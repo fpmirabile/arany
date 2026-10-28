@@ -52,7 +52,15 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     std::fs::write(root.join("helper"), HELPER).unwrap();
     std::fs::set_permissions(root.join("helper"), std::fs::Permissions::from_mode(0o700)).unwrap();
     let account_root = StateRoot::admit(&root.join("account-root")).unwrap();
-    let (selected, _) = seed_accounts(&account_root);
+    let (selected, removed) = seed_accounts(&account_root);
+    let saved: serde_json::Value = serde_json::from_slice(
+        &account_root
+            .record(RecordKind::ChatgptAccounts)
+            .read()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     let preferences = account_root
         .record(RecordKind::ModelPreferences)
         .read()
@@ -81,7 +89,15 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
             .unwrap();
         let index: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(index["selected"], selected.to_string());
-        assert_eq!(index["accounts"][1]["disconnected"], true);
+        assert_eq!(index["accounts"][0], saved["accounts"][0]);
+        let accounts = index["accounts"].as_array().unwrap();
+        if phase == "first" {
+            assert_eq!(accounts.len(), 2);
+            assert_eq!(accounts[1]["id"], removed.to_string());
+            assert_eq!(accounts[1]["disconnected"], true);
+        } else {
+            assert_eq!(accounts.len(), 1);
+        }
         assert_eq!(
             account_root
                 .record(RecordKind::ModelPreferences)
@@ -106,11 +122,11 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
             "chatgpt_account_id":null,"keyring_slot":legacy_chatgpt_slot(client),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
-            "disconnected":false,"plan_permission_missing":false,"token":null
+            "disconnected":false,"slot_client_id":client,"token":null
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema":3,"selected":selected,
+        "schema":4,"selected":selected,
         "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)],
         "model_checks":[]
     })).unwrap()).unwrap();

@@ -1500,11 +1500,12 @@ mod tests {
             state
                 .record(RecordKind::ChatgptAccounts).replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "schema": 1, "selected": id, "accounts": [{
+                        "schema": 4, "selected": id, "accounts": [{
                             "id": id, "host_id": "11111111-1111-4111-8111-111111111111",
                             "client_id": "synthetic-client", "subject": "synthetic-subject",
                             "storage": "keyring", "renewal_pending": false, "signout_pending": false,
-                            "disconnected": false, "plan_permission_missing": false, "token": null
+                            "disconnected": false, "slot_client_id": "synthetic-client",
+                            "chatgpt_account_id": null, "keyring_slot": "chatgpt-IjIINQ0Q5ZQZDbRRLOobPIpiUdn-Sa6xrV1rCSHp_Oc", "token": null
                         }], "model_checks": []
                     }))
                     .unwrap(),
@@ -1566,7 +1567,7 @@ mod tests {
             record["accounts"][0]
                 .as_object_mut()
                 .unwrap()
-                .remove("plan_permission_missing");
+                .remove("slot_client_id");
             state
                 .record(RecordKind::ChatgptAccounts)
                 .replace(&serde_json::to_vec(&record).unwrap())

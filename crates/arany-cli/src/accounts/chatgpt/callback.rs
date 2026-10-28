@@ -26,9 +26,16 @@ impl CallbackListener {
     pub(crate) async fn bind(
         acknowledgment: RiskAcknowledgment,
     ) -> Result<Self, AuthorizationError> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|_| AuthorizationError::Unavailable)?;
+        let primary_port = super::CALLBACK_PORTS[0];
+        let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, primary_port)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                TcpListener::bind((Ipv4Addr::LOCALHOST, super::CALLBACK_PORTS[1]))
+                    .await
+                    .map_err(|_| AuthorizationError::CallbackBusy)?
+            }
+            Err(_) => return Err(AuthorizationError::CallbackBusy),
+        };
         let port = listener
             .local_addr()
             .map_err(|_| AuthorizationError::Unavailable)?
@@ -195,6 +202,9 @@ mod tests {
     use crate::accounts::credentials::AccountStorage;
     use std::net::SocketAddr;
 
+    // Other callback journeys run product processes inside isolated network namespaces.
+    static CALLBACK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn send_request(port: u16, request: &str) -> String {
         let mut stream = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
             .await
@@ -245,7 +255,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callback_uses_only_the_two_registered_ports() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
+        let ack = || {
+            super::super::consent::RiskPrompt::new(AccountStorage::Keyring)
+                .accept("Accept")
+                .unwrap()
+        };
+        let first = CallbackListener::bind(ack()).await.unwrap();
+        assert_eq!(first.port(), super::super::CALLBACK_PORTS[0]);
+        let second = CallbackListener::bind(ack()).await.unwrap();
+        assert_eq!(second.port(), super::super::CALLBACK_PORTS[1]);
+        assert!(matches!(
+            CallbackListener::bind(ack()).await,
+            Err(AuthorizationError::CallbackBusy)
+        ));
+        drop(first);
+        drop(second);
+    }
+
+    #[tokio::test]
     async fn callback_accepts_only_its_bound_request() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
         let (response, accepted) = round_trip(valid_request).await;
         assert!(accepted);
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -255,6 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_http_envelope_rejects_cross_origin_and_body_shapes() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
         for mutate in [
             "host",
             "origin",
@@ -307,6 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn matching_denial_stops_waiting_and_invalid_attempts_are_bounded() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
         let acknowledgment = super::super::consent::RiskPrompt::new(AccountStorage::Keyring)
             .accept("Accept")
             .unwrap();
@@ -361,6 +394,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn listener_deadline_drops_unused_socket() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
         let listener = CallbackListener::bind(
             super::super::consent::RiskPrompt::new(AccountStorage::Keyring)
                 .accept("Accept")
@@ -382,6 +416,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn accepted_connection_cannot_hold_the_listener_open() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
         let listener = CallbackListener::bind(
             super::super::consent::RiskPrompt::new(AccountStorage::Keyring)
                 .accept("Accept")
@@ -409,6 +444,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "native Unix callback connection-deadline release gate"]
     async fn stalled_connection_expires_then_valid_callback_succeeds() {
+        let _guard = CALLBACK_TEST_LOCK.lock().await;
         let listener = CallbackListener::bind(
             super::super::consent::RiskPrompt::new(AccountStorage::Keyring)
                 .accept("Accept")

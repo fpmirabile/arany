@@ -40,6 +40,8 @@ pub(crate) enum IdentityFailure {
     Lifetime,
     #[error("the signed identity differs from the selected account")]
     SelectedSubject,
+    #[error("missing, malformed or changed ChatGPT account claim")]
+    AccountClaim,
     #[error("could not read the published signing keys as bounded JSON")]
     KeyTransport,
 }
@@ -65,6 +67,19 @@ struct Claims {
     nbf: Option<u64>,
     nonce: String,
     sub: String,
+    #[serde(rename = "https://api.openai.com/auth")]
+    account: Option<AccountClaim>,
+}
+
+#[derive(Deserialize)]
+struct AccountClaim {
+    chatgpt_account_id: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct VerifiedIdentity {
+    pub(super) subject: String,
+    pub(super) account_id: String,
 }
 
 #[derive(Deserialize)]
@@ -90,7 +105,7 @@ pub(super) fn verify(
     client_id: &str,
     nonce: &str,
     now_seconds: u64,
-) -> Result<String, AuthorizationError> {
+) -> Result<VerifiedIdentity, AuthorizationError> {
     let invalid = || AuthorizationError::IdentityRejected(IdentityFailure::TokenFormat);
     if id_token.is_empty()
         || id_token.len() > MAX_ID_TOKEN_BYTES
@@ -213,7 +228,17 @@ pub(super) fn verify(
             IdentityFailure::Lifetime,
         ));
     }
-    Ok(claims.sub)
+    let account_id = claims
+        .account
+        .and_then(|account| account.chatgpt_account_id)
+        .filter(|id| super::valid_account_id(id))
+        .ok_or(AuthorizationError::IdentityRejected(
+            IdentityFailure::AccountClaim,
+        ))?;
+    Ok(VerifiedIdentity {
+        subject: claims.sub,
+        account_id,
+    })
 }
 
 fn decode_segment(value: &str, max_bytes: usize) -> Result<Vec<u8>, AuthorizationError> {

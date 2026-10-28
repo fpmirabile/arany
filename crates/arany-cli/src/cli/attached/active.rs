@@ -165,11 +165,8 @@ pub(super) fn preflight_idle_run(
                 .filter(|_| ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt))
             {
                 Some(id) => match chatgpt::selected_reauthorization_target(id) {
-                    Ok(target) if target.plan_permission_missing => {
-                        chatgpt::AuthorizationError::PermissionMissing.to_string()
-                    }
+                    Ok(_) => chatgpt::AuthorizationError::BackendRouteNotAdmitted.to_string(),
                     Err(error) => error.to_string(),
-                    _ => "Choose a model with /model before submitting".into(),
                 },
                 None => "Choose a model with /model before submitting".into(),
             },

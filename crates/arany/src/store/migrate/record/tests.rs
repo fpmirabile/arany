@@ -76,7 +76,21 @@ fn a_behind_record_upgrades_in_its_pending_replacement_and_any_other_stays_uncha
 
     plant(&path, kind, br#"{"version":1,"name":"Session"}"#);
     let upgraded = br#"{"title":"Session","version":2}"#.to_vec();
-    assert_eq!(state.read_current(&FORMAT).unwrap(), Some(upgraded.clone()));
+    static NOTICES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    assert_eq!(
+        state
+            .read_current_with_notice(&FORMAT, || {
+                NOTICES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .unwrap(),
+        Some(upgraded.clone())
+    );
+    assert_eq!(NOTICES.load(std::sync::atomic::Ordering::SeqCst), 1);
+    state
+        .read_current_with_notice(&FORMAT, || {
+            panic!("current records must not repeat notices")
+        })
+        .unwrap();
     assert_eq!(on_disk(&path, kind), (upgraded, false));
     let mode = std::fs::metadata(path.join(kind.file()))
         .unwrap()

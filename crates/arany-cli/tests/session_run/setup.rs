@@ -86,7 +86,7 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 3,
+        "schema": 4,
         "selected": account_id,
         "accounts": [{
             "id": account_id,
@@ -97,7 +97,7 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
             "keyring_slot": legacy_chatgpt_slot("oaiapp_synthetic_saved"),
             "storage": "keyring",
             "renewal_pending": false, "signout_pending": false,
-            "disconnected": false, "plan_permission_missing": false, "token": null
+            "disconnected": false, "slot_client_id": "oaiapp_synthetic_saved", "token": null
         }], "model_checks": []
     });
     state
@@ -1736,18 +1736,6 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             executable
         } else {
             PathBuf::from("/arany")
-        };
-        let defaults = if replaced {
-            let account_id = prepare_selected_chatgpt_account_at(&account_path);
-            SessionDefaults {
-                provider: Some("chatgpt".into()),
-                model: Some("gpt-6.1-sol".into()),
-                effort: Some(arany::Effort::Low),
-                account_id: Some(account_id),
-                policy: Default::default(),
-            }
-        } else {
-            defaults.clone()
         };
         runtime
             .block_on(set_session_defaults(

@@ -41,7 +41,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                         "renewal_pending": false,
                         "signout_pending": false,
                         "disconnected": false,
-                        "plan_permission_missing": false,
+                        "slot_client_id": "oaiapp_synthetic_other",
                         "token": null
                     }));
             }
@@ -302,7 +302,7 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
             "renewal_pending": false,
             "signout_pending": false,
             "disconnected": false,
-            "plan_permission_missing": false,
+            "slot_client_id": "oaiapp_synthetic_other",
             "token": null
         }));
     account_root

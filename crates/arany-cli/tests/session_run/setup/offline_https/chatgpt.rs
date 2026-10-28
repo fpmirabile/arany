@@ -17,17 +17,14 @@ use std::{
 
 const STAGE: &str = "ARANY_TEST_OFFLINE_CHATGPT_STAGE";
 const ACCOUNT_ONLY_TEST: &str = "setup::offline_https::chatgpt::release_private_file_chatgpt_sign_in_keeps_account_without_check";
-const CHECKED_TURN_TEST: &str =
-    "setup::offline_https::chatgpt::release_private_file_chatgpt_checked_direct_and_team_turns";
+const ROUTE_REFUSAL_TEST: &str =
+    "setup::offline_https::chatgpt::release_private_file_chatgpt_refuses_unadmitted_routes";
 const ACCESS: &str = "synthetic-chatgpt-access-token";
-const CONTEXT_WINDOW: u32 = 272_000;
 const REFRESH: &str = "synthetic-chatgpt-refresh-token";
-const CLIENT: &str = "oaiapp_synthetic_offline";
+const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const ACCOUNT: &str = "synthetic-remote-account";
 const UNFINISHED_HOST: &str = "2e664d00-3f9a-40c3-adeb-c6447313a871";
-const OTHER_PENDING_CLIENT: &str = "oaiapp_other_unfinished";
 const SHELL: &str = "stty rows 8 cols 16; printf 'SHELL_PID:%s\nTTY_PATH:%s\n' \"$$\" \"$(tty)\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --setup --state-dir /root/state-chatgpt --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
-const ENABLE_PLAN_SHELL: &str = "stty rows 8 cols 16; printf 'SHELL_PID:%s\nTTY_PATH:%s\n' \"$$\" \"$(tty)\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --setup --state-dir /root/state-enabled --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
-const SIGNED_OUT_SHELL: &str = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; /arany --screen-reader --state-dir /root/state-after-logout --workspace /root/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$code\"";
 
 #[path = "chatgpt/checked_turn.rs"]
 mod checked_turn;
@@ -82,7 +79,8 @@ fn identity_fixture(nonce: &str) -> (Vec<u8>, String) {
             "iat": now,
             "exp": now + 3600,
             "nonce": nonce,
-            "sub": "synthetic-subject"
+            "sub": "synthetic-subject",
+            "https://api.openai.com/auth": {"chatgpt_account_id": ACCOUNT}
         }))
         .expect("signed claims"),
     );
@@ -144,11 +142,7 @@ pub(super) fn send_json(input: &mut impl Write, body: &[u8]) {
     input.write_all(body).expect("issuer response body");
 }
 
-fn issuer(
-    reply: Receiver<(Vec<u8>, Vec<u8>, String)>,
-    checked_turn: bool,
-    exchanges: usize,
-) -> Server {
+fn issuer(reply: Receiver<(Vec<u8>, Vec<u8>, String)>, revoke: bool, exchanges: usize) -> Server {
     assert!((1..=2).contains(&exchanges));
     let mut child = Command::new("/usr/bin/openssl")
         .args([
@@ -172,7 +166,7 @@ fn issuer(
     let responder = thread::spawn(move || {
         for _ in 0..exchanges {
             let first = read_request(&mut output);
-            assert!(first.starts_with(b"POST /api/accounts/oauth/token HTTP/1.1\r\n"));
+            assert!(first.starts_with(b"POST /oauth/token HTTP/1.1\r\n"));
             let end = first
                 .windows(4)
                 .position(|part| part == b"\r\n\r\n")
@@ -181,11 +175,11 @@ fn issuer(
             let fields = url::form_urlencoded::parse(&first[end..])
                 .into_owned()
                 .collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5);
             for (name, value) in [
                 ("grant_type", "authorization_code"),
                 ("client_id", CLIENT),
                 ("code", "synthetic-code"),
-                ("resource", "https://api.openai.com/v1"),
             ] {
                 assert!(
                     fields
@@ -212,15 +206,15 @@ fn issuer(
             assert!(second.starts_with(b"GET /.well-known/jwks.json HTTP/1.1\r\n"));
             send_json(&mut input, &jwks);
         }
-        if checked_turn {
+        if revoke {
             let discovery = read_request(&mut output);
             assert!(discovery.starts_with(b"GET /.well-known/openid-configuration HTTP/1.1\r\n"));
             send_json(
                 &mut input,
-                br#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/revoke"}"#,
+                br#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/oauth/revoke"}"#,
             );
             let revoke = read_request(&mut output);
-            assert!(revoke.starts_with(b"POST /revoke HTTP/1.1\r\n"));
+            assert!(revoke.starts_with(b"POST /oauth/revoke HTTP/1.1\r\n"));
             let end = revoke
                 .windows(4)
                 .position(|part| part == b"\r\n\r\n")
@@ -254,11 +248,7 @@ fn issuer(
     server
 }
 
-fn catalog_server(
-    checked_turn: bool,
-    started: Arc<AtomicBool>,
-    refresh_ready: Receiver<()>,
-) -> Server {
+fn catalog_server(started: Arc<AtomicBool>) -> Server {
     let mut child = Command::new("/usr/bin/openssl")
         .args([
             "s_server",
@@ -279,7 +269,11 @@ fn catalog_server(
     let mut input = child.stdin.take().expect("catalog response pipe");
     let mut output = child.stdout.take().expect("catalog request pipe");
     let responder = thread::spawn(move || {
-        let request = read_request(&mut output);
+        let mut first = [0];
+        if output.read(&mut first).unwrap() == 0 {
+            return;
+        }
+        let request = read_request(&mut std::io::Cursor::new(first).chain(output));
         started.store(true, Ordering::SeqCst);
         assert!(request.starts_with(b"GET /v1/models HTTP/1.1\r\n"));
         let headers = std::str::from_utf8(&request).expect("catalog headers");
@@ -291,13 +285,10 @@ fn catalog_server(
         );
         let body = serde_json::to_vec(&serde_json::json!({"models":[{
             "slug":"gpt-6.1-sol", "display_name":"GPT-6.1 Sol", "visibility":"list",
-            "context_window": CONTEXT_WINDOW
+            "context_window": 272_000
         }]}))
         .expect("catalog body");
         send_json(&mut input, &body);
-        if checked_turn {
-            checked_turn::respond_after_catalog(&mut input, &mut output, &body, refresh_ready);
-        }
     });
     let server = Server {
         child,
@@ -437,13 +428,12 @@ fn advance_setup_warning_pages(
     }
 }
 
-fn callback(url: &url::Url, returning: bool, registration_retry: bool) {
-    assert!(!returning || !registration_retry);
+fn callback(url: &url::Url) {
     assert_eq!(
         url.origin().ascii_serialization(),
         "https://auth.openai.com"
     );
-    assert_eq!(url.path(), "/api/accounts/authorize");
+    assert_eq!(url.path(), "/oauth/authorize");
     let fields = url.query_pairs().into_owned().collect::<Vec<_>>();
     let value = |name: &str| {
         fields
@@ -452,38 +442,17 @@ fn callback(url: &url::Url, returning: bool, registration_retry: bool) {
             .map(|(_, value)| value.as_str())
             .expect("authorization field")
     };
-    assert_eq!(
-        value("client_id"),
-        if returning || registration_retry {
-            CLIENT
-        } else {
-            "dynamic_agent_client"
-        }
-    );
-    if returning {
-        assert_eq!(value("prompt"), "consent");
-        assert!(!fields.iter().any(|(name, _)| matches!(
-            name.as_str(),
-            "agent_name_hint" | "id_token_hint" | "force_reconsent"
-        )));
-    } else if registration_retry {
-        assert!(!fields.iter().any(|(name, _)| matches!(
-            name.as_str(),
-            "prompt" | "agent_name_hint" | "id_token_hint" | "force_reconsent"
-        )));
-    } else {
-        assert_eq!(value("agent_name_hint"), "Arany");
-        assert!(!fields.iter().any(|(name, _)| name == "prompt"));
-    }
-    assert_eq!(
-        value("scope"),
-        "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
-    );
-    assert_eq!(value("resource"), "https://api.openai.com/v1");
+    assert_eq!(fields.len(), 11);
+    assert_eq!(value("client_id"), CLIENT);
+    assert_eq!(value("scope"), "openid profile email offline_access");
+    assert_eq!(value("originator"), "arany");
+    assert_eq!(value("id_token_add_organizations"), "true");
+    assert_eq!(value("codex_cli_simplified_flow"), "true");
     let redirect = url::Url::parse(value("redirect_uri")).expect("callback URI");
     assert_eq!(redirect.host_str(), Some("127.0.0.1"));
     assert_eq!(redirect.path(), "/auth/callback");
     let port = redirect.port().expect("callback port");
+    assert!([1455, 1457].contains(&port));
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("callback listener");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -506,721 +475,232 @@ fn callback(url: &url::Url, returning: bool, registration_retry: bool) {
     );
 }
 
-fn isolated_stage(checked_turn: bool) {
+fn isolated_stage(near_expiry: bool) {
     let stage = std::env::var(STAGE).expect("fixture stage");
-    let permission_recovery = stage == "plan_disabled";
-    let unfinished = matches!(stage.as_str(), "unfinished_resume" | "unfinished_cancel");
-    let cancel = stage == "unfinished_cancel";
-    assert!(!permission_recovery || !checked_turn);
-    assert!(!unfinished || !checked_turn);
     assert_eq!(nix::unistd::geteuid().as_raw(), 0);
-    assert_eq!(
-        StateRoot::account_path().unwrap(),
-        Path::new("/root/.local/state/arany")
-    );
-    let pending_record = serde_json::to_vec(&serde_json::json!({
-        "schema": 1,
-        "host_id": UNFINISHED_HOST,
-        "issued_client_id": CLIENT
-    }))
-    .expect("synthetic unfinished registration");
-    if unfinished {
-        StateRoot::admit(Path::new("/root/.local/state/arany"))
-            .expect("isolated account root")
-            .record(RecordKind::ChatgptRegistration)
-            .replace(&pending_record)
-            .expect("seed unfinished registration");
-    }
     assert!(
         Command::new("/usr/bin/ip")
             .args(["link", "set", "lo", "up"])
             .status()
-            .expect("private loopback")
+            .unwrap()
             .success()
     );
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let _issuer = (!cancel).then(|| {
-        issuer(
-            receiver,
-            checked_turn,
-            if permission_recovery { 2 } else { 1 },
-        )
-    });
-    let catalog_started = Arc::new(AtomicBool::new(false));
-    let (refresh_ready, refresh_gate) = mpsc::channel();
-    let mut api =
-        (!cancel).then(|| catalog_server(checked_turn, Arc::clone(&catalog_started), refresh_gate));
-    let mut previous_account = None;
-    let mut previous_authorization = None;
-    let mut signed_tokens = Vec::with_capacity(2);
-    for pass in 0..if permission_recovery { 2 } else { 1 } {
-        let permission_disabled = permission_recovery && pass == 0;
-        let returning = permission_recovery && pass == 1;
-        let state = if returning {
-            "/root/state-enabled"
-        } else {
-            "/root/state-chatgpt"
-        };
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .args([
-                "-q",
-                "-e",
-                "-c",
-                if returning { ENABLE_PLAN_SHELL } else { SHELL },
-                "/dev/null",
-            ])
-            .env_clear()
-            .env("SHELL", "/usr/bin/sh")
-            .env("TERM", "dumb")
-            .env("HOME", "/root")
-            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/root/missing-bus")
-            .env("SSL_CERT_FILE", "/fixture/ca.pem")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("ChatGPT setup PTY"));
-        let mut input = child.child().stdin.take().expect("PTY input");
-        let mut output = child.child().stdout.take().expect("PTY output");
-        let flags = fcntl_getfl(&output).expect("stdout flags");
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-        let mut transcript = Vec::new();
-        let mut answered = crate::session_picker::PtyResponses::default();
-        wait_for_stage(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            0,
-            b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
-            None,
-        );
-        let accounts_at = transcript.len();
-        input.write_all(b"API accounts\r").expect("open accounts");
-        acknowledge_linear_pages(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            (accounts_at, API_ACCOUNTS_PROMPT),
-        );
-        input
-            .write_all(b"Manage ChatGPT account\r")
-            .expect("manage ChatGPT account");
-        let warning_at;
-        if returning {
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                0,
-                b"type a choice name: 1. Enable plan or 2. Connect new or 3. Inspect; empty Enter selects 1. Enable plan\r\nInput:\r\n",
-                None,
-            );
-            warning_at = transcript.len();
-            input
-                .write_all(b"Enable plan\r")
-                .expect("enable plan explicitly");
-        } else {
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                0,
-                b"type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n",
-                None,
-            );
-            assert!(
-                String::from_utf8_lossy(&transcript)
-                    .contains("Password store unavailable. Unencrypted file")
-            );
-            warning_at = transcript.len();
-            input
-                .write_all(b"Use private file\r")
-                .expect("select file storage");
-        }
-        advance_setup_warning_pages(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            (warning_at, !permission_recovery && !unfinished && pass == 0),
-        );
-        input
-            .write_all(b"Accept\r")
-            .expect("accept plan and storage risk");
-        if unfinished {
-            let resume_at = transcript.len();
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                resume_at,
-                b"type a choice name: 1. Back or 2. Resume; empty Enter selects 1. Back\r\nInput:\r\n",
-                None,
-            );
-            assert!(!Path::new("/root/browser-url").exists());
-            input
-                .write_all(if cancel { b"\r" } else { b"Resume\r" })
-                .expect("explicit unfinished sign-in choice");
-            if cancel {
-                wait_for_stage(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    resume_at,
-                    b"TTY_AFTER:",
-                    None,
-                );
-                assert!(wait_product(child.take()).status.success());
-                pump(&mut output, &mut input, &mut transcript, &mut answered);
-                assert_eq!(answered.cursor_queries, 0);
-                assert!(!transcript.contains(&b'\x1b'));
-                let text = std::str::from_utf8(&transcript).expect("cancel output");
-                let marker = |name: &str| {
-                    text.lines()
-                        .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-                        .expect("TTY marker")
-                };
-                assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
-                let root = StateRoot::open_existing(Path::new("/root/.local/state/arany"))
-                    .expect("account root after cancellation");
-                assert_eq!(
-                    root.record(RecordKind::ChatgptRegistration).read().unwrap(),
-                    Some(pending_record)
-                );
-                assert!(
-                    root.record(RecordKind::ChatgptAccounts)
-                        .read()
-                        .unwrap()
-                        .is_none()
-                );
-                setup_session("/root/state-chatgpt");
-                assert!(!Path::new("/root/browser-url").exists());
-                assert!(!catalog_started.load(Ordering::SeqCst));
-                return;
-            }
-        }
-        let authorization = wait_browser_url(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            previous_authorization.as_ref(),
-        );
-        if unfinished {
-            assert!(authorization.query_pairs().any(|(name, value)| {
-                name == "ext_agent_host_id" && value == format!("urn:uuid:{UNFINISHED_HOST}")
-            }));
-        }
-        if let Some(previous) = &previous_authorization {
-            let host = |url: &url::Url| {
-                url.query_pairs()
-                    .find(|(name, _)| name == "ext_agent_host_id")
-                    .expect("host identity")
-                    .1
-                    .into_owned()
-            };
-            assert_eq!(host(previous), host(&authorization));
-        }
-        let nonce = authorization
-            .query_pairs()
-            .find(|(name, _)| name == "nonce")
-            .expect("nonce")
-            .1
-            .into_owned();
-        let (jwks, signed) = identity_fixture(&nonce);
-        let mut token = serde_json::json!({
-            "access_token": ACCESS,
-            "refresh_token": REFRESH,
-            "id_token": signed,
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "scope": "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke"
-        });
-        if permission_disabled {
-            token["scope"] = "openid profile email".into();
-            token
-                .as_object_mut()
-                .expect("token fields")
-                .remove("refresh_token");
-        }
-        let token = serde_json::to_vec(&token).expect("synthetic token exchange");
-        let redirect_uri = authorization
-            .query_pairs()
-            .find(|(name, _)| name == "redirect_uri")
-            .expect("redirect URI")
-            .1
-            .into_owned();
-        sender
-            .send((token, jwks, redirect_uri))
-            .expect("issuer fixture handoff");
-        let configured_at = transcript.len();
-        callback(&authorization, returning, unfinished);
-        previous_authorization = Some(authorization);
-        signed_tokens.push(signed.clone());
-        if permission_disabled {
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                configured_at,
-                b"Verified ChatGPT sign-in saved; plan usage is disabled",
-                Some(&signed),
-            );
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                configured_at,
-                b"Input:\r\n",
-                Some(&signed),
-            );
-            let submit_at = transcript.len();
-            input
-                .write_all(b"do not start a Run\r")
-                .expect("submit without permission");
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                submit_at,
-                b"ChatGPT plan permission was not granted; use /setup to enable the plan",
-                Some(&signed),
-            );
-            assert!(
-                !catalog_started.load(Ordering::SeqCst),
-                "disabled setup requested a catalog"
-            );
-        } else {
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                configured_at,
-                b"ChatGPT ready:",
-                Some(&signed),
-            );
-            wait_for_stage(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                configured_at,
-                b"Input:\r\n",
-                Some(&signed),
-            );
-            assert!(
-                !transcript
-                    .windows(b"Choose model effort".len())
-                    .any(|part| part == b"Choose model effort")
-            );
-            assert!(
-                !transcript
-                    .windows(b"Plan-consuming check".len())
-                    .any(|part| part == b"Plan-consuming check")
-            );
-            setup_session(state);
-            assert!(String::from_utf8_lossy(&transcript).contains("Model: gpt-6.1-sol\r\n"));
-            if checked_turn {
-                checked_turn::accept_check_and_run(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    &signed,
-                    &refresh_ready,
-                );
-            }
-        }
-        let quit_at = transcript.len();
-        input.write_all(b"/exit\r").expect("exit ChatGPT Session");
-        wait_for_stage(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            quit_at,
-            b"TTY_AFTER:",
-            Some(&signed),
-        );
-        let result = wait_product(child.take());
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(result.status.success(), "ChatGPT setup product exit");
-        assert_eq!(
-            answered.cursor_queries, 0,
-            "screen-reader queried the cursor"
-        );
-        assert!(
-            !transcript.contains(&b'\x1b'),
-            "screen-reader emitted escapes"
-        );
-        for secret in [ACCESS, REFRESH]
-            .into_iter()
-            .chain(signed_tokens.iter().map(String::as_str))
-        {
-            assert!(
-                !transcript
-                    .windows(secret.len())
-                    .any(|part| part == secret.as_bytes()),
-                "credential entered terminal output"
-            );
-        }
-        let text = std::str::from_utf8(&transcript).expect("screen-reader UTF-8");
-        assert!(text.contains("remote output-token limit"));
-        assert!(text.contains("private account file is not encrypted"));
-        let marker = |name: &str| {
-            text.lines()
-                .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-                .expect("TTY marker")
-                .to_owned()
-        };
-        assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
-        if checked_turn {
-            api.as_mut()
-                .expect("checked server")
-                .responder
-                .take()
-                .expect("checked peer")
-                .join()
-                .expect("checked HTTPS requests");
-        }
-        let account_root =
-            StateRoot::open_existing(Path::new("/root/.local/state/arany")).expect("account root");
-        let record = account_root
-            .record(RecordKind::ChatgptAccounts)
-            .read()
-            .expect("account index")
-            .expect("saved account");
-        let metadata = std::fs::metadata(account_root.path().join("chatgpt-accounts.json"))
-            .expect("account index metadata");
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-        let index: serde_json::Value = serde_json::from_slice(&record).expect("account index JSON");
-        assert_eq!(index["accounts"].as_array().expect("accounts").len(), 1);
-        let checks = index["model_checks"].as_array().expect("model checks");
-        assert_eq!(checks.len(), if checked_turn { 1 } else { 0 });
-        let entry = &index["accounts"][0];
-        assert_eq!(entry["storage"], "private_file");
-        assert_eq!(entry["client_id"], CLIENT);
-        assert_eq!(entry["subject"], "synthetic-subject");
-        if unfinished {
-            assert_eq!(entry["host_id"], UNFINISHED_HOST);
-        }
-        if permission_disabled {
-            assert!(
-                entry["token"].is_null(),
-                "disabled account retained a token"
-            );
-            assert_eq!(entry["disconnected"], true);
-            assert_eq!(entry["plan_permission_missing"], true);
-            for secret in [ACCESS, REFRESH, signed.as_str()] {
-                assert!(
-                    !record
-                        .windows(secret.len())
-                        .any(|part| part == secret.as_bytes()),
-                    "disabled metadata contains a token"
-                );
-            }
-        } else {
-            assert!(entry["plan_permission_missing"].is_null());
-            assert!(
-                entry["token"]["credentials"]["access_token"] == ACCESS,
-                "stored access token differs"
-            );
-            assert!(
-                entry["token"]["credentials"]["refresh_token"] == REFRESH,
-                "stored refresh token differs"
-            );
-        }
-        let account_id: Uuid = entry["id"]
-            .as_str()
-            .expect("account UUID")
-            .parse()
-            .expect("account UUID");
-        assert_eq!(index["selected"], account_id.to_string());
-        if let Some(previous) = previous_account {
-            assert_eq!(
-                account_id, previous,
-                "enablement replaced the saved account"
-            );
-        }
-        previous_account = Some(account_id);
-        let registration = account_root
-            .record(RecordKind::ChatgptRegistration)
-            .read()
-            .expect("registration")
-            .expect("saved registration");
-        let registration: serde_json::Value =
-            serde_json::from_slice(&registration).expect("registration JSON");
-        assert_eq!(registration["host_id"], entry["host_id"]);
-        if returning {
-            assert_eq!(registration["issued_client_id"], OTHER_PENDING_CLIENT);
-            assert!(!text.contains("Resume sign-in?"));
-        } else {
-            assert!(registration["issued_client_id"].is_null());
-        }
-        if checked_turn {
-            let view = session(state);
-            checked_turn::assert_runs(&view, account_id, &checks[0]);
-            assert!(!text.contains(checked_turn::FAILURE_BODY_CANARY));
-            assert_eq!(view.defaults.provider.as_deref(), Some("chatgpt"));
-            assert_eq!(view.defaults.account_id, Some(account_id));
-            assert_eq!(view.defaults.model.as_deref(), Some("gpt-6.1-sol"));
-            assert_eq!(view.defaults.effort, Some(arany::Effort::Medium));
-        } else {
-            setup_session(state);
-            assert!(text.contains("Provider: chatgpt\r\n"));
-            assert!(text.contains(if permission_disabled {
-                "Model: unset\r\n"
-            } else {
-                "Model: gpt-6.1-sol\r\n"
-            }));
-        }
-        let journal =
-            std::fs::read(Path::new(state).join("events.sqlite3")).expect("journal bytes");
-        for secret in [ACCESS, REFRESH, checked_turn::FAILURE_BODY_CANARY]
-            .into_iter()
-            .chain(signed_tokens.iter().map(String::as_str))
-        {
-            assert!(
-                !journal
-                    .windows(secret.len())
-                    .any(|part| part == secret.as_bytes()),
-                "credential entered SQLite"
-            );
-        }
-        if permission_disabled {
-            for args in [
-                &["provider", "models", "chatgpt"][..],
-                &[
-                    "provider",
-                    "check",
-                    "chatgpt",
-                    "gpt-6.1-sol",
-                    "--effort",
-                    "medium",
-                    "--accept-cost",
-                ][..],
-            ] {
-                let output = Command::new("/arany")
-                    .args(args)
-                    .env_clear()
-                    .env("HOME", "/root")
-                    .env("SSL_CERT_FILE", "/fixture/ca.pem")
-                    .current_dir("/root/workspace")
-                    .bounded_output()
-                    .expect("disabled public Provider operation");
-                assert_eq!(output.status.code(), Some(1));
-                assert!(output.stdout.is_empty());
-                assert!(
-                    output.stderr == b"error: ChatGPT plan permission was not granted; use /setup to enable the plan or explicitly choose an API account\n",
-                    "disabled operation must report the fixed permission rejection"
-                );
-                assert!(
-                    account_root
-                        .record(RecordKind::ChatgptAccounts)
-                        .read()
-                        .unwrap()
-                        .unwrap()
-                        == record,
-                    "disabled operation changed the account"
-                );
-                for secret in [ACCESS, REFRESH, signed.as_str()] {
-                    assert!(
-                        !output
-                            .stderr
-                            .windows(secret.len())
-                            .any(|part| part == secret.as_bytes())
-                    );
-                }
-            }
-            let reopened = run_pty(SIGNED_OUT_SHELL, &[], None);
-            assert!(!String::from_utf8_lossy(&reopened).contains("Provider setup"));
-            for secret in [ACCESS, REFRESH, signed.as_str()] {
-                assert!(
-                    !reopened
-                        .windows(secret.len())
-                        .any(|part| part == secret.as_bytes())
-                );
-            }
-            unsaved("/root/state-after-logout");
-            account_root
-                .record(RecordKind::ChatgptRegistration)
+    if matches!(stage.as_str(), "migrated_host" | "migrated_account") {
+        let root = StateRoot::admit(Path::new("/root/.local/state/arany")).unwrap();
+        root.record(RecordKind::ChatgptRegistration)
+            .replace(
+                &serde_json::to_vec(&serde_json::json!({
+                    "schema": 1, "host_id": UNFINISHED_HOST, "issued_client_id": "oaiapp_retired"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        if stage == "migrated_account" {
+            let id = Uuid::now_v7();
+            root.record(RecordKind::ChatgptAccounts)
                 .replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "schema": 1,
-                        "host_id": entry["host_id"],
-                        "issued_client_id": OTHER_PENDING_CLIENT
+                        "schema": 3, "selected": id, "model_checks": [],
+                        "accounts": [{
+                            "id": id, "host_id": UNFINISHED_HOST,
+                            "client_id": "oaiapp_retired", "subject": "synthetic-subject",
+                            "chatgpt_account_id": null, "keyring_slot": null,
+                            "storage": "private_file", "renewal_pending": false,
+                            "signout_pending": false, "disconnected": true,
+                            "plan_permission_missing": false, "token": null
+                        }]
                     }))
-                    .expect("independent unfinished registration"),
+                    .unwrap(),
                 )
-                .expect("retain unrelated registration during permission recovery");
-            assert!(
-                !catalog_started.load(Ordering::SeqCst),
-                "disabled account requested a catalog"
-            );
-            continue;
-        }
-        let second_output = run_pty(BARE_SHELL, &[], None);
-        assert!(!String::from_utf8_lossy(&second_output).contains("Provider setup"));
-        for secret in [ACCESS, REFRESH, signed.as_str()] {
-            assert!(
-                !second_output
-                    .windows(secret.len())
-                    .any(|part| part == secret.as_bytes()),
-                "reopened Session exposed a credential"
-            );
-        }
-        unsaved("/root/state-two");
-        assert!(
-            String::from_utf8_lossy(&second_output)
-                .contains("Provider: chatgpt\r\nModel: gpt-6.1-sol\r\n")
-        );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let empty_id = runtime
-            .block_on(arany::create_session(
-                StateRoot::admit(Path::new("/root/state-resume-empty")).unwrap(),
-                Path::new("/root/workspace").to_path_buf(),
-                None,
-            ))
-            .unwrap();
-        let resume_shell = BARE_SHELL
-            .replace("/root/state-two", "/root/state-resume-empty")
-            .replace("--screen-reader", "--screen-reader --resume");
-        let resumed_output = run_pty(
-            &resume_shell,
-            &[(
-                b"Choose number, exact ID, n next, p previous, or q close:",
-                b"1\r",
-            )],
-            None,
-        );
-        let resumed_text = String::from_utf8_lossy(&resumed_output);
-        assert!(resumed_text.contains("Resume: 1 in this Workspace"));
-        assert!(resumed_text.contains("Choice 1: Empty conversation"));
-        assert!(resumed_text.contains("Created:") && resumed_text.contains("last activity:"));
-        assert!(resumed_text.contains("Access: ChatGPT plan; model: gpt-6.1-sol"));
-        assert!(!resumed_text.contains("Choose saved access"));
-        let resumed = session("/root/state-resume-empty");
-        assert_eq!(resumed.id, empty_id);
-        assert_eq!(resumed.defaults.provider.as_deref(), Some("chatgpt"));
-        assert_eq!(resumed.defaults.model.as_deref(), Some("gpt-6.1-sol"));
-        assert_eq!(
-            resumed.defaults.effort,
-            Some(if checked_turn {
-                arany::Effort::Medium
-            } else {
-                arany::Effort::Low
-            })
-        );
-        assert_eq!(resumed.defaults.account_id, Some(account_id));
-        assert!(resumed.runs.is_empty());
-        for secret in [ACCESS, REFRESH, signed.as_str()] {
-            assert!(
-                !resumed_output
-                    .windows(secret.len())
-                    .any(|part| part == secret.as_bytes())
-            );
-        }
-        let preferences = account_root
-            .record(RecordKind::ModelPreferences)
-            .read()
-            .unwrap()
-            .unwrap();
-        let cache: serde_json::Value = serde_json::from_slice(&preferences).unwrap();
-        assert_eq!(cache["version"], 1);
-        let source = cache["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|source| source["account_id"] == account_id.to_string())
-            .unwrap();
-        assert_eq!(source["profile"], "chatgpt");
-        assert_eq!(source["model"], "gpt-6.1-sol");
-        assert_eq!(
-            source["effort"],
-            if checked_turn { "medium" } else { "low" }
-        );
-        assert_eq!(
-            source["catalog"],
-            if checked_turn {
-                serde_json::json!(["gpt-6.1-sol", "model-new"])
-            } else {
-                serde_json::json!(["gpt-6.1-sol"])
-            }
-        );
-        for secret in [ACCESS, REFRESH, signed.as_str()] {
-            assert!(
-                !preferences
-                    .windows(secret.len())
-                    .any(|part| part == secret.as_bytes())
-            );
-        }
-        if checked_turn {
-            let output = Command::new("/arany")
-                .args(["provider", "logout", "chatgpt"])
-                .env_clear()
-                .env("HOME", "/root")
-                .env("SSL_CERT_FILE", "/fixture/ca.pem")
-                .current_dir("/root/workspace")
-                .bounded_output()
-                .expect("product ChatGPT logout");
-            assert!(output.status.success(), "product logout failed");
-            assert_eq!(output.stdout, b"ChatGPT account disconnected locally\n");
-            assert!(output.stderr.is_empty(), "confirmed logout emitted warning");
-            let record = account_root
-                .record(RecordKind::ChatgptAccounts)
-                .read()
-                .expect("account index after logout")
-                .expect("retained registration mapping");
-            let index: serde_json::Value =
-                serde_json::from_slice(&record).expect("account index JSON");
-            assert_eq!(index["selected"], account_id.to_string());
-            assert_eq!(index["accounts"][0]["client_id"], CLIENT);
-            assert_eq!(index["accounts"][0]["disconnected"], true);
-            assert!(index["accounts"][0]["token"].is_null());
-            assert!(index["model_checks"].as_array().unwrap().is_empty());
-            let output = Command::new("/arany")
-                .args(["provider", "models", "chatgpt"])
-                .env_clear()
-                .env("HOME", "/root")
-                .env("SSL_CERT_FILE", "/fixture/ca.pem")
-                .current_dir("/root/workspace")
-                .bounded_output()
-                .expect("disconnected catalog rejection");
-            assert!(!output.status.success());
-            assert!(output.stdout.is_empty());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("run arany --setup"));
-            for secret in [ACCESS, REFRESH, signed.as_str()] {
-                assert!(
-                    !record
-                        .windows(secret.len())
-                        .any(|part| part == secret.as_bytes())
-                );
-                assert!(
-                    !output
-                        .stderr
-                        .windows(secret.len())
-                        .any(|part| part == secret.as_bytes())
-                );
-            }
-            let view = session("/root/state-chatgpt");
-            checked_turn::assert_runs(&view, account_id, &checks[0]);
-            let after_logout = run_pty(SIGNED_OUT_SHELL, &[], None);
-            assert!(!String::from_utf8_lossy(&after_logout).contains("Choose saved access"));
-            unsaved("/root/state-after-logout");
+                .unwrap();
         }
     }
-    drop(api);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let mut auth = issuer(receiver, true, 1);
+    let catalog_started = Arc::new(AtomicBool::new(false));
+    let _api = catalog_server(Arc::clone(&catalog_started));
+    let mut command = Command::new("/usr/bin/script");
+    command
+        .args(["-q", "-e", "-c", SHELL, "/dev/null"])
+        .env_clear()
+        .env("SHELL", "/usr/bin/sh")
+        .env("TERM", "dumb")
+        .env("HOME", "/root")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/root/missing-bus")
+        .env("SSL_CERT_FILE", "/fixture/ca.pem")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = ChildGuard::new(command.spawn().expect("ChatGPT setup PTY"));
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::default();
+    wait_for_stage(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        b"empty Enter selects 1. API accounts\r\nInput:\r\n",
+        None,
+    );
+    let accounts_at = transcript.len();
+    input.write_all(b"API accounts\r").unwrap();
+    acknowledge_linear_pages(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (accounts_at, API_ACCOUNTS_PROMPT),
+    );
+    input.write_all(b"Manage ChatGPT account\r").unwrap();
+    let reconnect = stage == "migrated_account";
+    wait_for_stage(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        if reconnect {
+            b"empty Enter selects 1. Reconnect\r\nInput:\r\n"
+        } else {
+            b"empty Enter selects 1. Cancel\r\nInput:\r\n"
+        },
+        None,
+    );
+    let warning_at = transcript.len();
+    input
+        .write_all(if reconnect {
+            b"Reconnect\r"
+        } else {
+            b"Use private file\r"
+        })
+        .unwrap();
+    advance_setup_warning_pages(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (warning_at, !near_expiry),
+    );
+    input.write_all(b"Accept\r").unwrap();
+    let authorization = wait_browser_url(&mut output, &mut input, &mut transcript, None);
+    let nonce = authorization
+        .query_pairs()
+        .find(|(name, _)| name == "nonce")
+        .unwrap()
+        .1
+        .into_owned();
+    let redirect = authorization
+        .query_pairs()
+        .find(|(name, _)| name == "redirect_uri")
+        .unwrap()
+        .1
+        .into_owned();
+    let (jwks, signed) = identity_fixture(&nonce);
+    let token = serde_json::to_vec(&serde_json::json!({
+        "access_token": ACCESS, "refresh_token": REFRESH, "id_token": signed,
+        "expires_in": if near_expiry { 1 } else { 3600 }
+    }))
+    .unwrap();
+    sender.send((token, jwks, redirect)).unwrap();
+    let configured_at = transcript.len();
+    callback(&authorization);
+    wait_for_stage(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        configured_at,
+        b"ChatGPT backend route not admitted; update Arany before continuing",
+        Some(&signed),
+    );
+    wait_for_stage(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        configured_at,
+        b"Input:\r\n",
+        Some(&signed),
+    );
+    let quit_at = transcript.len();
+    input.write_all(b"/exit\r").unwrap();
+    wait_for_stage(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        quit_at,
+        b"TTY_AFTER:",
+        Some(&signed),
+    );
+    assert!(wait_product(child.take()).status.success());
+    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    assert_eq!(answered.cursor_queries, 0);
+    assert!(!transcript.contains(&b'\x1b'));
+    let text = std::str::from_utf8(&transcript).unwrap();
+    let marker = |name: &str| {
+        text.lines()
+            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
+            .unwrap()
+    };
+    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    assert_eq!(
+        text.matches("Saved ChatGPT accounts were upgraded").count(),
+        usize::from(stage == "migrated_account")
+    );
+    let view = session("/root/state-chatgpt");
+    assert!(view.runs.is_empty());
+    assert!(view.pending_provider_setup_edit.is_none());
+    assert!(!view.provider_setup_uncertain);
+    assert!(view.defaults.model.is_none() && view.defaults.effort.is_none());
+    let account_id = view.defaults.account_id.unwrap();
+    let root = StateRoot::open_existing(Path::new("/root/.local/state/arany")).unwrap();
+    let record = root
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
+    let index: serde_json::Value = serde_json::from_slice(&record).unwrap();
+    assert_eq!(index["schema"], 4);
+    assert_eq!(index["selected"], account_id.to_string());
+    assert_eq!(index["accounts"][0]["chatgpt_account_id"], ACCOUNT);
+    assert_eq!(index["accounts"][0]["client_id"], CLIENT);
+    assert!(index["model_checks"].as_array().unwrap().is_empty());
+    let journal = std::fs::read("/root/state-chatgpt/events.sqlite3").unwrap();
+    for secret in [ACCESS, REFRESH, signed.as_str(), ACCOUNT] {
+        for bytes in [&transcript, &journal] {
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|part| part == secret.as_bytes())
+            );
+        }
+    }
+    checked_turn::assert_route_refusals(&root, &record);
+    assert!(!catalog_started.load(Ordering::SeqCst));
+    let logout = Command::new("/arany")
+        .args(["provider", "logout", "chatgpt"])
+        .env_clear()
+        .env("HOME", "/root")
+        .env("SSL_CERT_FILE", "/fixture/ca.pem")
+        .current_dir("/root/workspace")
+        .bounded_output()
+        .unwrap();
+    assert!(logout.status.success());
+    auth.responder.take().unwrap().join().unwrap();
+    let after = root
+        .record(RecordKind::ChatgptAccounts)
+        .read()
+        .unwrap()
+        .unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&after).unwrap();
+    assert_eq!(after["accounts"][0]["disconnected"], true);
+    assert!(after["accounts"][0]["token"].is_null());
 }
 
 #[test]
@@ -1230,24 +710,19 @@ fn release_private_file_chatgpt_sign_in_keeps_account_without_check() {
         isolated_stage(false);
         return;
     }
-    for stage in [
-        "unfinished_resume",
-        "unfinished_cancel",
-        "account_only",
-        "plan_disabled",
-    ] {
+    for stage in ["migrated_host", "migrated_account", "account_only"] {
         run_isolated(ACCOUNT_ONLY_TEST, stage);
     }
 }
 
 #[test]
-#[ignore = "native Linux networkless checked ChatGPT turns; requires OpenSSL, ip, unshare, bwrap, and script"]
-fn release_private_file_chatgpt_checked_direct_and_team_turns() {
+#[ignore = "native Linux networkless ChatGPT route refusals; requires OpenSSL, ip, unshare, bwrap, and script"]
+fn release_private_file_chatgpt_refuses_unadmitted_routes() {
     if std::env::var_os(STAGE).is_some() {
         isolated_stage(true);
         return;
     }
-    run_isolated(CHECKED_TURN_TEST, "checked_turn");
+    run_isolated(ROUTE_REFUSAL_TEST, "near_expiry");
 }
 
 fn run_isolated(test_name: &str, stage: &str) {

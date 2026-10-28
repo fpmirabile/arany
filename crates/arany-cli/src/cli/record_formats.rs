@@ -11,7 +11,7 @@ const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserI
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.
-const FIXTURES: [Fixture<'static>; 27] = [
+const FIXTURES: [Fixture<'static>; 29] = [
     (
         RecordKind::ToolsConfig,
         1,
@@ -80,11 +80,17 @@ const FIXTURES: [Fixture<'static>; 27] = [
         RecordKind::ChatgptAccounts,
         2,
         CHATGPT_ACCOUNT_V2,
-        CHATGPT_ACCOUNT,
+        CHATGPT_ACCOUNT_V3,
     ),
     (
         RecordKind::ChatgptAccounts,
         3,
+        CHATGPT_ACCOUNT_V3,
+        CHATGPT_ACCOUNT,
+    ),
+    (
+        RecordKind::ChatgptAccounts,
+        4,
         CHATGPT_ACCOUNT,
         CHATGPT_ACCOUNT,
     ),
@@ -92,7 +98,13 @@ const FIXTURES: [Fixture<'static>; 27] = [
         RecordKind::ChatgptRegistration,
         1,
         r#"{"schema":1,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","issued_client_id":null}"#,
-        r#"{"schema":1,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","issued_client_id":null}"#,
+        r#"{"schema":2,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b"}"#,
+    ),
+    (
+        RecordKind::ChatgptRegistration,
+        2,
+        r#"{"schema":2,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b"}"#,
+        r#"{"schema":2,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b"}"#,
     ),
     (RecordKind::McpOauth, 1, MCP_OAUTH, MCP_OAUTH),
     (RecordKind::ProviderRoster, 1, ROSTER, ROSTER_V2),
@@ -118,7 +130,8 @@ const ACCOUNT: &str = r#"{"schema":1,"storage":"private_file","account":{"schema
 const ACCOUNT_V2: &str = r#"{"schema":2,"storage":"private_file","account":{"schema":3,"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","api_key":"synthetic-test-key","anthropic_workspace_id":null}}"#;
 const CHATGPT_ACCOUNT_V1: &str = r#"{"schema":1,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":1,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":null}],"model_checks":[{"account_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","fingerprint":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"checked_at_sec":1700000000,"expires_at_sec":1700086400,"context_window_tokens":272000}]}"#;
 const CHATGPT_ACCOUNT_V2: &str = r#"{"schema":2,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":1,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":null}],"model_checks":[]}"#;
-const CHATGPT_ACCOUNT: &str = r#"{"schema":3,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","chatgpt_account_id":null,"keyring_slot":null,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":2,"slot":null,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","chatgpt_account_id":null,"keyring_slot":"chatgpt-Ne20hIaDcO1pbYxw0HwZIWr8MYnsSAeMgUzaAXLL3rM","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":null}],"model_checks":[]}"#;
+const CHATGPT_ACCOUNT_V3: &str = r#"{"schema":3,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","chatgpt_account_id":null,"keyring_slot":null,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":2,"slot":null,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","chatgpt_account_id":null,"keyring_slot":"chatgpt-Ne20hIaDcO1pbYxw0HwZIWr8MYnsSAeMgUzaAXLL3rM","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":null}],"model_checks":[]}"#;
+const CHATGPT_ACCOUNT: &str = r#"{"schema":4,"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","chatgpt_account_id":null,"keyring_slot":null,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":true,"token":{"schema":2,"slot":null,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}},"slot_client_id":null},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","chatgpt_account_id":null,"keyring_slot":"chatgpt-Ne20hIaDcO1pbYxw0HwZIWr8MYnsSAeMgUzaAXLL3rM","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":true,"token":null,"slot_client_id":"oaiapp_fake_vault"}],"model_checks":[]}"#;
 const ROSTER: &str = r#"{"version":1,"profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}"#;
 const ROSTER_V2: &str = r#"{"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}"#;
 const ROUTING: &str = r#"{"version":1,"providers":{"primary":null,"child":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}],"review":null,"compaction":null}}"#;
@@ -136,7 +149,7 @@ const NESTED_SCHEMAS: [NestedSchema; 2] = [
         RecordKind::ChatgptAccounts,
         "/accounts/0/token/schema",
         TOKEN_RECORD_SCHEMA,
-        &[(1, 1), (2, 1), (3, 2)],
+        &[(1, 1), (2, 1), (3, 2), (4, 2)],
     ),
 ];
 
@@ -385,7 +398,7 @@ fn nested_schema_fixtures_must_be_populated() {
         let empty = match kind {
             RecordKind::SavedAccount => r#"{"schema":2,"storage":"keyring","account":null}"#,
             RecordKind::ChatgptAccounts => {
-                r#"{"schema":3,"selected":null,"accounts":[],"model_checks":[]}"#
+                r#"{"schema":4,"selected":null,"accounts":[],"model_checks":[]}"#
             }
             _ => unreachable!(),
         };
