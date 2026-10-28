@@ -7,25 +7,16 @@ use arany_cli::presentation::{Output, render_exec};
 use std::{
     fs::File,
     path::Path,
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
 
+use crate::loopback::ChildGuard;
+
 const LIVE_DEADLINE: Duration = Duration::from_secs(360);
 const MAX_CHANNEL_BYTES: u64 = 128 * 1024;
-
-struct LiveChild(Option<Child>);
-
-impl Drop for LiveChild {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
 
 fn selected_credential(name: &str) -> String {
     assert_eq!(
@@ -46,16 +37,14 @@ fn selected_model(profile: &str) -> String {
     model
 }
 
-fn wait_live(mut child: LiveChild, stdout: &Path, stderr: &Path) -> (ExitStatus, Vec<u8>, Vec<u8>) {
+fn wait_live(
+    mut child: ChildGuard,
+    stdout: &Path,
+    stderr: &Path,
+) -> (ExitStatus, Vec<u8>, Vec<u8>) {
     let deadline = Instant::now() + LIVE_DEADLINE;
     let status = loop {
-        if let Some(status) = child
-            .0
-            .as_mut()
-            .expect("live child")
-            .try_wait()
-            .expect("live status")
-        {
+        if let Some(status) = child.child().try_wait().expect("live status") {
             break status;
         }
         for channel in [stdout, stderr] {
@@ -73,12 +62,7 @@ fn wait_live(mut child: LiveChild, stdout: &Path, stderr: &Path) -> (ExitStatus,
         );
         thread::sleep(Duration::from_millis(20));
     };
-    child
-        .0
-        .take()
-        .expect("live child")
-        .wait()
-        .expect("reap live child");
+    child.take().wait().expect("reap live child");
     let output = std::fs::read(stdout).expect("live stdout");
     let errors = std::fs::read(stderr).expect("live stderr");
     assert!(output.len() as u64 <= MAX_CHANNEL_BYTES);
@@ -169,7 +153,7 @@ fn live_route(profile: &str, model: &str, credential_name: &str, team: bool) {
         .args(["--output", "jsonl", objective])
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    let child = LiveChild(Some(command.spawn().expect("live product process")));
+    let child = ChildGuard::new(command.spawn().expect("live product process"));
     let (status, output, errors) = wait_live(child, &stdout_path, &stderr_path);
     assert!(status.success(), "{profile} team={team} exit: {status}");
     assert!(
@@ -270,7 +254,7 @@ fn capture_chatgpt_live(
         .stderr(Stdio::from(
             File::create(&stderr_path).expect("live stderr file"),
         ));
-    let child = LiveChild(Some(command.spawn().expect("live ChatGPT product process")));
+    let child = ChildGuard::new(command.spawn().expect("live ChatGPT product process"));
     wait_live(child, &stdout_path, &stderr_path)
 }
 

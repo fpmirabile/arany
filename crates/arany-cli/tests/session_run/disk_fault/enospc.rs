@@ -149,6 +149,16 @@ fn tmpfs_enospc_child() {
 #[test]
 #[ignore = "native Linux private tmpfs ENOSPC release gate; requires unshare and mount"]
 fn kernel_enospc_preserves_committed_prefix_and_recovers() {
+    run_private_mount_helper(
+        &["-Urm", "--"],
+        "disk_fault::enospc::tmpfs_enospc_child",
+        "private ENOSPC helper",
+        b"KERNEL_ENOSPC_REPLAY_OK",
+    );
+}
+
+// Runs one ignored helper under `unshare` with a private mountpoint and requires its success marker.
+fn run_private_mount_helper(unshare: &[&str], helper: &str, label: &str, marker: &[u8]) {
     let temp = tempfile::tempdir().expect("private test root");
     let mountpoint = temp.path().join("volume");
     std::fs::create_dir(&mountpoint).expect("private mountpoint");
@@ -156,30 +166,25 @@ fn kernel_enospc_preserves_committed_prefix_and_recovers() {
     command
         .env_clear()
         .env("ARANY_TEST_MOUNT", &mountpoint)
-        .args(["-Urm", "--"])
+        .args(unshare)
         .arg(std::env::current_exe().expect("test binary"))
-        .args([
-            "--ignored",
-            "--exact",
-            "disk_fault::enospc::tmpfs_enospc_child",
-            "--nocapture",
-        ])
+        .args(["--ignored", "--exact", helper, "--nocapture"])
         .current_dir(temp.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = wait_product(command.spawn().expect("private namespace helper"));
+    let output = wait_product(command.spawn().expect(label));
     assert!(output.stdout.len() <= 4096 && output.stderr.len() <= 4096);
     assert!(
         output.status.success(),
-        "private ENOSPC helper failed: {}",
+        "{label} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         output
             .stdout
-            .windows(b"KERNEL_ENOSPC_REPLAY_OK".len())
-            .any(|window| window == b"KERNEL_ENOSPC_REPLAY_OK")
+            .windows(marker.len())
+            .any(|window| window == marker)
     );
     assert_eq!(
         std::fs::read_dir(&mountpoint)

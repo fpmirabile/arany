@@ -1,3 +1,4 @@
+use arany::test_support::goals::facts_workspace;
 use arany::test_support::scenario::*;
 use arany::{
     AdmittedProviders, AgentPhase, AgentStatus, Answer, ChatGptAdmission, ChatGptProvenance,
@@ -34,9 +35,6 @@ mod tool_steps;
 
 #[path = "engine_run/performance.rs"]
 mod performance;
-
-#[path = "engine_run/shared_editors.rs"]
-mod shared_editors;
 
 #[path = "engine_run/goals.rs"]
 mod goals;
@@ -221,9 +219,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
     runtime.block_on(async {
         for branch in [false, true] {
             let temp = tempfile::tempdir().expect("temporary root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-            std::fs::write(workspace.join("notes/facts.txt"), "Facts").expect("include");
+            let workspace = facts_workspace(temp.path(), "Facts");
             let state_path = temp.path().join("state");
             let initial_engine_provider =
                 Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
@@ -480,9 +476,7 @@ fn cancellation_before_admission_creates_no_run_or_provider_call() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -539,9 +533,7 @@ fn provider_call_timeout_fails_without_a_final_message() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -617,9 +609,7 @@ fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation(
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(AtomicUsize::new(0));
@@ -883,9 +873,7 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let provider = ScriptedProvider::new(vec![]);
         let recorded_requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
@@ -1298,9 +1286,7 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
 #[tokio::test]
 async fn one_engine_refuses_a_concurrent_submission_and_takes_a_provider_per_submission() {
     let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-    std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+    let workspace = facts_workspace(temp.path(), "Fact");
     let state_path = temp.path().join("state");
     let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("private state"),
@@ -1413,9 +1399,7 @@ async fn one_engine_refuses_a_concurrent_submission_and_takes_a_provider_per_sub
 #[tokio::test]
 async fn a_handle_dropped_inside_a_provider_call_frees_the_engine_for_the_same_session() {
     let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-    std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+    let workspace = facts_workspace(temp.path(), "Fact");
     let state_path = temp.path().join("state");
     let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("private state"),
@@ -1509,9 +1493,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(AtomicUsize::new(0));
@@ -1621,9 +1603,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
             for cancel in [true, false] {
                 for (case, response, call_disposition, failure_reason) in completion_boundary_cases() {
                     let temp = tempfile::tempdir().expect("completion-time root");
-                    let workspace = temp.path().join("workspace");
-                    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-                    std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+                    let workspace = facts_workspace(temp.path(), "Fact");
                     let state_path = temp.path().join("state");
                     let cancellation = RunCancellation::new();
                     let mut provider = ScriptedProvider::new(Vec::new());
@@ -1634,10 +1614,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         run_request.policy = CollaborationPolicy::Team {
                             max_active_children: 1,
                         };
-                        responses.push_back(Ok(ProviderOutcome::Delegate(Delegate {
-                            agent: None,
-                            children: vec![arany::ChildAssignment { editor: None, objective: "A".into(), profile: None }],
-                        })));
+                        responses.push_back(Ok(delegate(&[("A", None)])));
                         responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: "Child result".into() })));
                         vec![
                             AgentPhase::RootPlan,
@@ -1828,14 +1805,7 @@ async fn streamed_text_before_a_call_is_journaled_as_commentary_and_the_run_cont
     let state = temp.path().join("state");
     let text = format!("STREAMED_BEFORE_CALL:{}", "x".repeat(3 * 1024));
     let mut provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "A".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("A", None)]),
         ProviderOutcome::Answer(Answer {
             text: "child result".into(),
         }),
