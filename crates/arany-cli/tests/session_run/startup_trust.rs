@@ -1994,7 +1994,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "environment area menu",
         &shows("Choose what to manage"),
     );
-    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+    input.write_all(b"\x1b[B\x1b[B\x1b[B\x1b[B\r").unwrap();
     until(
         &mut output,
         &mut input,
