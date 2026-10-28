@@ -345,6 +345,13 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: &EffectIntent,
     ) -> Result<Result<(), PendingToolRefusal>, EngineError> {
+        if runtime.refuses_shell_arguments(&intent.call) {
+            let refusal = crate::session::ToolRefusal {
+                cause: crate::session::ProposalRefusalCause::InvalidArguments,
+                reason: crate::session::ToolRefusalReason::Payload,
+            };
+            return Ok(Err(PendingToolRefusal::new(intent, refusal, None)));
+        }
         let mut event = Event::ToolProposed {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,

@@ -64,6 +64,9 @@ enum Action {
     Replace,
     RewindRef(String),
     TouchIndex,
+    EditFile,
+    ChangeMode,
+    AddFile,
 }
 
 async fn gated(
@@ -109,10 +112,27 @@ async fn gated(
         Action::Release => {
             release.take().unwrap().send(()).unwrap();
         }
-        Action::RewindRef(older) => {
-            std::fs::write(workspace.join(".git/refs/heads/main"), format!("{older}\n")).unwrap();
+        action => {
+            race_repository(workspace, action);
             raced = Some(tree_snapshot(workspace));
             release.take().unwrap().send(()).unwrap();
+        }
+    }
+    let result = running.await;
+    assert!(
+        !unit.exists(),
+        "{stage:?}: unit removed after confirmed cleanup"
+    );
+    drop(release);
+    (result.0, result.1, raced)
+}
+
+fn race_repository(workspace: &Path, action: Action) {
+    use std::os::unix::fs::PermissionsExt;
+
+    match action {
+        Action::RewindRef(older) => {
+            std::fs::write(workspace.join(".git/refs/heads/main"), format!("{older}\n")).unwrap();
         }
         Action::TouchIndex => {
             let index = std::fs::OpenOptions::new()
@@ -120,8 +140,20 @@ async fn gated(
                 .open(workspace.join(".git/index"))
                 .unwrap();
             index.set_len(index.metadata().unwrap().len() + 1).unwrap();
-            raced = Some(tree_snapshot(workspace));
-            release.take().unwrap().send(()).unwrap();
+        }
+        Action::EditFile => {
+            std::fs::write(workspace.join("src/a.txt"), "racing edit\n").unwrap();
+        }
+        Action::ChangeMode => {
+            std::fs::set_permissions(
+                workspace.join("src/a.txt"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        Action::AddFile => {
+            std::fs::create_dir_all(workspace.join("src/nested")).unwrap();
+            std::fs::write(workspace.join("src/nested/new.sh"), "racing creation\n").unwrap();
         }
         Action::Replace => {
             let original = workspace.join(".git");
@@ -139,19 +171,12 @@ async fn gated(
                 "copy identical Git directory: {copy:?}"
             );
             assert_eq!(tree_snapshot(&original), tree_snapshot(&moved));
-            release.take().unwrap().send(()).unwrap();
         }
+        Action::Cancel | Action::Release => panic!("expected a repository race"),
     }
-    let result = running.await;
-    assert!(
-        !unit.exists(),
-        "{stage:?}: unit removed after confirmed cleanup"
-    );
-    drop(release);
-    (result.0, result.1, raced)
 }
 
-async fn record(state: &Path, workspace: &Path, call: &ToolCall) -> Recorded {
+pub(super) async fn record(state: &Path, workspace: &Path, call: &ToolCall) -> Recorded {
     let sessions = arany::list_sessions(StateRoot::open_existing(state).unwrap(), workspace.into())
         .await
         .unwrap();
@@ -240,6 +265,89 @@ pub(super) async fn commit_death(engine: &Engine, workspace: &Path, state: &Path
     .await;
     capacity_released(engine, workspace, "after-commit-death", &leftovers).await;
     recorded
+}
+
+pub(super) async fn switch_death(engine: &Engine, workspace: &Path, state: &Path) -> Recorded {
+    two_slots();
+    let leftovers = unit_leftovers();
+    let before = std::fs::read(workspace.join("src/a.txt")).unwrap();
+    let head = std::fs::read(workspace.join(".git/HEAD")).unwrap();
+    let index = std::fs::read(workspace.join(".git/index")).unwrap();
+    let recorded = dead_publisher(
+        engine,
+        workspace,
+        state,
+        ToolCall::GitSwitch {
+            branch: "publisher-died".into(),
+        },
+        || std::fs::read(workspace.join("src/a.txt")).unwrap() != before,
+    )
+    .await;
+    assert_eq!(std::fs::read(workspace.join(".git/HEAD")).unwrap(), head);
+    assert_eq!(std::fs::read(workspace.join(".git/index")).unwrap(), index);
+    capacity_released(engine, workspace, "after-switch-death", &leftovers).await;
+    recorded
+}
+
+pub(super) async fn switch_drift(engine: &Engine, workspace: &Path, state: &Path) -> Vec<Recorded> {
+    use std::os::unix::fs::PermissionsExt;
+
+    two_slots();
+    let leftovers = unit_leftovers();
+    let path = workspace.join("src/a.txt");
+    let original = std::fs::metadata(&path).unwrap().permissions();
+    let mut rows = Vec::new();
+    for (branch, action) in [
+        ("racing-content", Action::EditFile),
+        ("racing-mode", Action::ChangeMode),
+        ("racing-creation", Action::AddFile),
+    ] {
+        let call = ToolCall::GitSwitch {
+            branch: branch.into(),
+        };
+        let (result, calls, raced) = tokio::time::timeout(
+            Duration::from_secs(120),
+            gated(
+                engine,
+                workspace,
+                call.clone(),
+                GitWriteStage::BeforeGo,
+                action,
+            ),
+        )
+        .await
+        .expect("switch drift deadline");
+        assert!(result.is_ok(), "{branch}: {result:?}");
+        assert_eq!(calls, 2, "known refusal permits continuation");
+        let row = record(state, workspace, &call).await;
+        let observed = observation(&row);
+        assert_eq!(observed.disposition, ToolDisposition::Failed, "{branch}");
+        assert!(
+            observed.output.contains("nothing was published"),
+            "{observed:?}"
+        );
+        assert_eq!(
+            Some(tree_snapshot(workspace)),
+            raced,
+            "racing state preserved"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            if branch == "racing-mode" {
+                0o700
+            } else {
+                original.mode() & 0o777
+            }
+        );
+        std::fs::write(&path, "alpha\n").unwrap();
+        std::fs::set_permissions(&path, original.clone()).unwrap();
+        if branch == "racing-creation" {
+            std::fs::remove_file(workspace.join("src/nested/new.sh")).unwrap();
+        }
+        capacity_released(engine, workspace, &format!("after-{branch}"), &leftovers).await;
+        rows.push(row);
+    }
+    rows
 }
 
 // Drift between the executor's snapshot and publication must publish nothing and keep the racing state.
