@@ -886,6 +886,18 @@ impl AttachedSession {
                 }
                 return Ok(IdleAction::Handled);
             }
+            Some(permissions::PermissionArea::CommandEnvironment) => {
+                let outcome = permissions::manage_command_environment(
+                    &mut self.terminal,
+                    &self.admission.state_dir,
+                )
+                .await?;
+                self.terminal
+                    .restore_draft_input(self.composer.input_capacity())
+                    .map_err(|error| error.to_string())?;
+                self.ui.notice = Some(Feedback::History(outcome.summary()));
+                return Ok(IdleAction::Handled);
+            }
             Some(permissions::PermissionArea::NetworkDomains) => {
                 let summary = permissions::manage_network_rules(
                     &mut self.terminal,
@@ -899,18 +911,6 @@ impl AttachedSession {
                     .map_err(|error| error.to_string())?;
                 self.ui.notice = Some(Feedback::History(summary));
                 readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::CommandEnvironment) => {
-                let outcome = permissions::manage_command_environment(
-                    &mut self.terminal,
-                    &self.admission.state_dir,
-                )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(outcome.summary()));
                 return Ok(IdleAction::Handled);
             }
             Some(permissions::PermissionArea::FolderTrust) => {}

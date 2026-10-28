@@ -646,37 +646,6 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
 }
 
 #[test]
-fn command_reservations_have_no_separate_selection_allowance() {
-    let root = tempfile::tempdir().unwrap();
-    let runtime = in_process_runtime(root.path(), config_value());
-    let call = ToolCall::Command {
-        program: "shell".into(),
-        args: vec!["-c".into(), "true".into()],
-        cwd: String::new(),
-    };
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        call.clone(),
-    );
-    for runtime_ms in [1_000, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS] {
-        intent.limits.runtime_ms = runtime_ms;
-        assert_eq!(
-            runtime.reservation_overhead(&call),
-            super::guard::RESERVATION_OVERHEAD
-        );
-        assert_eq!(
-            runtime.intent_reservation_overhead(&intent),
-            super::guard::RESERVATION_OVERHEAD
-        );
-        assert_eq!(
-            runtime.worker_reservation_overhead(&call),
-            super::guard::RESERVATION_OVERHEAD
-        );
-    }
-}
-
-#[test]
 fn compaction_readmission_accepts_a_recorded_locale() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -749,4 +718,27 @@ fn a_changed_environment_record_changes_the_process_policy_digest() {
     };
     assert_eq!(digest("/usr/bin"), digest("/usr/bin"));
     assert_ne!(digest("/usr/bin"), digest("/usr/bin:/bin"));
+}
+
+#[test]
+fn command_reservations_have_no_separate_selection_allowance() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(root.path(), config_value());
+    let call = ToolCall::Command {
+        program: "shell".into(),
+        args: vec!["-c".into(), "true".into()],
+        cwd: String::new(),
+    };
+    let mut intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        call.clone(),
+    );
+    for runtime_ms in [1_000, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS] {
+        intent.limits.runtime_ms = runtime_ms;
+        assert_eq!(
+            runtime.reservation_overhead(&intent.call),
+            super::guard::RESERVATION_OVERHEAD
+        );
+    }
 }

@@ -84,8 +84,8 @@ pub(super) enum PermissionArea {
     FolderTrust,
     TypedGitRules,
     HostRules,
-    NetworkDomains,
     CommandEnvironment,
+    NetworkDomains,
 }
 
 pub(super) async fn choose_area(
@@ -101,8 +101,8 @@ pub(super) async fn choose_area(
                 (b'1', "Folder trust"),
                 (b'2', "Typed Git rules"),
                 (b'3', "Host command rules"),
-                (b'4', "Network domains"),
-                (b'5', "Command environment"),
+                (b'4', "Command environment"),
+                (b'5', "Network domains"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -112,8 +112,8 @@ pub(super) async fn choose_area(
             Some(b'1') => Some(PermissionArea::FolderTrust),
             Some(b'2') => Some(PermissionArea::TypedGitRules),
             Some(b'3') => Some(PermissionArea::HostRules),
-            Some(b'4') => Some(PermissionArea::NetworkDomains),
-            Some(b'5') => Some(PermissionArea::CommandEnvironment),
+            Some(b'4') => Some(PermissionArea::CommandEnvironment),
+            Some(b'5') => Some(PermissionArea::NetworkDomains),
             _ => None,
         },
     )
@@ -271,6 +271,93 @@ pub(super) async fn manage_rules(
     }
 }
 
+pub(super) enum EnvironmentOutcome {
+    Confirmed(String),
+    Uncertain,
+}
+
+enum EnvironmentAction {
+    Select(String),
+    Reveal(String),
+    Remove(String),
+}
+
+enum EnvironmentStep {
+    Act(EnvironmentAction),
+    Again,
+    Leave,
+}
+
+pub(super) async fn manage_command_environment(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+) -> Result<EnvironmentOutcome, SetupError> {
+    let mut notice = None::<String>;
+    let mut saved = false;
+    let mut last_failure = None::<String>;
+    loop {
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(EnvironmentOutcome::Confirmed(
+                "Error: state directory unavailable or unsafe; command environment unchanged"
+                    .into(),
+            ));
+        };
+        let environment = match open_environment(&state) {
+            Ok(environment) => environment,
+            Err(outcome) => return Ok(outcome),
+        };
+        let names: Vec<String> = environment
+            .names()
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        let choice = choose_environment(
+            terminal,
+            &environment,
+            &names,
+            notice.take().unwrap_or_default(),
+        )
+        .await?;
+        let action = match environment_step(terminal, choice, &names).await? {
+            EnvironmentStep::Act(action) => action,
+            EnvironmentStep::Again => continue,
+            EnvironmentStep::Leave => {
+                return Ok(EnvironmentOutcome::Confirmed(leave_notice(
+                    saved,
+                    last_failure,
+                )));
+            }
+        };
+        let outcome = match action {
+            EnvironmentAction::Select(name) => {
+                CommandEnvironment::edit(&state, |record| record.select(&name)).map(|_| "Selected.")
+            }
+            EnvironmentAction::Remove(name) => {
+                CommandEnvironment::edit(&state, |record| record.deselect(&name))
+                    .map(|_| "Removed.")
+            }
+            EnvironmentAction::Reveal(name) => {
+                let value = environment
+                    .names()
+                    .find_map(|(candidate, value)| (candidate == name).then_some(value))
+                    .unwrap_or_default();
+                notice = Some(format!(
+                    "{name}={}.",
+                    crate::presentation::escape_terminal(value)
+                ));
+                continue;
+            }
+        };
+        match settle_environment(outcome) {
+            Ok(done) => {
+                saved |= done.saved;
+                last_failure = (!done.saved).then(|| done.notice.clone());
+                notice = Some(done.notice);
+            }
+            Err(outcome) => return Ok(outcome),
+        }
+    }
+}
+
 pub(super) async fn manage_network_rules(
     terminal: &mut AttachedTerminal,
     state_dir: &Path,
@@ -354,136 +441,21 @@ pub(super) async fn manage_network_rules(
     }
 }
 
-async fn add_network_edit(
-    terminal: &mut AttachedTerminal,
-    view: &arany::SessionView,
-) -> Result<Option<NetworkDomainEdit>, SetupError> {
-    let mut seen = std::collections::HashSet::new();
-    let domains = view
-        .runs
-        .iter()
-        .rev()
-        .flat_map(|run| run.tools.iter().rev())
-        .filter_map(|tool| tool.observation.as_ref())
-        .flat_map(arany::ToolObservation::refused_domains)
-        .filter(|domain| seen.insert(domain.clone()))
-        .take(arany::permissions::MAX_RULES)
-        .collect::<Vec<_>>();
-    let options = domains
-        .iter()
-        .enumerate()
-        .map(|(index, domain)| (index, crate::presentation::escape_terminal(domain)))
-        .collect::<Vec<_>>();
-    let Some(index) = pick(
-        terminal,
-        "Refused domain",
-        "Choose a domain a command could not reach. Allowing it lets commands send data to that host over HTTPS.",
-        &options,
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    let domain = domains[index].clone();
-    Ok(pick(
-        terminal,
-        "Domain decision",
-        "Choose a decision",
-        &decisions(),
-    )
-    .await?
-    .map(|decision| NetworkDomainEdit::Insert { domain, decision }))
-}
-
-pub(super) enum EnvironmentOutcome {
-    Confirmed(String),
-    Uncertain,
-}
-
-enum EnvironmentAction {
-    Select(String),
-    Reveal(String),
-    Remove(String),
-}
-
-enum EnvironmentStep {
-    Act(EnvironmentAction),
-    Again,
-    Leave,
-}
-
-pub(super) async fn manage_command_environment(
-    terminal: &mut AttachedTerminal,
-    state_dir: &Path,
-) -> Result<EnvironmentOutcome, SetupError> {
-    let mut notice = None::<String>;
-    let mut saved = false;
-    loop {
-        let Ok(state) = StateRoot::open_existing(state_dir) else {
-            return Ok(EnvironmentOutcome::Confirmed(
-                "Error: state directory unavailable or unsafe; command environment unchanged"
-                    .into(),
-            ));
-        };
-        let environment = match open_environment(&state) {
-            Ok(environment) => environment,
-            Err(outcome) => return Ok(outcome),
-        };
-        let names: Vec<String> = environment
-            .names()
-            .map(|(name, _)| name.to_owned())
-            .collect();
-        let choice = choose_environment(
-            terminal,
-            &environment,
-            &names,
-            notice.take().unwrap_or_default(),
-        )
-        .await?;
-        let action = match environment_step(terminal, choice, &names).await? {
-            EnvironmentStep::Act(action) => action,
-            EnvironmentStep::Again => continue,
-            EnvironmentStep::Leave => {
-                return Ok(EnvironmentOutcome::Confirmed(if saved {
-                    "Command environment saved; it applies from the next Run".into()
-                } else {
-                    "Command environment unchanged".into()
-                }));
-            }
-        };
-        let outcome = match action {
-            EnvironmentAction::Select(name) => {
-                CommandEnvironment::edit(&state, |record| record.select(&name)).map(|_| "Selected.")
-            }
-            EnvironmentAction::Remove(name) => {
-                CommandEnvironment::edit(&state, |record| record.deselect(&name))
-                    .map(|_| "Removed.")
-            }
-            EnvironmentAction::Reveal(name) => {
-                let value = environment
-                    .names()
-                    .find_map(|(candidate, value)| (candidate == name).then_some(value))
-                    .unwrap_or_default();
-                notice = Some(format!(
-                    "{name}={}.",
-                    crate::presentation::escape_terminal(value)
-                ));
-                continue;
-            }
-        };
-        match settle_environment(outcome) {
-            Ok(done) => {
-                saved |= done.saved;
-                notice = Some(done.notice);
-            }
-            Err(outcome) => return Ok(outcome),
-        }
-    }
-}
-
 struct EnvironmentSettled {
     saved: bool,
     notice: String,
+}
+
+fn leave_notice(saved: bool, last_failure: Option<String>) -> String {
+    let base = if saved {
+        "Command environment saved; it applies from the next Run"
+    } else {
+        "Command environment unchanged"
+    };
+    match last_failure {
+        Some(failure) => format!("{base}. {failure}"),
+        None => base.into(),
+    }
 }
 
 fn open_environment(state: &StateRoot) -> Result<CommandEnvironment, EnvironmentOutcome> {
@@ -591,6 +563,47 @@ async fn environment_step(
         }
         _ => EnvironmentStep::Leave,
     })
+}
+
+async fn add_network_edit(
+    terminal: &mut AttachedTerminal,
+    view: &arany::SessionView,
+) -> Result<Option<NetworkDomainEdit>, SetupError> {
+    let mut seen = std::collections::HashSet::new();
+    let domains = view
+        .runs
+        .iter()
+        .rev()
+        .flat_map(|run| run.tools.iter().rev())
+        .filter_map(|tool| tool.observation.as_ref())
+        .flat_map(arany::ToolObservation::refused_domains)
+        .filter(|domain| seen.insert(domain.clone()))
+        .take(arany::permissions::MAX_RULES)
+        .collect::<Vec<_>>();
+    let options = domains
+        .iter()
+        .enumerate()
+        .map(|(index, domain)| (index, crate::presentation::escape_terminal(domain)))
+        .collect::<Vec<_>>();
+    let Some(index) = pick(
+        terminal,
+        "Refused domain",
+        "Choose a domain a command could not reach. Allowing it lets commands send data to that host over HTTPS.",
+        &options,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let domain = domains[index].clone();
+    Ok(pick(
+        terminal,
+        "Domain decision",
+        "Choose a decision",
+        &decisions(),
+    )
+    .await?
+    .map(|decision| NetworkDomainEdit::Insert { domain, decision }))
 }
 
 pub(super) enum HostRuleEditOutcome {

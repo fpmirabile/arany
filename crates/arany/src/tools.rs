@@ -979,8 +979,8 @@ impl ToolRuntime {
         let mut config = match Config::load(state) {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
-                merge_network(&mut config, Some(&snapshot))?;
                 config.bind_environment(&environment);
+                merge_network(&mut config, Some(&snapshot))?;
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -995,8 +995,8 @@ impl ToolRuntime {
             Err(error) => return Err(error),
         };
         config.discover_skills(workspace)?;
-        merge_network(&mut config, Some(&snapshot))?;
         config.bind_environment(&environment);
+        merge_network(&mut config, Some(&snapshot))?;
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1050,7 +1050,6 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
-        config.bind_environment(&command_environment);
         let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
@@ -1075,6 +1074,7 @@ impl ToolRuntime {
         merge_network(&mut config, permissions.as_ref())?;
         let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
+        config.bind_environment(&command_environment);
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);

@@ -339,6 +339,7 @@ pub(in crate::tools::guard) mod tests {
             let host_now = Instant::now();
             let decoded = decode_deadline(encode_deadline(action).unwrap()).unwrap();
             assert!(decoded <= Instant::now() + remaining);
+            assert!(decoded > host_now);
             if runtime >= TEST_RUNTIME {
                 assert!(decoded > host_now + Duration::from_secs(5));
             }
