@@ -95,6 +95,13 @@ fn guarded_native_git_switch_publishes_through_two_units_and_replays() {
 
 #[cfg(all(not(debug_assertions), arany_ci))]
 fn release_git_journey(helper: &str) {
+    let stdout = release_native_journey(helper, "native Git journey");
+    latency::forward(&stdout);
+}
+
+// Runs one ignored helper in a fresh process with a private home; returns its stdout.
+#[cfg(all(not(debug_assertions), arany_ci))]
+pub(super) fn release_native_journey(helper: &str, label: &str) -> Vec<u8> {
     use crate::process::BoundedOutput;
 
     let _gate = crate::process::NATIVE_GATE
@@ -119,14 +126,14 @@ fn release_git_journey(helper: &str) {
         .unwrap();
     assert!(
         output.status.success(),
-        "native Git journey: {:?}; stdout={:?}; stderr={:?}",
+        "{label}: {:?}; stdout={:?}; stderr={:?}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    crate::process::assert_single_test_completed(&output.stdout, "native Git journey");
-    latency::forward(&output.stdout);
+    crate::process::assert_single_test_completed(&output.stdout, label);
     assert!(output.stderr.is_empty());
+    output.stdout
 }
 
 #[cfg(any(debug_assertions, arany_ci))]
