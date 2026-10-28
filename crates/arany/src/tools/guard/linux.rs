@@ -1100,18 +1100,8 @@ pub(super) async fn execute_inner(
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let mut stderr_task = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let go_cancellation = cancellation.clone();
-    let mut execution = Box::pin(async {
-        let secret = {
-            let renewal = secret_for(runtime, intent, &mut *dispatched);
-            tokio::pin!(renewal);
-            tokio::select! {
-                secret = &mut renewal => secret?,
-                () = crate::fault::launcher_kill(&intent.call) => {
-                    let _ = child.start_kill();
-                    renewal.await?
-                }
-            }
-        };
+    let execution = Box::pin(async {
+        let secret = launched_secret(runtime, intent, &mut *dispatched, &mut child).await?;
         let ready_bytes = prepare_ready(
             runtime,
             intent,
@@ -1119,8 +1109,7 @@ pub(super) async fn execute_inner(
             &seed_dir,
             (&mut stdin, &mut stdout),
             (preparation_deadline, go_deadline, command_deadline),
-            parent_namespaces.clone(),
-            secret,
+            (parent_namespaces.clone(), secret),
         )
         .await?;
         admit_ready(&mut unit, &ready_bytes, intent, &parent_namespaces).await?;
@@ -1183,20 +1172,10 @@ pub(super) async fn execute_inner(
         });
         super::discovery_work(intent, capture).await
     });
-    let execution = async move {
-        tokio::select! {
-            result = &mut execution => result,
-            capped_deadline = crate::fault::action_deadline_cap(&intent.call, deadline) => {
-                tokio::time::timeout_at(capped_deadline, &mut execution)
-                    .await
-                    .unwrap_or(Err(ToolError::Limit))
-            }
-        }
-    };
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Operation),
-        result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
+        result = bounded_execution(intent, deadline, execution) => result,
     };
     let settled = Box::pin(settle_launch(
         &mut unit,
@@ -1213,6 +1192,45 @@ pub(super) async fn execute_inner(
     ))
     .await;
     finish_proxy(proxy, settled).await
+}
+
+// A launcher killed mid-renewal still lets the renewal settle, so its outcome is recorded.
+async fn launched_secret(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    renewing: &mut bool,
+    child: &mut tokio::process::Child,
+) -> Result<Option<String>, ToolError> {
+    let renewal = secret_for(runtime, intent, renewing);
+    tokio::pin!(renewal);
+    tokio::select! {
+        secret = &mut renewal => secret,
+        () = crate::fault::launcher_kill(&intent.call) => {
+            let _ = child.start_kill();
+            renewal.await
+        }
+    }
+}
+
+async fn bounded_execution(
+    intent: &EffectIntent,
+    deadline: tokio::time::Instant,
+    execution: impl Future<Output = Result<(ToolObservation, super::CacheCandidate), ToolError>>,
+) -> Result<(ToolObservation, super::CacheCandidate), ToolError> {
+    tokio::pin!(execution);
+    let capped = async {
+        tokio::select! {
+            result = &mut execution => result,
+            capped_deadline = crate::fault::action_deadline_cap(&intent.call, deadline) => {
+                tokio::time::timeout_at(capped_deadline, &mut execution)
+                    .await
+                    .unwrap_or(Err(ToolError::Limit))
+            }
+        }
+    };
+    tokio::time::timeout_at(deadline, capped)
+        .await
+        .unwrap_or(Err(ToolError::Limit))
 }
 
 async fn finish_proxy(
@@ -1850,8 +1868,7 @@ async fn prepare_ready(
         tokio::time::Instant,
         Option<tokio::time::Instant>,
     ),
-    parent_namespaces: profile::Namespaces,
-    secret: Option<String>,
+    (parent_namespaces, secret): (profile::Namespaces, Option<String>),
 ) -> Result<Vec<u8>, ToolError> {
     let cache_transfer = cache.map(|session| session.transfer.clone());
     let task = task_bytes(

@@ -437,6 +437,7 @@ mod injection {
     #[cfg(any(target_os = "macos", test))]
     use std::io;
     use std::sync::Mutex;
+    #[cfg(target_os = "linux")]
     use std::time::Duration;
     use tokio::sync::oneshot;
 

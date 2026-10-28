@@ -280,7 +280,8 @@ pub(crate) async fn access_token(server: &Server, workspace: &Path, renewing: &m
         return Access::Unauthorized;
     };
     *renewing = true;
-    match refresh(&claimed).await {
+    let renewal: Refreshing<'_> = Box::pin(refresh(&claimed));
+    match renewal.await {
         Ok(renewed) => {
             let token = renewed.access_token.clone();
             match mutate(&root, workspace, |tokens| {
@@ -520,6 +521,11 @@ async fn register(metadata: &Metadata, redirect: &str) -> Result<String, McpAuth
         .filter(|id| token_text(id, MAX_CLIENT_ID_BYTES))
         .ok_or(McpAuthError::Rejected)
 }
+
+// Erasing the HTTP future keeps Send proofs of spawned Engine futures within the recursion limit.
+#[cfg(target_os = "linux")]
+type Refreshing<'a> =
+    std::pin::Pin<Box<dyn Future<Output = Result<Grant, McpAuthError>> + Send + 'a>>;
 
 #[cfg(target_os = "linux")]
 async fn refresh(grant: &Grant) -> Result<Grant, McpAuthError> {
