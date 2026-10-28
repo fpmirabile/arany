@@ -1117,6 +1117,7 @@ impl Task {
             intent: intent.clone(),
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+            secret: None,
             hidden: runtime.hidden_paths(&intent.call),
             definition: runtime.definitions.payload(&intent.call)?,
             handover: runtime
@@ -1874,6 +1875,7 @@ mod tests {
             config,
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
@@ -2351,6 +2353,7 @@ mod tests {
             config,
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             workspace: workspace.clone(),
             guard_executable: std::env::current_exe().unwrap(),

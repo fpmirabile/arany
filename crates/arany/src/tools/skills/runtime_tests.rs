@@ -20,6 +20,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         workspace_paths: vec![".agents/skills".into()],
         write: false,
         child_unguarded: crate::tools::UnguardedGrant::Denied,
+        child_web: false,
         commands: Vec::new(),
         skills: vec![Skill {
             disable_model_invocation: false,
@@ -38,6 +39,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         locale: Default::default(),
         environment_sha256: None,
         network: None,
+        web_search: None,
     };
     let runtime = ToolRuntime {
         host_settings_admitted: true,

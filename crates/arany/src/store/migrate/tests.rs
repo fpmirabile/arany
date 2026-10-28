@@ -22,33 +22,33 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 95] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 104] = [
     (
         "RunStarted",
-        25,
+        26,
         include_str!("runstarted-v24.json"),
         include_str!("runstarted-v24.json"),
     ),
     (
         "ToolProposed",
-        4,
+        5,
         include_str!("toolproposed-v1.json"),
         include_str!("toolproposed-v1.json"),
     ),
     (
         "ToolStarted",
-        26,
+        27,
         include_str!("toolstarted-v23.json"),
         include_str!("toolstarted-v23.json"),
     ),
-    ("ToolFinished", 33, SELECTION_TOOLFINISHED, SELECTION_TOOLFINISHED),
+    ("ToolFinished", 34, SELECTION_TOOLFINISHED, SELECTION_TOOLFINISHED),
     (
         "HookStarted",
-        15,
+        16,
         include_str!("hookstarted-without-expiry.json"),
         include_str!("hookstarted-without-expiry.json"),
     ),
-    ("HookFinished", 22, SELECTION_HOOKFINISHED, SELECTION_HOOKFINISHED),
+    ("HookFinished", 23, SELECTION_HOOKFINISHED, SELECTION_HOOKFINISHED),
     (
         "ToolFinished",
         32,
@@ -364,6 +364,85 @@ const EVENT_FIXTURES: [EventFixture<'static>; 95] = [
     ),
     (
         "ToolProposed",
+        3,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        25,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        31,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        14,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        20,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "RunStarted",
+        24,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
+    ),
+    ("AgentSpawned", 17, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    (
+        "ToolProposed",
+        4,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        26,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        33,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        15,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        22,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        14,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        25,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    (
+        "ToolProposed",
         2,
         include_str!("toolproposed-v1.json"),
         include_str!("toolproposed-v1.json"),
@@ -394,41 +473,45 @@ const EVENT_FIXTURES: [EventFixture<'static>; 95] = [
     ),
     (
         "RunStarted",
-        24,
-        include_str!("runstarted-v24.json"),
-        include_str!("runstarted-v24.json"),
-    ),
-    (
-        "ToolProposed",
-        3,
-        include_str!("toolproposed-v1.json"),
-        include_str!("toolproposed-v1.json"),
-    ),
-    (
-        "ToolStarted",
         25,
-        include_str!("toolstarted-v23.json"),
-        include_str!("toolstarted-v23.json"),
-    ),
-    (
-        "ToolFinished",
-        31,
-        SELECTION_TOOLFINISHED,
-        SELECTION_TOOLFINISHED,
-    ),
-    (
-        "HookStarted",
-        14,
-        include_str!("hookstarted-without-expiry.json"),
-        include_str!("hookstarted-without-expiry.json"),
-    ),
-    (
-        "HookFinished",
-        20,
-        SELECTION_HOOKFINISHED,
-        SELECTION_HOOKFINISHED,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
     ),
 ];
+
+#[test]
+fn web_operations_never_appear_in_source_version_rows() {
+    for (kind, from, input) in [
+        ("ToolProposed", 4, include_str!("toolproposed-v1.json")),
+        ("ToolStarted", 26, include_str!("toolstarted-v23.json")),
+        ("ToolFinished", 33, SELECTION_TOOLFINISHED),
+        (
+            "HookStarted",
+            15,
+            include_str!("hookstarted-without-expiry.json"),
+        ),
+        ("HookFinished", 22, SELECTION_HOOKFINISHED),
+    ] {
+        let value: Value = serde_json::from_str(input).unwrap();
+        let pointer = ["/intent/call", "/observation/intent/call"]
+            .into_iter()
+            .find(|pointer| value.pointer(pointer).is_some_and(Value::is_object))
+            .unwrap_or_else(|| panic!("{kind} fixture carries a call"));
+        for web in [
+            serde_json::json!({"operation":"web_fetch","url":"https://example.com/"}),
+            serde_json::json!({"operation":"web_search","query":"q"}),
+        ] {
+            let mut widened = value.clone();
+            *widened.pointer_mut(pointer).unwrap() = web;
+            assert!(
+                REGISTRY
+                    .upgrade_payload(kind, from, &widened.to_string())
+                    .is_err(),
+                "{kind} v{from} must refuse web calls"
+            );
+        }
+    }
+}
 
 #[test]
 fn proxy_network_class_never_appears_in_source_version_rows() {
@@ -3177,7 +3260,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(upgraded, source);
         let event = Event::decode(
             "RunStarted",
-            crate::session::payload_version("RunStarted").unwrap(),
+            payload_version("RunStarted").unwrap(),
             &upgraded.to_string(),
             Some(RunId::new()),
             None,
@@ -3193,7 +3276,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
     let fixture = include_str!("runstarted-v24.json");
     let event = Event::decode(
         "RunStarted",
-        crate::session::payload_version("RunStarted").unwrap(),
+        payload_version("RunStarted").unwrap(),
         fixture,
         Some(RunId::new()),
         None,
@@ -3275,3 +3358,6 @@ fn setup_identity_step_rejects_roster_in_a_source_version_without_it() {
         assert!((step.transform)(forged).is_none());
     }
 }
+
+#[path = "web_tests.rs"]
+mod web;

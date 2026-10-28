@@ -2759,3 +2759,47 @@ fn network_domain_rules_extend_a_grant_and_never_match_calls() {
         .is_err()
     );
 }
+
+#[test]
+fn web_fetch_domain_rules_allow_ask_and_deny_by_host() {
+    let rules = config(json!({
+        "allow": ["WebFetch(domain:*.example.com)"],
+        "ask": ["WebFetch(domain:ask.example.org)"],
+        "deny": ["WebFetch(domain:bad.example.com)"],
+    }));
+    let fetch = |url: &str| ToolCall::WebFetch { url: url.into() };
+    assert_eq!(
+        rules.evaluate(&fetch("https://docs.example.com/")).0,
+        Decision::Allow
+    );
+    assert_eq!(
+        rules.evaluate(&fetch("https://docs.example.com/")).1,
+        PermissionSource::Rule
+    );
+    assert_eq!(
+        rules.evaluate(&fetch("https://ask.example.org/")).0,
+        Decision::Ask
+    );
+    assert_eq!(
+        rules.evaluate(&fetch("https://other.example.net/")).0,
+        Decision::Allow
+    );
+    let denied = config(json!({
+        "allow": ["WebFetch(domain:*.example.com)"],
+        "deny": ["WebFetch(domain:bad.example.com)"],
+    }));
+    assert_eq!(
+        denied.evaluate(&fetch("https://bad.example.com/")).0,
+        Decision::Deny
+    );
+    for rule in [
+        "WebFetch(example.com)",
+        "WebFetch(domain:)",
+        "WebFetch(domain:*.com)",
+    ] {
+        let parsed = PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions": {"allow": [rule]}})).unwrap(),
+        );
+        assert!(parsed.is_err(), "{rule}");
+    }
+}

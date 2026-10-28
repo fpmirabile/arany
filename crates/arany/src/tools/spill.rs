@@ -71,7 +71,10 @@ pub(super) fn report_cap(intent: &super::EffectIntent) -> usize {
     if intent.target == crate::session::worker::EffectTarget::Workspace
         && matches!(
             intent.call,
-            ToolCall::Command { .. } | ToolCall::McpCall { .. } | ToolCall::McpList { .. }
+            ToolCall::Command { .. }
+                | ToolCall::McpCall { .. }
+                | ToolCall::McpList { .. }
+                | ToolCall::WebFetch { .. }
         )
     {
         MAX_REPORT_BYTES
@@ -114,6 +117,7 @@ impl OutputSpill {
                     | ToolCall::CommandUnguarded { .. }
                     | ToolCall::McpCall { .. }
                     | ToolCall::McpList { .. }
+                    | ToolCall::WebFetch { .. }
             )
             && observation.intent.target == crate::session::worker::EffectTarget::Workspace
     }

@@ -762,6 +762,14 @@ fn unit_command(
             .arg(socket)
             .arg(crate::tools::network::PROXY_SOCKET_TARGET);
     }
+    if intent.call.is_web()
+        && let Some(bundle) = super::super::web::ca_bundle()
+    {
+        command
+            .args(["--ro-bind"])
+            .arg(bundle)
+            .arg(crate::tools::network::WEB_CA_TARGET);
+    }
     command
         .args(["--chdir", "/", "/arany", "--internal-tool-guard"])
         .arg(launch.helper_pin()?);
@@ -776,7 +784,7 @@ async fn settle_launch(
     stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
     deadline: tokio::time::Instant,
     result: Result<(ToolObservation, super::CacheCandidate), ToolError>,
-    (cache, discovery): (&mut Option<super::BuildCacheSession>, bool),
+    (cache, typed_error): (&mut Option<super::BuildCacheSession>, bool),
 ) -> Result<ToolObservation, ToolError> {
     let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
     if !matches!(cleanup, Ok(Ok(()))) {
@@ -819,7 +827,7 @@ async fn settle_launch(
     let Some(stderr) = drained else {
         return Err(ToolError::GuardRejected(GuardStage::OutputEof));
     };
-    if result.is_err() && !discovery {
+    if result.is_err() && !typed_error {
         let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
         let stage = if diagnostic.contains("bwrap:") || diagnostic.contains("unshare:") {
             GuardStage::NamespaceBootstrap
@@ -994,6 +1002,7 @@ fn task_bytes(
         intent: intent.clone(),
         cache,
         hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+        secret: super::super::web::secret(&runtime.config, &intent.call)?,
         hidden: runtime.hidden_paths(&intent.call),
         parent_namespaces,
     })
@@ -1143,7 +1152,11 @@ pub(super) async fn execute_inner(
         &mut stderr_task,
         deadline,
         result,
-        (&mut cache, super::super::discovery::possible(&intent.call)),
+        (
+            &mut cache,
+            super::super::discovery::possible(&intent.call)
+                || (intent.call.is_web() && cancellation.is_cancelled()),
+        ),
     ))
     .await;
     finish_proxy(proxy, settled).await
@@ -1158,7 +1171,9 @@ async fn finish_proxy(
     };
     let refusals = proxy.finish().await;
     settled.and_then(|mut observation| {
-        crate::tools::network::annotate(&mut observation, refusals)?;
+        if !observation.intent.call.is_web() {
+            crate::tools::network::annotate(&mut observation, refusals)?;
+        }
         Ok(observation)
     })
 }
@@ -1171,11 +1186,15 @@ fn proxy_for(
     if intent.limits.network != crate::tools::types::NetworkGrant::Proxy {
         return Ok(None);
     }
-    let grant = runtime
-        .config
-        .network
-        .clone()
-        .ok_or(ToolError::Configuration)?;
+    let grant = if intent.call.is_web() {
+        super::super::web::grant(&runtime.config, &intent.call)?
+    } else {
+        runtime
+            .config
+            .network
+            .clone()
+            .ok_or(ToolError::Configuration)?
+    };
     let socket = PathBuf::from(format!(
         "/run/user/{}/arany-egress-{id}.sock",
         rustix::process::geteuid().as_raw()
@@ -1208,6 +1227,7 @@ fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
         .chain([
             &PREPARATION_ROOT,
             &crate::tools::network::PROXY_SOCKET_TARGET,
+            &crate::tools::network::WEB_CA_TARGET,
         ])
         .map(Path::new)
         .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))

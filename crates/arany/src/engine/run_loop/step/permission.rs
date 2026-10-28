@@ -560,6 +560,22 @@ impl RunLoop<'_> {
             basis = PermissionSource::PinnedGrant;
             approval = None;
         }
+        // Claude Code's WebFetch asks per domain: only a listed host or an explicit allow rule skips the prompt.
+        if matches!(call, ToolCall::WebFetch { .. })
+            && decision == Decision::Allow
+            && basis != PermissionSource::Rule
+            && !runtime.lists_web_host(call)
+        {
+            if runtime.permissions().map(|config| config.mode())
+                == Some(crate::tools::permissions::PermissionMode::DontAsk)
+            {
+                decision = Decision::Deny;
+                approval = None;
+            } else {
+                decision = Decision::Ask;
+                approval = Some(ApprovalMode::Request);
+            }
+        }
         if call.is_host()
             && decision != Decision::Deny
             && !(call.is_host_pr_read()
@@ -573,6 +589,11 @@ impl RunLoop<'_> {
             // Host approval never uses AI review or ordinary allow rules.
             decision = Decision::Ask;
             approval = Some(ApprovalMode::Request);
+        }
+        if researcher && call.is_web() && !runtime.allows_research_web(call) {
+            decision = Decision::Deny;
+            basis = PermissionSource::PinnedGrant;
+            approval = None;
         }
         let permission = Permission {
             decision,

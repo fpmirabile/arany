@@ -138,6 +138,8 @@ struct Task {
     cache: Option<BuildCacheTransfer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_stdin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -429,7 +431,7 @@ pub(super) fn intent_enforcement_digest(
             )
         }
     }?;
-    let profile = if is_process && limits.network == super::types::NetworkGrant::Proxy {
+    let profile = if limits.network == super::types::NetworkGrant::Proxy {
         network::bind(profile)?
     } else {
         profile
@@ -850,6 +852,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+                secret: None,
                 hidden: runtime.hidden_paths(&intent.call),
                 definition: None,
                 handover: runtime
@@ -1033,8 +1036,8 @@ pub(super) async fn execute(
     #[cfg(target_os = "linux")]
     let result = result
         .map_err(|error| linux::supervisor::namespace_failure(error, &runtime.guard_executable));
-    let result = if super::discovery::possible(&intent.call) {
-        discovery_result(intent, dispatched, stop.is_cancelled(), result)
+    let result = if known_read_stop(&intent.call) {
+        read_stop_result(intent, dispatched, stop.is_cancelled(), result)
     } else {
         dispatch_result(intent, dispatched, result)
     };
@@ -1048,15 +1051,25 @@ pub(super) async fn execute(
     ))
 }
 
-fn discovery_result(
+// Discovery and web calls publish nothing, so confirmed teardown after a stop is a known outcome.
+fn known_read_stop(call: &ToolCall) -> bool {
+    super::discovery::possible(call) || call.is_web()
+}
+
+fn read_stop_result(
     intent: &EffectIntent,
     dispatched: bool,
     cancelled: bool,
     result: Result<ToolObservation, ToolError>,
 ) -> Result<ToolObservation, ToolError> {
+    let discovery = super::discovery::possible(&intent.call);
     let cause = match &result {
-        Err(ToolError::Timeout(_)) if dispatched => Some(crate::tools::LimitCause::Timeout),
-        Err(ToolError::Limit) if dispatched => Some(crate::tools::LimitCause::Resource),
+        Err(ToolError::Timeout(_)) if dispatched && discovery => {
+            Some(crate::tools::LimitCause::Timeout)
+        }
+        Err(ToolError::Limit) if dispatched && discovery => {
+            Some(crate::tools::LimitCause::Resource)
+        }
         Err(ToolError::Operation) if cancelled => None,
         Err(ToolError::GuardBootstrap(BootstrapFailure {
             check: Some(GuardCheck::Cancelled),
@@ -1074,8 +1087,10 @@ fn discovery_result(
         },
         output: if cause.is_some() {
             "Discovery stopped at its resource or time limit"
-        } else {
+        } else if discovery {
             "Discovery cancelled"
+        } else {
+            "Web request cancelled"
         }
         .into(),
         attestation: dispatched.then(|| {
@@ -1747,6 +1762,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) hook_stdin: Option<&'a str>,
+    pub(super) secret: Option<String>,
     pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
     pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
@@ -2026,6 +2042,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             hook_stdin: task.hook_stdin.as_deref(),
+            secret: task.secret.clone(),
             hidden: &task.hidden,
             definition,
             git_plan: Default::default(),
@@ -2069,6 +2086,7 @@ pub(super) fn unit_main() -> ExitCode {
 fn parser_config(config: &Config) -> Config {
     Config {
         child_unguarded: super::UnguardedGrant::Denied,
+        child_web: false,
         commands: Vec::new(),
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -2374,6 +2392,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cancelled_web_teardown_is_cancelled_and_other_dispatched_errors_stay_unknown() {
+        let intent = intent(ToolCall::WebFetch {
+            url: "https://example.com/".into(),
+        });
+        assert!(known_read_stop(&intent.call));
+        let observation = read_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Cancelled);
+        assert_eq!(observation.output, "Web request cancelled");
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::Guard(_))
+        ));
+        for (cancelled, error) in [
+            (false, ToolError::Operation),
+            (true, ToolError::Limit),
+            (true, ToolError::Timeout(String::new())),
+        ] {
+            assert!(read_stop_result(&intent, true, cancelled, Err(error)).is_err());
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn discovery_completion_keeps_cleanup_outside_the_selection_window() {
         use tokio::io::AsyncWriteExt;
@@ -2612,6 +2652,7 @@ mod tests {
             intent: intent(call),
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             handover: None,
@@ -2679,6 +2720,7 @@ mod tests {
             intent: intent(call.clone()),
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             handover: None,
@@ -2714,6 +2756,7 @@ mod tests {
             }),
             cache: None,
             hook_stdin: None,
+            secret: None,
             hidden: Default::default(),
             definition: None,
             handover: None,
@@ -3426,6 +3469,7 @@ mod tests {
             workspace_paths: vec![".".into()],
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
+            child_web: false,
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -3435,6 +3479,7 @@ mod tests {
             locale: Default::default(),
             environment_sha256: None,
             network: None,
+            web_search: None,
         }
     }
 
@@ -3570,7 +3615,7 @@ mod tests {
         };
         assert_eq!(digest(true, &offline), enforcement_digest(&[]).unwrap());
         assert_ne!(digest(true, &offline), digest(true, &proxy));
-        assert_eq!(digest(false, &offline), digest(false, &proxy));
+        assert_ne!(digest(false, &offline), digest(false, &proxy));
         assert_ne!(
             profile::profile_digest(profile::Routing::Offline).unwrap(),
             profile::profile_digest(profile::Routing::Proxy).unwrap()
@@ -3578,7 +3623,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_task_requires_a_command_grant_and_no_worker() {
+    fn proxy_task_requires_an_admitted_call_and_no_private_target() {
         let mut command = intent(ToolCall::Command {
             program: "node".into(),
             args: Vec::new(),
@@ -4297,6 +4342,7 @@ mod tests {
                 },
                 cache: None,
                 hook_stdin: None,
+                secret: None,
                 hidden: Default::default(),
                 #[cfg(target_os = "linux")]
                 parent_namespaces: profile::Namespaces::read().unwrap(),

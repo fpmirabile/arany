@@ -370,3 +370,301 @@ async fn held_tunnels_record_one_overflow_through_the_endpoint() {
         "{output}"
     );
 }
+
+const MAX_PAGE_CONNECTIONS: usize = 8;
+const PAGE_HEADER_BYTES: usize = 8192;
+const PAGE_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[path = "network/web_journeys.rs"]
+mod web_journeys;
+
+struct PageServer {
+    port: u16,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    requests: Arc<AtomicUsize>,
+    headers: Arc<Mutex<Vec<Vec<u8>>>>,
+    received: Arc<tokio::sync::Notify>,
+    closed: Arc<AtomicUsize>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for PageServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("page fixture joined");
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PageReply {
+    content_type: &'static str,
+    body: Vec<u8>,
+    status: &'static str,
+    location: String,
+    hold: bool,
+}
+
+fn page_upstream(content_type: &'static str, body: Vec<u8>) -> PageServer {
+    page_server(PageReply {
+        content_type,
+        body,
+        status: "200 OK",
+        location: String::new(),
+        hold: false,
+    })
+}
+
+fn page_server(reply: PageReply) -> PageServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let count = requests.clone();
+    let headers = Arc::new(Mutex::new(Vec::new()));
+    let recorded = headers.clone();
+    let received = Arc::new(tokio::sync::Notify::new());
+    let notify = received.clone();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let eof = closed.clone();
+    let thread = std::thread::spawn(move || {
+        let mut handlers = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            if handlers.len() >= MAX_PAGE_CONNECTIONS {
+                continue;
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            let (reply, recorded, notify, eof) =
+                (reply.clone(), recorded.clone(), notify.clone(), eof.clone());
+            handlers.push(std::thread::spawn(move || {
+                serve_page(stream, reply, recorded, notify, eof);
+            }));
+        }
+        for handler in handlers {
+            handler.join().expect("page handler joined");
+        }
+    });
+    PageServer {
+        port,
+        stop,
+        requests,
+        headers,
+        received,
+        closed,
+        thread: Some(thread),
+    }
+}
+
+fn serve_page(
+    mut stream: std::net::TcpStream,
+    reply: PageReply,
+    headers: Arc<Mutex<Vec<Vec<u8>>>>,
+    received: Arc<tokio::sync::Notify>,
+    closed: Arc<AtomicUsize>,
+) {
+    stream.set_read_timeout(Some(PAGE_IO_TIMEOUT)).unwrap();
+    stream.set_write_timeout(Some(PAGE_IO_TIMEOUT)).unwrap();
+    let mut request = Vec::new();
+    let mut byte = [0];
+    while request.len() < PAGE_HEADER_BYTES {
+        if stream.read(&mut byte).unwrap_or(0) == 0 {
+            return;
+        }
+        request.push(byte[0]);
+        if request.ends_with(b"\r\n\r\n") {
+            headers.lock().unwrap().push(request);
+            received.notify_one();
+            if reply.hold {
+                if stream.read(&mut byte).is_ok_and(|size| size == 0) {
+                    closed.fetch_add(1, Ordering::SeqCst);
+                }
+                return;
+            }
+            let head = format!(
+                "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",
+                reply.status,
+                reply.content_type,
+                reply.body.len(),
+                reply.location,
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&reply.body);
+            return;
+        }
+    }
+}
+
+async fn fetch_page(content_type: &'static str, body: Vec<u8>) -> (Value, bool) {
+    let large = body.len() > 64 * 1024;
+    let server = page_upstream(content_type, body);
+    let port = server.port;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    private_file(&workspace.join("src/current.txt"), b"current");
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    let config = json!({"version":1,"workspace_paths":["src"],"write":false,
+        "commands":[],"skills":[],"mcp":[],"network":{"allow":["127.0.0.1"]}});
+    private_file(
+        &state_path.join("tools.json"),
+        &serde_json::to_vec(&config).unwrap(),
+    );
+    let provider = Arc::new(Proposal {
+        call: ToolCall::WebFetch {
+            url: format!("http://127.0.0.1:{port}/page"),
+        },
+        requests: Arc::new(Mutex::new(Vec::new())),
+        inspect_first: false,
+        plan_on_inspection: false,
+        omit_plan: false,
+    });
+    let engine = arany::test_support::engine::open(
+        state,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let outcome = run_fetch_page(&engine, &workspace, provider, large).await;
+    engine.close().await.unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    let (events, replay) =
+        arany::test_support::goals::replayed(&state_path, outcome.session_id).await;
+    assert_eq!(replay.runs[0], outcome.run);
+    assert!(!events.is_empty());
+    if large {
+        read_reopened_web_spill(&state_path, &workspace, &outcome).await;
+    }
+    assert_eq!(
+        server.requests.load(Ordering::SeqCst),
+        1,
+        "spill reads and replay never fetch"
+    );
+    (
+        serde_json::from_str(&observation.output).unwrap(),
+        observation.spill.is_some(),
+    )
+}
+
+async fn run_fetch_page(
+    engine: &arany::Engine,
+    workspace: &Path,
+    provider: Arc<Proposal>,
+    large: bool,
+) -> arany::RunOutcome {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        };
+        if large {
+            let provider = Arc::new(super::native_exec::SpillJourney {
+                script: arany::test_support::scenario::ScriptedProvider::new(Vec::new()),
+                command: provider.call.clone(),
+            });
+            run_with(engine, &provider, proposal_request(workspace), controls).await
+        } else {
+            run_with(engine, &provider, proposal_request(workspace), controls).await
+        }
+    })
+    .await
+    .expect("web fetch parent deadline")
+    .unwrap()
+}
+
+async fn read_reopened_web_spill(state: &Path, workspace: &Path, outcome: &arany::RunOutcome) {
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    let expected = "2\tRETAINED_WEB_TEXT\n";
+    let read = outcome.run.tools[1].observation.as_ref().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&read.output).unwrap()["text"],
+        expected
+    );
+    assert!(!observation.output.contains("RETAINED_WEB_TEXT"));
+    let reference = &observation.spill.as_ref().unwrap().r#ref;
+    let engine = arany::test_support::engine::open(
+        StateRoot::open_existing(state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
+        crate::tool_outcome(ToolCall::Read {
+            path: format!("spill:{reference}"),
+            offset: Some(2),
+            limit: Some(1),
+        }),
+        ProviderOutcome::Answer(Answer {
+            text: "Retained page read".into(),
+        }),
+    ]));
+    let mut request = proposal_request(workspace);
+    request.session_id = Some(outcome.session_id);
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(20),
+        run_with(
+            &engine,
+            &provider,
+            request,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("reopened spill read deadline")
+    .unwrap();
+    let read = resumed.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(read.disposition, ToolDisposition::Succeeded);
+    assert_eq!(
+        serde_json::from_str::<Value>(&read.output).unwrap()["text"],
+        expected
+    );
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux web_fetch through the egress proxy: HTML reduction and the download bound"
+)]
+async fn web_fetch_reads_a_listed_page_and_bounds_a_large_one() {
+    if !crate::isolation::enter_native_account_isolated_test() {
+        return;
+    }
+    let (page, spilled) = fetch_page(
+        "text/html; charset=utf-8",
+        b"<html><body><script>evil()</script><h1>Title</h1><p>Hello &amp; welcome</p></body></html>"
+            .to_vec(),
+    )
+    .await;
+    assert_eq!(page["status"], 200);
+    assert_eq!(page["content_type"], "text/html");
+    assert_eq!(page["truncated"], false);
+    assert_eq!(page["text"], "Title\n\nHello & welcome");
+    assert!(!spilled);
+
+    let mut body = vec![b'a'; 80 * 1024];
+    body.extend_from_slice(b"\nRETAINED_WEB_TEXT\n");
+    body.resize(3 * 1024 * 1024, b'a');
+    let (large, spilled) = fetch_page("text/plain", body).await;
+    assert_eq!(large["truncated"], true);
+    assert!(spilled);
+    let text = large["text"].as_str().unwrap();
+    assert!(text.ends_with("[web_fetch truncated]"));
+    assert!(text.len() < 64 * 1024);
+}

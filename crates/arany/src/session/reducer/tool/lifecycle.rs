@@ -284,7 +284,11 @@ pub(super) fn proposed(
     if child && !intent.rewrite.is_empty() {
         return Err(ReplayError::InvalidTransition);
     }
-    if child && intent.limits.network == crate::tools::NetworkGrant::Proxy {
+    if super::search_allowance_spent(current, &intent.call) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if child && intent.limits.network == crate::tools::NetworkGrant::Proxy && !intent.call.is_web()
+    {
         return Err(ReplayError::InvalidTransition);
     }
     if child {

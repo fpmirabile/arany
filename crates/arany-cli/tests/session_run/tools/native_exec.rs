@@ -1388,9 +1388,9 @@ async fn user_programs_helper() {
     .await;
 }
 
-struct SpillJourney {
-    script: arany::test_support::scenario::ScriptedProvider,
-    command: ToolCall,
+pub(super) struct SpillJourney {
+    pub(super) script: arany::test_support::scenario::ScriptedProvider,
+    pub(super) command: ToolCall,
 }
 
 #[async_trait::async_trait]

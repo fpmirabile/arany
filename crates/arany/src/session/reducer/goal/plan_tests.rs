@@ -574,3 +574,154 @@ fn build_jobs_are_bound_to_goal_resources_before_tool_admission() {
         );
     }
 }
+
+#[tokio::test]
+async fn committed_search_proposals_spend_the_session_allowance() {
+    use crate::store::{StateRoot, Store};
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let store = Store::open(StateRoot::admit(&path).unwrap()).unwrap();
+    let session = SessionId::new();
+    store
+        .append(
+            session,
+            Event::SessionStarted {
+                title: "Search allowance".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        commit_search_run(&store, session).await;
+    }
+    let (goal, run, agent) = (GoalId::new(), RunId::new(), AgentRunId::new());
+    let mut events = vec![goal_started(goal, GoalBudget::default())];
+    events.extend(start_run(
+        goal,
+        run,
+        agent,
+        config(CollaborationPolicy::Single, true),
+    ));
+    events.extend([
+        reserve_child_call(goal, run, agent),
+        requesting_step(run, agent, 1),
+    ]);
+    for event in events {
+        store.append(session, event).await.unwrap();
+    }
+    let mut intent = read_intent(run, agent, "src/main.rs");
+    intent.call = ToolCall::WebSearch {
+        query: "excess".into(),
+    };
+    let excess = tool_proposed(run, agent, &intent);
+    let committed = store.load_session(session).await.unwrap();
+    let live = SessionView::replay_open(session, &committed)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        crate::session::validate_primary_tool_scope(&live, run, &intent.call),
+        Err(crate::session::ProposalRefusalCause::NotOffered)
+    ));
+    assert!(store.append(session, excess.clone()).await.is_err());
+    store.close().await.unwrap();
+
+    let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
+    let mut reopened = store.load_session(session).await.unwrap();
+    assert_eq!(reopened, committed);
+    let resumed = SessionView::replay_open(session, &reopened)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        crate::session::validate_tool_started(&resumed, &excess)
+            .unwrap_err()
+            .cause,
+        crate::session::ProposalRefusalCause::NotOffered
+    );
+    let replay = SessionView::replay(session, &reopened).unwrap().unwrap();
+    let proposals: Vec<_> = replay.runs.iter().flat_map(|run| &run.tools).collect();
+    assert_eq!(proposals.len(), crate::tools::MAX_SESSION_SEARCHES);
+    let ids: std::collections::HashSet<_> = proposals.iter().map(|tool| tool.intent.id).collect();
+    assert_eq!(ids.len(), crate::tools::MAX_SESSION_SEARCHES);
+    assert!(store.append(session, excess.clone()).await.is_err());
+    reopened.push(crate::session::EventEnvelope {
+        sequence: reopened.last().unwrap().sequence + 1,
+        session_id: session,
+        run_id: Some(run),
+        agent_run_id: Some(agent),
+        event: excess,
+        created_at_ms: committed.last().unwrap().created_at_ms,
+    });
+    assert!(SessionView::replay(session, &reopened).is_err());
+    store.close().await.unwrap();
+}
+
+async fn commit_search_run(store: &crate::Store, session: SessionId) {
+    let (goal, run, agent) = (GoalId::new(), RunId::new(), AgentRunId::new());
+    let mut events = vec![goal_started(goal, GoalBudget::default())];
+    events.extend(start_run(
+        goal,
+        run,
+        agent,
+        config(CollaborationPolicy::Single, true),
+    ));
+    for index in 0..crate::tools::MAX_SESSION_SEARCHES / 2 {
+        let mut intent = read_intent(run, agent, "src/main.rs");
+        intent.call = ToolCall::WebSearch {
+            query: format!("query {run} {index}"),
+        };
+        events.extend([
+            reserve_child_call(goal, run, agent),
+            requesting_step(run, agent, 1),
+            tool_proposed(run, agent, &intent),
+            tool_started(run, agent, &intent),
+            tool_finished(run, agent, &intent, b"result"),
+        ]);
+    }
+    events.extend(complete_run_and_goal(goal, run, agent));
+    for event in events {
+        store.append(session, event).await.unwrap();
+    }
+}
+
+#[test]
+fn child_web_proposals_require_the_pinned_grant() {
+    for enabled in [false, true] {
+        for call in [
+            ToolCall::WebFetch {
+                url: "https://example.com/".into(),
+            },
+            ToolCall::WebSearch { query: "q".into() },
+        ] {
+            let (mut view, goal, run, child) = research_session();
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .child_web = enabled;
+            apply(&mut view, reserve_child_call(goal, run, child)).unwrap();
+            apply(
+                &mut view,
+                child_record(run, child, ProviderCallDisposition::ToolRequested),
+            )
+            .unwrap();
+            let mut intent = read_intent(run, child, "src/main.rs");
+            intent.call = call;
+            intent.limits.network = crate::tools::NetworkGrant::Proxy;
+            assert_eq!(
+                apply(&mut view, tool_proposed(run, child, &intent)).is_ok(),
+                enabled
+            );
+            if enabled {
+                assert_eq!(view.runs[0].agents[1].tools.len(), 1);
+            }
+        }
+    }
+}

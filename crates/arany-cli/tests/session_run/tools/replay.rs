@@ -40,6 +40,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         unguarded_rules_digest: None,
         unguarded: arany::UnguardedGrant::HumanOnly,
         child_unguarded: arany::UnguardedGrant::Denied,
+        child_web: false,
     };
     let config = RunConfig {
         supervisor: Some(arany::supervisor::SupervisorPolicy::all_off()),

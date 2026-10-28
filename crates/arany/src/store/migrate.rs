@@ -105,6 +105,12 @@ macro_rules! gh_pr_view_step {
     };
 }
 
+macro_rules! web_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_web_payload)
+    };
+}
+
 macro_rules! expiry_step {
     ($kind:literal, $from:literal) => {
         EventStep {
@@ -171,12 +177,21 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
-        variant_step!("RunStarted", 25, crate::session::pre_command_tools_payload),
-        variant_step!("ToolProposed", 4, crate::session::pre_command_tools_payload),
-        variant_step!("ToolStarted", 26, crate::session::pre_command_tools_payload),
-        variant_step!("ToolFinished", 33, crate::session::pre_command_tools_payload),
-        variant_step!("HookStarted", 15, crate::session::pre_command_tools_payload),
-        variant_step!("HookFinished", 22, crate::session::pre_command_tools_payload),
+        variant_step!("RunStarted", 26, crate::session::pre_command_tools_payload),
+        variant_step!("ToolProposed", 5, crate::session::pre_command_tools_payload),
+        variant_step!("ToolStarted", 27, crate::session::pre_command_tools_payload),
+        variant_step!("ToolFinished", 34, crate::session::pre_command_tools_payload),
+        variant_step!("HookStarted", 16, crate::session::pre_command_tools_payload),
+        variant_step!("HookFinished", 23, crate::session::pre_command_tools_payload),
+        web_step!("RunStarted", 25),
+        web_step!("AgentSpawned", 17),
+        web_step!("ToolProposed", 4),
+        web_step!("ToolStarted", 26),
+        web_step!("ToolFinished", 33),
+        web_step!("HookStarted", 15),
+        web_step!("HookFinished", 22),
+        web_step!("GoalPlanContractRecorded", 14),
+        web_step!("ProviderCallRecorded", 25),
         EventStep {
             kind: "ToolFinished",
             from: 32,

@@ -623,7 +623,9 @@ impl GoalPlanContract {
                     && binding.resource.as_deref().unwrap_or("SKILL.md")
                         == resource.as_deref().unwrap_or("SKILL.md")
             }),
-            ToolCall::McpList { .. } => true,
+            ToolCall::McpList { .. } | ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => {
+                true
+            }
             // Commits, branches and switches act on the whole repository.
             ToolCall::GitCommit { .. }
             | ToolCall::GitBranch { .. }

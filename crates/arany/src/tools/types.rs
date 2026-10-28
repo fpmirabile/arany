@@ -449,6 +449,12 @@ pub enum ToolCall {
         repository: String,
         number: u32,
     },
+    WebFetch {
+        url: String,
+    },
+    WebSearch {
+        query: String,
+    },
     // Null or omitted path and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
@@ -583,6 +589,10 @@ impl ToolCall {
         self.facts().family == Family::Preparation
     }
 
+    pub(crate) fn is_web(&self) -> bool {
+        self.facts().family == Family::Web
+    }
+
     pub(crate) fn is_git(&self) -> bool {
         self.facts().family == Family::Git
     }
@@ -632,7 +642,9 @@ impl ToolCall {
             | Self::GitPush { .. }
             | Self::GhPrCreate { .. }
             | Self::GhPrList { .. }
-            | Self::GhPrView { .. } => None,
+            | Self::GhPrView { .. }
+            | Self::WebFetch { .. }
+            | Self::WebSearch { .. } => None,
         }
     }
 
@@ -646,6 +658,7 @@ impl ToolCall {
             Family::Skill => super::skills::valid(self),
             Family::Mcp => super::mcp::valid(self),
             Family::Git => super::git::valid(self),
+            Family::Web => super::web::valid(self),
             Family::Preparation => {
                 matches!(self, Self::ParseAgentDefinition { index, .. } if usize::from(*index) < 128)
             }
@@ -697,6 +710,8 @@ pub struct ToolPolicyReceipt {
     pub unguarded_rules_digest: Option<[u8; 32]>,
     pub unguarded: UnguardedGrant,
     pub child_unguarded: UnguardedGrant,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub child_web: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -845,8 +860,12 @@ impl EffectIntent {
             && self.call.valid()
             && (self.limits.network == NetworkGrant::Host) == self.call.is_host()
             && (self.limits.network != NetworkGrant::Proxy
-                || matches!(self.call, ToolCall::Command { .. })
-                    && self.target == EffectTarget::Workspace)
+                || matches!(
+                    self.call,
+                    ToolCall::Command { .. }
+                        | ToolCall::WebFetch { .. }
+                        | ToolCall::WebSearch { .. }
+                ) && self.target == EffectTarget::Workspace)
             && self
                 .host
                 .as_ref()

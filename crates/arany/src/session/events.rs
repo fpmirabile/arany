@@ -157,16 +157,16 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 43] = [
     ("ProviderSetupEditFinished", 1),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 14),
+    ("GoalPlanContractRecorded", 15),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 17),
+    ("AgentSpawned", 18),
     ("AgentFinished", 12),
-    ("ProviderCallRecorded", 25),
+    ("ProviderCallRecorded", 26),
     ("WorkerStopObserved", 1),
     ("WorkerLeaseReleased", 2),
     ("WorkerVerificationRecorded", 1),
@@ -1978,26 +1978,45 @@ pub(crate) fn pre_proxy_payload(kind: &str, payload: &str) -> Option<String> {
 }
 
 pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String> {
-    before_typed_pr_read(kind, payload, "gh_pr_list")
+    before_typed_pr_read(kind, payload, &["gh_pr_list"])
 }
 
 pub(crate) fn pre_gh_pr_view_payload(kind: &str, payload: &str) -> Option<String> {
-    before_typed_pr_read(kind, payload, "gh_pr_view")
+    before_typed_pr_read(kind, payload, &["gh_pr_view"])
 }
 
-fn before_typed_pr_read(kind: &str, payload: &str, operation: &str) -> Option<String> {
+// The web Tools arrived with a later payload version of every kind that carries a Tool call.
+pub(crate) fn pre_web_payload(kind: &str, payload: &str) -> Option<String> {
+    let text = before_typed_pr_read(kind, payload, &["web_fetch", "web_search"])?;
+    let value = serde_json::from_str(&text).ok()?;
+    if mentions(&value, &[], Some("web_fetch"))
+        || mentions(&value, &[], Some("web_search"))
+        || value
+            .pointer("/config/tool_policy/child_web")
+            .is_some_and(|grant| grant == true)
+    {
+        return None;
+    }
+    Some(text)
+}
+
+fn before_typed_pr_read(kind: &str, payload: &str, operations: &[&str]) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()
     }
     let text = match kind {
+        "ToolProposed" => again::<ToolProposedPayload>(payload),
+        "ToolStarted" => again::<ToolStartedPayload>(payload),
         "ToolFinished" => again::<ToolFinishedPayload>(payload),
         "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
         "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
         "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
+        "RunStarted" => again::<RunStartedPayload>(payload),
+        "AgentSpawned" => again::<SpawnPayload>(payload),
         _ => None,
     }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, &[operation], None)).then_some(text)
+    (!mentions(&serde_json::from_str(&text).ok()?, operations, None)).then_some(text)
 }
 
 pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {
