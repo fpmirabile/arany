@@ -171,7 +171,7 @@ async fn run_rewrite(
         tools: ToolGrant::Trusted(
             arany::WorkspacePermissions::load(&fixture.workspace, &fixture.state).unwrap(),
         ),
-        approvals: Some(approvals),
+        approvals: host.then_some(approvals),
         ..Default::default()
     };
     let run = run_with(engine, &provider, input, controls);
