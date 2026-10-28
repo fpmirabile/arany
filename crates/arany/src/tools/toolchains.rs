@@ -94,7 +94,7 @@ const MANAGER_SHIMS: [ShimEntry; 5] = [
 ];
 
 const MAX_DISCOVERY_PATH_BYTES: usize = super::command_environment::PATH_LIMIT_BYTES;
-const MAX_DISCOVERY_PATH_ENTRIES: usize = 32;
+pub(crate) const MAX_DISCOVERY_PATH_ENTRIES: usize = 32;
 
 const HOMEBREW_PREFIXES: [&str; 3] = ["/home/linuxbrew/.linuxbrew", "/opt/homebrew", "/usr/local"];
 
@@ -1616,6 +1616,31 @@ mod user_environment_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::{EXCLUSIVE_RUNTIME_GRANTS, RuntimeKind};
+
+    #[test]
+    fn exclusive_runtime_grants_count_the_non_multi_kinds() {
+        let kinds = [
+            RuntimeKind::Rust,
+            RuntimeKind::Node,
+            RuntimeKind::Python,
+            RuntimeKind::CargoCache,
+            RuntimeKind::CargoSource,
+            RuntimeKind::CargoIndex,
+            RuntimeKind::NpmCache,
+            RuntimeKind::PipHttpCache,
+            RuntimeKind::PipWheelCache,
+            RuntimeKind::AppleCompiler,
+            RuntimeKind::AppleSdk,
+            RuntimeKind::UserPrograms,
+            RuntimeKind::ManagerShims,
+        ];
+        assert_eq!(
+            kinds.iter().filter(|kind| !kind.is_multi()).count(),
+            EXCLUSIVE_RUNTIME_GRANTS
+        );
+    }
+
     #[test]
     fn user_program_discovery_offers_only_platform_enforced_grants() {
         use super::*;

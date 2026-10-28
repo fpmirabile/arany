@@ -439,6 +439,7 @@ fn native_journey_with_rust_sysroot(
             .create(fixture_root.join(directory))
             .unwrap();
     }
+    StateRoot::admit(&fixture_root.join("account")).unwrap();
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", helper, "--ignored", "--nocapture"])
@@ -1574,6 +1575,11 @@ async fn native_runtime_mount_journey_helper() {
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
         .prepare_profile_selection(&StateRoot::account_path().unwrap());
+    assert!(
+        permissions.discovery_error().is_none(),
+        "runtime profile discovery: {:?}",
+        permissions.discovery_error()
+    );
     let options = permissions.runtime_profile_choices();
     let node = options
         .iter()
