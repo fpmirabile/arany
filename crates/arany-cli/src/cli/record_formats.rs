@@ -379,7 +379,7 @@ fn nested_schema_fixtures_must_be_populated() {
         let empty = match kind {
             RecordKind::SavedAccount => r#"{"schema":2,"storage":"keyring","account":null}"#,
             RecordKind::ChatgptAccounts => {
-                r#"{"schema":2,"selected":null,"accounts":[],"model_checks":[]}"#
+                r#"{"schema":3,"selected":null,"accounts":[],"model_checks":[]}"#
             }
             _ => unreachable!(),
         };
