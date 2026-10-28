@@ -396,6 +396,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_tools: Default::default(),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
             "/usr/bin:/bin",
         )),
@@ -514,6 +515,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_tools: Default::default(),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
             "/usr/bin:/bin",
         )),

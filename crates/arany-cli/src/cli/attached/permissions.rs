@@ -1,3 +1,6 @@
+mod command_tools;
+pub(super) use command_tools::manage_command_tools;
+
 use super::setup::SetupError;
 use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput};
 use arany::permissions::{
@@ -88,6 +91,7 @@ pub(super) enum PermissionArea {
     TypedGitRules,
     HostRules,
     CommandEnvironment,
+    CommandTools,
     NetworkDomains,
 }
 
@@ -105,7 +109,8 @@ pub(super) async fn choose_area(
                 (b'2', "Typed Git rules"),
                 (b'3', "Host command rules"),
                 (b'4', "Command environment"),
-                (b'5', "Network domains"),
+                (b'5', "Command tools"),
+                (b'6', "Network domains"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -116,7 +121,8 @@ pub(super) async fn choose_area(
             Some(b'2') => Some(PermissionArea::TypedGitRules),
             Some(b'3') => Some(PermissionArea::HostRules),
             Some(b'4') => Some(PermissionArea::CommandEnvironment),
-            Some(b'5') => Some(PermissionArea::NetworkDomains),
+            Some(b'5') => Some(PermissionArea::CommandTools),
+            Some(b'6') => Some(PermissionArea::NetworkDomains),
             _ => None,
         },
     )
@@ -1335,6 +1341,7 @@ mod tests {
         arany::ToolView {
             intent: arany::EffectIntent {
                 host: None,
+                rewrite: Vec::new(),
                 host_command: Some(pin),
                 target: arany::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),

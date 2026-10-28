@@ -963,6 +963,7 @@ mod tests {
         host.executable = "/usr/bin/env".into();
         let mut intent = crate::tools::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: Some(host),
             target: crate::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),

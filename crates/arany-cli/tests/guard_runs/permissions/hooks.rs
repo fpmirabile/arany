@@ -1,3 +1,6 @@
+#[path = "hooks/command_tools.rs"]
+mod command_tools;
+
 use super::*;
 
 fn hook_settings(permissions: Value, hooks: Vec<Value>) -> Value {

@@ -13,6 +13,11 @@ pub use discovery::{
     FileSuggestionSource, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
 };
 pub(crate) mod command_environment;
+pub(crate) mod command_tools;
+pub use command_tools::{
+    CommandRewrite, CommandTool, CommandToolProbe, CommandToolRole, CommandTools, PROBE_COMMAND,
+    RewriteStage, command_tool_candidates,
+};
 mod executable;
 mod fs;
 mod git;
@@ -392,6 +397,7 @@ pub(crate) struct ToolRuntime {
     checkpoint_gate: Option<tokio::sync::mpsc::Sender<CheckpointRequest>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
     command_environment: std::sync::Arc<CommandEnvironment>,
+    command_tools: std::sync::Arc<CommandTools>,
     spill_access: Option<std::sync::Arc<crate::store::SpillAccess>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
@@ -409,6 +415,7 @@ struct RuntimeAdmission<'a> {
 struct RuntimeState {
     root: cap_std::fs::Dir,
     command_environment: std::sync::Arc<CommandEnvironment>,
+    command_tools: std::sync::Arc<CommandTools>,
     workspace_identity: WorkspaceIdentity,
     guard_available: bool,
     enforcement_digest: [u8; 32],
@@ -1059,6 +1066,7 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
+        let command_tools = std::sync::Arc::new(CommandTools::load(state)?);
         let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
@@ -1108,6 +1116,7 @@ impl ToolRuntime {
             RuntimeState {
                 root,
                 command_environment,
+                command_tools,
                 workspace_identity,
                 guard_available,
                 enforcement_digest,
@@ -1135,6 +1144,7 @@ impl ToolRuntime {
         let RuntimeState {
             root,
             command_environment,
+            command_tools,
             workspace_identity,
             guard_available,
             enforcement_digest,
@@ -1168,6 +1178,7 @@ impl ToolRuntime {
                     .map_err(|_| ToolError::ProtectionUnavailable)?,
             )),
             command_environment,
+            command_tools,
             workspace: workspace.to_owned(),
             reads: Some(InProcessReads {
                 skills,
@@ -1202,6 +1213,7 @@ impl ToolRuntime {
         receipt.max_context_bytes = self.context_limit_bytes as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
         receipt.unguarded_rules_digest = None;
+        receipt.command_tools_digest = Some(self.command_tools.digest());
         receipt.host_prefixes = self
             .permissions()
             .map_or_else(Vec::new, |permissions| permissions.host.clone());
@@ -1551,6 +1563,7 @@ impl ToolRuntime {
         };
         EffectIntent {
             host: git::host::pin(&self.workspace, &call).ok(),
+            rewrite: Vec::new(),
             host_command: match &call {
                 ToolCall::CommandUnguarded { program, .. } => {
                     let requested = self.command_executable(program).unwrap_or(program);

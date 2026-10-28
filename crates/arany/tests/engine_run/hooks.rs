@@ -54,6 +54,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
         let config = result.run.config.as_ref().unwrap();
         let intent = arany::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
@@ -88,6 +89,8 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                     Sha256::digest(serde_json::to_vec(&(actor, 0_usize)).unwrap()).into()
                 },
                 intent: intent.clone(),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [3; 32],
                 active_ceiling_ms: Some(1),
             },

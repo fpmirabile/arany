@@ -2057,6 +2057,7 @@ mod tests {
     fn fallback_command_deadlines_share_runtime_with_selection() {
         let mut intent = EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -2595,6 +2596,7 @@ done
             checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
+            command_tools: Default::default(),
             command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
                 "/usr/bin:/bin",
             )),
@@ -4146,6 +4148,7 @@ int main(int argc, char **argv) {
                     hidden: Default::default(),
                     intent: EffectIntent {
                         host: None,
+                        rewrite: Vec::new(),
                         host_command: None,
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),
