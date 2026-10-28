@@ -75,6 +75,14 @@ impl RecordFormat {
 
 impl StateRoot {
     pub fn read_current(&self, format: &RecordFormat) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read_current_with_notice(format, || {})
+    }
+
+    pub fn read_current_with_notice(
+        &self,
+        format: &RecordFormat,
+        migrated: fn(),
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         let record = self.record(format.kind);
         match record.read()? {
             Some(bytes) if format.upgrade(&bytes).is_some() => {}
@@ -88,6 +96,7 @@ impl StateRoot {
                 return Ok(Some(bytes));
             };
             record.replace_upgraded(&upgraded)?;
+            migrated();
             Ok(Some(upgraded))
         })
     }

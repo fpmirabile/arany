@@ -145,6 +145,9 @@ impl AttachedSession {
         {
             self.ui.notice = Some(Feedback::History(text.into()));
         }
+        if let Some(notice) = crate::accounts::chatgpt::take_migration_notice() {
+            append_notice(&mut self.ui.notice, notice);
+        }
         self.terminal
             .draw_notice(
                 &self.view,

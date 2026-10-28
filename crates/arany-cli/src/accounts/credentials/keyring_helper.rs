@@ -336,6 +336,7 @@ mod tests {
             client_id: "oaiapp_authorize".into(),
             host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
             subject: "synthetic-subject".into(),
+            chatgpt_account_id: None,
             id_token: "synthetic-id".into(),
             access_token: "synthetic-access".into(),
             refresh_token: "synthetic-refresh".into(),

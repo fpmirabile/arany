@@ -168,20 +168,6 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                 0,
                 "> Use saved",
             ),
-            (
-                "Resume sign-in?",
-                "Reuse saved registration",
-                &[(b'0', "Back"), (b'1', "Resume")][..],
-                0,
-                "> Back",
-            ),
-            (
-                "Resume sign-in?",
-                "Reuse saved registration",
-                &[(b'0', "Back"), (b'1', "Resume")][..],
-                1,
-                "> Resume",
-            ),
         ] {
             let mut terminal =
                 Terminal::new(TestBackend::new(width, height)).expect("test terminal");
@@ -220,10 +206,6 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                 "ChatGPT account" => {
                     assert!(visible.contains("Reconnect"));
                     assert!(visible.contains("Connect new"));
-                }
-                "Resume sign-in?" => {
-                    assert!(visible.contains("Reuse saved"));
-                    assert!(visible.contains("registration"));
                 }
                 _ => unreachable!(),
             }

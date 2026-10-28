@@ -1,6 +1,6 @@
 use super::{
-    AuthorizationError, RiskAcknowledgment, VerifiedCredentials, VerifiedIdentity,
-    consent::ConsentReceipt, registration, valid_client_id,
+    AuthorizationError, RiskAcknowledgment, VerifiedCredentials, consent::ConsentReceipt,
+    registration, valid_client_id,
 };
 use crate::accounts::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
@@ -23,10 +23,9 @@ const LEGACY_TOKEN_RECORD_SCHEMA: u8 = 1;
 
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
-const MAX_ACCOUNT_ID_BYTES: usize = 128;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
-const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-journal-v40";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v39";
+const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-journal-v41";
+const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v40";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
@@ -46,10 +45,6 @@ fn account_keyring_slot(client_id: &str, id: Uuid) -> String {
             .chain_update(id.as_bytes())
             .finalize(),
     )
-}
-
-fn new_keyring_slot(storage: AccountStorage, client_id: &str, id: Uuid) -> Option<String> {
-    (storage == AccountStorage::Keyring).then(|| account_keyring_slot(client_id, id))
 }
 
 #[derive(Deserialize)]
@@ -122,11 +117,18 @@ struct SignedIn<'a> {
     client_id: &'a str,
     subject: &'a str,
     host_id: Uuid,
+    account_id: Option<&'a str>,
 }
 
 impl SignedIn<'_> {
     fn unchanged_in(self, entry: &AccountEntry, storage: AccountStorage) -> bool {
-        entry.subject == self.subject && entry.host_id == self.host_id && entry.storage == storage
+        entry.subject == self.subject
+            && entry.host_id == self.host_id
+            && entry.storage == storage
+            && entry
+                .chatgpt_account_id
+                .as_deref()
+                .is_none_or(|id| Some(id) == self.account_id)
     }
 }
 
@@ -136,7 +138,7 @@ pub(crate) struct ReauthorizationTarget {
     pub(crate) client_id: String,
     pub(crate) subject: String,
     pub(crate) storage: AccountStorage,
-    pub(crate) plan_permission_missing: bool,
+    pub(crate) chatgpt_account_id: Option<String>,
 }
 
 pub(crate) struct AccountInspection {
@@ -149,14 +151,8 @@ pub(crate) struct AccountInspection {
 pub(crate) enum AccountAccess {
     Connected,
     Disconnected,
-    PlanDisabled,
     RenewalPending,
     SignOutPending,
-}
-
-pub(crate) struct DisabledSignInOutcome {
-    pub(crate) id: Uuid,
-    pub(crate) local_cleared: bool,
 }
 
 pub(crate) struct SignOutOutcome {
@@ -209,11 +205,12 @@ struct AccountEntry {
     chatgpt_account_id: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     keyring_slot: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    slot_client_id: Option<String>,
     storage: AccountStorage,
     renewal_pending: bool,
     signout_pending: bool,
     disconnected: bool,
-    plan_permission_missing: bool,
     #[serde(deserialize_with = "Option::deserialize")]
     token: Option<TokenRecord>,
 }
@@ -250,11 +247,7 @@ impl ModelCheck {
 impl AccountEntry {
     fn ensure_usable(&self) -> Result<(), AuthorizationError> {
         if self.disconnected {
-            return Err(if self.plan_permission_missing {
-                AuthorizationError::PermissionMissing
-            } else {
-                AuthorizationError::NoSelectedAccount
-            });
+            return Err(AuthorizationError::NoSelectedAccount);
         }
         if self.signout_pending {
             return Err(AuthorizationError::SignOutPending);
@@ -272,12 +265,12 @@ impl AccountEntry {
     }
 
     fn slot_valid(&self) -> bool {
-        match (self.storage, &self.keyring_slot) {
-            (AccountStorage::Keyring, Some(slot)) => {
-                *slot == legacy_keyring_slot(&self.client_id)
-                    || *slot == account_keyring_slot(&self.client_id, self.id)
+        match (self.storage, &self.keyring_slot, &self.slot_client_id) {
+            (AccountStorage::Keyring, Some(slot), Some(client)) if valid_client_id(client) => {
+                *slot == legacy_keyring_slot(client)
+                    || *slot == account_keyring_slot(client, self.id)
             }
-            (AccountStorage::PrivateFile, None) => true,
+            (AccountStorage::PrivateFile, None, None) => true,
             _ => false,
         }
     }
@@ -293,19 +286,18 @@ impl AccountEntry {
             && self
                 .chatgpt_account_id
                 .as_deref()
-                .is_none_or(|id| super::bounded_graphic(id, MAX_ACCOUNT_ID_BYTES))
+                .is_none_or(|id| super::bounded_graphic(id, super::MAX_ACCOUNT_ID_BYTES))
             && self.slot_valid()
-            && !(self.signout_pending && (self.renewal_pending || self.disconnected))
-            && (!self.plan_permission_missing || (self.disconnected && self.token.is_none()))
+            && !(self.signout_pending && self.renewal_pending)
             && match (&self.storage, &self.token) {
                 (AccountStorage::PrivateFile, Some(token)) => {
-                    !self.disconnected
-                        && token.schema == TOKEN_RECORD_SCHEMA
+                    token.schema == TOKEN_RECORD_SCHEMA
                         && token.slot.is_none()
                         && token.credentials.valid_saved()
                         && token.credentials.client_id == self.client_id
                         && token.credentials.host_id == self.host_id
                         && token.credentials.subject == self.subject
+                        && token.credentials.chatgpt_account_id == self.chatgpt_account_id
                 }
                 (AccountStorage::PrivateFile, None) => self.disconnected,
                 (AccountStorage::Keyring, None) => true,
@@ -338,7 +330,7 @@ pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptAccounts,
     field: "schema",
     floor: 1,
-    current: 3,
+    current: 4,
     steps: &[
         RecordStep {
             from: 1,
@@ -347,6 +339,10 @@ pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
         RecordStep {
             from: 2,
             transform: migrate_account_slots,
+        },
+        RecordStep {
+            from: 3,
+            transform: migrate_public_client,
         },
     ],
     accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
@@ -370,7 +366,7 @@ fn migrate_account_index(mut record: serde_json::Value) -> Option<serde_json::Va
     // Validate the complete source index before discarding checks that cannot prove a journal link.
     let mut candidate = record.clone();
     candidate.as_object_mut()?.insert("schema".into(), 2.into());
-    let candidate = migrate_account_slots(candidate)?;
+    let candidate = migrate_public_client(migrate_account_slots(candidate)?)?;
     AccountIndex::decode(&serde_json::to_vec(&candidate).ok()?).ok()?;
     record.get_mut("model_checks")?.as_array_mut()?.clear();
     record.as_object_mut()?.insert("schema".into(), 2.into());
@@ -414,6 +410,37 @@ fn migrate_account_slots(mut record: serde_json::Value) -> Option<serde_json::Va
     Some(record)
 }
 
+fn migrate_public_client(mut record: serde_json::Value) -> Option<serde_json::Value> {
+    for entry in record.get_mut("accounts")?.as_array_mut()? {
+        let object = entry.as_object_mut()?;
+        let disabled = object.remove("plan_permission_missing")?.as_bool()?;
+        if object.contains_key("slot_client_id")
+            || (disabled
+                && (!object.get("disconnected")?.as_bool()? || !object.get("token")?.is_null()))
+            || (object.get("disconnected")?.as_bool()? && !object.get("token")?.is_null())
+            || (object.get("signout_pending")?.as_bool()?
+                && object.get("disconnected")?.as_bool()?)
+        {
+            return None;
+        }
+        let client = match object.get("storage")?.as_str()? {
+            "keyring" => object.get("client_id")?.clone(),
+            "private_file" => serde_json::Value::Null,
+            _ => return None,
+        };
+        object.insert("slot_client_id".into(), client);
+    }
+    record.as_object_mut()?.insert("schema".into(), 4.into());
+    AccountIndex::decode(&serde_json::to_vec(&record).ok()?).ok()?;
+    for entry in record.get_mut("accounts")?.as_array_mut()? {
+        if entry.get("client_id")?.as_str()? != super::CLIENT_ID {
+            entry["disconnected"] = true.into();
+        }
+    }
+    record.get_mut("model_checks")?.as_array_mut()?.clear();
+    Some(record)
+}
+
 pub(super) fn retained_checks(state: &StateRoot) -> Result<Vec<CheckId>, arany::StoreError> {
     AccountIndex::read(state)
         .map(|index| {
@@ -451,20 +478,38 @@ impl AccountIndex {
     ) -> Result<Option<usize>, AuthorizationError> {
         let position = match expected_selected {
             Some(id) => {
-                self.require_selected_client(id, who.client_id)?;
-                Some(self.account_position(id)?)
+                if self.selected != Some(id) {
+                    return Err(AuthorizationError::SelectedAccountChanged);
+                }
+                let position = self.account_position(id)?;
+                let entry = &self.accounts[position];
+                if entry.client_id != who.client_id
+                    && !(entry.disconnected
+                        && entry.chatgpt_account_id.is_none()
+                        && who.client_id == super::CLIENT_ID)
+                {
+                    return Err(AuthorizationError::SelectedAccountChanged);
+                }
+                Some(position)
             }
             None => self.accounts.iter().position(|entry| {
                 entry.client_id == who.client_id
                     && entry.subject == who.subject
-                    && entry.chatgpt_account_id.is_none()
+                    && entry.chatgpt_account_id.as_deref() == who.account_id
             }),
         };
         let Some(position) = position else {
             return Ok(None);
         };
         let entry = &self.accounts[position];
-        if !who.unchanged_in(entry, storage) {
+        if !who.unchanged_in(entry, storage)
+            || self.accounts.iter().any(|other| {
+                other.id != entry.id
+                    && other.client_id == who.client_id
+                    && other.subject == who.subject
+                    && other.chatgpt_account_id.as_deref() == who.account_id
+            })
+        {
             return Err(AuthorizationError::RegistrationConflict);
         }
         Ok(Some(position))
@@ -540,26 +585,9 @@ impl AccountIndex {
         Ok(())
     }
 
-    fn require_selected_client(
-        &self,
-        account_id: Uuid,
-        client_id: &str,
-    ) -> Result<(), AuthorizationError> {
-        if self.selected == Some(account_id)
-            && self
-                .accounts
-                .iter()
-                .any(|entry| entry.id == account_id && entry.client_id == client_id)
-        {
-            Ok(())
-        } else {
-            Err(AuthorizationError::SelectedAccountChanged)
-        }
-    }
-
     fn read(state: &StateRoot) -> Result<Self, AuthorizationError> {
         let Some(bytes) = state
-            .read_current(&CHATGPT_ACCOUNTS)
+            .read_current_with_notice(&CHATGPT_ACCOUNTS, super::record_migration_notice)
             .map_err(|_| AuthorizationError::Unavailable)?
         else {
             return Ok(Self::empty());
@@ -657,6 +685,7 @@ fn load_selected_snapshot(
     if entry.storage != selected.storage
         || entry.host_id != selected.credentials.host_id
         || entry.client_id != selected.credentials.client_id
+        || entry.chatgpt_account_id != selected.credentials.chatgpt_account_id
         || entry.subject != selected.credentials.subject
     {
         return Err(AuthorizationError::InvalidIdentity);
@@ -957,22 +986,6 @@ fn checked_model_window(
         .and_then(|check| check.context_window_tokens))
 }
 
-pub(super) fn contains_saved_client_at(
-    state: &StateRoot,
-    client_id: &str,
-    host_id: Uuid,
-) -> Result<bool, AuthorizationError> {
-    match AccountIndex::read(state)?
-        .accounts
-        .into_iter()
-        .find(|entry| entry.client_id == client_id)
-    {
-        Some(entry) if entry.host_id == host_id => Ok(true),
-        Some(_) => Err(AuthorizationError::InvalidIdentity),
-        None => Ok(false),
-    }
-}
-
 pub(super) fn saved_host_at(state: &StateRoot) -> Result<Option<Uuid>, AuthorizationError> {
     Ok(AccountIndex::read(state)?
         .accounts
@@ -986,6 +999,9 @@ pub(crate) async fn save_verified(
     acknowledgment: RiskAcknowledgment,
     expected_selected: Option<Uuid>,
 ) -> Result<Uuid, AuthorizationError> {
+    if credentials.client_id != super::CLIENT_ID || credentials.chatgpt_account_id.is_none() {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
     let storage = acknowledgment.storage();
     let consent = acknowledgment.bind(&credentials)?;
     tokio::task::spawn_blocking(move || {
@@ -1008,102 +1024,6 @@ pub(crate) async fn save_verified(
     })?
 }
 
-pub(crate) async fn save_without_plan_permission(
-    workspace: PathBuf,
-    identity: VerifiedIdentity,
-    acknowledgment: RiskAcknowledgment,
-    expected_selected: Option<Uuid>,
-) -> Result<DisabledSignInOutcome, AuthorizationError> {
-    let storage = acknowledgment.storage();
-    tokio::task::spawn_blocking(move || {
-        let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-        let state = StateRoot::admit(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        save_without_plan_permission_at(
-            &state,
-            &workspace,
-            identity,
-            storage,
-            expected_selected,
-            |slot| delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable),
-        )
-    })
-    .await
-    .map_err(|_| {
-        AuthorizationError::CredentialStore(
-            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown,
-        )
-    })?
-}
-
-fn save_without_plan_permission_at(
-    state: &StateRoot,
-    workspace: &Path,
-    identity: VerifiedIdentity,
-    storage: AccountStorage,
-    expected_selected: Option<Uuid>,
-    delete: impl FnOnce(&str) -> Result<(), AuthorizationError>,
-) -> Result<DisabledSignInOutcome, AuthorizationError> {
-    if !identity.valid() {
-        return Err(AuthorizationError::InvalidIdentity);
-    }
-    state
-        .with_account_replacement_lock(workspace, || {
-            let mut index = AccountIndex::read(state)?;
-            registration::verify_host_at(state, identity.host_id)?;
-            if index
-                .accounts
-                .first()
-                .is_some_and(|entry| entry.host_id != identity.host_id)
-            {
-                return Err(AuthorizationError::RegistrationConflict);
-            }
-            let previous = index.signed_in_position(
-                SignedIn {
-                    client_id: &identity.client_id,
-                    subject: &identity.subject,
-                    host_id: identity.host_id,
-                },
-                storage,
-                expected_selected,
-            )?;
-            let mut slot = None;
-            let id = if let Some(position) = previous {
-                let entry = &mut index.accounts[position];
-                slot = entry.keyring_slot.clone();
-                entry.token = None;
-                entry.renewal_pending = false;
-                entry.signout_pending = false;
-                entry.disconnected = true;
-                entry.plan_permission_missing = true;
-                entry.id
-            } else {
-                index.ensure_account_capacity()?;
-                let id = Uuid::now_v7();
-                index.push_account(AccountEntry {
-                    id,
-                    host_id: identity.host_id,
-                    keyring_slot: new_keyring_slot(storage, &identity.client_id, id),
-                    chatgpt_account_id: None,
-                    client_id: identity.client_id.clone(),
-                    subject: identity.subject,
-                    storage,
-                    renewal_pending: false,
-                    signout_pending: false,
-                    disconnected: true,
-                    plan_permission_missing: true,
-                    token: None,
-                })
-            };
-            index.select_account(id);
-            index.write(state)?;
-            registration::complete_issued_client_at(state, &identity.client_id, identity.host_id)
-                .map_err(uncertain_account_publication)?;
-            let local_cleared = slot.is_none_or(|slot| delete(&slot).is_ok());
-            Ok(DisabledSignInOutcome { id, local_cleared })
-        })
-        .map_err(|_| AuthorizationError::Unavailable)?
-}
-
 pub(super) fn save_private_file_at(
     state: &StateRoot,
     workspace: &Path,
@@ -1120,7 +1040,6 @@ pub(super) fn save_private_file_at(
     if !token.valid_for(AccountStorage::PrivateFile) {
         return Err(AuthorizationError::ConsentRequired);
     }
-    let completed_client_id = token.credentials.client_id.clone();
     let host_id = token.credentials.host_id;
     state
         .with_account_replacement_lock(workspace, || {
@@ -1140,17 +1059,19 @@ pub(super) fn save_private_file_at(
                     client_id,
                     subject,
                     host_id,
+                    account_id: token.credentials.chatgpt_account_id.as_deref(),
                 },
                 AccountStorage::PrivateFile,
                 expected_selected,
             )?;
             let id = if let Some(position) = position {
                 let entry = &mut index.accounts[position];
+                entry.client_id = token.credentials.client_id.clone();
+                entry.chatgpt_account_id = token.credentials.chatgpt_account_id.clone();
                 entry.token = Some(token);
                 entry.renewal_pending = false;
                 entry.signout_pending = false;
                 entry.disconnected = false;
-                entry.plan_permission_missing = false;
                 entry.id
             } else {
                 index.ensure_account_capacity()?;
@@ -1159,20 +1080,18 @@ pub(super) fn save_private_file_at(
                     host_id,
                     client_id: client_id.clone(),
                     subject: subject.clone(),
-                    chatgpt_account_id: None,
+                    chatgpt_account_id: token.credentials.chatgpt_account_id.clone(),
                     keyring_slot: None,
+                    slot_client_id: None,
                     storage: AccountStorage::PrivateFile,
                     renewal_pending: false,
                     signout_pending: false,
                     disconnected: false,
-                    plan_permission_missing: false,
                     token: Some(token),
                 })
             };
             index.select_account(id);
             index.write(state)?;
-            registration::complete_issued_client_at(state, &completed_client_id, host_id)
-                .map_err(uncertain_account_publication)?;
             Ok(id)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -1214,7 +1133,6 @@ fn save_keyring_at_with(
     if !token.content_valid(AccountStorage::Keyring) {
         return Err(AuthorizationError::ConsentRequired);
     }
-    let completed_client_id = token.credentials.client_id.clone();
     let host_id = token.credentials.host_id;
     state
         .with_account_replacement_lock(workspace, || {
@@ -1234,12 +1152,14 @@ fn save_keyring_at_with(
                     client_id: &client_id,
                     subject: &subject,
                     host_id,
+                    account_id: token.credentials.chatgpt_account_id.as_deref(),
                 },
                 AccountStorage::Keyring,
                 expected_selected,
             )?;
             let (id, slot, record) = prepare_keyring_record(&index, position, &mut token)?;
             if let Some(position) = position {
+                index.accounts[position].signout_pending = false;
                 index.accounts[position].renewal_pending = true;
                 index.write(state)?;
             } else {
@@ -1248,13 +1168,13 @@ fn save_keyring_at_with(
                     host_id,
                     client_id,
                     subject,
-                    chatgpt_account_id: None,
+                    chatgpt_account_id: token.credentials.chatgpt_account_id.clone(),
                     keyring_slot: Some(slot.clone()),
+                    slot_client_id: Some(token.credentials.client_id.clone()),
                     storage: AccountStorage::Keyring,
                     renewal_pending: false,
                     signout_pending: false,
                     disconnected: false,
-                    plan_permission_missing: false,
                     token: None,
                 });
             }
@@ -1275,11 +1195,10 @@ fn save_keyring_at_with(
             entry.renewal_pending = false;
             entry.signout_pending = false;
             entry.disconnected = false;
-            entry.plan_permission_missing = false;
+            entry.client_id = token.credentials.client_id.clone();
+            entry.chatgpt_account_id = token.credentials.chatgpt_account_id.clone();
             index.select_account(id);
             index.write(state).map_err(uncertain_account_publication)?;
-            registration::complete_issued_client_at(state, &completed_client_id, host_id)
-                .map_err(uncertain_account_publication)?;
             Ok(id)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -1383,6 +1302,7 @@ fn admit_keyring_record(
         || token.slot != entry.keyring_slot
         || !token.credentials.valid_saved()
         || token.credentials.client_id != entry.client_id
+        || token.credentials.chatgpt_account_id != entry.chatgpt_account_id
         || token.credentials.subject != entry.subject
         || token.credentials.host_id != entry.host_id
     {
@@ -1421,7 +1341,25 @@ pub(super) async fn selected_for_use(
             .selected
             .ok_or(AuthorizationError::NoSelectedAccount)?,
     };
+    refuse_backend_route_at(&state, &workspace, id)?;
     refresh_selected_at(state, workspace, id).await
+}
+
+fn refuse_backend_route_at(
+    state: &StateRoot,
+    workspace: &Path,
+    expected_id: Uuid,
+) -> Result<(), AuthorizationError> {
+    state
+        .with_account_replacement_lock(workspace, || {
+            let index = AccountIndex::read(state)?;
+            if index.selected != Some(expected_id) {
+                return Err(AuthorizationError::SelectedAccountChanged);
+            }
+            index.accounts[index.account_position(expected_id)?].ensure_usable()?;
+            Err(AuthorizationError::BackendRouteNotAdmitted)
+        })
+        .map_err(|_| AuthorizationError::Unavailable)?
 }
 
 pub(super) fn authenticate(expected_account_id: Option<Uuid>) -> Result<(), AuthorizationError> {
@@ -1475,9 +1413,7 @@ fn account_inspections_at(
         .map(|entry| AccountInspection {
             id: entry.id,
             storage: entry.storage,
-            access: if entry.plan_permission_missing {
-                AccountAccess::PlanDisabled
-            } else if entry.signout_pending {
+            access: if entry.signout_pending {
                 AccountAccess::SignOutPending
             } else if entry.renewal_pending {
                 AccountAccess::RenewalPending
@@ -1655,12 +1591,15 @@ fn sign_out_target_at_with(
             let entry = &index.accounts[position];
             let slot = entry.keyring_slot.clone();
             if entry.disconnected {
+                index.accounts[position].token = None;
+                index.write(state)?;
                 let local_cleared = slot
                     .as_deref()
                     .is_none_or(|slot| (actions.delete_keyring)(slot).is_ok());
                 if !local_cleared {
                     return Err(AuthorizationError::SignOutStorageUncertain);
                 }
+                forget_removed_account(state, &mut index, target.account_id)?;
                 return Ok(SignOutOutcome {
                     remote_confirmed: false,
                     local_cleared,
@@ -1698,12 +1637,36 @@ fn sign_out_target_at_with(
             if !local_cleared {
                 return Err(AuthorizationError::SignOutStorageUncertain);
             }
+            forget_removed_account(state, &mut index, target.account_id)?;
             Ok(SignOutOutcome {
                 remote_confirmed,
                 local_cleared,
             })
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn forget_removed_account(
+    state: &StateRoot,
+    index: &mut AccountIndex,
+    target: Option<Uuid>,
+) -> Result<(), AuthorizationError> {
+    let Some(id) = target else {
+        return Ok(());
+    };
+    index.accounts.retain(|entry| entry.id != id);
+    index.model_checks.retain(|check| check.account_id != id);
+    if index.selected == Some(id) {
+        index.selected = index
+            .accounts
+            .iter()
+            .find(|entry| entry.ensure_usable().is_ok())
+            .or_else(|| index.accounts.first())
+            .map(|entry| entry.id);
+    }
+    index
+        .write(state)
+        .map_err(|_| AuthorizationError::SignOutStorageUncertain)
 }
 
 fn select_saved_at(
@@ -1776,7 +1739,7 @@ fn selected_reauthorization_target_at(
         client_id: entry.client_id,
         subject: entry.subject,
         storage: entry.storage,
-        plan_permission_missing: entry.plan_permission_missing,
+        chatgpt_account_id: entry.chatgpt_account_id,
     })
 }
 
@@ -1954,3 +1917,6 @@ fn disconnect_unusable_refresh_with(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod public_client_tests;

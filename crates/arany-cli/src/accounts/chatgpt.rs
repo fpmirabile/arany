@@ -7,6 +7,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::{Uuid, Variant, Version};
 
 use account::SignOutOutcome;
@@ -22,12 +23,25 @@ pub(crate) mod registration;
 
 pub(crate) use account::{
     AccountAccess, AccountInspection, MAX_TOKEN_RECORD_BYTES, ReauthorizationTarget, save_verified,
-    save_without_plan_permission, valid_keyring_record, valid_written_keyring_record,
+    valid_keyring_record, valid_written_keyring_record,
 };
 pub(crate) use browser::open_authorization_url;
 pub(crate) use callback::CallbackListener;
 pub(crate) use catalog::ChatGptModel;
 pub(crate) use consent::{RiskAcknowledgment, RiskPrompt};
+
+static MIGRATION_NOTICE_PENDING: AtomicBool = AtomicBool::new(false);
+const MIGRATION_NOTICE: &str = "Saved ChatGPT accounts were upgraded; earlier sign-ins are disconnected. Reconnect through /setup to use the Codex OAuth client.";
+
+fn record_migration_notice() {
+    MIGRATION_NOTICE_PENDING.store(true, Ordering::Release);
+}
+
+pub(crate) fn take_migration_notice() -> Option<&'static str> {
+    MIGRATION_NOTICE_PENDING
+        .swap(false, Ordering::AcqRel)
+        .then_some(MIGRATION_NOTICE)
+}
 
 pub(crate) async fn selected_models(
     workspace: PathBuf,
@@ -330,9 +344,11 @@ pub(crate) async fn provider_for_run(
     .map_err(|_| AuthorizationError::Unavailable)
 }
 
-const AUTHORIZE_ENDPOINT: &str = "https://auth.openai.com/api/accounts/authorize";
-const RESOURCE: &str = "https://api.openai.com/v1";
-const SCOPE: &str = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+const AUTHORIZE_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
+const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CALLBACK_PORTS: [u16; 2] = [1455, 1457];
+const MAX_ACCOUNT_ID_BYTES: usize = 128;
+const SCOPE: &str = "openid profile email offline_access";
 const CALLBACK_PATH: &str = "/auth/callback";
 const MAX_CALLBACK_BYTES: usize = 4096;
 const MAX_CODE_BYTES: usize = 2048;
@@ -370,6 +386,10 @@ pub(crate) enum AuthorizationError {
         "ChatGPT sign-out could not clear the local account; retry arany provider logout chatgpt"
     )]
     SignOutStorageUncertain,
+    #[error("ChatGPT callback ports are busy; close the other sign-in and retry")]
+    CallbackBusy,
+    #[error("ChatGPT backend route not admitted; update Arany before continuing")]
+    BackendRouteNotAdmitted,
     #[error("invalid authorization callback")]
     InvalidCallback,
     #[error("authorization was denied")]
@@ -404,10 +424,6 @@ pub(crate) enum AuthorizationError {
     SetupChanged,
     #[error("ChatGPT account state in different roots conflicts")]
     RegistrationConflict,
-    #[error(
-        "ChatGPT plan permission was not granted; use /setup to enable the plan or explicitly choose an API account"
-    )]
-    PermissionMissing,
     #[error("ChatGPT plan risk warning was not accepted")]
     ConsentRequired,
     #[error("invalid ChatGPT model catalog")]
@@ -453,13 +469,9 @@ pub(crate) struct AuthorizationAttempt {
 
 enum AuthorizationMode {
     NewRegistration,
-    RegistrationRetry {
-        client_id: String,
-    },
     Returning {
-        client_id: String,
         subject: String,
-        plan_permission_missing: bool,
+        account_id: Option<String>,
     },
 }
 
@@ -471,6 +483,7 @@ pub(crate) struct CodeExchange {
     nonce: String,
     host_id: Uuid,
     expected_subject: Option<String>,
+    expected_account_id: Option<String>,
 }
 
 struct AcceptedCallback {
@@ -479,32 +492,14 @@ struct AcceptedCallback {
     expected_subject: Option<String>,
 }
 
-pub(crate) enum VerifiedSignIn {
-    PlanEnabled(VerifiedCredentials),
-    PlanDisabled(VerifiedIdentity),
-}
-
-pub(crate) struct VerifiedIdentity {
-    pub(crate) client_id: String,
-    pub(crate) host_id: Uuid,
-    pub(crate) subject: String,
-}
-
-impl VerifiedIdentity {
-    fn valid(&self) -> bool {
-        valid_client_id(&self.client_id)
-            && self.host_id.get_version() == Some(Version::Random)
-            && self.host_id.get_variant() == Variant::RFC4122
-            && bounded_graphic(&self.subject, 512)
-    }
-}
-
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct VerifiedCredentials {
     pub(crate) client_id: String,
     pub(crate) host_id: Uuid,
     pub(crate) subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chatgpt_account_id: Option<String>,
     pub(crate) id_token: String,
     pub(crate) access_token: String,
     pub(crate) refresh_token: String,
@@ -517,6 +512,10 @@ impl VerifiedCredentials {
             && self.host_id.get_version() == Some(Version::Random)
             && self.host_id.get_variant() == Variant::RFC4122
             && bounded_graphic(&self.subject, 512)
+            && self
+                .chatgpt_account_id
+                .as_deref()
+                .is_none_or(valid_account_id)
             && bounded_graphic(&self.id_token, 16 * 1024)
             && bounded_graphic(&self.access_token, 16 * 1024)
             && bounded_graphic(&self.refresh_token, 8 * 1024)
@@ -533,26 +532,8 @@ impl VerifiedCredentials {
 }
 
 impl CodeExchange {
-    pub(crate) async fn redeem(
-        self,
-        workspace: &std::path::Path,
-    ) -> Result<VerifiedSignIn, AuthorizationError> {
-        self.retain_new_registration(workspace)?;
+    pub(crate) async fn redeem(self) -> Result<VerifiedCredentials, AuthorizationError> {
         exchange::redeem(self).await
-    }
-
-    fn retain_new_registration(
-        &self,
-        workspace: &std::path::Path,
-    ) -> Result<(), AuthorizationError> {
-        if !self.is_new_registration() {
-            return Ok(());
-        }
-        registration::retain_issued_client(workspace, self)
-    }
-
-    fn is_new_registration(&self) -> bool {
-        self.expected_subject.is_none()
     }
 }
 
@@ -568,6 +549,10 @@ impl AuthorizationAttempt {
         callback_port: u16,
     ) -> Result<Self, AuthorizationError> {
         if !valid_client_id(&account.client_id)
+            || account
+                .chatgpt_account_id
+                .as_deref()
+                .is_some_and(|id| !valid_account_id(id))
             || !bounded_graphic(&account.subject, 512)
             || account.id.get_version() != Some(Version::SortRand)
         {
@@ -575,23 +560,9 @@ impl AuthorizationAttempt {
         }
         let mut attempt = Self::new(account.host_id, callback_port)?;
         attempt.mode = AuthorizationMode::Returning {
-            client_id: account.client_id.clone(),
             subject: account.subject.clone(),
-            plan_permission_missing: account.plan_permission_missing,
+            account_id: account.chatgpt_account_id.clone(),
         };
-        Ok(attempt)
-    }
-
-    pub(crate) fn for_new_registration_retry(
-        host_id: Uuid,
-        client_id: String,
-        callback_port: u16,
-    ) -> Result<Self, AuthorizationError> {
-        if !valid_client_id(&client_id) {
-            return Err(AuthorizationError::InvalidIdentity);
-        }
-        let mut attempt = Self::new(host_id, callback_port)?;
-        attempt.mode = AuthorizationMode::RegistrationRetry { client_id };
         Ok(attempt)
     }
 
@@ -602,7 +573,7 @@ impl AuthorizationAttempt {
     ) -> Result<Self, AuthorizationError> {
         if host_id.get_version() != Some(Version::Random)
             || host_id.get_variant() != Variant::RFC4122
-            || callback_port == 0
+            || !CALLBACK_PORTS.contains(&callback_port)
         {
             return Err(AuthorizationError::Unavailable);
         }
@@ -619,32 +590,14 @@ impl AuthorizationAttempt {
     pub(crate) fn authorization_url(&self) -> AuthorizationUrl {
         let mut url = Url::parse(AUTHORIZE_ENDPOINT).expect("compiled authorization endpoint");
         let mut query = url.query_pairs_mut();
-        match &self.mode {
-            AuthorizationMode::NewRegistration => {
-                query
-                    .append_pair("client_id", "dynamic_agent_client")
-                    .append_pair("agent_name_hint", "Arany");
-            }
-            AuthorizationMode::RegistrationRetry { client_id } => {
-                query.append_pair("client_id", client_id);
-            }
-            AuthorizationMode::Returning {
-                client_id,
-                plan_permission_missing,
-                ..
-            } => {
-                query.append_pair("client_id", client_id);
-                if *plan_permission_missing {
-                    query.append_pair("prompt", "consent");
-                }
-            }
-        }
         query
-            .append_pair("ext_agent_host_id", &format!("urn:uuid:{}", self.host_id))
+            .append_pair("client_id", CLIENT_ID)
+            .append_pair("id_token_add_organizations", "true")
+            .append_pair("codex_cli_simplified_flow", "true")
+            .append_pair("originator", "arany")
             .append_pair("response_type", "code")
             .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("scope", SCOPE)
-            .append_pair("resource", RESOURCE)
             .append_pair("state", &self.state)
             .append_pair("nonce", &self.nonce)
             .append_pair("code_challenge_method", "S256")
@@ -674,15 +627,8 @@ impl AuthorizationAttempt {
         let url = Url::parse(callback_url).map_err(|_| AuthorizationError::InvalidCallback)?;
         let mut code = None;
         let mut state = None;
-        let mut client_id = None;
         let mut error = None;
-        let mut scope_seen = false;
-        let mut count = 0;
         for (name, value) in url.query_pairs() {
-            count += 1;
-            if count > 6 {
-                return Err(AuthorizationError::InvalidCallback);
-            }
             match name.as_ref() {
                 "code" if code.is_none() && bounded_graphic(&value, MAX_CODE_BYTES) => {
                     code = Some(value.into_owned());
@@ -690,29 +636,18 @@ impl AuthorizationAttempt {
                 "state" if state.is_none() && bounded_graphic(&value, 64) => {
                     state = Some(value.into_owned());
                 }
-                "client_id" if client_id.is_none() && valid_client_id(&value) => {
-                    client_id = Some(value.into_owned());
-                }
-                "scope"
-                    if !scope_seen
-                        && value.len() <= MAX_SCOPE_BYTES
-                        && value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_graphic() || byte == b' ') =>
-                {
-                    scope_seen = true;
-                }
                 "error" if error.is_none() && bounded_graphic(&value, 128) => {
                     error = Some(value.into_owned());
                 }
-                _ => return Err(AuthorizationError::InvalidCallback),
+                "code" | "state" | "error" => return Err(AuthorizationError::InvalidCallback),
+                _ => {}
             }
         }
         if state.as_deref() != Some(&self.state) {
             return Err(AuthorizationError::InvalidCallback);
         }
         if let Some(error) = error {
-            if code.is_some() || client_id.is_some() {
+            if code.is_some() {
                 return Err(AuthorizationError::InvalidCallback);
             }
             return if error == "access_denied" {
@@ -722,32 +657,13 @@ impl AuthorizationAttempt {
             };
         }
         let code = code.ok_or(AuthorizationError::InvalidCallback)?;
-        let (client_id, expected_subject) = match &self.mode {
-            AuthorizationMode::NewRegistration => {
-                (client_id.ok_or(AuthorizationError::InvalidCallback)?, None)
-            }
-            AuthorizationMode::RegistrationRetry {
-                client_id: selected,
-            } => {
-                if client_id.is_some_and(|returned| returned != *selected) {
-                    return Err(AuthorizationError::InvalidCallback);
-                }
-                (selected.clone(), None)
-            }
-            AuthorizationMode::Returning {
-                client_id: selected,
-                subject,
-                ..
-            } => {
-                if client_id.is_some_and(|returned| returned != *selected) {
-                    return Err(AuthorizationError::InvalidCallback);
-                }
-                (selected.clone(), Some(subject.clone()))
-            }
+        let expected_subject = match &self.mode {
+            AuthorizationMode::NewRegistration => None,
+            AuthorizationMode::Returning { subject, .. } => Some(subject.clone()),
         };
         Ok(AcceptedCallback {
             code,
-            client_id,
+            client_id: CLIENT_ID.into(),
             expected_subject,
         })
     }
@@ -761,6 +677,10 @@ impl AuthorizationAttempt {
             nonce: self.nonce,
             host_id: self.host_id,
             expected_subject: accepted.expected_subject,
+            expected_account_id: match self.mode {
+                AuthorizationMode::NewRegistration => None,
+                AuthorizationMode::Returning { account_id, .. } => account_id,
+            },
         }
     }
 }
@@ -771,6 +691,10 @@ fn pkce_challenge(verifier: &str) -> String {
 
 fn bounded_graphic(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn valid_account_id(value: &str) -> bool {
+    bounded_graphic(value, MAX_ACCOUNT_ID_BYTES)
 }
 
 fn valid_client_id(value: &str) -> bool {
@@ -898,6 +822,7 @@ mod tests {
             client_id: "oaiapp_saved".into(),
             host_id: fixture_host_id(),
             subject: "verified-subject".into(),
+            chatgpt_account_id: None,
             id_token: "synthetic-signed-id-hint".into(),
             access_token: "synthetic-access".into(),
             refresh_token: "synthetic-refresh".into(),
@@ -913,7 +838,7 @@ mod tests {
             client_id: account.client_id,
             subject: account.subject,
             storage: AccountStorage::Keyring,
-            plan_permission_missing: false,
+            chatgpt_account_id: account.chatgpt_account_id,
         }
     }
 
@@ -926,19 +851,18 @@ mod tests {
             parsed.origin().ascii_serialization(),
             "https://auth.openai.com"
         );
-        assert_eq!(parsed.path(), "/api/accounts/authorize");
+        assert_eq!(parsed.path(), "/oauth/authorize");
         let fields = parsed
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(fields["client_id"], "dynamic_agent_client");
-        assert_eq!(fields["agent_name_hint"], "Arany");
-        assert_eq!(
-            fields["ext_agent_host_id"],
-            format!("urn:uuid:{}", attempt.host_id)
-        );
+        assert_eq!(fields["client_id"], CLIENT_ID);
+        assert_eq!(fields["id_token_add_organizations"], "true");
+        assert_eq!(fields["codex_cli_simplified_flow"], "true");
+        assert_eq!(fields["originator"], "arany");
+        assert_eq!(fields.len(), 11);
         assert_eq!(fields["response_type"], "code");
         assert_eq!(fields["redirect_uri"], attempt.redirect_uri);
-        assert_eq!(fields["resource"], RESOURCE);
+        assert!(!fields.contains_key("resource"));
         assert_eq!(fields["scope"], SCOPE);
         assert_eq!(fields["state"], attempt.state);
         assert_eq!(fields["nonce"], attempt.nonce);
@@ -975,17 +899,17 @@ mod tests {
         let host_id = attempt.host_id;
         let callback = callback(
             &attempt,
-            "code=synthetic-code&client_id=oaiapp_test&scope=openid+chatgpt.tokens.use.direct",
+            "code=synthetic-code&client_id=oaiapp_test&scope=openid",
         );
         let exchange = attempt.accept_callback(&callback).expect("accepted code");
         assert_eq!(exchange.code, "synthetic-code");
-        assert_eq!(exchange.client_id, "oaiapp_test");
+        assert_eq!(exchange.client_id, CLIENT_ID);
         assert_eq!(exchange.redirect_uri, "http://127.0.0.1:1455/auth/callback");
         assert_eq!(exchange.verifier, verifier);
         assert_eq!(exchange.nonce, nonce);
         assert_eq!(exchange.host_id, host_id);
         assert_eq!(exchange.expected_subject, None);
-        assert!(exchange.is_new_registration());
+        assert!(exchange.expected_subject.is_none());
     }
 
     #[test]
@@ -996,35 +920,14 @@ mod tests {
         let fields = url
             .query_pairs()
             .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(fields["client_id"], account.client_id);
+        assert_eq!(fields["client_id"], CLIENT_ID);
         assert!(!fields.contains_key("id_token_hint"));
-        assert_eq!(
-            fields["ext_agent_host_id"],
-            format!("urn:uuid:{}", account.host_id)
-        );
+        assert!(!fields.contains_key("ext_agent_host_id"));
         assert!(!fields.contains_key("agent_name_hint"));
         assert_eq!(fields["scope"], SCOPE);
-        assert_eq!(fields["resource"], RESOURCE);
+        assert!(!fields.contains_key("resource"));
         assert!(!fields.contains_key("prompt"));
         assert!(!fields.contains_key("force_reconsent"));
-        let mut disabled = reauthorization_target();
-        disabled.plan_permission_missing = true;
-        let repair =
-            AuthorizationAttempt::for_existing(&disabled, 1455).expect("permission repair");
-        let repair_url = Url::parse(repair.authorization_url().as_str()).unwrap();
-        let repair_fields = repair_url
-            .query_pairs()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(repair_fields["prompt"], "consent");
-        assert_eq!(repair_fields["client_id"], disabled.client_id);
-        assert_eq!(repair_fields["scope"], SCOPE);
-        assert_eq!(
-            repair_fields["ext_agent_host_id"],
-            format!("urn:uuid:{}", disabled.host_id)
-        );
-        assert!(!repair_fields.contains_key("force_reconsent"));
-        assert!(!repair_fields.contains_key("id_token_hint"));
-        assert!(!repair_fields.contains_key("agent_name_hint"));
         for suffix in [
             "code=renewed-code",
             "code=renewed-code&client_id=oaiapp_saved",
@@ -1036,81 +939,19 @@ mod tests {
                 .accept_callback(&callback)
                 .expect("issued client retained");
             assert_eq!(exchange.code, "renewed-code");
-            assert_eq!(exchange.client_id, account.client_id);
+            assert_eq!(exchange.client_id, CLIENT_ID);
             assert_eq!(
                 exchange.expected_subject.as_deref(),
                 Some("verified-subject")
             );
             assert_eq!(exchange.host_id, account.host_id);
-            assert!(!exchange.is_new_registration());
+            assert_eq!(exchange.expected_account_id, account.chatgpt_account_id);
         }
-    }
-
-    #[test]
-    fn issued_registration_retry_pins_client_host_and_callback_without_signed_account() {
-        let first = fixture_attempt();
-        let accepted = callback(&first, "code=spent-code&client_id=oaiapp_issued");
-        let exchange = first.accept_callback(&accepted).expect("issued client");
-        let host_id = exchange.host_id;
-        let client_id = exchange.client_id.clone();
-        assert_eq!(client_id, "oaiapp_issued");
-        let retry = AuthorizationAttempt::for_new_registration_retry(host_id, client_id, 1456)
-            .expect("fresh attempt with issued client");
-        let fields = Url::parse(retry.authorization_url().as_str())
-            .expect("authorization URL")
-            .query_pairs()
-            .into_owned()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(fields["client_id"], "oaiapp_issued");
-        assert_eq!(fields["ext_agent_host_id"], format!("urn:uuid:{host_id}"));
-        assert_eq!(
-            fields["redirect_uri"],
-            "http://127.0.0.1:1456/auth/callback"
-        );
-        assert!(!fields.contains_key("agent_name_hint"));
-        assert!(!fields.contains_key("id_token_hint"));
-
-        let mismatched = callback(&retry, "code=new-code&client_id=oaiapp_other");
-        assert_eq!(
-            retry.inspect_callback(&mismatched).err(),
-            Some(AuthorizationError::InvalidCallback)
-        );
-
-        let returned = callback(&retry, "code=new-code");
-        let retried = retry
-            .accept_callback(&returned)
-            .expect("same issued client");
-        assert_eq!(retried.client_id, "oaiapp_issued");
-        assert_eq!(retried.expected_subject, None);
-        assert_eq!(retried.host_id, host_id);
-
-        assert!(
-            AuthorizationAttempt::for_new_registration_retry(
-                host_id,
-                "dynamic_agent_client".into(),
-                1456
-            )
-            .is_err()
-        );
     }
 
     #[test]
     fn returning_callback_rejects_registration_drift_and_invalid_saved_identity() {
         let account = reauthorization_target();
-        for suffix in [
-            "code=renewed-code&client_id=oaiapp_other",
-            "code=renewed-code&client_id=dynamic_agent_client",
-            "code=renewed-code&client_id=oaiapp_saved&client_id=oaiapp_saved",
-        ] {
-            let attempt =
-                AuthorizationAttempt::for_existing(&account, 1455).expect("selected account");
-            let callback = callback(&attempt, suffix);
-            assert_eq!(
-                attempt.accept_callback(&callback).err(),
-                Some(AuthorizationError::InvalidCallback),
-                "{suffix}"
-            );
-        }
         let attempt = AuthorizationAttempt::for_existing(&account, 1455).expect("selected account");
         let denial = callback(&attempt, "error=access_denied");
         assert_eq!(
@@ -1150,10 +991,7 @@ mod tests {
             valid.replace("state=", "state=wrong"),
             format!("{valid}&state=duplicate"),
             format!("{valid}&code=duplicate"),
-            format!("{valid}&client_id=other"),
-            format!("{valid}&extra=value"),
             format!("{valid}#fragment"),
-            valid.replace("oaiapp_test", "dynamic_agent_client"),
             valid.replace("code=synthetic-code", "code=%G0"),
             valid.replace("code=synthetic-code", "code=synthetic-code%0A"),
             valid.replace("code=synthetic-code", &format!("code={}", "x".repeat(2049))),
@@ -1169,11 +1007,17 @@ mod tests {
             fixture_attempt().accept_callback("http://127.0.0.1:1455/auth/callback?code=x"),
             Err(AuthorizationError::InvalidCallback)
         ));
-        let missing_client = valid.replace("&client_id=oaiapp_test", "");
-        assert!(matches!(
-            fixture_attempt().accept_callback(&missing_client),
-            Err(AuthorizationError::InvalidCallback)
-        ));
+        for suffix in [
+            "code=x",
+            "code=x&client_id=foreign&client_id=again&extra=value",
+        ] {
+            let attempt = fixture_attempt();
+            let returned = callback(&attempt, suffix);
+            assert_eq!(
+                attempt.accept_callback(&returned).unwrap().client_id,
+                CLIENT_ID
+            );
+        }
         assert!(AuthorizationAttempt::from_random(fixture_host_id(), 0, [0; 96]).is_err());
     }
 

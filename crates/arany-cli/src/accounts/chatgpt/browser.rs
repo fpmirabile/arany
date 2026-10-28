@@ -28,7 +28,7 @@ pub(crate) async fn open_authorization_url(
     if url.0.scheme() != "https"
         || url.0.host_str() != Some("auth.openai.com")
         || url.0.port().is_some()
-        || url.0.path() != "/api/accounts/authorize"
+        || url.0.path() != "/oauth/authorize"
         || url.0.as_str().len() > 4096
         || url.0.query_pairs().any(|(key, _)| key == "id_token_hint")
     {
@@ -127,9 +127,9 @@ mod tests {
     #[tokio::test]
     async fn browser_launch_rejects_token_hints_and_other_destinations_before_a_process() {
         for url in [
-            "https://auth.openai.com/api/accounts/authorize?id_token_hint=secret",
-            "https://example.com/api/accounts/authorize",
-            "http://auth.openai.com/api/accounts/authorize",
+            "https://auth.openai.com/oauth/authorize?id_token_hint=secret",
+            "https://example.com/oauth/authorize",
+            "http://auth.openai.com/oauth/authorize",
         ] {
             assert_eq!(
                 open_authorization_url(&AuthorizationUrl(Url::parse(url).unwrap())).await,

@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const WARNING_VERSION: u8 = 4;
-const PLAN_RISK_WARNING: &str = "ChatGPT-plan requests cannot set a remote output-token limit. Arany can stop reading after local time and byte limits, but that does not guarantee a cap on generated tokens or plan usage. You can set an app-specific usage limit in ChatGPT Settings > Usage; it is not a per-request cap.";
+const WARNING_VERSION: u8 = 5;
+const PLAN_RISK_WARNING: &str = "Arany uses the Codex backend with the public Codex OAuth client. ChatGPT-plan requests cannot set a remote output-token limit. Arany can stop reading after local time and byte limits, but that does not guarantee a cap on generated tokens or plan usage. You can set an app-specific usage limit in ChatGPT Settings > Usage; it is not a per-request cap.";
 #[cfg(target_os = "linux")]
 const KEYRING_RISK_WARNING: &str = "An unlocked Linux Secret Service item may be read by another application running as your user. The keyring does not make this token private to Arany.";
 #[cfg(not(target_os = "linux"))]
@@ -69,6 +69,7 @@ impl RiskAcknowledgment {
             storage: self.storage,
             client_id: credentials.client_id.clone(),
             subject: credentials.subject.clone(),
+            chatgpt_account_id: credentials.chatgpt_account_id.clone(),
             host_id: credentials.host_id,
             accepted_at_sec,
         })
@@ -83,6 +84,8 @@ pub(crate) struct ConsentReceipt {
     storage: AccountStorage,
     client_id: String,
     subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chatgpt_account_id: Option<String>,
     host_id: Uuid,
     accepted_at_sec: u64,
 }
@@ -102,6 +105,7 @@ impl ConsentReceipt {
             && self.storage == storage
             && self.client_id == credentials.client_id
             && self.subject == credentials.subject
+            && self.chatgpt_account_id == credentials.chatgpt_account_id
             && self.host_id == credentials.host_id
             && self.accepted_at_sec != 0
     }
@@ -116,6 +120,7 @@ mod tests {
             client_id: "oaiapp_synthetic".into(),
             host_id: Uuid::now_v7(),
             subject: "subject-one".into(),
+            chatgpt_account_id: None,
             id_token: "synthetic-id".into(),
             access_token: "synthetic-access".into(),
             refresh_token: "synthetic-refresh".into(),
@@ -136,6 +141,7 @@ mod tests {
         assert!(warning.is_ascii());
         assert!(warning.len() <= 1024);
         assert!(warning.contains("remote output-token limit"));
+        assert!(warning.contains("Codex backend"));
         assert!(warning.contains("app-specific usage limit"));
         #[cfg(target_os = "linux")]
         assert!(warning.contains("another application running as your user"));
@@ -156,6 +162,9 @@ mod tests {
         changed.client_id = "oaiapp_other".into();
         assert!(!receipt.matches(&changed, AccountStorage::Keyring));
         changed.client_id = credentials.client_id.clone();
+        changed.chatgpt_account_id = Some("other-account".into());
+        assert!(!receipt.matches(&changed, AccountStorage::Keyring));
+        changed.chatgpt_account_id = credentials.chatgpt_account_id.clone();
         changed.host_id = Uuid::now_v7();
         assert!(!receipt.matches(&changed, AccountStorage::Keyring));
     }
@@ -176,7 +185,7 @@ mod tests {
         let file_warning = RiskPrompt::new(AccountStorage::PrivateFile).text();
         assert!(file_warning.is_ascii());
         assert!(file_warning.len() <= 1024);
-        for version in [1, 3, WARNING_VERSION + 1] {
+        for version in [1, 4, WARNING_VERSION + 1] {
             let mut value = serde_json::to_value(&receipt).expect("serializable receipt");
             value["warning_version"] = version.into();
             let changed: ConsentReceipt = serde_json::from_value(value).expect("receipt shape");

@@ -49,11 +49,12 @@ fn key_parts(pair: &RsaKeyPair) -> (Vec<u8>, Vec<u8>) {
 fn claims(now: u64, nonce: &str) -> Value {
     json!({
         "iss": "https://auth.openai.com",
-        "aud": "oaiapp_test",
+        "aud": super::super::CLIENT_ID,
         "iat": now,
         "exp": now + 3600,
         "nonce": nonce,
-        "sub": "synthetic-subject"
+        "sub": "synthetic-subject",
+        "https://api.openai.com/auth": {"chatgpt_account_id": "account-one"}
     })
 }
 
@@ -99,35 +100,69 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     let keys = jwks(&pair);
     let good = signed_token(&pair, &claims(NOW, "expected-nonce"));
     assert_eq!(
-        identity::verify(&good, &keys, "oaiapp_test", "expected-nonce", NOW),
-        Ok("synthetic-subject".into())
+        identity::verify(&good, &keys, super::super::CLIENT_ID, "expected-nonce", NOW),
+        Ok(identity::VerifiedIdentity {
+            subject: "synthetic-subject".into(),
+            account_id: "account-one".into(),
+        })
     );
+    for account in [
+        json!(null),
+        json!({}),
+        json!({"chatgpt_account_id": ""}),
+        json!({"chatgpt_account_id": "x".repeat(super::super::MAX_ACCOUNT_ID_BYTES + 1)}),
+        json!({"chatgpt_account_id": "account-\u{e9}"}),
+        json!({"chatgpt_account_id": "account\n"}),
+        json!({"chatgpt_account_id": 42}),
+    ] {
+        let mut rejected = claims(NOW, "expected-nonce");
+        rejected["https://api.openai.com/auth"] = account;
+        assert!(
+            identity::verify(
+                &signed_token(&pair, &rejected),
+                &keys,
+                super::super::CLIENT_ID,
+                "expected-nonce",
+                NOW,
+            )
+            .is_err()
+        );
+    }
     let mut singleton = claims(NOW, "expected-nonce");
-    singleton["aud"] = json!(["oaiapp_test"]);
+    singleton["aud"] = json!([super::super::CLIENT_ID]);
     assert_eq!(
         identity::verify(
             &signed_token(&pair, &singleton),
             &keys,
-            "oaiapp_test",
+            super::super::CLIENT_ID,
             "expected-nonce",
             NOW
         ),
-        Ok("synthetic-subject".into()),
+        Ok(identity::VerifiedIdentity {
+            subject: "synthetic-subject".into(),
+            account_id: "account-one".into(),
+        }),
         "a signed singleton audience is the same issued client"
     );
-    for audience in [json!("oaiapp_test"), json!(["oaiapp_test"])] {
+    for audience in [
+        json!(super::super::CLIENT_ID),
+        json!([super::super::CLIENT_ID]),
+    ] {
         let mut bound_party = claims(NOW, "expected-nonce");
         bound_party["aud"] = audience;
-        bound_party["azp"] = json!("oaiapp_test");
+        bound_party["azp"] = json!(super::super::CLIENT_ID);
         assert_eq!(
             identity::verify(
                 &signed_token(&pair, &bound_party),
                 &keys,
-                "oaiapp_test",
+                super::super::CLIENT_ID,
                 "expected-nonce",
                 NOW
             ),
-            Ok("synthetic-subject".into()),
+            Ok(identity::VerifiedIdentity {
+                subject: "synthetic-subject".into(),
+                account_id: "account-one".into(),
+            }),
             "present authorized party is the issued client"
         );
         bound_party["azp"] = json!("another-client");
@@ -135,7 +170,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
             identity::verify(
                 &signed_token(&pair, &bound_party),
                 &keys,
-                "oaiapp_test",
+                super::super::CLIENT_ID,
                 "expected-nonce",
                 NOW
             ),
@@ -154,17 +189,17 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         ("aud", json!([]), identity::IdentityFailure::ClaimsFormat),
         (
             "aud",
-            json!(["oaiapp_test", "another-client"]),
+            json!([super::super::CLIENT_ID, "another-client"]),
             identity::IdentityFailure::ClaimsFormat,
         ),
         (
             "aud",
-            json!(["another-client", "oaiapp_test"]),
+            json!(["another-client", super::super::CLIENT_ID]),
             identity::IdentityFailure::ClaimsFormat,
         ),
         (
             "aud",
-            json!(["oaiapp_test", "oaiapp_test"]),
+            json!([super::super::CLIENT_ID, super::super::CLIENT_ID]),
             identity::IdentityFailure::ClaimsFormat,
         ),
         (
@@ -175,7 +210,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         ("aud", json!([42]), identity::IdentityFailure::ClaimsFormat),
         (
             "aud",
-            json!([["oaiapp_test"]]),
+            json!([[super::super::CLIENT_ID]]),
             identity::IdentityFailure::ClaimsFormat,
         ),
         ("aud", json!(null), identity::IdentityFailure::ClaimsFormat),
@@ -183,7 +218,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         ("aud", json!(true), identity::IdentityFailure::ClaimsFormat),
         (
             "aud",
-            json!({"client": "oaiapp_test"}),
+            json!({"client": super::super::CLIENT_ID}),
             identity::IdentityFailure::ClaimsFormat,
         ),
         (
@@ -195,7 +230,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         ("azp", json!(null), identity::IdentityFailure::ClaimsFormat),
         (
             "azp",
-            json!(["oaiapp_test"]),
+            json!([super::super::CLIENT_ID]),
             identity::IdentityFailure::ClaimsFormat,
         ),
         ("azp", json!(true), identity::IdentityFailure::ClaimsFormat),
@@ -206,7 +241,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
             identity::verify(
                 &signed_token(&pair, &rejected),
                 &keys,
-                "oaiapp_test",
+                super::super::CLIENT_ID,
                 "expected-nonce",
                 NOW
             ),
@@ -240,13 +275,25 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         altered[field] = replacement;
         let token = signed_token(&pair, &altered);
         assert_eq!(
-            identity::verify(&token, &keys, "oaiapp_test", "expected-nonce", NOW),
+            identity::verify(
+                &token,
+                &keys,
+                super::super::CLIENT_ID,
+                "expected-nonce",
+                NOW
+            ),
             Err(AuthorizationError::IdentityRejected(failure)),
             "{field}"
         );
         if field == "nonce" {
-            let error = identity::verify(&token, &keys, "oaiapp_test", "expected-nonce", NOW)
-                .expect_err("mismatched nonce");
+            let error = identity::verify(
+                &token,
+                &keys,
+                super::super::CLIENT_ID,
+                "expected-nonce",
+                NOW,
+            )
+            .expect_err("mismatched nonce");
             assert!(error.to_string().contains("nonce mismatch"), "{error}");
             assert!(!error.to_string().contains("wrong-nonce"));
         }
@@ -257,7 +304,13 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     signature[0] ^= 1;
     let tampered = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature));
     assert_eq!(
-        identity::verify(&tampered, &keys, "oaiapp_test", "expected-nonce", NOW),
+        identity::verify(
+            &tampered,
+            &keys,
+            super::super::CLIENT_ID,
+            "expected-nonce",
+            NOW
+        ),
         Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::Signature
         ))
@@ -282,7 +335,13 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     ] {
         let token = signed_token_with_header(&pair, &claims(NOW, "expected-nonce"), &header);
         assert_eq!(
-            identity::verify(&token, &keys, "oaiapp_test", "expected-nonce", NOW),
+            identity::verify(
+                &token,
+                &keys,
+                super::super::CLIENT_ID,
+                "expected-nonce",
+                NOW
+            ),
             Err(AuthorizationError::IdentityRejected(failure)),
             "{header}"
         );
@@ -293,7 +352,13 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     ]}))
     .expect("duplicate JWKS");
     assert_eq!(
-        identity::verify(&good, &duplicate, "oaiapp_test", "expected-nonce", NOW),
+        identity::verify(
+            &good,
+            &duplicate,
+            super::super::CLIENT_ID,
+            "expected-nonce",
+            NOW
+        ),
         Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::KeyId
         ))
@@ -303,7 +368,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         identity::verify(
             &good,
             &jwks(&wrong_key),
-            "oaiapp_test",
+            super::super::CLIENT_ID,
             "expected-nonce",
             NOW
         ),
@@ -316,7 +381,13 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     }))
     .expect("oversized JWKS");
     assert_eq!(
-        identity::verify(&good, &too_many, "oaiapp_test", "expected-nonce", NOW),
+        identity::verify(
+            &good,
+            &too_many,
+            super::super::CLIENT_ID,
+            "expected-nonce",
+            NOW
+        ),
         Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::KeySet
         ))
@@ -417,12 +488,13 @@ async fn issuer(replies: Vec<Reply>) -> (Endpoints, tokio::task::JoinHandle<Vec<
 fn exchange() -> CodeExchange {
     CodeExchange {
         code: "synthetic-code".into(),
-        client_id: "oaiapp_test".into(),
+        client_id: super::super::CLIENT_ID.into(),
         redirect_uri: "http://127.0.0.1:1455/auth/callback".into(),
         verifier: "synthetic-verifier".into(),
         nonce: "synthetic-nonce".into(),
         host_id: uuid::Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
         expected_subject: None,
+        expected_account_id: None,
     }
 }
 
@@ -446,18 +518,15 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
         .expect("test clock")
         .as_secs();
     let mut identity = claims(now, "synthetic-nonce");
-    identity["aud"] = serde_json::json!(["oaiapp_test"]);
-    identity["azp"] = serde_json::json!("oaiapp_test");
+    identity["aud"] = serde_json::json!([super::super::CLIENT_ID]);
+    identity["azp"] = serde_json::json!(super::super::CLIENT_ID);
     let id_token = signed_token(&pair, &identity);
     let replies = vec![
         Reply {
             status: "200 OK",
             content_type: "application/json",
             encoding: None,
-            body: token_reply(
-                &id_token,
-                "openid offline_access resource.invoke chatgpt.tokens.use.direct",
-            ),
+            body: token_reply(&id_token, "openid profile email offline_access"),
             chunked: false,
         },
         Reply {
@@ -471,12 +540,8 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
     let (endpoints, task) = issuer(replies).await;
     let attempt = exchange();
     let host_id = attempt.host_id;
-    let VerifiedSignIn::PlanEnabled(verified) =
-        redeem_at(attempt, endpoints).await.expect("verified grant")
-    else {
-        panic!("complete permission must enable the plan");
-    };
-    assert_eq!(verified.client_id, "oaiapp_test");
+    let verified = redeem_at(attempt, endpoints).await.expect("verified grant");
+    assert_eq!(verified.client_id, super::super::CLIENT_ID);
     assert_eq!(verified.host_id, host_id);
     assert_eq!(verified.subject, "synthetic-subject");
     assert_eq!(verified.id_token, id_token);
@@ -489,7 +554,7 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
         .expect("issuer task");
     assert_eq!(requests.len(), 2);
     let token_request = String::from_utf8(requests[0].clone()).expect("form request");
-    assert!(token_request.starts_with("POST /api/accounts/oauth/token HTTP/1.1\r\n"));
+    assert!(token_request.starts_with("POST /oauth/token HTTP/1.1\r\n"));
     assert!(token_request.contains("content-type: application/x-www-form-urlencoded\r\n"));
     let form = token_request.split("\r\n\r\n").nth(1).expect("form body");
     let fields = url::form_urlencoded::parse(form.as_bytes())
@@ -499,14 +564,13 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
         fields,
         [
             ("grant_type".into(), "authorization_code".into()),
-            ("client_id".into(), "oaiapp_test".into()),
+            ("client_id".into(), super::super::CLIENT_ID.into()),
             ("code".into(), "synthetic-code".into()),
             ("code_verifier".into(), "synthetic-verifier".into()),
             (
                 "redirect_uri".into(),
                 "http://127.0.0.1:1455/auth/callback".into()
             ),
-            ("resource".into(), "https://api.openai.com/v1".into())
         ]
     );
     let jwks_request = String::from_utf8(requests[1].clone()).expect("JWKS request");
@@ -524,13 +588,19 @@ async fn returning_redemption_rejects_a_signed_but_different_account() {
         .expect("test clock")
         .as_secs();
     let id_token = signed_token(&pair, &claims(now, "synthetic-nonce"));
-    for scope in [
-        "openid offline_access resource.invoke chatgpt.tokens.use.direct",
-        "openid offline_access resource.invoke",
-    ] {
-        for (expected_subject, admitted) in [
-            ("synthetic-subject", true),
-            ("different-saved-subject", false),
+    for scope in ["openid profile email offline_access", "openid"] {
+        for (expected_subject, expected_account, failure) in [
+            ("synthetic-subject", "account-one", None),
+            (
+                "different-saved-subject",
+                "account-one",
+                Some(identity::IdentityFailure::SelectedSubject),
+            ),
+            (
+                "synthetic-subject",
+                "account-two",
+                Some(identity::IdentityFailure::AccountClaim),
+            ),
         ] {
             let replies = vec![
                 Reply {
@@ -551,25 +621,15 @@ async fn returning_redemption_rejects_a_signed_but_different_account() {
             let (endpoints, task) = issuer(replies).await;
             let mut selected = exchange();
             selected.expected_subject = Some(expected_subject.into());
+            selected.expected_account_id = Some(expected_account.into());
             let result = redeem_at(selected, endpoints).await;
-            if admitted {
-                let subject = match result.expect("same signed account") {
-                    VerifiedSignIn::PlanEnabled(verified) => {
-                        assert!(scope.contains("chatgpt.tokens.use.direct"));
-                        verified.subject
-                    }
-                    VerifiedSignIn::PlanDisabled(identity) => {
-                        assert!(!scope.contains("chatgpt.tokens.use.direct"));
-                        identity.subject
-                    }
-                };
+            if failure.is_none() {
+                let subject = result.expect("same signed account").subject;
                 assert_eq!(subject, expected_subject);
             } else {
                 assert!(matches!(
                     result,
-                    Err(AuthorizationError::IdentityRejected(
-                        identity::IdentityFailure::SelectedSubject
-                    ))
+                    Err(AuthorizationError::IdentityRejected(cause)) if Some(cause) == failure
                 ));
             }
             let requests = tokio::time::timeout(Duration::from_secs(5), task)
@@ -585,75 +645,29 @@ async fn returning_redemption_rejects_a_signed_but_different_account() {
 }
 
 #[tokio::test]
-async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
+async fn redemption_rejects_invalid_identity_and_failed_responses() {
     let pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("test RSA key");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("test clock")
         .as_secs();
     let id_token = signed_token(&pair, &claims(now, "synthetic-nonce"));
-    for (scope, retain_refresh) in [
-        ("openid offline_access resource.invoke", true),
-        ("openid", false),
-        ("openid chatgpt.tokens.use.direct offline_access", true),
-        ("openid chatgpt.tokens.use.direct resource.invoke", false),
-    ] {
-        let mut reply: Value = serde_json::from_slice(&token_reply(&id_token, scope)).unwrap();
-        if !retain_refresh {
-            reply.as_object_mut().unwrap().remove("refresh_token");
-        }
-        let (endpoints, task) = issuer(vec![
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: None,
-                body: serde_json::to_vec(&reply).unwrap(),
-                chunked: false,
-            },
-            Reply {
-                status: "200 OK",
-                content_type: "application/jwk-set+json",
-                encoding: None,
-                body: jwks(&pair),
-                chunked: false,
-            },
-        ])
-        .await;
-        let VerifiedSignIn::PlanDisabled(identity) = redeem_at(exchange(), endpoints)
-            .await
-            .expect("verified identity must survive absent plan permission")
-        else {
-            panic!("missing permission must not return usable credentials");
-        };
-        assert_eq!(identity.client_id, "oaiapp_test");
-        assert_eq!(identity.host_id, exchange().host_id);
-        assert_eq!(identity.subject, "synthetic-subject");
-        let requests = tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("issuer deadline")
-            .expect("issuer task");
-        assert_eq!(
-            requests.len(),
-            2,
-            "identity must be verified before retention"
-        );
-    }
     let other_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("different signing key");
     for (name, identity, signer, expected) in [
         (
-            "missing-permission nonce mismatch",
+            "nonce mismatch",
             claims(now, "different-nonce"),
             &pair,
             identity::IdentityFailure::Nonce,
         ),
         (
-            "missing-permission expired identity",
+            "expired identity",
             claims(now - 7200, "synthetic-nonce"),
             &pair,
             identity::IdentityFailure::Lifetime,
         ),
         (
-            "missing-permission signature mismatch",
+            "signature mismatch",
             claims(now, "synthetic-nonce"),
             &other_pair,
             identity::IdentityFailure::Signature,
@@ -664,10 +678,7 @@ async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
                 status: "200 OK",
                 content_type: "application/json",
                 encoding: None,
-                body: token_reply(
-                    &signed_token(signer, &identity),
-                    "openid offline_access resource.invoke",
-                ),
+                body: token_reply(&signed_token(signer, &identity), "openid"),
                 chunked: false,
             },
             Reply {
@@ -691,7 +702,7 @@ async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
     }
     let mut wrong_type: Value = serde_json::from_slice(&token_reply(
         &id_token,
-        "openid offline_access resource.invoke chatgpt.tokens.use.direct",
+        "openid profile email offline_access",
     ))
     .expect("test token reply");
     wrong_type["token_type"] = json!("Basic");
@@ -769,12 +780,12 @@ async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
             AuthorizationError::ExchangeFailed,
         ),
         (
-            "duplicate scopes without plan permission",
+            "oversized scope",
             Reply {
                 status: "200 OK",
                 content_type: "application/json",
                 encoding: None,
-                body: token_reply(&id_token, "openid openid"),
+                body: token_reply(&id_token, &"x".repeat(super::super::MAX_SCOPE_BYTES + 1)),
                 chunked: false,
             },
             AuthorizationError::ExchangeFailed,
@@ -785,10 +796,7 @@ async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
                 status: "200 OK",
                 content_type: "text/plain",
                 encoding: None,
-                body: token_reply(
-                    &id_token,
-                    "openid offline_access resource.invoke chatgpt.tokens.use.direct",
-                ),
+                body: token_reply(&id_token, "openid profile email offline_access"),
                 chunked: false,
             },
             AuthorizationError::ExchangeFailed,
@@ -810,10 +818,7 @@ async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
                 status: "200 OK",
                 content_type: "application/json",
                 encoding: Some("gzip"),
-                body: token_reply(
-                    &id_token,
-                    "openid offline_access resource.invoke chatgpt.tokens.use.direct",
-                ),
+                body: token_reply(&id_token, "openid profile email offline_access"),
                 chunked: false,
             },
             AuthorizationError::ExchangeFailed,
@@ -852,7 +857,22 @@ async fn redemption_keeps_disabled_identity_and_rejects_failed_responses() {
             AuthorizationError::ExchangeFailed,
         ),
     ];
-    for (name, token_reply, expected) in scenarios {
+    let missing_fields = ["expires_in", "id_token"].map(|field| {
+        let mut reply: Value = serde_json::from_slice(&token_reply(&id_token, "openid")).unwrap();
+        reply.as_object_mut().unwrap().remove(field);
+        (
+            field,
+            Reply {
+                status: "200 OK",
+                content_type: "application/json",
+                encoding: None,
+                body: serde_json::to_vec(&reply).unwrap(),
+                chunked: false,
+            },
+            AuthorizationError::ExchangeFailed,
+        )
+    });
+    for (name, token_reply, expected) in scenarios.into_iter().chain(missing_fields) {
         let (endpoints, task) = issuer(vec![token_reply]).await;
         let result = redeem_at(exchange(), endpoints).await;
         assert!(matches!(result, Err(error) if error == expected), "{name}");
@@ -871,7 +891,7 @@ async fn redemption_rejects_untrusted_jwks_transport_before_identity_use() {
         .expect("test clock")
         .as_secs();
     let id_token = signed_token(&pair, &claims(now, "synthetic-nonce"));
-    let scope = "openid offline_access resource.invoke chatgpt.tokens.use.direct";
+    let scope = "openid profile email offline_access";
     let scenarios = [
         (
             "status",
@@ -955,9 +975,10 @@ async fn redemption_rejects_untrusted_jwks_transport_before_identity_use() {
 
 fn saved_credentials() -> VerifiedCredentials {
     VerifiedCredentials {
-        client_id: "oaiapp_test".into(),
+        client_id: super::super::CLIENT_ID.into(),
         host_id: uuid::Uuid::now_v7(),
         subject: "synthetic-subject".into(),
+        chatgpt_account_id: None,
         id_token: "synthetic-signed-id-hint".into(),
         access_token: "synthetic-old-access".into(),
         refresh_token: "synthetic-old-refresh".into(),
@@ -979,7 +1000,7 @@ fn refresh_reply(access_token: &str, refresh_token: &str, scope: &str) -> Vec<u8
 #[tokio::test]
 async fn refresh_rotates_only_the_selected_registration_with_exact_form() {
     let original = saved_credentials();
-    let scope = "openid offline_access resource.invoke chatgpt.tokens.use.direct";
+    let scope = "openid profile email offline_access";
     let (endpoints, task) = issuer(vec![Reply {
         status: "200 OK",
         content_type: "application/json",
@@ -1009,7 +1030,7 @@ async fn refresh_rotates_only_the_selected_registration_with_exact_form() {
         .expect("issuer task");
     assert_eq!(requests.len(), 1);
     let request = String::from_utf8(requests[0].clone()).expect("form request");
-    assert!(request.starts_with("POST /api/accounts/oauth/token HTTP/1.1\r\n"));
+    assert!(request.starts_with("POST /oauth/token HTTP/1.1\r\n"));
     let form = request.split("\r\n\r\n").nth(1).expect("form body");
     let fields = url::form_urlencoded::parse(form.as_bytes())
         .into_owned()
@@ -1018,9 +1039,8 @@ async fn refresh_rotates_only_the_selected_registration_with_exact_form() {
         fields,
         [
             ("grant_type".into(), "refresh_token".into()),
-            ("client_id".into(), "oaiapp_test".into()),
+            ("client_id".into(), super::super::CLIENT_ID.into()),
             ("refresh_token".into(), "synthetic-old-refresh".into()),
-            ("resource".into(), "https://api.openai.com/v1".into()),
         ]
     );
     assert!(!request.contains("synthetic-old-access"));
@@ -1045,7 +1065,7 @@ fn absolute_access_expiry_is_checked_from_request_start() {
 #[tokio::test]
 async fn refresh_rejects_invalid_rotation_without_changing_prior_credentials() {
     let original = saved_credentials();
-    let scope = "openid offline_access resource.invoke chatgpt.tokens.use.direct";
+    let scope = "openid profile email offline_access";
     let mut wrong_type: Value = serde_json::from_slice(&refresh_reply(
         "synthetic-new-access",
         "synthetic-new-refresh",
@@ -1055,19 +1075,24 @@ async fn refresh_rejects_invalid_rotation_without_changing_prior_credentials() {
     wrong_type["token_type"] = json!("Basic");
     for (name, reply, expected) in [
         (
-            "permission missing",
+            "invalid expiry",
             Reply {
                 status: "200 OK",
                 content_type: "application/json",
                 encoding: None,
-                body: refresh_reply(
-                    "synthetic-new-access",
-                    "synthetic-new-refresh",
-                    "openid offline_access resource.invoke",
-                ),
+                body: {
+                    let mut reply: Value = serde_json::from_slice(&refresh_reply(
+                        "synthetic-new-access",
+                        "synthetic-new-refresh",
+                        "openid",
+                    ))
+                    .unwrap();
+                    reply["expires_in"] = 0.into();
+                    serde_json::to_vec(&reply).unwrap()
+                },
                 chunked: false,
             },
-            AuthorizationError::PermissionMissing,
+            AuthorizationError::ExchangeFailed,
         ),
         (
             "wrong token type",
@@ -1257,7 +1282,7 @@ async fn refresh_form_accepts_the_longest_admitted_escaped_token() {
         body: refresh_reply(
             "synthetic-new-access",
             "synthetic-new-refresh",
-            "openid offline_access resource.invoke chatgpt.tokens.use.direct",
+            "openid profile email offline_access",
         ),
         chunked: false,
     }])
