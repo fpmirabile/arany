@@ -2,7 +2,7 @@ use super::*;
 
 const JOURNEY_TIMEOUT: Duration = Duration::from_secs(180);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Ending {
     Success,
     Failed,
@@ -27,6 +27,23 @@ async fn prefix_binds_guard_host_approval_failure_drift_and_closed_replay() {
 
 fn prefix_fixture(root: &Path, ending: Ending, compose: bool) -> CommandFixture {
     let mut fixture = CommandFixture::new(root, None);
+    let path = [
+        fixture.executable.parent().unwrap().to_str().unwrap(),
+        "/usr/bin",
+        "/bin",
+    ];
+    let canonical = serde_json::to_vec(&json!([3, "process", null, path, [], []])).unwrap();
+    fixture
+        .state
+        .record(arany::RecordKind::CommandEnvironment)
+        .replace(
+            &serde_json::to_vec(&json!({
+                "version":3,"source":"process","shell":null,"captured_at":0,"path":path,
+                "names":[],"excluded":[],"sha256":hash(&canonical)
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     let rewrite = fixture.executable.with_file_name("rewrite");
     if compose {
         std::fs::copy(&fixture.executable, &rewrite).unwrap();
@@ -163,11 +180,18 @@ async fn prefix_journey(host: bool, ending: Ending, compose: bool) {
         ..Default::default()
     };
     let approve = approve_prefix(&mut inbox, &fixture, &original, ending);
-    let (outcome, ()) = tokio::time::timeout(JOURNEY_TIMEOUT, async {
+    let (outcome, approved) = tokio::time::timeout(JOURNEY_TIMEOUT, async {
         tokio::join!(run_with(&engine, &provider, input, controls), approve)
     })
     .await
     .unwrap();
+    assert!(
+        approved,
+        "prefix approval missing: host={host} ending={ending:?} compose={compose}; outcome={:?}",
+        outcome
+            .as_ref()
+            .map(|outcome| (&outcome.run.status, &outcome.run.failure))
+    );
     if matches!(ending, Ending::Unknown) {
         assert!(matches!(
             outcome,
@@ -186,8 +210,10 @@ async fn approve_prefix(
     fixture: &CommandFixture,
     original: &arany::ToolCall,
     ending: Ending,
-) {
-    let approval = inbox.next().await.unwrap();
+) -> bool {
+    let Some(approval) = inbox.next().await else {
+        return false;
+    };
     let wrap = approval.intent.wrap.as_ref().unwrap();
     assert_eq!(&wrap.original, original);
     assert_eq!(wrap.stage, arany::WrapStage::Wrapped);
@@ -199,6 +225,7 @@ async fn approve_prefix(
         arany::FaultPlan::lose_guard_receipt(approval.intent.id);
     }
     approval.decide(true);
+    true
 }
 
 fn prefix_provider(
