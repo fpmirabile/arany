@@ -1,5 +1,9 @@
 use super::*;
+use arany::test_support::process::BoundedOutput;
 use std::os::unix::fs::MetadataExt;
+
+const FIXTURE_COMPILE_TIMEOUT: Duration = Duration::from_secs(30);
+const FIXTURE_COMPILER_OUTPUT_BYTES: usize = 4096;
 
 struct CommandFixture {
     state: StateRoot,
@@ -14,8 +18,7 @@ impl CommandFixture {
         let directory = root.join("programs");
         std::fs::create_dir(&directory).unwrap();
         let executable = directory.join("filter");
-        std::fs::write(&executable, hook_source(failure)).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        compile_hook(root, &executable, failure);
         let state = StateRoot::admit(&root.join("state")).unwrap();
         let folder = workspace.metadata().unwrap();
         let programs = directory.metadata().unwrap();
@@ -55,10 +58,13 @@ impl CommandFixture {
             .probe_command_tool(session, &self.workspace, &self.tool, RunCancellation::new())
             .await
             .unwrap();
-        assert!(matches!(
-            probe.outcome.unwrap().result,
-            arany::permissions::HookResult::Narrowed { .. }
-        ));
+        let outcome = probe.outcome.unwrap();
+        assert!(
+            matches!(outcome.result, arany::permissions::HookResult::Narrowed { .. }),
+            "probe: {:?}; {}",
+            outcome.result,
+            tool_report(Some(&outcome.observation))
+        );
         assert!(!arany::CommandTools::load(&self.state).unwrap().entries()[0].enabled);
         let mut enabled = self.tool.clone();
         enabled.last_probe = Some(arany::RewriteStage::Rewritten);
@@ -237,15 +243,57 @@ fn command(host: bool, script: &str) -> arany::ToolCall {
     }
 }
 
+fn compile_hook(root: &Path, executable: &Path, failure: Option<arany::RewriteStage>) {
+    let source = root.join("filter.c");
+    std::fs::write(&source, hook_source(failure)).unwrap();
+    #[cfg(target_os = "macos")]
+    let mut compiler = {
+        let mut command = std::process::Command::new("/usr/bin/xcrun");
+        command.args(["--sdk", "macosx", "clang"]);
+        command
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut compiler = std::process::Command::new("/usr/bin/cc");
+    let output = compiler
+        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(&source)
+        .arg("-o")
+        .arg(executable)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root)
+        .env("TMPDIR", root)
+        .current_dir(root)
+        .bounded_output_for(FIXTURE_COMPILE_TIMEOUT, FIXTURE_COMPILER_OUTPUT_BYTES)
+        .unwrap();
+    assert!(output.status.success(), "fixture compilation: {output:?}");
+}
+
 fn hook_source(failure: Option<arany::RewriteStage>) -> String {
-    let rewrite = "printf '%s\\n' '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"printf rewritten\"}}}'";
+    let rewrite = r#"puts("{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\",\"updatedInput\":{\"command\":\"printf rewritten\"}}}")"#;
     let payload = match failure {
-        Some(arany::RewriteStage::NonZeroExit) => "exit 2",
-        Some(arany::RewriteStage::InvalidOutput) => "printf invalid",
+        Some(arany::RewriteStage::NonZeroExit) => "return 2",
+        Some(arany::RewriteStage::InvalidOutput) => "puts(\"invalid\")",
         None => rewrite,
         Some(_) => unreachable!("only confirmed failures are configured"),
     };
     format!(
-        "#!/bin/sh\nIFS= read -r input || :\ncase \"$input\" in *'cargo test'*) {rewrite}; exit 0 ;; esac\n{payload}\n"
+        r#"#include <stdio.h>
+#include <string.h>
+
+int main(void) {{
+    char input[{input_bytes}];
+    size_t size = fread(input, 1, sizeof(input) - 1, stdin);
+    if (ferror(stdin) || !feof(stdin)) return 3;
+    input[size] = '\0';
+    if (strstr(input, "cargo test")) {{
+        {rewrite};
+        return 0;
+    }}
+    {payload};
+    return 0;
+}}
+"#,
+        input_bytes = arany::permissions::MAX_HOOK_INPUT_BYTES + 2,
     )
 }
