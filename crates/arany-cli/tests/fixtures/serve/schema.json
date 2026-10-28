@@ -312,6 +312,7 @@
         },
         "kind": {
           "enum": [
+            "HostEnvironmentCapture",
             "SessionStarted",
             "SessionDefaultChanged",
             "SessionForked",

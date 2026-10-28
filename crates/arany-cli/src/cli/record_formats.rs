@@ -11,7 +11,7 @@ const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserI
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.
-const FIXTURES: [Fixture<'static>; 23] = [
+const FIXTURES: [Fixture<'static>; 25] = [
     (
         RecordKind::ToolsConfig,
         1,
@@ -33,6 +33,18 @@ const FIXTURES: [Fixture<'static>; 23] = [
     (
         RecordKind::CommandEnvironment,
         1,
+        COMMAND_ENVIRONMENT_V1,
+        COMMAND_ENVIRONMENT_V2,
+    ),
+    (
+        RecordKind::CommandEnvironment,
+        2,
+        COMMAND_ENVIRONMENT_V2,
+        COMMAND_ENVIRONMENT,
+    ),
+    (
+        RecordKind::CommandEnvironment,
+        3,
         COMMAND_ENVIRONMENT,
         COMMAND_ENVIRONMENT,
     ),
@@ -76,7 +88,10 @@ const FIXTURES: [Fixture<'static>; 23] = [
     (RecordKind::ProviderRouting, 1, ROUTING, ROUTING_V2),
     (RecordKind::ProviderRouting, 2, ROUTING_V2, ROUTING_V2),
 ];
-const COMMAND_ENVIRONMENT: &str = r#"{"version":1,"source":"process","captured_at":0,"path":[],"names":[],"excluded":[],"sha256":"5fb8d18f216b305631b7e04584e2db972974baaa85b6448a9120c4e899730833"}"#;
+const COMMAND_ENVIRONMENT_V1_STABLE: &str = r#"{"version":1,"source":"process","captured_at":0,"path":[],"names":[],"excluded":[],"sha256":"5fb8d18f216b305631b7e04584e2db972974baaa85b6448a9120c4e899730833"}"#;
+const COMMAND_ENVIRONMENT_V1: &str = r#"{"version":1,"source":"process","captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"93ffd086ef94ffa935cc4ad55f5ef67a0dda50913d60bbe61c424572733c8b99"}"#;
+const COMMAND_ENVIRONMENT_V2: &str = r#"{"version":2,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"b543544f6d20cffccddb8cb997234ccb594dbeafb96c632be1bb0fe4b01207a2"}"#;
+const COMMAND_ENVIRONMENT: &str = r#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"f9aa85256800d2c10b3d044c2e5005c385f5ef42a543e0182c0a1e2366c4b6b4"}"#;
 const MCP_OAUTH: &str = r#"{"schema":1,"servers":{"remote":{"url":"https://mcp.example.com/mcp","client_id":"client","token_endpoint":"https://auth.example.com/token","revocation_endpoint":null,"access_token":"token","refresh_token":null,"expires_at":null,"renewal":"ready","claim":null}}}"#;
 const PROFILES: &str = r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const PROFILES_V2: &str = r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
@@ -208,6 +223,23 @@ fn uncovered(
         }
     }
     problems
+}
+
+#[test]
+fn timestamp_independent_version_one_records_migrate() {
+    let formats = formats();
+    let format = formats
+        .iter()
+        .find(|format| format.kind == RecordKind::CommandEnvironment)
+        .unwrap();
+    let upgraded = format
+        .upgrade(COMMAND_ENVIRONMENT_V1_STABLE.as_bytes())
+        .unwrap();
+    let record: Value = serde_json::from_slice(&upgraded).unwrap();
+    assert_eq!(record["version"], format.current);
+    assert_eq!(record["path"], serde_json::json!([]));
+    assert_eq!(record["names"], serde_json::json!([]));
+    assert!(format.accepts_current(&upgraded));
 }
 
 #[test]

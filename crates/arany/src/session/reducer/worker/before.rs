@@ -387,6 +387,7 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::SessionForked { .. }
         | Event::ContextCompacted { .. }
         | Event::SessionRenamed { .. }
+        | Event::HostEnvironmentCapture { .. }
         | Event::ProviderSetupEditStarted { .. }
         | Event::ProviderSetupEditFinished { .. }
         | Event::GoalStarted { .. }
