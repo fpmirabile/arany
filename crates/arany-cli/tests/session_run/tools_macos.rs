@@ -483,6 +483,7 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
+    super::tools_git::latency::forward(&output.stdout);
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if line.starts_with("offline Cargo ")
             || (registry.is_some() && line.starts_with("repository "))

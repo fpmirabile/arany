@@ -221,7 +221,9 @@ async fn native_git_switch_helper() {
     } = write_fixture(Path::new(&root), "git-switch");
     let leftovers = unit_leftovers();
     prepare(&workspace, &home);
+    let recorder = arany::test_support::engine::record_tool_latency(&engine);
     let outcomes = successful_switches(&engine, &workspace, &home).await;
+    let samples = recorder.samples().unwrap();
     assert_no_new_units(&leftovers, "successful switches leave no unit");
     let mut rows = conflicts(&engine, &workspace, &home, &state_path).await;
     rows.extend(recovery::switch_drift(&engine, &workspace, &state_path).await);
@@ -238,6 +240,7 @@ async fn native_git_switch_helper() {
             .unwrap()
             .unwrap();
         assert_eq!(view.runs.last().unwrap(), &outcome.run);
+        latency::report(&samples, &events);
         let started = events.iter().filter(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::GitSwitch { .. }))).count();
         let finished = events.iter().filter(|event| matches!(&event.event, arany::Event::ToolFinished { observation, .. } if matches!(observation.intent.call, ToolCall::GitSwitch { .. }))).count();
         assert_eq!(
