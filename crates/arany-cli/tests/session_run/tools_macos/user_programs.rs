@@ -34,7 +34,8 @@ fn guarded_user_programs_load_homebrew_libraries_and_select_rustup_toolchains() 
 }
 
 fn compile_fixture(root: &Path, args: &[&std::ffi::OsStr]) {
-    let output = std::process::Command::new("/Library/Developer/CommandLineTools/usr/bin/clang")
+    let output = std::process::Command::new("/usr/bin/xcrun")
+        .args(["--sdk", "macosx", "clang"])
         .args(args)
         .env_clear()
         .env("HOME", root.join("home"))
