@@ -491,7 +491,7 @@ Test: [`crates/arany-cli/tests/guard_runs.rs::scripted_runs_snapshot_workspace_a
 | Trigger | Introduce then |
 |---|---|
 | Local tool workloads exceed the proven base | Reviewed runtime/cache/artifact adapters, bounded larger profiles and actual workload evidence |
-| Remote MCP or network effects are needed | Exact protocol/auth/data-disclosure grants and enforcing transport adapters |
+| Interactive or background jobs need network effects | Exact protocol/auth/data-disclosure grants and enforcing transport adapters |
 | Children need nested delegation | Bounded recursive supervision and depth budgets; beta remains flat |
 | Agents write concurrently | Isolated Workspace views and one integration owner |
 | Work needs dependencies/ownership transfer | Assignment DAG, attempts, leases, fencing |
