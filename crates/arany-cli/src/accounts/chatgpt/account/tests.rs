@@ -327,18 +327,12 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     let id = save_keyring_at_with(
         &state,
         &workspace,
-        credentials.clone(),
-        consent.clone(),
+        credentials,
+        consent,
         None,
         |_, _| Ok(()),
     )
     .unwrap();
-    let token = TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
-        slot: Some(account_keyring_slot("oaiapp_keyring_signout", id)),
-        credentials,
-        consent,
-    };
     let expected_index = state
         .record(RecordKind::ChatgptAccounts)
         .read()
@@ -352,12 +346,7 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
             expected_index: Some(&expected_index),
         },
         SignOutActions {
-            read_keyring: |entry: &AccountEntry| {
-                assert_eq!(entry.client_id, token.credentials.client_id);
-                assert_eq!(entry.subject, token.credentials.subject);
-                assert_eq!(entry.host_id, token.credentials.host_id);
-                Ok(token.clone())
-            },
+            read_keyring: |_: &AccountEntry| panic!("local removal must not load token"),
             revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
             delete_keyring: |slot: &str| {
                 assert_eq!(slot, account_keyring_slot("oaiapp_keyring_signout", id));
@@ -392,6 +381,10 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     .unwrap();
     assert!(!cleanup.remote_confirmed);
     assert!(cleanup.local_cleared);
+    let reopened = StateRoot::open_existing(state.path()).unwrap();
+    let index = AccountIndex::read(&reopened).unwrap();
+    assert!(index.accounts.is_empty());
+    assert!(index.selected.is_none());
 }
 
 #[test]

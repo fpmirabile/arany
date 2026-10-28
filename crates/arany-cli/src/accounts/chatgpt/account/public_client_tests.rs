@@ -34,62 +34,66 @@ fn root() -> (tempfile::TempDir, PathBuf, StateRoot) {
 
 #[test]
 fn public_client_accounts_keep_separate_slots_and_logout_deletes_only_the_selected_slot() {
-    let (_temp, workspace, state) = root();
-    let records = RefCell::new(HashMap::new());
-    let mut ids = Vec::new();
-    for account_id in ["remote-one", "remote-two"] {
-        let credentials = fixture(account_id);
-        let consent = receipt(&credentials, AccountStorage::Keyring);
-        let id = save_keyring_at_with(
+    for disconnected in [false, true] {
+        let (_temp, workspace, state) = root();
+        let records = RefCell::new(HashMap::new());
+        let mut ids = Vec::new();
+        for account_id in ["remote-one", "remote-two"] {
+            let credentials = fixture(account_id);
+            let consent = receipt(&credentials, AccountStorage::Keyring);
+            let id = save_keyring_at_with(
+                &state,
+                &workspace,
+                credentials,
+                consent,
+                None,
+                |slot, record| {
+                    records
+                        .borrow_mut()
+                        .insert(slot.to_owned(), record.as_bytes().to_vec());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1]);
+        assert!(matches!(
+            refuse_backend_route_at(&state, &workspace, ids[1]),
+            Err(AuthorizationError::BackendRouteNotAdmitted)
+        ));
+        let mut index = AccountIndex::read(&state).unwrap();
+        index.accounts[1].disconnected = disconnected;
+        index.write(&state).unwrap();
+        let first_slot = index.accounts[0].keyring_slot.clone().unwrap();
+        let second_slot = index.accounts[1].keyring_slot.clone().unwrap();
+        assert_ne!(first_slot, second_slot);
+        let first_bytes = records.borrow()[&first_slot].clone();
+        let result = sign_out_at_with(
             &state,
             &workspace,
-            credentials,
-            consent,
-            None,
-            |slot, record| {
-                records
-                    .borrow_mut()
-                    .insert(slot.to_owned(), record.as_bytes().to_vec());
+            |entry| {
+                admit_keyring_record(
+                    entry,
+                    &records.borrow()[entry.keyring_slot.as_ref().unwrap()],
+                )
+            },
+            |_| Ok(()),
+            |slot| {
+                assert_eq!(slot, second_slot);
+                records.borrow_mut().remove(slot);
                 Ok(())
             },
         )
         .unwrap();
-        ids.push(id);
+        assert!(result.remote_confirmed && result.local_cleared);
+        assert!(records.borrow()[&first_slot] == first_bytes);
+        assert!(!records.borrow().contains_key(&second_slot));
+        let reopened = StateRoot::open_existing(state.path()).unwrap();
+        let index = AccountIndex::read(&reopened).unwrap();
+        assert!(!index.accounts[0].disconnected);
+        assert!(index.accounts[1].disconnected);
     }
-    assert_ne!(ids[0], ids[1]);
-    assert!(matches!(
-        refuse_backend_route_at(&state, &workspace, ids[1]),
-        Err(AuthorizationError::BackendRouteNotAdmitted)
-    ));
-    let index = AccountIndex::read(&state).unwrap();
-    let first_slot = index.accounts[0].keyring_slot.clone().unwrap();
-    let second_slot = index.accounts[1].keyring_slot.clone().unwrap();
-    assert_ne!(first_slot, second_slot);
-    let first_bytes = records.borrow()[&first_slot].clone();
-    let result = sign_out_at_with(
-        &state,
-        &workspace,
-        |entry| {
-            admit_keyring_record(
-                entry,
-                &records.borrow()[entry.keyring_slot.as_ref().unwrap()],
-            )
-        },
-        |_| Ok(()),
-        |slot| {
-            assert_eq!(slot, second_slot);
-            records.borrow_mut().remove(slot);
-            Ok(())
-        },
-    )
-    .unwrap();
-    assert!(result.remote_confirmed && result.local_cleared);
-    assert!(records.borrow()[&first_slot] == first_bytes);
-    assert!(!records.borrow().contains_key(&second_slot));
-    let reopened = StateRoot::open_existing(state.path()).unwrap();
-    let index = AccountIndex::read(&reopened).unwrap();
-    assert!(!index.accounts[0].disconnected);
-    assert!(index.accounts[1].disconnected);
 }
 
 #[test]
