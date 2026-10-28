@@ -1421,6 +1421,7 @@ mod tests {
         _dir: tempfile::TempDir,
         workspace: std::path::PathBuf,
         program: Program,
+        runnable: Program,
         identity: WorkspaceIdentity,
         environment: CommandEnvironment,
     }
@@ -1438,24 +1439,36 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let workspace = root.join("work");
         std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        let system_shell = std::fs::canonicalize("/bin/sh").unwrap();
         let shell = root.join("sh");
-        std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &shell).unwrap();
+        std::fs::copy(&system_shell, &shell).unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let program = Program {
-            name: "sh".into(),
-            executable: shell.to_str().unwrap().into(),
-            sha256: hex_digest(&std::fs::read(&shell).unwrap()),
-            interpreter: true,
-            inputs: Vec::new(),
-        };
+        let program = shell_program(&shell);
+        // macOS launch constraints kill a copied shell, so macOS runs the system one.
+        let runnable = shell_program(if cfg!(target_os = "macos") {
+            &system_shell
+        } else {
+            &shell
+        });
         let identity = super::super::workspace_identity(&workspace).unwrap();
         Fixture {
             launcher: std::env::current_exe().unwrap(),
             _dir: dir,
             workspace,
             program,
+            runnable,
             identity,
             environment: CommandEnvironment::for_path("/usr/bin:/bin"),
+        }
+    }
+
+    fn shell_program(shell: &Path) -> Program {
+        Program {
+            name: "sh".into(),
+            executable: shell.to_str().unwrap().into(),
+            sha256: hex_digest(&std::fs::read(shell).unwrap()),
+            interpreter: true,
+            inputs: Vec::new(),
         }
     }
 
@@ -1463,7 +1476,7 @@ mod tests {
         fn request<'a>(&'a self, args: &'a [String], cwd: &'a str, runtime_ms: u32) -> Request<'a> {
             Request {
                 launcher: &self.launcher,
-                program: &self.program,
+                program: &self.runnable,
                 host: None,
                 environment: &self.environment,
                 args,
@@ -1624,7 +1637,7 @@ mod tests {
     #[tokio::test]
     async fn unguarded_run_refuses_changed_pinned_executable_before_spawn() {
         let mut fixture = fixture();
-        fixture.program.sha256 = "0".repeat(64);
+        fixture.runnable.sha256 = "0".repeat(64);
         let outcome = fixture.sh("touch made", "", 10_000).await;
         assert_eq!(outcome.disposition, ToolDisposition::Failed);
         assert!(!outcome.spawned);
