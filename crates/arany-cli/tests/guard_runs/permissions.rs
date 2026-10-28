@@ -17,18 +17,6 @@ mod modes;
 #[path = "permissions/rules.rs"]
 mod rules;
 
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn definition() -> Value {
     json!({"name":"echo","inputSchema":{"type":"object","properties":{},"additionalProperties":false}})
 }
@@ -278,41 +266,17 @@ impl Fixture {
     }
 
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {
-        self.engine.close().await.unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&self.state).unwrap()).unwrap();
-        let events = store.load_session(session).await.unwrap();
-        let view = SessionView::replay(session, &events).unwrap().unwrap();
-        assert_action_bounds(&events, false, false);
-        store.close().await.unwrap();
-        (events, view)
-    }
-}
-
-fn budget() -> arany::GoalBudget {
-    arany::GoalBudget {
-        max_provider_calls: Some(16),
-        max_tokens: None,
-        max_active_ms: Some(30 * 60 * 1000),
-        max_runs: 1,
+        reopen_closed(self.engine, &self.state, session).await
     }
 }
 
 fn plan(call: &arany::ToolCall) -> arany::GoalPlanContract {
     arany::GoalPlanContract {
-        mission: "Complete the bounded Tool action".into(),
-        paths: vec!["notes".into()],
-        commands: vec!["sh".into()],
-        resource_class: arany::ToolResourceClass::Default,
-        command_timeout_ms: None,
-        skills: vec![],
         mcp_tools: vec![arany::GoalMcpTool {
             server: "server".into(),
             tool: "echo".into(),
         }],
-        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-            call: Box::new(call.clone()),
-        },
-        budget: budget(),
+        ..super::plan(call)
     }
 }
 
