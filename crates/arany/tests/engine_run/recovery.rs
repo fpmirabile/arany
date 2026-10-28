@@ -2,6 +2,7 @@ use super::goals::*;
 use super::*;
 use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
+use arany::test_support::routing::{api_sample, plan_sample};
 
 #[tokio::test]
 async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths() {
@@ -137,7 +138,7 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
             wire_provenance: None,
         })
     };
-    let provider = ScriptedProvider::new(outcomes).with_compactions(
+    let mut provider = ScriptedProvider::new(outcomes).with_compactions(
         std::iter::once(Ok(CompactionResponse {
             summary: String::new(),
             response_id: None,
@@ -151,6 +152,8 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
         .chain((1..READS).map(|_| good_compaction()))
         .collect(),
     );
+    let samples = provider.compact_rate_limits.get_mut().unwrap();
+    samples.extend((0..READS).map(|index| Some(api_sample(1000 + index as i64))));
     let requests = Arc::clone(&provider.requests);
     let compaction_requests = Arc::clone(&provider.compact_requests);
     let provider = Arc::new(provider);
@@ -372,6 +375,13 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
     let view = SessionView::replay(outcome.session_id, &events)
         .expect("closed replay validates active prefixes")
         .expect("Session");
+    for (index, (_, record)) in compacted.iter().enumerate() {
+        assert_eq!(record.rate_limits, Some(api_sample(1000 + index as i64)));
+    }
+    let group = &view.usage.api_limits[0];
+    assert_eq!(group.role, arany::ProviderRole::Compaction);
+    let latest = api_sample(1000 + (compacted.len() - 1) as i64);
+    assert_eq!(group.rows, latest.api.unwrap().rows);
     assert_eq!(
         view.usage
             .groups
@@ -1477,6 +1487,16 @@ async fn cancellation_after_clearing_refuses_compaction_before_reservation() {
 
 #[tokio::test]
 async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
+    for (sample, append_failure) in [
+        (plan_sample(1234), false),
+        (api_sample(1234), false),
+        (api_sample(1234), true),
+    ] {
+        interrupted_compaction_sample(sample, append_failure).await;
+    }
+}
+
+async fn interrupted_compaction_sample(sample: arany::RateLimits, append_failure: bool) {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
@@ -1484,13 +1504,24 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     let mut failing = ScriptedProvider::new(vec![])
         .with_chatgpt_account(uuid::Uuid::now_v7(), [1; 32])
         .with_profile("chatgpt", "compact-primary");
-    failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    if sample.api.is_some() {
+        failing.identity =
+            arany::ProviderIdentity::new("openai", "compact-primary", arany::Provenance::native());
+    }
+    let error = if append_failure {
+        ProviderError::InvalidOutcome
+    } else {
+        ProviderError::RemoteHttp(503)
+    };
+    failing.compact_responses = Mutex::new(vec![Err(error)].into());
     failing
         .compact_rate_limits
         .get_mut()
         .unwrap()
-        .push_back(Some(arany::test_support::routing::plan_sample(1234)));
-    failing.cancel_at_compaction = Some(cancellation.clone());
+        .push_back(Some(sample.clone()));
+    if !append_failure {
+        failing.cancel_at_compaction = Some(cancellation.clone());
+    }
     let failing = Arc::new(failing);
     let fallback =
         Arc::new(ScriptedProvider::new(vec![]).with_profile("openai", "compact-fallback"));
@@ -1504,6 +1535,17 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     );
     let mut input = request(&workspace, "Inspect the bounded file in pages");
     input.include_paths.clear();
+    let session = engine
+        .create_session(workspace.clone(), None)
+        .await
+        .unwrap();
+    input.session_id = Some(session);
+    input.title = None;
+    if append_failure {
+        arany::FaultPlan::fail_goal_append(session, |event| {
+            matches!(event, Event::GoalContextCompacted { .. })
+        });
+    }
     input.goal.budget = Some(arany::GoalBudget {
         max_provider_calls: None,
         max_tokens: None,
@@ -1520,29 +1562,41 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
             ..Default::default()
         },
     )
-    .await
-    .expect("cancelled Run");
-    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    .await;
+    if append_failure {
+        assert!(outcome.is_err());
+    } else {
+        assert_eq!(outcome.unwrap().run.status, RunStatus::Cancelled);
+    }
     engine.close().await.expect("engine shutdown");
 
-    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let (events, view) = replayed(&state_path, session).await;
     let run = &view.runs[0];
     assert!(
         run.provider_fallbacks.is_empty() && run.provider_retries.is_empty(),
         "a cancelled compaction call starts no further attempt"
     );
-    let record = events
-        .iter()
-        .find_map(|event| match &event.event {
-            Event::GoalContextCompacted { record, .. } => Some(record),
-            _ => None,
-        })
-        .expect("compaction record");
+    let record = events.iter().find_map(|event| match &event.event {
+        Event::GoalContextCompacted { record, .. } => Some(record),
+        _ => None,
+    });
+    if append_failure {
+        assert!(view.usage.api_limits.is_empty());
+        assert!(record.is_none());
+        assert!(fallback.compact_requests.lock().unwrap().is_empty());
+        assert_eq!(failing.compact_requests.lock().unwrap().len(), 1);
+        return;
+    }
+    let record = record.expect("compaction record");
     assert_eq!(record.model, "compact-primary");
-    assert_eq!(
-        record.rate_limits,
-        Some(arany::test_support::routing::plan_sample(1234))
-    );
+    assert_eq!(record.rate_limits.as_ref(), Some(&sample));
+    if let Some(api) = sample.api {
+        assert_eq!(
+            view.usage.api_limits[0].role,
+            arany::ProviderRole::Compaction
+        );
+        assert_eq!(view.usage.api_limits[0].rows, api.rows);
+    }
     assert!(matches!(
         record.status,
         arany::CompactionStatus::Failed {

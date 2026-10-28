@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
-    let page = "Session totals\nInput: 12,340 known; some calls unreported\nCache write (included in input): unknown (not reported)\nChatGPT weekly: unknown (not reported)\nGroups 1-1 of 1\n";
+    let page = "Session totals\nInput: 12,340 known; some calls unreported\nCache write (included in input): unknown (not reported)\nChatGPT weekly: unknown (not reported)\nAPI rate limits\nRole: compaction\nRequests\nLimit: 100\nRemaining: 0\nGroups 1-1 of 1\n";
     for width in [80, 50, 40, 16] {
         let lines = usage_lines(page, width);
         assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
@@ -11,6 +11,8 @@ fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
             "Session totals",
             "some calls unreported",
             "unknown (not reported)",
+            "Role: compaction",
+            "Remaining: 0",
         ] {
             assert!(joined.contains(phrase));
         }
