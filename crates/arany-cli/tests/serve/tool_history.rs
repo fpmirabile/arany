@@ -5,6 +5,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     use arany::{CacheUpdate, ToolCall, ToolDisposition, ToolObservation};
     let intent = arany::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -18,6 +19,8 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             program: "check".into(),
             args: vec!["--check".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         limits: arany::ToolLimits::default(),
         use_count: 1,

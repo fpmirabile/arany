@@ -87,11 +87,13 @@ fn event_payload_limit(kind: &str, version: i64) -> usize {
         }
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
         "GoalFinished" if payload_version(kind) == Some(version) => MAX_GOAL_FINISHED_BYTES,
-        "ToolProposed" | "ToolStarted" if payload_version(kind) == Some(version) => {
+        "ToolProposed" | "ToolStarted" | "CommandToolProbeStarted"
+            if payload_version(kind) == Some(version) =>
+        {
             MAX_TOOL_STARTED_BYTES
         }
         "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
-        "HookFinished" if payload_version(kind) == Some(version) => {
+        "HookFinished" | "CommandToolProbeFinished" if payload_version(kind) == Some(version) => {
             crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
         }
         _ => MAX_EVENT_BYTES,

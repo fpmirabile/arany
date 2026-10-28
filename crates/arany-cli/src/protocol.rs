@@ -55,6 +55,8 @@ event_kinds!(
     SessionForked,
     ContextCompacted,
     SessionRenamed,
+    CommandToolProbeStarted,
+    CommandToolProbeFinished,
     ProviderSetupEditStarted,
     ProviderSetupEditFinished,
     GoalStarted,

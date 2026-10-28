@@ -1,5 +1,10 @@
-use super::{AgentPhase, ChildResult, HistoryTurn, PromptRole, ProviderRequest, RunInput};
-use crate::session::{AgentRunId, CollaborationPolicy, GoalBudget, GoalPlanContract, RunId};
+use super::{
+    AgentPhase, ChildResult, CompactionItem, CompactionRequest, HistoryTurn, PromptRole,
+    ProviderRequest, RunInput,
+};
+use crate::session::{
+    AgentRunId, CollaborationPolicy, GoalBudget, GoalPlanContract, RunId, SessionId,
+};
 use crate::tools::ToolContext;
 use serde_json::{Value, json};
 
@@ -110,6 +115,7 @@ pub(crate) fn goal_plan_contract() -> GoalPlanContract {
 fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
     crate::tools::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -241,4 +247,63 @@ pub(crate) fn four_read_step(adapter: &'static str) -> crate::tools::ToolStep {
         },
         "bounded facts",
     )
+}
+
+const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+];
+
+pub(crate) fn assert_no_schema_bounds(value: &Value, at: &str) {
+    match value {
+        Value::Object(map) => {
+            for keyword in SCHEMA_BOUND_KEYWORDS {
+                assert!(!map.contains_key(keyword), "{at} carries {keyword}");
+            }
+            for (key, child) in map {
+                assert_no_schema_bounds(child, &format!("{at}.{key}"));
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                assert_no_schema_bounds(child, &format!("{at}[{index}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn compaction_bound_request(
+    model: &str,
+    body_of: fn(&CompactionRequest) -> Value,
+) -> (CompactionRequest, Value) {
+    let request = |user: String| CompactionRequest {
+        session_id: SessionId::new(),
+        covered_run_id: RunId::new(),
+        model: model.into(),
+        previous_summary: None,
+        items: vec![CompactionItem::Completed(HistoryTurn {
+            user,
+            assistant: String::new(),
+        })],
+        max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+    };
+    let base = crate::provider::compaction_input_bytes(&request(String::new())).expect("input");
+    let slack = crate::session::MAX_COMPACTION_INPUT_BYTES - base;
+    // Each quote serializes to two input bytes and four request bytes: the worst expansion.
+    let at_bound = request(format!(
+        "{}{}",
+        "\"".repeat(slack / 2),
+        "a".repeat(slack % 2)
+    ));
+    assert_eq!(
+        crate::provider::compaction_input_bytes(&at_bound).expect("input"),
+        crate::session::MAX_COMPACTION_INPUT_BYTES
+    );
+    let body = body_of(&at_bound);
+    (at_bound, body)
 }

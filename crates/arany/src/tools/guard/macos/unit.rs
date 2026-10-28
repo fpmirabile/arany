@@ -2057,6 +2057,7 @@ mod tests {
     fn fallback_command_deadlines_share_runtime_with_selection() {
         let mut intent = EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -2070,6 +2071,8 @@ mod tests {
                 program: "shell".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: ToolLimits {
                 cache_transfer_ms: 1_000,
@@ -2595,6 +2598,7 @@ done
             checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
+            command_tools: Default::default(),
             command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
                 "/usr/bin:/bin",
             )),
@@ -2726,6 +2730,8 @@ done
             program: "node".into(),
             args: Vec::new(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let mut stage = super::super::super::BootstrapStage::Workspace;
         assert!(matches!(
@@ -4146,6 +4152,7 @@ int main(int argc, char **argv) {
                     hidden: Default::default(),
                     intent: EffectIntent {
                         host: None,
+                        rewrite: Vec::new(),
                         host_command: None,
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),
@@ -4159,6 +4166,8 @@ int main(int argc, char **argv) {
                             program: "shell".into(),
                             args: Vec::new(),
                             cwd: ".".into(),
+                            resource_class: None,
+                            timeout_ms: None,
                         },
                         limits: limits.clone(),
                         use_count: 1,

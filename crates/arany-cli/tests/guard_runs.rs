@@ -50,11 +50,21 @@ fn tool_report(observation: Option<&arany::ToolObservation>) -> String {
     observation.map_or_else(
         || "no observation".to_owned(),
         |observation| {
-            let failure = arany::test_support::recorded_tool_failure(observation.intent.id)
-                .unwrap_or_else(|| "no recorded failure".to_owned());
+            let output = serde_json::from_str::<serde_json::Value>(&observation.output).ok();
+            let exit_code = output.as_ref().and_then(|value| value["exit_code"].as_i64());
+            let stdout_bytes = output
+                .as_ref()
+                .and_then(|value| value["stdout"].as_str())
+                .map(str::len);
+            let stderr_bytes = output
+                .as_ref()
+                .and_then(|value| value["stderr"].as_str())
+                .map(str::len);
             format!(
-                "{:?} {:?} [{failure}]",
-                observation.disposition, observation.output
+                "disposition={:?} stage={:?} exit_code={exit_code:?} output_bytes={} stdout_bytes={stdout_bytes:?} stderr_bytes={stderr_bytes:?}",
+                observation.disposition,
+                observation.guard_stage.map(|fact| fact.stage),
+                observation.output.len()
             )
         },
     )
@@ -1511,14 +1521,7 @@ async fn tool_step_events(
     std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("fact");
     let state_path = temp.path().join("state");
     let provider = Arc::new(ScriptedProvider::new(outcomes));
-    let engine = engine_support::open(
-        StateRoot::admit(&state_path).expect("state"),
-        EngineConfig {
-            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-            ..Default::default()
-        },
-    )
-    .expect("engine");
+    let engine = guarded_engine(&state_path);
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -1637,6 +1640,94 @@ fn write_plan() -> arany::GoalPlanContract {
             max_runs: 1,
         },
     }
+}
+
+fn private_file(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn budget() -> arany::GoalBudget {
+    arany::GoalBudget {
+        max_provider_calls: Some(16),
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    }
+}
+
+fn plan(call: &arany::ToolCall) -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Complete the bounded Tool action".into(),
+        paths: vec!["notes".into()],
+        commands: vec!["sh".into()],
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
+        skills: vec![],
+        mcp_tools: vec![],
+        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(call.clone()),
+        },
+        budget: budget(),
+    }
+}
+
+async fn reopen_closed(
+    engine: Engine,
+    state: &Path,
+    session: SessionId,
+) -> (Vec<arany::EventEnvelope>, SessionView) {
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+    let events = store.load_session(session).await.unwrap();
+    let view = SessionView::replay(session, &events).unwrap().unwrap();
+    arany::test_support::goals::assert_action_bounds(&events, false, false);
+    store.close().await.unwrap();
+    (events, view)
+}
+
+fn change_facts_plan(path: &str, content: &str) -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Change the facts".into(),
+        paths: vec!["notes".into()],
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: path.into(),
+            content: content.into(),
+        },
+        budget: arany::GoalBudget::default(),
+        ..write_plan()
+    }
+}
+
+fn guarded_engine(state: &Path) -> Engine {
+    engine_support::open(
+        StateRoot::admit(state).expect("state"),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .expect("engine")
+}
+
+fn write_notes_tools(state: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let config = state.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("tool configuration mode");
 }
 
 #[tokio::test]
@@ -2080,25 +2171,8 @@ mod goals {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         let state_path = temp.path().join("state");
         let provider = Arc::new(ExactCapToolReview);
-        let engine = engine_support::open(
-            StateRoot::admit(&state_path).expect("state"),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .expect("engine");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let config = state_path.join("tools.json");
-            std::fs::write(
-            &config,
-            br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
-        )
-        .expect("tool config");
-            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-                .expect("tool config mode");
-        }
+        let engine = guarded_engine(&state_path);
+        write_notes_tools(&state_path);
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
         let mut input = request(&workspace, "Write one note at the exact token cap");
         input.include_paths.clear();
@@ -2148,26 +2222,15 @@ mod goals {
 
     #[tokio::test]
     async fn approval_wait_is_not_charged_to_the_runs_active_time() {
-        use std::os::unix::fs::PermissionsExt;
         const APPROVAL_WAIT: Duration = Duration::from_secs(3600);
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
-                mission: "Change the facts".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["notes".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                    path: "notes/facts.txt".into(),
-                    content: "changed".into(),
-                },
-                budget: arany::GoalBudget::default(),
-            }),
+            arany::test_support::scenario::plan_outcome(change_facts_plan(
+                "notes/facts.txt",
+                "changed",
+            )),
             crate::tool_outcome(arany::ToolCall::Write {
                 path: "notes/facts.txt".into(),
                 expected_digest: None,
@@ -2176,22 +2239,8 @@ mod goals {
             arany::test_support::goals::finish_with("The proposed edit was declined"),
         ]);
         let provider = Arc::new(provider);
-        let engine = engine_support::open(
-            StateRoot::admit(&state_path).expect("state"),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .expect("engine");
-        let config = state_path.join("tools.json");
-        std::fs::write(
-        &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
-    )
-    .expect("tool configuration");
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-            .expect("tool configuration mode");
+        let engine = guarded_engine(&state_path);
+        write_notes_tools(&state_path);
         let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
         let mut input = request(&workspace, "Change the facts");
         input.include_paths.clear();
@@ -2239,27 +2288,16 @@ mod goals {
 
     #[tokio::test]
     async fn pause_during_approval_wait_dispatches_no_tool() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let steering = RunSteering::new();
         let pause = steering.clone();
         let provider = ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
-                mission: "Change the facts".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["notes".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                    path: "notes/facts.txt".into(),
-                    content: "changed".into(),
-                },
-                budget: arany::GoalBudget::default(),
-            }),
+            arany::test_support::scenario::plan_outcome(change_facts_plan(
+                "notes/facts.txt",
+                "changed",
+            )),
             crate::tool_outcome(arany::ToolCall::Write {
                 path: "notes/facts.txt".into(),
                 expected_digest: None,
@@ -2269,22 +2307,8 @@ mod goals {
         ]);
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
-        let engine = engine_support::open(
-            StateRoot::admit(&state_path).expect("state"),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .expect("engine");
-        let config = state_path.join("tools.json");
-        std::fs::write(
-        &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
-    )
-    .expect("tool configuration");
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-            .expect("tool configuration mode");
+        let engine = guarded_engine(&state_path);
+        write_notes_tools(&state_path);
         let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
         let mut input = request(&workspace, "Change the facts");
         input.include_paths.clear();
@@ -2341,27 +2365,16 @@ mod goals {
 
     #[tokio::test]
     async fn pause_during_tool_review_skips_the_prompt_and_dispatches_no_tool() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let steering = RunSteering::new();
         let pause = steering.clone();
         let provider = ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
-                mission: "Change the facts".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["notes".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                    path: "notes/facts.txt".into(),
-                    content: "changed".into(),
-                },
-                budget: arany::GoalBudget::default(),
-            }),
+            arany::test_support::scenario::plan_outcome(change_facts_plan(
+                "notes/facts.txt",
+                "changed",
+            )),
             crate::tool_outcome(arany::ToolCall::Write {
                 path: "notes/facts.txt".into(),
                 expected_digest: None,
@@ -2374,22 +2387,8 @@ mod goals {
         .with_before_call(2, move || assert!(pause.pause(), "first pause"));
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
-        let engine = engine_support::open(
-            StateRoot::admit(&state_path).expect("state"),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .expect("engine");
-        let config = state_path.join("tools.json");
-        std::fs::write(
-        &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
-    )
-    .expect("tool configuration");
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-            .expect("tool configuration mode");
+        let engine = guarded_engine(&state_path);
+        write_notes_tools(&state_path);
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
         let mut input = request(&workspace, "Change the facts");
         input.include_paths.clear();
@@ -2432,25 +2431,11 @@ mod goals {
 
     #[tokio::test]
     async fn reviewed_write_stays_within_each_action_bound() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
-                mission: "Change the facts".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["notes".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                    path: "notes/a.txt".into(),
-                    content: "x".into(),
-                },
-                budget: arany::GoalBudget::default(),
-            }),
+            arany::test_support::scenario::plan_outcome(change_facts_plan("notes/a.txt", "x")),
             crate::tool_outcome(arany::ToolCall::Write {
                 path: "notes/a.txt".into(),
                 expected_digest: None,
@@ -2460,22 +2445,8 @@ mod goals {
             finish_with("x"),
         ]);
         let provider = Arc::new(provider);
-        let engine = engine_support::open(
-            StateRoot::admit(&state_path).expect("state"),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .expect("engine");
-        let config = state_path.join("tools.json");
-        std::fs::write(
-        &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
-    )
-    .expect("tool configuration");
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
-            .expect("tool configuration mode");
+        let engine = guarded_engine(&state_path);
+        write_notes_tools(&state_path);
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
         let mut input = request(&workspace, "Change the facts");
         input.include_paths.clear();
@@ -2503,25 +2474,15 @@ mod goals {
     #[tokio::test]
     async fn a_stalled_checkpoint_capture_is_skipped_and_the_edit_still_publishes() {
         use arany::test_support::goals::*;
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let workspace = facts_workspace(temp.path(), "original");
         let state_path = temp.path().join("state");
-        let engine = engine_support::open(
-            StateRoot::admit(&state_path).unwrap(),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let engine = guarded_engine(&state_path);
         let session = engine
             .create_session(workspace.clone(), None)
             .await
             .unwrap();
-        let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_notes_tools(&state_path);
         let mut plan = write_plan();
         plan.paths = vec!["notes/facts.txt".into()];
         plan.budget = arany::GoalBudget::default();
@@ -2581,26 +2542,16 @@ mod goals {
     #[tokio::test]
     async fn checkpoints_commit_before_go_skip_repeats_capture_gaps_and_preserve_replay() {
         use arany::test_support::goals::*;
-        use std::os::unix::fs::PermissionsExt;
         for unavailable in [false, true] {
             let temp = tempfile::tempdir().unwrap();
             let workspace = facts_workspace(temp.path(), "original");
             let state_path = temp.path().join("state");
-            let engine = engine_support::open(
-                StateRoot::admit(&state_path).unwrap(),
-                EngineConfig {
-                    guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+            let engine = guarded_engine(&state_path);
             let session = engine
                 .create_session(workspace.clone(), None)
                 .await
                 .unwrap();
-            let config = state_path.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
-            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+            write_notes_tools(&state_path);
             if unavailable {
                 std::fs::write(state_path.join("checkpoints.sqlite"), b"malformed").unwrap();
             }
@@ -2762,7 +2713,6 @@ mod routing {
 
     #[tokio::test]
     async fn review_role_fallback_does_not_dispatch_the_proposed_tool_twice() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
         let state = temp.path().join("state");
@@ -2808,17 +2758,8 @@ mod routing {
                 .with_profile("openai", "review-fallback")
                 .with_before_call(0, tokio::time::resume),
         );
-        let engine = engine_support::open(
-            StateRoot::admit(&state).unwrap(),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..EngineConfig::default()
-            },
-        )
-        .unwrap();
-        let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let engine = guarded_engine(&state);
+        write_notes_tools(&state);
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
         let mut bindings = routes(&primary);
         bindings.roles.review = vec![review.clone(), fallback.clone()];
@@ -2919,14 +2860,7 @@ mod routing {
                 .with_profile("openai", "spare-fallback")
                 .with_before_call(0, tokio::time::resume),
         );
-        let engine = engine_support::open(
-            StateRoot::admit(&state).unwrap(),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..EngineConfig::default()
-            },
-        )
-        .unwrap();
+        let engine = guarded_engine(&state);
         let config = state.join("tools.json");
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -3004,14 +2938,7 @@ mod routing {
                     wire_provenance: None,
                 })]),
         );
-        let engine = engine_support::open(
-            StateRoot::admit(&state).unwrap(),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..EngineConfig::default()
-            },
-        )
-        .unwrap();
+        let engine = guarded_engine(&state);
         let config = state.join("tools.json");
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -3086,14 +3013,7 @@ mod routing {
                     wire_provenance: None,
                 })]),
         );
-        let engine = engine_support::open(
-            StateRoot::admit(&state).unwrap(),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..EngineConfig::default()
-            },
-        )
-        .unwrap();
+        let engine = guarded_engine(&state);
         let config = state.join("tools.json");
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -3133,14 +3053,7 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state = temp.path().join("state");
-    let engine = engine_support::open(
-        StateRoot::admit(&state).expect("state"),
-        EngineConfig {
-            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-            ..Default::default()
-        },
-    )
-    .expect("engine");
+    let engine = guarded_engine(&state);
     let config = state.join("tools.json");
     std::fs::write(
         &config,
@@ -3228,14 +3141,7 @@ async fn missing_skill_path_recovery() {
     )
     .unwrap();
     let state = temp.path().join("state");
-    let engine = engine_support::open(
-        StateRoot::admit(&state).unwrap(),
-        EngineConfig {
-            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let engine = guarded_engine(&state);
     let config = state.join("tools.json");
     std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -3343,14 +3249,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                 let body = b"---\nname: ask-matt\ndescription: Guide the task\ndisable-model-invocation: true\n---\nPinned untrusted Skill guidance.\n";
                 std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
                 let state_path = temp.path().join("state");
-                let engine = engine_support::open(
-                    StateRoot::admit(&state_path).unwrap(),
-                    EngineConfig {
-                        guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+                let engine = guarded_engine(&state_path);
                 let hash = if mismatch {
                     "0".repeat(64)
                 } else {
@@ -3502,14 +3401,7 @@ fn invoked_skill_crash_window_resumes_without_rereading_or_rerunning() {
         "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
     }]});
     let open = || {
-        engine_support::open(
-            StateRoot::admit(&state_path).unwrap(),
-            EngineConfig {
-                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
+        guarded_engine(&state_path)
     };
     let engine = open();
     let config_path = state_path.join("tools.json");
@@ -3613,14 +3505,7 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
     let body = b"---\nname: ask-matt\ndescription: Guide\n---\nGuidance.\n";
     std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     let state_path = temp.path().join("state");
-    let engine = engine_support::open(
-        StateRoot::admit(&state_path).unwrap(),
-        EngineConfig {
-            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let engine = guarded_engine(&state_path);
     let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
         "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"disable_model_invocation":true,
         "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
@@ -3675,22 +3560,12 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
 
 #[tokio::test]
 async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly() {
-    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).unwrap();
     let state = temp.path().join("state");
-    let engine = engine_support::open(
-        StateRoot::admit(&state).unwrap(),
-        EngineConfig {
-            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let config = state.join("tools.json");
-    std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
-    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let engine = guarded_engine(&state);
+    write_notes_tools(&state);
     let write = || arany::ToolCall::Write {
         path: "notes/new/file.txt".into(),
         expected_digest: None,

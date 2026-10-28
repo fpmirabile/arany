@@ -120,8 +120,12 @@ fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
                         program: "sh".into(),
                         args: vec!["-c".into(), "exit 2".into()],
                         cwd: String::new(),
+                        resource_class: None,
+                        timeout_ms: None,
                     },
                 ),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
                 active_ceiling_ms: Some(5_000),
             },
@@ -203,6 +207,8 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let started = |subject: [u8; 32], hook_intent: &EffectIntent| Event::HookStarted {
@@ -215,6 +221,8 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
                 handler: 0,
                 subject_digest: subject,
                 intent: hook_intent.clone(),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
             },
         };
@@ -583,6 +591,8 @@ fn post_tool_use_hooks_need_a_committed_observation_and_feed_back_only_their_res
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let started = |event, subject: [u8; 32]| Event::HookStarted {
@@ -595,6 +605,8 @@ fn post_tool_use_hooks_need_a_committed_observation_and_feed_back_only_their_res
                 handler: 0,
                 subject_digest: subject,
                 intent: hook_intent.clone(),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
             },
         };
@@ -745,8 +757,12 @@ fn post_tool_hook(intent: &EffectIntent) -> crate::tools::permissions::HookInvoc
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 0".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         ),
+        command_subject: None,
+        command_tool: None,
         input_digest: [9; 32],
     }
 }
@@ -1151,6 +1167,8 @@ fn primary_host_approval_preserves_ignored_hook_outcomes() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         apply(
@@ -1165,6 +1183,8 @@ fn primary_host_approval_preserves_ignored_hook_outcomes() {
                     handler: 0,
                     subject_digest: intent.digest(),
                     intent: hook.clone(),
+                    command_subject: None,
+                    command_tool: None,
                     input_digest: [9; 32],
                 },
             },
@@ -1341,6 +1361,8 @@ fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 2".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let subject = if event == HookEvent::PreCompact {
@@ -1357,6 +1379,8 @@ fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
                 handler: 0,
                 subject_digest: subject,
                 intent: intent.clone(),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
                 active_ceiling_ms: Some(1),
             },
@@ -1580,6 +1604,8 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 2".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     apply(
@@ -1592,6 +1618,8 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
                 group: 0,
                 handler: 0,
                 subject_digest: compact_subject("manual", 1),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
                 intent: intent.clone(),
                 active_ceiling_ms: Some(ACTIVE_CEILING_MS),
@@ -1666,6 +1694,8 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 2".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     let last_call = view.runs[0].agents[0].provider_calls.len() - 1;
@@ -1679,6 +1709,8 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
                 group: 0,
                 handler: 0,
                 subject_digest: stop_subject(actor, last_call),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
                 intent: intent.clone(),
                 active_ceiling_ms: Some(ACTIVE_CEILING_MS),
@@ -1750,6 +1782,8 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 2".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     apply(
@@ -1762,6 +1796,8 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
                 group: 0,
                 handler: 0,
                 subject_digest: compact_subject("manual", 1),
+                command_subject: None,
+                command_tool: None,
                 input_digest: [9; 32],
                 intent,
                 active_ceiling_ms: Some(ACTIVE_CEILING_MS),
@@ -1785,4 +1821,142 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
         view.goals[0].resume_usage(&view).active_ms,
         ACTIVE_CEILING_MS
     );
+}
+
+fn command_rewrite_start(run: RunId, agent: AgentRunId) -> Event {
+    use crate::tools::permissions::{HookEvent, HookInvocation};
+    let intent = child_intent(
+        run,
+        agent,
+        ToolCall::Command {
+            program: "command-tool".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        },
+    );
+    Event::HookStarted {
+        run_id: run,
+        agent_run_id: agent,
+        hook: HookInvocation {
+            command_subject: Some(uuid::Uuid::now_v7()),
+            command_tool: Some(Box::new(crate::tools::CommandTool {
+                selected_path: "/programs/filter".into(),
+                executable: "/programs/filter".into(),
+                args: Vec::new(),
+                role: crate::tools::CommandToolRole::Rewrite,
+                device: 1,
+                inode: 2,
+                sha256: "a".repeat(64),
+                enabled: true,
+                last_probe: Some(crate::tools::RewriteStage::Rewritten),
+            })),
+            event: HookEvent::CommandRewrite,
+            group: 0,
+            handler: 0,
+            subject_digest: [7; 32],
+            intent,
+            input_digest: [8; 32],
+            active_ceiling_ms: Some(1),
+        },
+    }
+}
+
+fn pin_command_tools(view: &mut SessionView) {
+    view.runs[0]
+        .config
+        .as_mut()
+        .unwrap()
+        .tool_policy
+        .as_mut()
+        .unwrap()
+        .command_tools_digest = Some([9; 32]);
+}
+
+#[test]
+fn unknown_command_rewrite_stops_the_primary_and_never_reuses_the_hook() {
+    use crate::tools::permissions::{HookIgnoreReason, HookOutcome, HookResult};
+    let (mut view, goal, run, agent) = primary_tool_session(true);
+    pin_command_tools(&mut view);
+    apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+    apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+    let start = command_rewrite_start(run, agent);
+    let Event::HookStarted { hook, .. } = &start else {
+        unreachable!();
+    };
+    let mut observation = observation_for(hook.intent.clone(), b"");
+    let payload = start.payload().unwrap();
+    assert_eq!(
+        Event::decode(
+            start.kind(),
+            start.version(),
+            &payload,
+            Some(run),
+            Some(agent)
+        )
+        .unwrap(),
+        start
+    );
+    apply(&mut view, start.clone()).unwrap();
+    observation.disposition = ToolDisposition::Uncertain;
+    observation.attestation = None;
+    observation.output = "unknown".into();
+    apply(
+        &mut view,
+        Event::HookFinished {
+            run_id: run,
+            agent_run_id: agent,
+            outcome: HookOutcome {
+                observation,
+                result: HookResult::Ignored {
+                    why: HookIgnoreReason::NotCompleted,
+                },
+                boundary_active_ms: None,
+            },
+        },
+    )
+    .unwrap();
+    assert!(!view.runs[0].hooks_settled());
+    assert!(rejected(&view, start));
+    let payload = child_intent(
+        run,
+        agent,
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "printf payload".into()],
+            cwd: String::new(),
+        },
+    );
+    assert!(rejected(&view, tool_proposed(run, agent, &payload)));
+}
+
+#[test]
+fn command_rewrite_subjects_cannot_exceed_pending_tool_requests() {
+    use crate::tools::permissions::{HookEvent, HookOutcome, HookResult};
+    for pending in [1, 2] {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        pin_command_tools(&mut view);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, pending)).unwrap();
+        let first = command_rewrite_start(run, agent);
+        let Event::HookStarted { hook, .. } = &first else {
+            unreachable!();
+        };
+        let observation = observation_for(hook.intent.clone(), b"");
+        apply(&mut view, first).unwrap();
+        apply(
+            &mut view,
+            Event::HookFinished {
+                run_id: run,
+                agent_run_id: agent,
+                outcome: HookOutcome {
+                    result: HookResult::for_event(HookEvent::CommandRewrite, &observation),
+                    observation,
+                    boundary_active_ms: None,
+                },
+            },
+        )
+        .unwrap();
+        let second = command_rewrite_start(run, agent);
+        assert_eq!(rejected(&view, second), pending == 1);
+    }
 }

@@ -2807,6 +2807,8 @@ mod tests {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 0".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
@@ -2827,6 +2829,8 @@ mod tests {
             program: "sh".into(),
             args: vec!["-c".into(), "exit 0".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
@@ -3010,6 +3014,8 @@ mod tests {
             program: "/nonexistent/arany-test-program".into(),
             args: Vec::new(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         });
         let (disposition, output, enforcement_cause, limit_cause) =
             super::super::dispatch::outcome(&intent, expired.map(|_| String::new()));
@@ -3088,6 +3094,8 @@ mod tests {
                 program: "sh".into(),
                 args: vec![],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             });
             command.policy_digest = [1; 32];
             command.enforcement_digest = [2; 32];
@@ -3141,6 +3149,8 @@ mod tests {
             program: "sh".into(),
             args: vec![],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -3443,6 +3453,7 @@ mod tests {
     pub(super) fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -3489,6 +3500,8 @@ mod tests {
             program: "node".into(),
             args: Vec::new(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -3567,6 +3580,8 @@ mod tests {
                 program: "node".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             }),
             disposition: ToolDisposition::Denied,
             enforcement_cause: None,
@@ -3623,6 +3638,8 @@ mod tests {
             program: "node".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         });
         command.policy_digest = [1; 32];
         command.enforcement_digest = [2; 32];
@@ -3634,6 +3651,8 @@ mod tests {
                 program: "node".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         ] {
             let mut other = command.clone();
@@ -3667,6 +3686,8 @@ mod tests {
             program: "node".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         });
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
         assert!(matches!(
@@ -3706,6 +3727,8 @@ mod tests {
             program: "node".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         });
         assert!(verify_intent_runtime_grants(&process, &config).is_ok());
 
@@ -3745,6 +3768,8 @@ mod tests {
             program: "cargo".into(),
             args: vec!["build".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -4321,6 +4346,7 @@ mod tests {
                 config: config.clone(),
                 intent: EffectIntent {
                     host: None,
+                    rewrite: Vec::new(),
                     host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
@@ -4363,6 +4389,8 @@ mod tests {
             program: "sh".into(),
             args: args.clone(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         assert!(validate_task(&task(command.clone())).is_ok());
         assert!(matches!(

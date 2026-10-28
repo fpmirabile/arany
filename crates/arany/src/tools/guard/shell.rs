@@ -73,6 +73,8 @@ mod tests {
                 program: "renamed-shell".into(),
                 args: args.iter().map(|arg| (*arg).into()).collect(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             };
             let error = validate_command(&config, &call).unwrap_err();
             let observation =
@@ -94,6 +96,8 @@ mod tests {
                     program: "renamed-shell".into(),
                     args: args.into_iter().map(str::to_owned).collect(),
                     cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
             )
             .unwrap();

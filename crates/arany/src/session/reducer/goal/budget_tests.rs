@@ -258,6 +258,8 @@ fn proposal_pre_hook_events(
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     events.push(Event::HookStarted {
@@ -270,6 +272,8 @@ fn proposal_pre_hook_events(
             handler: 0,
             subject_digest: intent.digest(),
             intent: hook_intent.clone(),
+            command_subject: None,
+            command_tool: None,
             input_digest: [9; 32],
         },
     });

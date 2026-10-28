@@ -100,6 +100,7 @@ fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
 fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
     let intent = EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -259,6 +260,7 @@ fn plan_contract_counts_a_pre_plan_read_matching_its_digest() {
             budget_refusal: None,
             run_start_usage: Default::default(),
         }],
+        command_tool_probe: None,
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
         environment_capture: None,
@@ -487,6 +489,7 @@ fn plan_contract_counts_a_write_from_an_earlier_run() {
             budget_refusal: None,
             run_start_usage: Default::default(),
         }],
+        command_tool_probe: None,
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
         environment_capture: None,
@@ -560,17 +563,20 @@ fn build_jobs_are_bound_to_goal_resources_before_tool_admission() {
             program: "cargo".into(),
             args: vec!["build".into()],
             cwd: String::new(),
+            resource_class: Some(crate::tools::ToolResourceClass::Build),
+            timeout_ms: None,
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = jobs;
         intent.limits.build_cpu_cores = limit_cpu;
         intent.limits.cache_bytes = 0;
         intent.limits.cache_candidate_bytes = 0;
-        assert_eq!(
-            crate::session::validate_tool_started(&view, &tool_proposed(run, agent, &intent))
-                .is_ok(),
-            admitted
-        );
+        let result =
+            crate::session::validate_tool_started(&view, &tool_proposed(run, agent, &intent));
+        assert_eq!(result.is_ok(), admitted);
+        if let Err(refusal) = result {
+            assert!(refusal.valid());
+        }
     }
 }
 

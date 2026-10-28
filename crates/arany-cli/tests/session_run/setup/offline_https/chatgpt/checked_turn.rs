@@ -716,7 +716,7 @@ pub(super) fn accept_check_and_run(
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(checked["schema"], 2);
+    assert_eq!(checked["schema"], 3);
     assert!(checked["model_checks"][0]["check_id"].as_str().is_some());
     for effort in ["high", "low", "medium"] {
         let select_at = transcript.len();

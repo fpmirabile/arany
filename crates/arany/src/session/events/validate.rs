@@ -1,6 +1,7 @@
 use super::*;
 
 mod agent;
+mod command_tools;
 mod goal;
 mod run;
 mod session;
@@ -29,6 +30,9 @@ impl Event {
         }
         match self {
             Self::HostEnvironmentCapture { record } => record.validate(),
+            Self::CommandToolProbeStarted { .. } | Self::CommandToolProbeFinished { .. } => {
+                self.validate_command_probe()
+            }
             Self::SupervisorVerdictRecorded { .. }
             | Self::WorkspaceRewindStarted { .. }
             | Self::WorkspaceRewindFinished { .. }

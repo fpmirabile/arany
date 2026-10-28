@@ -13,6 +13,8 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
         program: "cargo".into(),
         args: vec!["build".into()],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     assert_eq!(
         super::guard_error_cache_update(&command, true),
@@ -29,6 +31,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 
     let intent = EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -57,6 +60,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
     let intent = |call| EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -74,6 +78,8 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         program: "sh".into(),
         args: vec![],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let cleanup = intent(command.clone());
     let failure = serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#)
@@ -214,6 +220,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_tools: std::sync::Arc::new(super::CommandTools::default()),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
             "/usr/bin:/bin",
         )),
@@ -384,6 +391,8 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "touch canary".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             "Guard",
         ),
@@ -471,6 +480,8 @@ fn undispatched_guard_failures_explain_safe_causes_and_recovery() {
                 program: "script".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let observation = super::unstarted_observation(intent, error);
@@ -501,6 +512,8 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
                 program: "script".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         )
     };
@@ -630,6 +643,8 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
             program: "script".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     let mut observation = super::unstarted_observation(intent, super::ToolError::Limit);
@@ -728,6 +743,8 @@ fn command_reservations_have_no_separate_selection_allowance() {
         program: "shell".into(),
         args: vec!["-c".into(), "true".into()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut intent = runtime.intent(
         crate::session::RunId::new(),

@@ -280,6 +280,8 @@ async fn refuse_mounted_roots(
             program: "sh".into(),
             args: vec!["-c".into(), "printf must-not-run".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let state = root.join(format!("state-mounted-{name}"));
         let (outcome, _) =
@@ -327,6 +329,8 @@ async fn native_user_programs_helper() {
         program: "sh".into(),
         args: vec!["-c".into(), user_program_script(root, &prefix)],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut request =
         arany::test_support::scenario::request(&workspace, "Run selected user programs offline");

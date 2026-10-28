@@ -102,6 +102,10 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             ));
         }
     }
+    for fact in &tool.intent.rewrite {
+        summary.push_str(" · rewrite: ");
+        summary.push_str(fact.stage.label());
+    }
     if tool.ran_unguarded() {
         summary.push_str(" · UNGUARDED");
     }

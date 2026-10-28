@@ -2,11 +2,12 @@ use super::config::{parse_endpoint, resolve_endpoint};
 use super::*;
 use crate::engine::{Engine, EngineConfig, RunControls, RunRequest};
 use crate::provider::{
-    Answer, Delegate, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
+    Answer, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
     ProviderRequest, ProviderResponse,
 };
 use crate::session::{AgentStatus, CollaborationPolicy, RunStatus, WorkspaceIdentity};
 use crate::store::StateRoot;
+use crate::test_support::scenario::delegate;
 use opentelemetry::Value;
 use opentelemetry::trace::SpanId;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -110,21 +111,7 @@ impl Provider for GatedFailureProvider {
             .expect("requests")
             .push(request.clone());
         let outcome = match request.phase {
-            AgentPhase::RootPlan => ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![
-                    crate::ChildAssignment {
-                        editor: None,
-                        objective: "A".into(),
-                        profile: None,
-                    },
-                    crate::ChildAssignment {
-                        editor: None,
-                        objective: "B".into(),
-                        profile: None,
-                    },
-                ],
-            }),
+            AgentPhase::RootPlan => delegate(&[("A", None), ("B", None)]),
             AgentPhase::ChildWork => {
                 let (release, gate) = oneshot::channel();
                 self.started
@@ -137,14 +124,7 @@ impl Provider for GatedFailureProvider {
                         ChildFailureCase::NestedDelegation => {
                             return Ok(ProviderResponse {
                                 turn: crate::provider::ProviderTurn::scripted(),
-                                outcome: ProviderOutcome::Delegate(Delegate {
-                                    agent: None,
-                                    children: vec![crate::ChildAssignment {
-                                        editor: None,
-                                        objective: "not permitted".into(),
-                                        profile: None,
-                                    }],
-                                }),
+                                outcome: delegate(&[("not permitted", None)]),
                                 response_id: None,
                                 usage: crate::provider::Usage {
                                     input_tokens: Some(10),
@@ -714,6 +694,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
         let agent_run_id = segment.spawn(AgentRole::Primary);
         let intent = EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),

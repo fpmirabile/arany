@@ -32,21 +32,7 @@ fn team_two_core_latency_on_named_host() {
         let mut responses = Vec::with_capacity((WARMUPS + SAMPLES) * 4);
         for _ in 0..WARMUPS + SAMPLES {
             responses.extend([
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "A".into(),
-                            profile: None,
-                        },
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "B".into(),
-                            profile: None,
-                        },
-                    ],
-                }),
+                delegate(&[("A", None), ("B", None)]),
                 ProviderOutcome::Answer(Answer {
                     text: "done".into(),
                 }),

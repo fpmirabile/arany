@@ -67,7 +67,7 @@ pub struct WorkspacePermissions {
     identity: WorkspaceIdentity,
     trusted: bool,
     mode: ApprovalMode,
-    runtime_grants: Vec<RuntimeGrant>,
+    pub(super) runtime_grants: Vec<RuntimeGrant>,
     candidates: Vec<Candidate>,
     discovery_error: Option<String>,
 }
@@ -344,7 +344,7 @@ impl WorkspacePermissions {
         self
     }
 
-    fn load(path: &Path, root: &StateRoot) -> Result<Self, TrustRecordError> {
+    pub fn load(path: &Path, root: &StateRoot) -> Result<Self, TrustRecordError> {
         let directory = fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
         let identity =
             fs::workspace_identity(&directory).map_err(|_| TrustRecordError::Workspace)?;

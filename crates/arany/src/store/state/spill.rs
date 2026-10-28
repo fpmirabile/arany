@@ -383,6 +383,7 @@ mod tests {
     fn spill_observation(run: RunId, content: &[u8]) -> ToolObservation {
         let intent = EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -396,6 +397,8 @@ mod tests {
                 program: "echo".into(),
                 args: Vec::new(),
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,

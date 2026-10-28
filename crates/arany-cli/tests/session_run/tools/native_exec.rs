@@ -400,6 +400,8 @@ async fn selected_cache_canary_helper_inner() {
             "set -eu; /usr/bin/mkdir -p \"$CARGO_HOME/registry/cache\"; cache=\"$CARGO_HOME/registry/cache/private-bulk.crate\"; : > \"$cache\"; i=0; while test \"$i\" -lt 40; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
         ],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let seed_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let seed_engine_provider = Arc::new(CacheCanary {
@@ -529,6 +531,8 @@ async fn selected_cache_canary_helper_inner() {
             ),
         ],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let read_caches = ToolCall::Command {
         program: "sh".into(),
@@ -539,6 +543,8 @@ async fn selected_cache_canary_helper_inner() {
             ),
         ],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let overflow_cache = ToolCall::Command {
         program: "sh".into(),
@@ -547,6 +553,8 @@ async fn selected_cache_canary_helper_inner() {
             "set -eu; /usr/bin/mkdir -p \"$CARGO_TARGET_DIR\"; cache=\"$CARGO_TARGET_DIR/overflow-marker\"; : > \"$cache\"; i=0; while test \"$i\" -lt 32; do printf '%1048576s' '' >> \"$cache\"; i=$((i + 1)); done".into(),
         ],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let calls = vec![write_cache, read_caches, overflow_cache];
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -783,6 +791,8 @@ async fn selected_cache_canary_helper_inner() {
             ),
         ],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let verify_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let verify_engine_provider = Arc::new(CacheCanary {
@@ -1485,6 +1495,8 @@ impl SpillFixture {
                     .into(),
             ],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         Self {
             _temp: temp,

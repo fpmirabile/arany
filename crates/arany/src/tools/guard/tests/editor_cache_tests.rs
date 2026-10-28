@@ -21,6 +21,8 @@ fn editor_build_jobs_bind_selected_rust_before_guard_dispatch() {
             program: "sh".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
@@ -63,6 +65,8 @@ async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_
             program: "build".into(),
             args: vec![],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     let (view_bytes, candidate_bytes) = runtime

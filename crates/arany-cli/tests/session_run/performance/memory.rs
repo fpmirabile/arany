@@ -3,7 +3,7 @@ use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, kill_process};
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     path::Path,
     process::Stdio,
     sync::mpsc,
@@ -15,42 +15,6 @@ const FILE_BYTES: usize = 128 * 1024;
 const RESPONSE_BYTES: usize = 1024 * 1024;
 const REQUEST_LIMIT: usize = 512 * 1024;
 const OUTPUT_LIMIT: usize = 32 * 1024;
-
-fn read_request(stream: &mut TcpStream) -> Vec<u8> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("request deadline");
-    let mut request = Vec::new();
-    loop {
-        let mut chunk = [0; 8192];
-        let count = stream.read(&mut chunk).expect("request bytes");
-        assert!(count > 0 && request.len() + count <= REQUEST_LIMIT);
-        request.extend_from_slice(&chunk[..count]);
-        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-            let header_end = end + 4;
-            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
-            );
-            let body_len = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("Content-Length");
-            let total = header_end.checked_add(body_len).expect("request length");
-            assert!(total <= REQUEST_LIMIT, "bounded request");
-            if request.len() >= total {
-                return request[header_end..total].to_vec();
-            }
-        }
-    }
-}
 
 fn rss_kib(pid: Pid) -> usize {
     let rollup = std::fs::read_to_string(format!("/proc/{}/smaps_rollup", pid.as_raw_pid()))
@@ -141,7 +105,12 @@ fn resident_memory_two_includes_on_named_host() {
             stream
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .expect("response write deadline");
-            let body = read_request(&mut stream);
+            let body = crate::loopback::read_request_within(
+                &mut stream,
+                "/v1/responses",
+                "authorization: bearer test-key",
+                REQUEST_LIMIT,
+            );
             let wire: serde_json::Value =
                 serde_json::from_slice(&body).expect("synthetic Responses request");
             assert_eq!(wire["model"], "model-1");

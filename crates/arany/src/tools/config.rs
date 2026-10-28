@@ -414,6 +414,7 @@ impl Config {
     pub(super) fn receipt(&self) -> ToolPolicyReceipt {
         ToolPolicyReceipt {
             host_epoch: None,
+            command_tools_digest: None,
             host_prefixes: Vec::new(),
             contract_version: 1,
             config_digest: self.digest(),

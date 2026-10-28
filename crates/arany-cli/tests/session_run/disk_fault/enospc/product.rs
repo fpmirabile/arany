@@ -248,43 +248,10 @@ fn tmpfs_enospc_exec_child() {
 #[test]
 #[ignore = "native Linux private-tmpfs shipped-exec ENOSPC release gate"]
 fn kernel_enospc_exec_reports_store_failure_without_egress() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let mountpoint = temp.path().join("volume");
-    std::fs::create_dir(&mountpoint).expect("private mountpoint");
-    let mut command = Command::new("/usr/bin/unshare");
-    command
-        .env_clear()
-        .env("ARANY_TEST_MOUNT", &mountpoint)
-        .args(["-Urmpf", "--kill-child", "--mount-proc", "--"])
-        .arg(std::env::current_exe().expect("test binary"))
-        .args([
-            "--ignored",
-            "--exact",
-            "disk_fault::enospc::product::tmpfs_enospc_exec_child",
-            "--nocapture",
-        ])
-        .current_dir(temp.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = wait_product(command.spawn().expect("private product namespace"));
-    assert!(output.stdout.len() <= 4096 && output.stderr.len() <= 4096);
-    assert!(
-        output.status.success(),
-        "private ENOSPC product helper failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output
-            .stdout
-            .windows(b"KERNEL_ENOSPC_EXEC_OK".len())
-            .any(|window| window == b"KERNEL_ENOSPC_EXEC_OK")
-    );
-    assert_eq!(
-        std::fs::read_dir(&mountpoint)
-            .expect("host mountpoint")
-            .count(),
-        0,
-        "private mount did not leak into the parent namespace"
+    super::run_private_mount_helper(
+        &["-Urmpf", "--kill-child", "--mount-proc", "--"],
+        "disk_fault::enospc::product::tmpfs_enospc_exec_child",
+        "private ENOSPC product helper",
+        b"KERNEL_ENOSPC_EXEC_OK",
     );
 }

@@ -228,6 +228,9 @@ impl RunLoop<'_> {
             Ok(Err(SizingRefusal::ActiveTime)) => {
                 return Ok(PrimaryContext::Stop(StopCause::Budget));
             }
+            Ok(Err(SizingRefusal::Uncertain)) => {
+                return Ok(PrimaryContext::Stop(StopCause::Uncertain));
+            }
             Ok(Err(SizingRefusal::Cancelled)) => {
                 return Ok(PrimaryContext::Stop(StopCause::Cancelled));
             }
@@ -793,6 +796,8 @@ mod tests {
                 program: "cargo".into(),
                 args: vec!["git".into()],
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
             r#"{"exit_code":128,"stderr":"fatal: not a git repository"}"#,
         );

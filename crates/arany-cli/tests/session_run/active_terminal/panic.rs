@@ -1,4 +1,4 @@
-use super::{redacted_tail, transcript_field, tty_settings};
+use super::{collect_nonblocking, redacted_tail, transcript_field, tty_settings};
 use crate::loopback::{ChildGuard, wait_product};
 use arany_cli::terminal::AttachedTerminal;
 use rustix::{
@@ -13,24 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn drain_nonblocking(reader: &mut impl Read, bytes: &mut Vec<u8>) {
-    loop {
-        let mut chunk = [0; 4096];
-        match reader.read(&mut chunk) {
-            Ok(0) => return,
-            Ok(count) => {
-                assert!(
-                    bytes.len() + count <= 16 * 1024,
-                    "bounded panic PTY transcript"
-                );
-                bytes.extend_from_slice(&chunk[..count]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => panic!("panic PTY read failed: {error}"),
-        }
-    }
-}
+const PTY_CAPTURE_LIMIT: usize = 16 * 1024;
 
 #[test]
 #[ignore = "supervised Linux terminal-owner panic helper"]
@@ -91,7 +74,7 @@ fn panic_unwind_restores_the_exact_terminal_settings() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut transcript = Vec::new();
     let mut gate_stream = loop {
-        drain_nonblocking(&mut output, &mut transcript);
+        collect_nonblocking(&mut output, &mut transcript, PTY_CAPTURE_LIMIT);
         match gate.accept() {
             Ok((stream, _)) => break stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -120,7 +103,7 @@ fn panic_unwind_restores_the_exact_terminal_settings() {
         .expect("trigger test-only panic");
 
     loop {
-        drain_nonblocking(&mut output, &mut transcript);
+        collect_nonblocking(&mut output, &mut transcript, PTY_CAPTURE_LIMIT);
         if attached
             .child()
             .try_wait()
@@ -139,7 +122,7 @@ fn panic_unwind_restores_the_exact_terminal_settings() {
         "expected test-harness failure"
     );
     assert_eq!(result.stderr, b"");
-    drain_nonblocking(&mut output, &mut transcript);
+    collect_nonblocking(&mut output, &mut transcript, PTY_CAPTURE_LIMIT);
     assert!(transcript.len() <= 16 * 1024);
     let transcript = String::from_utf8(transcript).expect("PTY transcript UTF-8");
     let after = transcript_field(&transcript, "TTY_AFTER:");

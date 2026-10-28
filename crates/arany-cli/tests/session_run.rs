@@ -645,6 +645,13 @@ mod tools_researcher;
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
 
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", any(debug_assertions, arany_ci))
+))]
+#[path = "session_run/tools/git_journey.rs"]
+mod git_journey;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/supervisor.rs"]
 mod supervisor;
@@ -903,6 +910,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     last_sequence: 0,
                     lineage: None,
                     goals: Vec::new(),
+                    command_tool_probe: None,
                     pending_provider_setup_edit: None,
                     provider_setup_uncertain: false,
                     environment_capture: None,

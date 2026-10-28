@@ -3,6 +3,7 @@ use super::definition_mode;
 mod hook;
 mod lifecycle;
 mod permission;
+mod rewrite;
 use super::{
     AgentStatus, HookView, MAX_HOST_SESSION_GRANTS, RunView, SessionView, ToolView, active_run,
     active_run_goal, current_goal_mut, observed_command_changeset,
@@ -52,7 +53,11 @@ pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result
     {
         validate_primary_tool_scope(view, *run_id, &intent.call).map_err(|cause| ToolRefusal {
             cause,
-            reason: ToolRefusalReason::Scope,
+            reason: if cause == InvalidArguments {
+                ToolRefusalReason::Payload
+            } else {
+                ToolRefusalReason::Scope
+            },
         })?;
         validate_primary_tool_lease(run, &intent.call).map_err(|cause| ToolRefusal {
             cause,
@@ -117,6 +122,11 @@ pub(crate) fn validate_primary_tool_scope(
     {
         return Err(PlanScopeExcludesCall);
     }
+    crate::session::events::requested_command_resources(
+        call,
+        goal.plan_contract.as_ref(),
+        goal.resource_settings,
+    )?;
     Ok(())
 }
 
@@ -619,6 +629,9 @@ fn start_lifecycle(
     hook: &crate::tools::permissions::HookInvocation,
     sequence: u64,
 ) -> Result<(), ReplayError> {
+    if hook.event == HookEvent::CommandRewrite {
+        return rewrite::started(current, run_id, agent_id, hook, sequence);
+    }
     use crate::session::{AgentRole, ChildGrant, RunStatus};
     use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, compact_subject, stop_subject};
     let previous = current.previous_subject_sequence();

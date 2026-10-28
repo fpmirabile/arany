@@ -17,6 +17,7 @@ fn matches_success<'a>(
 fn observation(call: ToolCall, disposition: ToolDisposition, output: String) -> ToolObservation {
     let intent = EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
@@ -83,6 +84,8 @@ fn a_later_git_switch_invalidates_a_satisfied_command_criterion() {
         program: "sh".into(),
         args: vec!["-c".into(), "true".into()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
         call: Box::new(call.clone()),
@@ -217,6 +220,8 @@ fn success_criterion_rejects_inspection_and_internal_tools() {
                 program: "shell".into(),
                 args: Vec::new(),
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             }),
         },
         budget: GoalBudget::default(),

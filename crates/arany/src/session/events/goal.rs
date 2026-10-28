@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::types::{MAX_COMMAND_TIMEOUT_MS, MIN_COMMAND_TIMEOUT_MS};
 use std::path::Path;
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
@@ -339,6 +340,43 @@ pub struct GoalPlanContract {
     pub budget: GoalBudget,
 }
 
+pub(crate) fn requested_command_resources(
+    call: &crate::tools::ToolCall,
+    contract: Option<&GoalPlanContract>,
+    settings: crate::tools::ToolResourceSettings,
+) -> Result<(crate::tools::ToolResourceClass, u32), ProposalRefusalCause> {
+    use crate::tools::{ToolCall, ToolResourceClass};
+    let plan_class = contract.map_or(ToolResourceClass::Default, |plan| plan.resource_class);
+    let plan_timeout = contract
+        .and_then(|plan| plan.command_timeout_ms)
+        .unwrap_or(settings.default_command_timeout_ms);
+    let ToolCall::Command {
+        resource_class,
+        timeout_ms,
+        ..
+    } = call
+    else {
+        return Ok((plan_class, plan_timeout));
+    };
+    let class = resource_class.unwrap_or(plan_class);
+    let timeout = timeout_ms.unwrap_or(plan_timeout);
+    if !(MIN_COMMAND_TIMEOUT_MS..=MAX_COMMAND_TIMEOUT_MS).contains(&timeout) {
+        return Err(ProposalRefusalCause::InvalidArguments);
+    }
+    if contract.is_some()
+        && (class == ToolResourceClass::Build && plan_class == ToolResourceClass::Default
+            || timeout > plan_timeout)
+    {
+        return Err(ProposalRefusalCause::PlanScopeExcludesCall);
+    }
+    if class == ToolResourceClass::Build
+        && (settings.build_jobs.is_none() || settings.build_cpu_cores.is_none())
+    {
+        return Err(ProposalRefusalCause::InvalidArguments);
+    }
+    Ok((class, timeout))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalSuccessCriterion {
@@ -652,7 +690,7 @@ impl GoalPlanContract {
             || self.paths.len() > MAX_GOAL_PLAN_PATHS
             || self.commands.len() > MAX_GOAL_PLAN_COMMANDS
             || self.command_timeout_ms.is_some_and(|timeout| {
-                !(1_000..=crate::tools::types::MAX_COMMAND_TIMEOUT_MS).contains(&timeout)
+                !(MIN_COMMAND_TIMEOUT_MS..=MAX_COMMAND_TIMEOUT_MS).contains(&timeout)
             })
             || self.resource_class == crate::tools::ToolResourceClass::Build
                 && self.commands.is_empty()

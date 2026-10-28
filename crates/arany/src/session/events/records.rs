@@ -18,6 +18,8 @@ impl EffectTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolIntentRecord {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrite: Vec<crate::tools::CommandRewrite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,6 +41,7 @@ impl From<EffectIntent> for ToolIntentRecord {
     fn from(intent: EffectIntent) -> Self {
         Self {
             host: intent.host,
+            rewrite: intent.rewrite,
             host_command: intent.host_command,
             target: intent.target,
             id: intent.id,
@@ -59,6 +62,7 @@ impl From<ToolIntentRecord> for EffectIntent {
     fn from(intent: ToolIntentRecord) -> Self {
         Self {
             host: intent.host,
+            rewrite: intent.rewrite,
             host_command: intent.host_command,
             target: intent.target,
             id: intent.id,
@@ -407,10 +411,9 @@ impl RunConfig {
                     || self.tool_policy.is_some()
                         && roster.child_profiles.iter().any(|name| {
                             roster.chain(name).is_none_or(|chain| {
-                                chain.iter().any(|identity| {
-                                    identity.custom_provenance().is_some()
-                                        || !identity.shares_account(&chain[0])
-                                })
+                                chain
+                                    .iter()
+                                    .any(|identity| !identity.shares_account(&chain[0]))
                             })
                         })
             })
@@ -433,10 +436,9 @@ impl RunConfig {
                     })
                     || self.tool_policy.is_some()
                         && providers.values().iter().take(2).any(|chain| {
-                            chain.iter().any(|identity| {
-                                identity.custom_provenance().is_some()
-                                    || !identity.shares_account(&chain[0])
-                            })
+                            chain
+                                .iter()
+                                .any(|identity| !identity.shares_account(&chain[0]))
                         })
             })
             || !self.identity().is_some_and(|identity| identity.valid())
@@ -444,7 +446,6 @@ impl RunConfig {
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
-            || self.provider.kind() == ProviderKind::Custom && self.tool_policy.is_some()
             || self.include_digests.len() > 16
             || !self.instruction_scope_valid()
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS

@@ -65,6 +65,8 @@ pub(super) fn call(outside: bool) -> ToolCall {
             .into(),
         ],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     }
 }
 

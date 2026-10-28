@@ -406,6 +406,8 @@ fn child_steering_requires_its_open_work_reservation() {
                     program: "sh".into(),
                     args: Vec::new(),
                     cwd: String::new(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
             );
             view.runs[0].lifecycle_hooks.push(HookView {
@@ -416,6 +418,8 @@ fn child_steering_requires_its_open_work_reservation() {
                     handler: 0,
                     subject_digest: [0; 32],
                     intent: intent.clone(),
+                    command_subject: None,
+                    command_tool: None,
                     input_digest: [0; 32],
                     active_ceiling_ms: None,
                 },

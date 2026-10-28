@@ -359,6 +359,10 @@ pub enum ToolCall {
         program: String,
         args: Vec<String>,
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_class: Option<ToolResourceClass>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u32>,
     },
     CommandUnguarded {
         program: String,
@@ -699,6 +703,8 @@ pub(crate) fn validate_mention_path(value: &str, root: bool) -> Result<(), super
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicyReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_tools_digest: Option<[u8; 32]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_prefixes: Vec<super::permissions::HostPrefixRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -797,6 +803,8 @@ pub(crate) fn test_host_pin() -> HostCommandPin {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectIntent {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrite: Vec<super::command_tools::CommandRewrite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -838,7 +846,20 @@ impl EffectIntent {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.target.valid()
+        self.rewrite.len() <= super::command_tools::MAX_COMMAND_TOOLS
+            && self.rewrite.iter().all(|fact| {
+                crate::validate::valid_digest(&fact.tool_sha256)
+                    && fact.original_sha256 != [0; 32]
+                    && fact
+                        .hook_intent_id
+                        .is_none_or(|id| id.get_version() == Some(uuid::Version::SortRand))
+            })
+            && (self.rewrite.is_empty()
+                || matches!(
+                    self.call,
+                    ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+                ))
+            && self.target.valid()
             && self.id.get_version() == Some(uuid::Version::SortRand)
             && self.policy_digest != [0; 32]
             && self.enforcement_digest != [0; 32]
@@ -899,6 +920,7 @@ pub enum ToolResourceProfile {
     MacosSupervised,
 }
 
+pub(crate) const MIN_COMMAND_TIMEOUT_MS: u32 = 1_000;
 pub(crate) const DEFAULT_COMMAND_TIMEOUT_MS: u32 = 120_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -933,8 +955,10 @@ impl Default for ToolResourceSettings {
 
 impl ToolResourceSettings {
     pub fn valid(self) -> bool {
-        (1_000..=self.max_command_timeout_ms).contains(&self.default_command_timeout_ms)
-            && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.max_command_timeout_ms)
+        (MIN_COMMAND_TIMEOUT_MS..=self.max_command_timeout_ms)
+            .contains(&self.default_command_timeout_ms)
+            && (MIN_COMMAND_TIMEOUT_MS..=MAX_COMMAND_TIMEOUT_MS)
+                .contains(&self.max_command_timeout_ms)
             && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
             && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
             && self.build_jobs != Some(0)
@@ -1012,7 +1036,7 @@ impl ToolLimits {
 
     fn valid(&self) -> bool {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
-            && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
+            && (MIN_COMMAND_TIMEOUT_MS..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
             && (1..=self.max_processes).contains(&self.build_jobs)
             && self.build_cpu_cores > 0
             && (self.resource_class == ToolResourceClass::Build
@@ -2112,6 +2136,7 @@ mod model_call_tests {
         ] {
             let intent = EffectIntent {
                 host: None,
+                rewrite: Vec::new(),
                 host_command: None,
                 target: EffectTarget::Workspace,
                 id: Uuid::now_v7(),
@@ -2154,6 +2179,7 @@ mod unguarded_vocabulary_tests {
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: call.is_unguarded().then(test_host_pin),
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
@@ -2174,6 +2200,8 @@ mod unguarded_vocabulary_tests {
             program: "sh".into(),
             args: args.iter().map(|arg| (*arg).into()).collect(),
             cwd: cwd.into(),
+            resource_class: None,
+            timeout_ms: None,
         }
     }
 

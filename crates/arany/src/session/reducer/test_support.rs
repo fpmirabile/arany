@@ -14,6 +14,7 @@ pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> Session
     let run_id = RunId::new();
     let intent = EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -143,6 +144,7 @@ pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> Session
             budget_refusal: None,
             run_start_usage: Default::default(),
         }],
+        command_tool_probe: None,
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
         environment_capture: None,
@@ -180,6 +182,7 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         compaction_content_digest: None,
         tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
             host_epoch: None,
+            command_tools_digest: None,
             host_prefixes: Vec::new(),
             permissions_digest: None,
             contract_version: 1,
@@ -549,6 +552,7 @@ pub(super) fn delegated_session(known_tokens: u64) -> SessionView {
             budget_refusal: None,
             run_start_usage: Default::default(),
         }],
+        command_tool_probe: None,
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
         environment_capture: None,
@@ -602,6 +606,7 @@ pub(super) fn child_intent(
 ) -> EffectIntent {
     EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -1071,6 +1076,8 @@ pub async fn selection_failure_session(
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     intent.workspace_device = identity.device;

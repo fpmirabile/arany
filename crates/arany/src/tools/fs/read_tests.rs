@@ -53,6 +53,8 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
             program: "shell".into(),
             args: vec![],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         }),
         super::guard::RESERVATION_OVERHEAD,
     );

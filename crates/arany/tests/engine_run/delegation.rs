@@ -8,21 +8,10 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let provider = ScriptedProvider::new(
             (0..3)
-                .map(|_| {
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "unauthorized child".into(),
-                            profile: None,
-                        }],
-                    })
-                })
+                .map(|_| delegate(&[("unauthorized child", None)]))
                 .collect(),
         );
         let requests = provider.requests.clone();
@@ -88,9 +77,7 @@ fn team_policy_rejects_a_direct_primary_finish() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Answer(Answer {
                 text: "unearned result".into()
@@ -169,14 +156,7 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
     });
     let provider = Arc::new(ScriptedProvider::new(vec![
         finish.clone(),
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                objective: "Inspect".into(),
-                profile: None,
-                editor: None,
-            }],
-        }),
+        delegate(&[("Inspect", None)]),
         finish.clone(),
         finish.clone(),
         finish,
@@ -240,18 +220,9 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Check fact".into(),
-                    profile: None,
-                }],
-            }),
+            delegate(&[("Check fact", None)]),
             ProviderOutcome::Answer(Answer {
                 text: "Fact is true".into(),
             }),
@@ -466,9 +437,7 @@ fn provider_concurrency_ceiling_serializes_admitted_children() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let provider = GatedProvider {
             started,
@@ -541,9 +510,7 @@ fn team_cancellation_drains_active_and_queued_children() {
     runtime.block_on(async {
         for capacity in [1_u8, 3] {
             let temp = tempfile::tempdir().expect("temporary root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-            std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+            let workspace = facts_workspace(temp.path(), "Fact");
             let state_path = temp.path().join("state");
             let (started, mut started_rx) = mpsc::unbounded_channel();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -749,9 +716,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state = temp.path().join("state");
         let cap = arany::OpenAiProvider::from_api_key_with_effort(
             "gpt-5.4".into(),
@@ -771,14 +736,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
                 bound,
                 cap,
                 vec![
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "Inspect".into(),
-                            profile: None,
-                        }],
-                    }),
+                    delegate(&[("Inspect", None)]),
                     ProviderOutcome::Answer(Answer {
                         text: "Child answer".into(),
                     }),
@@ -808,9 +766,7 @@ fn eight_children_use_the_same_ordered_loop() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let objectives: Vec<_> = (1..=8).map(|index| format!("Child {index}")).collect();
         let mut responses = vec![ProviderOutcome::Delegate(Delegate {
             agent: None,
@@ -875,9 +831,7 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let cases = [
             (
                 CollaborationPolicy::Auto {
@@ -1009,34 +963,16 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let provider = ScriptedProvider::new(
             vec![
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Check fact".into(),
-                        profile: None,
-                    }],
-                }),
+                delegate(&[("Check fact", None)]),
                 ProviderOutcome::Answer(Answer {
                     text: "Fact is true".into(),
                 }),
             ]
             .into_iter()
-            .chain((0..3).map(|_| {
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Second round".into(),
-                        profile: None,
-                    }],
-                })
-            }))
+            .chain((0..3).map(|_| delegate(&[("Second round", None)])))
             .collect::<Vec<_>>(),
         );
         let requests = provider.requests.clone();
@@ -1084,9 +1020,7 @@ fn failed_child_cancels_and_drains_siblings_without_a_final_message() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let requests = Arc::new(Mutex::new(Vec::new()));

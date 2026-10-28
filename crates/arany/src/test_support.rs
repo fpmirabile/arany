@@ -501,6 +501,8 @@ pub fn uncertain_hook_fixture() -> crate::ToolView {
         program: "sh".into(),
         args: Vec::new(),
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     observation.disposition = crate::ToolDisposition::Uncertain;
     observation.cache_update = crate::CacheUpdate::NotAttempted;
@@ -515,6 +517,8 @@ pub fn uncertain_hook_fixture() -> crate::ToolView {
             handler: 0,
             subject_digest: tool.intent.digest(),
             intent: observation.intent.clone(),
+            command_subject: None,
+            command_tool: None,
             input_digest: [1; 32],
             active_ceiling_ms: None,
         },
@@ -538,6 +542,7 @@ fn host_admission_tool(
 ) -> crate::ToolView {
     let intent = crate::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),

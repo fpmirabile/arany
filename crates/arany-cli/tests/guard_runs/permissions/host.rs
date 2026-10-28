@@ -641,6 +641,8 @@ async fn timed_out_command(maximum: u32) -> (Fixture, arany::RunOutcome) {
         program: "sh".into(),
         args: vec!["-c".into(), "printf 'head\\n'; printf '%100000s' ''; printf 'tail\\n'; printf 'partial error\\n' >&2; printf changed > notes/new.txt; sleep 20".into()],
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut plan = plan(&call);
     plan.command_timeout_ms = Some(maximum);
@@ -733,6 +735,8 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
         program: "sh".into(),
         args: vec!["-c".into(), format!("sleep {marker} & sleep {marker}")],
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut plan = plan(&call);
     plan.command_timeout_ms = Some(10_000);

@@ -124,6 +124,24 @@ pub(crate) fn tool_request(
             *path = normalized.to_owned();
         }
     }
+    if operation == "command" {
+        let class_valid = fields.get("resource_class").is_none_or(|value| {
+            value.is_null() || matches!(value.as_str(), Some("default" | "build"))
+        });
+        let timeout_valid = fields.get("timeout_ms").is_none_or(|value| {
+            value.is_null()
+                || value
+                    .as_u64()
+                    .is_some_and(|value| u32::try_from(value).is_ok())
+        });
+        if !class_valid {
+            fields.remove("resource_class");
+        }
+        if !class_valid || !timeout_valid {
+            // Zero keeps the request invalid for Engine refusal while preserving a valid class.
+            fields.insert("timeout_ms".into(), json!(0));
+        }
+    }
     let call: ToolCall = serde_json::from_value(Value::Object(fields)).map_err(invalid)?;
     if matches!(
         call,
@@ -165,6 +183,52 @@ pub(crate) fn review_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_command_resources_reach_correlated_argument_refusal_without_relaxing_replay() {
+        for (field, value) in [
+            ("resource_class", json!("unlimited")),
+            ("resource_class", json!(1)),
+            ("timeout_ms", json!(1.5)),
+            ("timeout_ms", json!("1000")),
+            ("timeout_ms", json!(-1)),
+            ("timeout_ms", json!(u64::MAX)),
+        ] {
+            let mut fields = json!({"program":"sh","args":["-c","exit 0"],"cwd":"","resource_class":"build","timeout_ms":60000});
+            fields[field] = value;
+            let request = tool_request(
+                ToolUseId::new("call_command").unwrap(),
+                "command",
+                fields.clone(),
+            )
+            .unwrap();
+            assert_eq!(request.id.as_str(), "call_command");
+            assert!(!request.call.valid());
+            let ToolCall::Command {
+                resource_class,
+                timeout_ms,
+                ..
+            } = &request.call
+            else {
+                panic!("typed command refusal");
+            };
+            assert_eq!(
+                *resource_class,
+                (field == "timeout_ms").then_some(crate::tools::ToolResourceClass::Build)
+            );
+            assert_eq!(*timeout_ms, Some(0));
+            fields["operation"] = json!("command");
+            assert!(serde_json::from_value::<ToolCall>(fields).is_err());
+        }
+        assert!(
+            tool_request(
+                ToolUseId::new("call_large").unwrap(),
+                "command",
+                json!({"program":"sh","args":[],"cwd":"","resource_class":"x".repeat(MAX_ORDINARY_TOOL_ARGUMENT_BYTES)}),
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn native_tool_paths_normalize_only_peer_spelling_before_admission() {

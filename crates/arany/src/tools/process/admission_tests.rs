@@ -95,6 +95,8 @@ fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     assert!(
