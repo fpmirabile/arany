@@ -483,7 +483,12 @@ async fn redirect_failure_and_cancellation(root: &Path) {
         location: String::new(),
         hold: false,
     });
-    let outcome = web_case("failure", &root.join("failure"), WebCase::search(server.port)).await;
+    let outcome = web_case(
+        "failure",
+        &root.join("failure"),
+        WebCase::search(server.port),
+    )
+    .await;
     assert_eq!(first_result(&outcome).disposition, ToolDisposition::Failed);
     assert_eq!(
         serde_json::from_str::<Value>(&first_result(&outcome).output).unwrap(),

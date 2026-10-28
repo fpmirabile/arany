@@ -2383,7 +2383,10 @@ mod tests {
         let observation = read_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Cancelled);
         assert_eq!(observation.output, "Web request cancelled");
-        assert!(matches!(observation.attestation, Some(Attestation::Guard(_))));
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::Guard(_))
+        ));
         for (cancelled, error) in [
             (false, ToolError::Operation),
             (true, ToolError::Limit),
