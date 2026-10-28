@@ -1,6 +1,6 @@
 # Testing
 
-Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the rationale; this file is the working contract.
+Load when adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the rationale; this file is the working contract.
 
 ## Load for the affected task
 
@@ -14,7 +14,7 @@ Load when continuing beta 1, adding or changing behavior, fixing a defect, editi
 
 ## Documentation and instruction changes
 
-Use the [shared documentation checks](../docs/development.md#verification), including the generated-bound scan in `scripts/spec-bounds.py`. When changing instruction routing, follow representative tasks from `AGENTS.md` (terminal output, Provider decoding, Session persistence) to their contract, editing rules, and evidence owner. Check inbound links after moving or renaming a heading. These checks establish documentation consistency, not agent quality or platform support.
+Use the [shared documentation checks](../docs/development.md#verification), including the generated-bound scan in `scripts/spec-bounds.py`. When changing instruction routing, follow representative tasks from `AGENTS.md` (terminal output, Provider decoding, Session persistence) to their contract and editing rules. Before the PR, the author checks locally, not CI, that links and anchors resolve (including inbound links after moving or renaming a heading) and that no rule is restated outside its owner; the [spec workflow](../docs/specs/README.md) owns spec content rules. These checks establish documentation consistency, not agent quality or platform support.
 
 Keep specs concise: tighten existing prose before appending, and link to another owner instead of restating it.
 
@@ -28,10 +28,10 @@ Keep specs concise: tighten existing prose before appending, and link to another
 
 ## Tests worth keeping
 
-A test earns its place by the claims [Evidence budget](#evidence-budget) admits: a spec scenario, a [non-negotiable guarantee](../AGENTS.md#non-negotiable-guarantees), a declared bound or its overflow, a protocol boundary, a concurrency, failure or recovery path, the [security coverage](#evidence-lanes) categories, a migration fixture, or a named regression. A test is junk only if it is a same-lane duplicate of a stronger owner (not materially different process, platform, durability or security evidence), or tests private helpers, getters or type-enforced facts. Reviewed goldens and wire or schema snapshots are contract evidence, not noise.
+A test earns its place by the claims [Evidence budget](#evidence-budget) admits: a specified behavior, a [non-negotiable guarantee](../AGENTS.md#non-negotiable-guarantees), a declared bound or its overflow, a protocol boundary, a concurrency, failure or recovery path, the [security coverage](#evidence-lanes) categories, a migration fixture, or a named regression. A test is junk only if it is a same-lane duplicate of a stronger owner (not materially different process, platform, durability or security evidence), or tests private helpers, getters or type-enforced facts. Reviewed goldens and wire or schema snapshots are contract evidence, not noise.
 
 - Junk is deleted only in a corpus-split PR. Each deleted test is listed with the junk category it meets and the surviving owner that asserts the same outcome in the same lane. A test in a keep category is never deleted without such an owner.
-- A test file past 3,000 lines takes no new test: add it to a focused owner beside the child it proves. Splitting the file is its own pure-move PR under the [test corpus pruning](../planning/test-corpus-pruning/README.md) plan. Such a PR may exceed the [slice ceiling](../planning/PLANNING.md#slice-delivery) only for moved blocks, reviewed with `git diff --color-moved=dimmed-zebra`. Its non-moved lines (deletions, imports, module glue, link edits) stay within the ceiling, and deletions sit in a separate commit listed per the rule above. Old and new nonzero `cargo test` counts, plus deleted count, are its evidence.
+- A test file past 3,000 lines takes no new test: add it to a focused owner beside the child it proves. Splitting the file is its own pure-move PR. Such a PR may exceed the [slice ceiling](../planning/PLANNING.md#slice-delivery) only for moved blocks, reviewed with `git diff --color-moved=dimmed-zebra`. Its non-moved lines (deletions, imports, module glue, link edits) stay within the ceiling, and deletions sit in a separate commit listed per the rule above. Old and new nonzero `cargo test` counts, plus deleted count, are its evidence.
 
 ## User-visible proof
 

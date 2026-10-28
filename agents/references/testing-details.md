@@ -6,13 +6,13 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 Use the standard checks in [the development guide](../../docs/development.md#verification), which owns CI profile selection, changed-path detection and skipped-job behavior.
 
-Manual dispatch offers three inputs. `linux_arm64` runs the `Linux ARM64 Tests` job. `linux_native_advanced` runs the `Native Linux Guard and tmux` job, where each ignored `--exact` invocation must report one completed test. `history_benchmark` runs the `Measure native long-history behavior` step, and its numbers describe that runner only. The [focused workflow](../../.github/workflows/ci-focused.yml) runs one manually chosen `ci.yml` lane; [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline) governs its use. Linux terminal fixtures need Bubblewrap, util-linux `script`, and user and network namespaces. To reproduce the default suite:
+Manual dispatch offers three inputs. `linux_arm64` runs the `Linux ARM64 Tests` job. `linux_native_advanced` runs the `Native Linux Guard and tmux` job, where each ignored `--exact` invocation must report one completed test. `history_benchmark` runs the `Measure native long-history behavior` step, and its numbers describe that runner only. The [focused workflow](../../.github/workflows/ci-focused.yml) runs one manually chosen `ci.yml` lane; [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline) governs its use. To reproduce the default suite:
 
 ```sh
 RUSTFLAGS='--cfg arany_ci' cargo test --workspace --locked --offline
 ```
 
-Repeat with `--release` for the optimized profile. Run one ignored gate with `cargo test <path> -- --exact --ignored`; the isolated macOS Keychain gate also needs `ARANY_TEST_EXE` set to a built debug `arany`. CI uses no account credentials or paid calls. Compilation or an OS-specific subset does not prove platform parity.
+Repeat with `--release` for the optimized profile. Run one ignored gate with `cargo test <path> -- --exact --ignored`; the isolated macOS Keychain gate also needs `ARANY_TEST_EXE` set to a built debug `arany`. CI uses no account credentials or paid calls.
 
 ## Release-policy CI
 
@@ -32,7 +32,7 @@ The [release-policy workflow](../../.github/workflows/release-policy.yml) runs o
 - A Bubblewrap fixture binding only `/etc/passwd` must make the generated `/etc` traversable before the UID switch, and must give the second UID an accessible synthetic `XDG_STATE_HOME`.
 - Offline setup fixtures can serve compiled HTTPS endpoints from a private network namespace with hosts-only resolution and a test CA under ordinary TLS validation. Use `s_server -quiet` with a bounded parser and static reply; `-HTTP` did not answer the Responses POST. This proves synthetic flow, not live models.
 - The offline ChatGPT journeys own first sign-in and checked-turn coverage; a matching mock URL or unsigned token is not OAuth evidence.
-- On macOS, run private-state fixtures under an admitted physical root: `env TMPDIR=/private/tmp cargo test --locked --offline --workspace`. Do not weaken the `/tmp` and `/var` rejection for fixtures.
+- On macOS, run private-state fixtures with the [development guide's](../../docs/development.md#verification) `TMPDIR=/private/tmp`; do not weaken the `/tmp` and `/var` rejection for fixtures.
 - Run macOS liveness-lock and drop corpora in an isolated, exactly-one-test helper. A concurrent fork can hold the same `flock` until exec, so parent drop is not immediate unlock evidence.
 - Linux tests that enable write-capable Engine Tools or the account-wide Workspace lock must use the private passwd-home account fixture, following [account-root identity](../../docs/specs/credentials.md#account-scope-and-identity); a `HOME` override alone is insufficient isolation.
 - Native macOS Keychain evidence uses the [admitted debug fixture](../../docs/specs/credentials.md#account-scope-and-identity) with a privately named synthetic Keychain, never `login.keychain` and never a search-list change.

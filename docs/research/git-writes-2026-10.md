@@ -3,7 +3,7 @@
 - Question: how can Arany commit, branch, push and open pull requests with peer-like usability while preserving explicit authority and honest recovery?
 - Source-check date: 2026-10-21. Peer evidence is the official Claude Code and Codex CLI documentation as published on 2026-10-21; neither page exposes a stable document revision, so no version can be pinned, and the conclusions should be rechecked if those docs change. This is not a pinned peer release or implementation audit.
 - Conclusion: typed local writes use the neutralized-view approach and receipted publication. Host push and PR creation require the separately approved isolation exception. Prefix matching must operate on a closed typed schema rather than authorize arbitrary Git options.
-- Scope: evidence, alternatives and conflicts. [AGENTS.md guarantees](../../AGENTS.md#non-negotiable-guarantees), [typed Git writes](../specs/tools.md#typed-git-writes), [human-approved host Git](../specs/tools.md#human-approved-host-git) and [execution](../specs/execution.md) own the accepted decisions and current contracts. This report preserves rationale, grants no capability and establishes no native or live support.
+- Scope: evidence, alternatives and conflicts. [AGENTS.md guarantees](../../AGENTS.md#non-negotiable-guarantees), [typed Git writes](../specs/tools.md#typed-git-writes), [human-approved host Git](../specs/tools.md#human-approved-host-git), [typed prefix rules](../specs/tools.md#typed-prefix-rules) and [execution](../specs/execution.md) own the accepted decisions and current contracts. This report preserves rationale, grants no capability and establishes no native or live support.
 
 ## Peer evidence
 
@@ -21,16 +21,6 @@ The [approval and security documentation](https://learn.chatgpt.com/docs/agent-a
 
 The shared usability pattern is remembered command authorization with restrictive rules taking precedence. The peers do not establish one universal isolation implementation. Arany's user-owned-only rules and mandatory human approval for typed host network writes are owner constraints, not claims of identical peer policy.
 
-## Arany owners
-
-[Typed Git writes](../specs/tools.md#typed-git-writes) own local publication;
-[execution migration](../specs/execution.md#journal-migration) owns format changes.
-The [migration module](../../crates/arany/src/store/migrate.rs) is present.
-The Tools specification owns accepted [typed prefix rules](../specs/tools.md#typed-prefix-rules);
-the active plan owns remaining host-write and future, unaccepted decisions.
-The source-check date above applies to peer evidence, not an implementation
-snapshot.
-
 ## Git and GitHub configuration risks
 
 The [Git configuration reference](https://git-scm.com/docs/git-config) documents that `include`/`includeIf` imports other configuration, `core.sshCommand` substitutes the SSH command, `url.*.insteadOf` rewrites URLs, and `remote.*.pushurl` overrides push destinations and may name multiple destinations. `credential.helper` can execute a helper or shell command; `gpg.program` chooses an executable for signatures. **Inference:** setting only `-c core.hooksPath=/dev/null` does not neutralize these independent routes. A private configuration view plus explicitly admitted destination and authentication settings has a smaller authority surface than passing arbitrary repository config through.
@@ -39,4 +29,4 @@ The [GitHub CLI PR manual](https://cli.github.com/manual/gh_pr_create) says PR c
 
 ## Verification limits
 
-This investigation ran no Linux/macOS native write test, remote push, PR creation, credential access or peer executable experiment. Remaining implementation lives in [NEXT_STEPS.md, Git write workflow, macOS executor](../../NEXT_STEPS.md#daily-use-first) and its linked native/live checklist. The current contracts above own authentication, supported layouts and recovery; this report is not evidence of their native or live verification.
+This investigation ran no Linux/macOS native write test, remote push, PR creation, credential access or peer executable experiment. Pending native macOS evidence is listed in [next steps](../../NEXT_STEPS.md#daily-use-first).

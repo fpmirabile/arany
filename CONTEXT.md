@@ -1,6 +1,6 @@
 # Arany
 
-Arany is a CLI-first runtime for durable conversations whose Runs execute bounded single-agent or team work. The executable is `arany`; the repository directory name is not a product identifier. This glossary names only the concepts required by the beta.
+Arany is a CLI-first runtime for durable conversations whose Runs execute bounded single-agent or team work. The executable is `arany`; the repository directory name is not a product identifier. This glossary names the core product concepts.
 
 ## Language
 
@@ -33,11 +33,11 @@ An authored user input or assistant output in a Session, associated with the Run
 _Avoid_: Event, prompt fragment, terminal line
 
 **Team**:
-The AgentRuns participating in one Run: one accountable primary and zero or more bounded read-only children selected by the Run's agent mode and limits.
+The AgentRuns participating in one Run: one accountable primary and zero or more bounded researcher or editor children selected by the Run's agent mode and limits.
 _Avoid_: Session, fixed worker pair, peer swarm
 
 **AgentRun**:
-One accountable execution within a Run. The primary AgentRun owns the iterative Tool/delegation/synthesis loop; each child AgentRun is read-only: one Provider call, or bounded read-only research steps in a Tool-enabled Run.
+One accountable execution within a Run. The primary AgentRun owns the iterative Tool/delegation/synthesis loop. A researcher child is read-only: one Provider call, or bounded read-only research steps in a Tool-enabled Run. An EditOnly editor child changes its leased Workspace files with typed, receipted operations and explicitly admitted commands.
 _Avoid_: Agent, worker process, task
 
 **Event**:
