@@ -1360,6 +1360,7 @@ pub(super) async fn run_unit(
     }
     match result {
         Ok((mut observation, candidate)) => {
+            crate::tools::network::annotate(&mut observation, refusals)?;
             super::super::publish_cache_candidate(
                 &mut observation,
                 candidate,
@@ -1367,7 +1368,6 @@ pub(super) async fn run_unit(
                 completion_deadline,
             )
             .await;
-            crate::tools::network::annotate(&mut observation, refusals)?;
             Ok(observation)
         }
         Err(error) => Err(error),
@@ -1468,6 +1468,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             None
         };
         let command_deadline = task.command_deadline;
+        let proxy_port = task.proxy_port;
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
@@ -1647,7 +1648,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         #[cfg(any(test, feature = "test-support"))]
                         git_fault,
                     },
-                    (path.parent().ok_or(ToolError::Path)?, command_deadline),
+                    (path.parent().ok_or(ToolError::Path)?, command_deadline, proxy_port),
                 )
                 .await
             }

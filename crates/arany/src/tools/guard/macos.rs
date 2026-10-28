@@ -1311,7 +1311,7 @@ async fn execute_worker(
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     gate: GoGate,
-    (root, command_deadline): (&Path, Option<[u8; 8]>),
+    (root, command_deadline, proxy_port): (&Path, Option<[u8; 8]>, Option<u16>),
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let git_stage = gate.git_stage;
@@ -1319,6 +1319,7 @@ async fn execute_worker(
     let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
     task.command_deadline = command_deadline;
+    task.proxy_port = proxy_port;
     task.git_stage = git_stage;
     #[cfg(any(test, feature = "test-support"))]
     {
