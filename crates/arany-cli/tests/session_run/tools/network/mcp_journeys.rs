@@ -566,6 +566,13 @@ async fn remote_mcp_refuses_a_server_rejected_unexpired_token() {
     let listed = list_remote(server.port).await;
     assert_eq!(listed["disposition"], "Failed");
     assert_eq!(listed["output"]["error"], "unauthorized");
+    let exchanges = server.exchanges.lock().unwrap();
+    assert_eq!(exchanges.len(), 1);
+    assert_eq!(exchanges[0].path, "/mcp");
+    assert_eq!(
+        exchanges[0].headers["authorization"],
+        "Bearer rejected-token"
+    );
 }
 
 #[tokio::test]
