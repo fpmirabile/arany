@@ -98,6 +98,8 @@ Every EditOnly AgentRun uses the same `execute_step` and `before_dispatch` as th
 
 This follows Claude Code and Codex CLI subagents sharing the working tree. Arany additionally checkpoints editor typed mutations, unlike Claude Code's subagent checkpoint exclusion, because receipted effects and rewind are part of its durability contract. Editors never receive host authority. Their effective capabilities remain the intersection of parent, plan, definition and leased assignment, with `unguarded: denied`.
 
+Per-editor worktrees are rejected because they add creation, cleanup and merge cost without strengthening these guarantees. An opt-in worktree shared by all agents for one Goal, with one changeset published at the end, remains outside the current capability. Revisit it if dogfooding shows parallel editors needing overlapping areas or a user asks to keep the working tree untouched until review.
+
 A write-capable parent, Implementation phase, an admitted matching definition and a committed Goal plan are required. Invalid input is refused before spawn or child disclosure. Foreground and background modes use the same admission; command lists and command criteria must fit the parent, plan and definition grants. No editor can invoke Git, MCP, Skill, network, host commands or nested delegation. Existing per-Tool, context, turn, call, token, active-time and Store bounds remain in force; no transfer allowance grants live editor authority.
 
 `RunStarted.config.worker_policy` remains required nullable data. The bounded parent grant, concurrency, turns and model Tool ceiling are admission pins. It carries no Worker data allowance.
