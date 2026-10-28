@@ -6,6 +6,8 @@ const CLIENT_TOKEN: &str = "synthetic-mcp-token-8841";
 const RENEWED_TOKEN: &str = "synthetic-renewed-token-3157";
 const LOGIN_TOKEN: &str = "login-access-canary-7731";
 const LOGIN_REFRESH: &str = "login-refresh-canary-5519";
+// Above the 64 KiB bound that caps token replies (`MAX_METADATA_BYTES`).
+const OVERSIZED_TOKEN_REPLY_BYTES: usize = 70 * 1024;
 
 #[derive(Clone)]
 struct Exchange {
@@ -89,77 +91,109 @@ fn respond(status: &str, kind: &str, extra: &str, body: &str) -> String {
     )
 }
 
+struct Gates<'a> {
+    answered: &'a std::sync::atomic::AtomicBool,
+    requested: &'a tokio::sync::Notify,
+    stop: &'a std::sync::atomic::AtomicBool,
+}
+
 // `None` closes the connection without any reply.
 fn mcp_reply(
     exchange: &Exchange,
     mode: Mode,
     executed: &AtomicUsize,
-    (answered, requested, stop): (
-        &std::sync::atomic::AtomicBool,
-        &tokio::sync::Notify,
-        &std::sync::atomic::AtomicBool,
-    ),
+    gates: &Gates<'_>,
     stream: &mut std::net::TcpStream,
 ) -> Option<String> {
     let host = exchange.headers.get("host").cloned().unwrap_or_default();
-    match exchange.path.as_str() {
+    if let Some(reply) = oauth_reply(&exchange.path, &host, mode) {
+        return Some(reply);
+    }
+    if exchange.path == "/token" {
+        return token_reply(exchange, mode, gates);
+    }
+    rpc_reply(exchange, mode, executed, gates, stream)
+}
+
+fn oauth_reply(path: &str, host: &str, mode: Mode) -> Option<String> {
+    let reply = match path {
         path if path.starts_with("/.well-known/oauth-protected-resource") => {
-            return Some(respond("404 Not Found", "text/plain", "", ""));
+            respond("404 Not Found", "text/plain", "", "")
         }
         "/.well-known/oauth-authorization-server" => {
             let origin = format!("http://{host}");
             let body = json!({"issuer":origin,"authorization_endpoint":format!("{origin}/authorize"),
                 "token_endpoint":format!("{origin}/token"),"registration_endpoint":format!("{origin}/register"),
                 "revocation_endpoint":format!("{origin}/revoke"),"code_challenge_methods_supported":["S256"]});
-            return Some(respond("200 OK", "application/json", "", &body.to_string()));
+            respond("200 OK", "application/json", "", &body.to_string())
         }
         "/register" => {
             let body = json!({"client_id":"fixture-client"}).to_string();
-            return Some(respond("201 Created", "application/json", "", &body));
+            respond("201 Created", "application/json", "", &body)
         }
-        "/revoke" => {
-            return Some(if mode == Mode::RevokeFails {
-                respond("500 Internal Server Error", "text/plain", "", "")
-            } else {
-                respond("200 OK", "text/plain", "", "")
-            });
+        "/revoke" if mode == Mode::RevokeFails => {
+            respond("500 Internal Server Error", "text/plain", "", "")
         }
-        _ => {}
+        "/revoke" => respond("200 OK", "text/plain", "", ""),
+        _ => return None,
+    };
+    Some(reply)
+}
+
+fn token_reply(exchange: &Exchange, mode: Mode, gates: &Gates<'_>) -> Option<String> {
+    gates.requested.notify_one();
+    if mode == Mode::HoldTokenReply {
+        while !gates.stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        return None;
     }
-    if exchange.path == "/token" {
-        requested.notify_one();
-        if mode == Mode::HoldTokenReply {
-            while !stop.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            return None;
-        }
-        if mode == Mode::LoseTokenReply {
-            return None;
-        }
-        if String::from_utf8_lossy(&exchange.body).contains("grant_type=authorization_code") {
-            let body = json!({"access_token":LOGIN_TOKEN,"token_type":"Bearer","expires_in":3600,
-                "refresh_token":LOGIN_REFRESH})
-            .to_string();
-            return Some(respond("200 OK", "application/json", "", &body));
-        }
-        let body = format!(
-            r#"{{"access_token":"{RENEWED_TOKEN}","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh"}}"#
-        );
-        return Some(match mode {
-            Mode::TokenEncoded => respond(
-                "200 OK",
-                "application/json",
-                "Content-Encoding: gzip\r\n",
-                &body,
-            ),
-            Mode::TokenOversized => {
-                let padded = format!(r#"{{"pad":"{}"}}"#, "a".repeat(70 * 1024));
-                respond("200 OK", "application/json", "", &padded)
-            }
-            _ => respond("200 OK", "application/json", "", &body),
-        });
+    if mode == Mode::LoseTokenReply {
+        return None;
     }
+    if String::from_utf8_lossy(&exchange.body).contains("grant_type=authorization_code") {
+        let body = json!({"access_token":LOGIN_TOKEN,"token_type":"Bearer","expires_in":3600,
+            "refresh_token":LOGIN_REFRESH})
+        .to_string();
+        return Some(respond("200 OK", "application/json", "", &body));
+    }
+    let body = format!(
+        r#"{{"access_token":"{RENEWED_TOKEN}","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh"}}"#
+    );
+    Some(match mode {
+        Mode::TokenEncoded => respond(
+            "200 OK",
+            "application/json",
+            "Content-Encoding: gzip\r\n",
+            &body,
+        ),
+        Mode::TokenOversized => {
+            let padded = format!(
+                r#"{{"access_token":"{RENEWED_TOKEN}","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh","pad":"{}"}}"#,
+                "a".repeat(OVERSIZED_TOKEN_REPLY_BYTES)
+            );
+            respond("200 OK", "application/json", "", &padded)
+        }
+        _ => respond("200 OK", "application/json", "", &body),
+    })
+}
+
+fn stream_ping(stream: &mut std::net::TcpStream) -> Option<()> {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+    stream.write_all(head.as_bytes()).ok()?;
+    stream
+        .write_all(b"data: {\"jsonrpc\":\"2.0\",\"id\":\"ping-1\",\"method\":\"ping\"}\n\n")
+        .ok()?;
+    stream.flush().ok()
+}
+
+fn rpc_reply(
+    exchange: &Exchange,
+    mode: Mode,
+    executed: &AtomicUsize,
+    gates: &Gates<'_>,
+    stream: &mut std::net::TcpStream,
+) -> Option<String> {
     let bearer = exchange.headers.get("authorization");
     let admitted = [CLIENT_TOKEN, RENEWED_TOKEN]
         .iter()
@@ -170,80 +204,85 @@ fn mcp_reply(
     let message: Value = serde_json::from_slice(&exchange.body).unwrap_or(Value::Null);
     let id = &message["id"];
     if message.get("method").is_none() && message["id"] == "ping-1" {
-        answered.store(true, Ordering::SeqCst);
+        gates.answered.store(true, Ordering::SeqCst);
         return Some(if mode == Mode::RejectPingReply {
             respond("401 Unauthorized", "text/plain", "", "")
         } else {
             respond("202 Accepted", "text/plain", "", "")
         });
     }
-    Some(match message["method"].as_str() {
-        Some("initialize") => respond(
+    match message["method"].as_str() {
+        Some("initialize") => Some(respond(
             "200 OK",
             "application/json",
             "Mcp-Session-Id: fixture-session\r\n",
             &json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}}).to_string(),
-        ),
-        Some("notifications/initialized") => respond("202 Accepted", "text/plain", "", ""),
-        Some("tools/list") => {
-            let description = if mode == Mode::ReflectToken {
-                format!("echo {CLIENT_TOKEN}")
-            } else {
-                "Echo".to_owned()
-            };
-            let reply = json!({"jsonrpc":"2.0","id":id,"result":{"tools":[tool(&description)]}});
-            if mode == Mode::PingBeforeResult {
-                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
-                stream.write_all(head.as_bytes()).ok()?;
-                stream
-                    .write_all(b"data: {\"jsonrpc\":\"2.0\",\"id\":\"ping-1\",\"method\":\"ping\"}\n\n")
-                    .ok()?;
-                stream.flush().ok()?;
-                let deadline = std::time::Instant::now() + PAGE_IO_TIMEOUT;
-                while !answered.load(Ordering::SeqCst) {
-                    if std::time::Instant::now() > deadline {
-                        return None;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                return Some(format!("data: {reply}\n\n"));
-            }
-            respond(
-                "200 OK",
-                "text/event-stream",
-                "",
-                &format!(": comment\nid: 1\ndata: {reply}\n\n"),
-            )
-        }
-        Some("tools/call") => {
-            executed.fetch_add(1, Ordering::SeqCst);
-            if mode == Mode::DisconnectAfterCall {
+        )),
+        Some("notifications/initialized") => Some(respond("202 Accepted", "text/plain", "", "")),
+        Some("tools/list") => tools_list_reply(id, mode, gates, stream),
+        Some("tools/call") => tools_call_reply(id, mode, executed, gates, stream),
+        _ => Some(respond("400 Bad Request", "text/plain", "", "")),
+    }
+}
+
+fn tools_list_reply(
+    id: &Value,
+    mode: Mode,
+    gates: &Gates<'_>,
+    stream: &mut std::net::TcpStream,
+) -> Option<String> {
+    let description = if mode == Mode::ReflectToken {
+        format!("echo {CLIENT_TOKEN}")
+    } else {
+        "Echo".to_owned()
+    };
+    let reply = json!({"jsonrpc":"2.0","id":id,"result":{"tools":[tool(&description)]}});
+    if mode == Mode::PingBeforeResult {
+        stream_ping(stream)?;
+        let deadline = std::time::Instant::now() + PAGE_IO_TIMEOUT;
+        while !gates.answered.load(Ordering::SeqCst) {
+            if std::time::Instant::now() > deadline {
                 return None;
             }
-            if mode == Mode::RejectPingReply {
-                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
-                stream.write_all(head.as_bytes()).ok()?;
-                stream
-                    .write_all(b"data: {\"jsonrpc\":\"2.0\",\"id\":\"ping-1\",\"method\":\"ping\"}\n\n")
-                    .ok()?;
-                stream.flush().ok()?;
-                let deadline = std::time::Instant::now() + PAGE_IO_TIMEOUT;
-                while !answered.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                return None;
-            }
-            let mut reply = json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"done"}]}});
-            match mode {
-                Mode::WrongReplyId => reply["id"] = json!(9999),
-                Mode::WrongReplyVersion => reply["jsonrpc"] = json!("1.0"),
-                Mode::ReplyWithResultAndError => reply["error"] = json!({"code":-1,"message":"x"}),
-                _ => {}
-            }
-            respond("200 OK", "application/json", "", &reply.to_string())
+            std::thread::sleep(Duration::from_millis(10));
         }
-        _ => respond("400 Bad Request", "text/plain", "", ""),
-    })
+        return Some(format!("data: {reply}\n\n"));
+    }
+    Some(respond(
+        "200 OK",
+        "text/event-stream",
+        "",
+        &format!(": comment\nid: 1\ndata: {reply}\n\n"),
+    ))
+}
+
+fn tools_call_reply(
+    id: &Value,
+    mode: Mode,
+    executed: &AtomicUsize,
+    gates: &Gates<'_>,
+    stream: &mut std::net::TcpStream,
+) -> Option<String> {
+    executed.fetch_add(1, Ordering::SeqCst);
+    if mode == Mode::DisconnectAfterCall {
+        return None;
+    }
+    if mode == Mode::RejectPingReply {
+        stream_ping(stream)?;
+        let deadline = std::time::Instant::now() + PAGE_IO_TIMEOUT;
+        while !gates.answered.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        return None;
+    }
+    let mut reply = json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"done"}]}});
+    match mode {
+        Mode::WrongReplyId => reply["id"] = json!(9999),
+        Mode::WrongReplyVersion => reply["jsonrpc"] = json!("1.0"),
+        Mode::ReplyWithResultAndError => reply["error"] = json!({"code":-1,"message":"x"}),
+        _ => {}
+    }
+    Some(respond("200 OK", "application/json", "", &reply.to_string()))
 }
 
 fn mcp_fixture(mode: Mode) -> McpFixture {
@@ -278,13 +317,12 @@ fn mcp_fixture(mode: Mode) -> McpFixture {
                     return;
                 };
                 recorded.lock().unwrap().push(exchange.clone());
-                let reply = mcp_reply(
-                    &exchange,
-                    mode,
-                    &count,
-                    (&answered, &notify, &gate),
-                    &mut stream,
-                );
+                let gates = Gates {
+                    answered: &answered,
+                    requested: &notify,
+                    stop: &gate,
+                };
+                let reply = mcp_reply(&exchange, mode, &count, &gates, &mut stream);
                 if let Some(reply) = reply {
                     let _ = stream.write_all(reply.as_bytes());
                 }
@@ -381,7 +419,7 @@ async fn run_remote_until(
             cancel_run.cancel();
         }
     };
-    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(40), async {
+    let (outcome, ()) = tokio::time::timeout(REMOTE_RUN_DEADLINE, async {
         tokio::join!(
             run_with(
                 &engine,
@@ -668,7 +706,7 @@ async fn remote_mcp_is_refused_to_researchers_without_touching_credentials() {
         max_active_children: 1,
     };
     let outcome = tokio::time::timeout(
-        Duration::from_secs(40),
+        REMOTE_RUN_DEADLINE,
         run_with(
             &engine,
             &provider,
@@ -815,6 +853,7 @@ fn query_value(url: &str, key: &str) -> String {
 
 const MAX_CLI_CHANNEL_BYTES: usize = 4096;
 const CLI_DEADLINE: Duration = Duration::from_secs(30);
+const REMOTE_RUN_DEADLINE: Duration = Duration::from_secs(40);
 
 fn arany_mcp(action: &str, state: &Path, workspace: &Path) -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
