@@ -454,7 +454,10 @@ mod tests {
             CommandEnvironment::for_discovery(&path),
             Err(ToolError::Configuration)
         ));
-        assert_eq!(record.read().unwrap().unwrap(), b"invalid saved environment");
+        assert_eq!(
+            record.read().unwrap().unwrap(),
+            b"invalid saved environment"
+        );
 
         selected.save(&state).unwrap();
         std::fs::remove_file(path.join("events.sqlite3")).unwrap();
