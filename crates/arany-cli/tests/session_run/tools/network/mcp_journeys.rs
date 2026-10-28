@@ -414,7 +414,10 @@ async fn run_remote_until(
         },
     )
     .unwrap();
-    let session = engine.create_session(workspace.clone(), None).await.unwrap();
+    let session = engine
+        .create_session(workspace.clone(), None)
+        .await
+        .unwrap();
     let mut request = proposal_request(&workspace);
     request.session_id = Some(session);
     let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
@@ -478,7 +481,10 @@ async fn run_remote_until(
 
 fn assert_reported_uncertain(run: &Value) {
     assert_eq!(run["disposition"], "Uncertain");
-    assert_eq!(run["reported_uncertain"], true, "reported unknown, never settled");
+    assert_eq!(
+        run["reported_uncertain"], true,
+        "reported unknown, never settled"
+    );
     assert_eq!(run["stop"], "Some(Uncertain)", "it stops the Run");
 }
 
