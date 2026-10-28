@@ -22,10 +22,19 @@ pub(crate) fn run_body(
         "max_completion_tokens": request.max_output_tokens,
         "stream": false,
     });
-    let functions: Vec<_> = outcome_specs(&conversation.outcome)
-        .into_iter()
+    let functions: Vec<_> = conversation
+        .tools
+        .iter()
+        .flatten()
+        .cloned()
+        .chain(outcome_specs(&conversation.outcome))
         .map(function_json)
         .collect();
+    let exhausted = request
+        .input
+        .tools
+        .as_ref()
+        .is_some_and(crate::tools::ToolContext::answer_only);
     if request.input.role == crate::provider::PromptRole::ToolReview {
         body["response_format"] = json!({
             "type":"json_schema",
@@ -37,7 +46,7 @@ pub(crate) fn run_body(
         });
     } else if !functions.is_empty() {
         body["tools"] = Value::Array(functions);
-        body["tool_choice"] = json!("auto");
+        body["tool_choice"] = json!(if exhausted { "none" } else { "auto" });
         body["parallel_tool_calls"] = json!(false);
     }
     if let Some(effort) = effort {

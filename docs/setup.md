@@ -162,8 +162,8 @@ credentials. Keep the file private (`0600` on Unix).
 
 All routes below require the exact text-compaction conformance check before use.
 Checks establish bounded protocol behavior, not live vendor compatibility or
-summary accuracy. Custom primary/child routes are read-only, without Workspace
-Tools or images. If AI Tool review is needed, select a native review route in
+summary accuracy. Custom primary/child routes receive the same Workspace Tools
+as native routes but no images. If AI Tool review is needed, select a native review route in
 [provider-routing.json](./specs/provider.md#per-role-selection-and-fallback);
 text compaction does not attest a strict review verdict.
 
@@ -211,9 +211,9 @@ Only after that exact check succeeds, use the matching model ID:
 arany exec --state-dir STATE --provider custom:local --model MODEL_ID "Your task"
 ```
 
-An empty effort list omits `reasoning_effort`. Custom routes remain read-only
-without Workspace Tools or images; a passing check does not establish live
-vendor compatibility or summary accuracy.
+An empty effort list omits `reasoning_effort`. Custom routes receive the same
+Workspace Tools as native routes but no images; a passing check does not
+establish live vendor compatibility, Tool-call fidelity or summary accuracy.
 
 DeepSeek API keys can use this private `STATE/provider-profiles.json`:
 

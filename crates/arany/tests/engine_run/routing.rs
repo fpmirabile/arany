@@ -613,6 +613,63 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
 }
 
 #[tokio::test]
+async fn custom_routes_receive_the_same_workspace_tools_as_native_routes() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
+    let state = temp.path().join("state");
+    let read = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: None,
+        limit: None,
+    };
+    let mut primary = ScriptedProvider::new(vec![tool_outcome(read), finish("done")])
+        .with_profile("openai", "model-a");
+    primary.identity.profile = "custom:messages".into();
+    primary.identity.provenance = arany::Provenance::Custom(arany::CustomProfileProvenance {
+        endpoint: "https://example.com/anthropic/v1/messages".into(),
+        evidence_digest: [7; 32],
+        capability_evidence_version: 2,
+    });
+    primary.identity.limits.concurrency = 1;
+    let primary = route(primary);
+    let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+    let result = run_routed(&engine, routes(&primary), input(&workspace), configured())
+        .await
+        .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let (events, view) = reopen(&state, result.session_id).await;
+    assert!(
+        view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .custom_profile_provenance
+            .is_some()
+    );
+    assert_eq!(view.runs[0].tools.len(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .count(),
+        1
+    );
+    let requests = primary.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.input.role == arany::PromptRole::Primary)
+    );
+    assert_eq!(
+        requests[1].input.tools.as_ref().unwrap().steps[0]
+            .observations
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispatch() {
     for kind in 0..3 {
         for role in [ProviderRole::Primary, ProviderRole::Child] {
