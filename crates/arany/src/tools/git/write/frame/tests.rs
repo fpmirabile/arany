@@ -36,13 +36,37 @@ fn validate(plan: &Plan) -> Result<Plan, ToolError> {
 }
 
 fn round_trip(plan: &Plan) -> Plan {
+    timed_round_trip(plan).0
+}
+
+fn timed_round_trip(plan: &Plan) -> (Plan, std::time::Duration) {
     let original = digest(&encode(plan).unwrap());
     let mut framed = Vec::new();
+    let started = std::time::Instant::now();
     write(&mut framed, plan).unwrap();
     let mut remaining = framed.as_slice();
     let decoded = read(&mut remaining).unwrap();
+    let elapsed = started.elapsed();
     assert!(remaining.is_empty());
     assert_eq!(digest(&encode(&decoded).unwrap()), original);
+    (decoded, elapsed)
+}
+
+fn largest_switch_round_trip(plan: &Plan) -> Plan {
+    let (decoded, elapsed) = timed_round_trip(plan);
+    println!(
+        "Git write latency {}",
+        serde_json::json!({
+            "platform": std::env::consts::OS,
+            "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            "operation": "largest_switch_frame",
+            "frame_round_trip_us": elapsed.as_micros(),
+            "index_bytes": MAX_SNAPSHOT_BYTES,
+            "replacement_bytes": MAX_SNAPSHOT_BYTES,
+            "files": MAX_SNAPSHOT_FILES,
+            "refs": MAX_REF_ENTRIES,
+        })
+    );
     decoded
 }
 
@@ -76,7 +100,7 @@ fn largest_switch_and_long_paths_fit_the_derived_frame_bound() {
             .push(long_path("refs/heads", MAX_PATH_BYTES, index));
     }
     plan.publication.head = Some(b"ref: refs/heads/target\n".to_vec());
-    let decoded = round_trip(&plan);
+    let decoded = largest_switch_round_trip(&plan);
     assert_eq!(
         decoded.publication.index.as_ref().unwrap().len(),
         MAX_SNAPSHOT_BYTES

@@ -7,6 +7,10 @@ mod recovery;
 mod switch;
 
 #[cfg(any(debug_assertions, arany_ci))]
+#[path = "tools_macos_git/latency.rs"]
+pub(super) mod latency;
+
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::engine_support::run_with;
 #[cfg(any(debug_assertions, arany_ci))]
 use crate::git::{host_git, tree_snapshot};
@@ -212,6 +216,7 @@ fn release_git_journey(helper: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native Git journey");
+    latency::forward(&output.stdout);
     assert!(output.stderr.is_empty());
 }
 
@@ -911,8 +916,10 @@ async fn native_git_branch_helper() {
     } = write_fixture(root, "git-write");
     let leftovers = unit_leftovers();
 
+    let recorder = arany::test_support::engine::record_tool_latency(&engine);
     let (created, provider) =
         approved_git_write(&engine, &workspace, branch_creation("topic")).await;
+    let samples = recorder.samples().unwrap();
     assert_eq!(
         created.run.status,
         RunStatus::Finished,
@@ -989,6 +996,7 @@ async fn native_git_branch_helper() {
         .unwrap()
         .unwrap();
     assert_eq!(replay.runs.last().unwrap(), &created.run);
+    latency::report(&samples, &events);
     store.close().await.unwrap();
     let started = events
         .iter()
@@ -1042,6 +1050,7 @@ async fn native_git_commit_helper() {
         engine,
     } = write_fixture(root, "git-commit");
     let leftovers = unit_leftovers();
+    let recorder = arany::test_support::engine::record_tool_latency(&engine);
 
     std::fs::write(workspace.join("src/a.txt"), "beta\n").unwrap();
     std::fs::write(workspace.join("src/b.txt"), "new\n").unwrap();
@@ -1106,6 +1115,7 @@ async fn native_git_commit_helper() {
     );
     assert_eq!(unit_leftovers(), leftovers);
 
+    let samples = recorder.samples().unwrap();
     let mut rows = recovery::commit_drift(&engine, &workspace, &state_path, &head).await;
     std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
     rows.push(recovery::commit_death(&engine, &workspace, &state_path).await);
@@ -1121,6 +1131,7 @@ async fn native_git_commit_helper() {
             .unwrap()
             .unwrap();
         assert_eq!(replay.runs.last().unwrap(), &outcome.run);
+        latency::report(&samples, &events);
         let started = events
             .iter()
             .filter(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::GitCommit { .. })))
