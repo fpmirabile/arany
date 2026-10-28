@@ -1,5 +1,5 @@
 use super::{escape_terminal, grouped_count, observation_lines, unavailable_limits_line};
-use arany::{ApiLimitDimension, ApiUsage, ProviderRole, SessionView};
+use arany::{ApiLimitDialect, ApiLimitDimension, ApiUsage, ProviderRole, SessionView};
 use std::fmt::Write;
 
 pub(super) fn reported(
@@ -55,14 +55,19 @@ fn section(
         ProviderRole::Compaction => "compaction",
     };
     let dialect = match group.dialect {
-        arany::ApiLimitDialect::OpenAi => "OpenAI",
-        arany::ApiLimitDialect::Anthropic => "Anthropic",
+        ApiLimitDialect::OpenAi => "OpenAI",
+        ApiLimitDialect::Anthropic => "Anthropic",
     };
     let mut text = format!(
         "\nAPI rate limits · Run {run_number} · route {selection}{qualifier}\nProvider: {}\nModel: {}\nRole: {role}\nReported header dialect: {dialect}\nProvider-reported counters; not a plan balance or this Session's share\n",
         escape_terminal(&group.identity.profile),
         escape_terminal(&group.identity.model)
     );
+    if group.dialect == ApiLimitDialect::Anthropic {
+        text.push_str(
+            "Token counters may be rounded by the Provider; dimensions are not additive\n",
+        );
+    }
     for row in &group.rows {
         let count = |value: Option<u64>| {
             value
@@ -72,7 +77,7 @@ fn section(
         let _ = writeln!(
             text,
             "{}\nLimit: {}\nRemaining: {}",
-            label(row.dimension),
+            label(row.dimension, group.dialect),
             count(row.limit),
             count(row.remaining)
         );
@@ -86,7 +91,10 @@ fn section(
             text.push_str("Latest call did not report limits\n");
         }
         Some(omitted) => {
-            let labels: Vec<_> = omitted.iter().map(|dimension| label(*dimension)).collect();
+            let labels: Vec<_> = omitted
+                .iter()
+                .map(|dimension| label(*dimension, group.dialect))
+                .collect();
             let _ = writeln!(
                 text,
                 "Latest call did not report limits for: {}",
@@ -101,10 +109,13 @@ fn section(
     text
 }
 
-fn label(dimension: ApiLimitDimension) -> &'static str {
+fn label(dimension: ApiLimitDimension, dialect: ApiLimitDialect) -> &'static str {
     match dimension {
         ApiLimitDimension::Requests => "Requests",
-        ApiLimitDimension::Tokens => "Tokens",
+        ApiLimitDimension::Tokens => match dialect {
+            ApiLimitDialect::OpenAi => "Tokens",
+            ApiLimitDialect::Anthropic => "Tokens (most restrictive limit)",
+        },
         ApiLimitDimension::ProjectTokens => "Project tokens",
         ApiLimitDimension::InputTokens => "Input tokens",
         ApiLimitDimension::OutputTokens => "Output tokens",

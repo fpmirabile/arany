@@ -165,7 +165,10 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             write!(input, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             input.flush().unwrap();
         } else {
-            chatgpt::send_json(input, &serde_json::to_vec(&response).unwrap());
+            let bytes = serde_json::to_vec(&response).unwrap();
+            write!(input, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nanthropic-ratelimit-input-tokens-remaining: 0\r\nanthropic-priority-output-tokens-limit: 2000\r\nanthropic-priority-output-tokens-reset: 2026-10-28T01:30:00.001+01:30\r\nanthropic-workspace-id: remote-workspace-canary\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+            input.write_all(&bytes).unwrap();
+            input.flush().unwrap();
         }
     }
 }
@@ -275,6 +278,15 @@ pub(super) fn stage() {
     assert_eq!(compact.response_id.as_deref(), Some("msg_scoped_3"));
     assert_eq!(compact.input_tokens, Some(12));
     assert_eq!(compact.output_tokens, Some(8));
+    let compact_api = compact.rate_limits.as_ref().unwrap().api.as_ref().unwrap();
+    assert_eq!(compact_api.dialect, arany::ApiLimitDialect::Anthropic);
+    assert_eq!(compact_api.rows[0].remaining, Some(0));
+    assert_eq!(compact_api.rows[1].limit, Some(2000));
+    assert_eq!(direct.usage.api_limits.len(), 2);
+    assert!(direct.usage.api_limits.iter().all(|group| {
+        group.identity.saved_api_account_id() == Some(id)
+            && group.dialect == arany::ApiLimitDialect::Anthropic
+    }));
     assert_eq!(
         compact.wire_provenance,
         Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified)
@@ -354,6 +366,23 @@ pub(super) fn stage() {
         assert_eq!(run.agents.len(), 1);
         assert_eq!(run.agents[0].provider_calls.len(), 1);
         let call = &run.agents[0].provider_calls[0];
+        let api = call.rate_limits.as_ref().unwrap().api.as_ref().unwrap();
+        assert_eq!(api.dialect, arany::ApiLimitDialect::Anthropic);
+        assert_eq!(api.rows[0].dimension, arany::ApiLimitDimension::InputTokens);
+        assert_eq!(api.rows[0].remaining, Some(0));
+        assert_eq!(
+            api.rows[1].dimension,
+            arany::ApiLimitDimension::PriorityOutputTokens
+        );
+        assert_eq!(api.rows[1].limit, Some(2000));
+        assert_eq!(api.rows[1].reset_at, Some(1_793_145_601));
+        let facts = serde_json::to_vec(&call.rate_limits).unwrap();
+        assert!(
+            !facts
+                .windows(WORKSPACE_ID.len())
+                .any(|part| part == WORKSPACE_ID.as_bytes())
+        );
+        assert!(!facts.windows(b"canary".len()).any(|part| part == b"canary"));
         assert_eq!(call.response_id.as_deref(), Some(response_id));
         assert_eq!(call.input_tokens, Some(12));
         assert_eq!(call.output_tokens, Some(8));
