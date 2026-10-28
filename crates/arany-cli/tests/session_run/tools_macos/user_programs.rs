@@ -123,6 +123,8 @@ fn rustup_fixture(root: &Path, workspace: &Path) {
         );
         std::fs::set_permissions(rustc, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
+    // A toolchain-file proxy ensures this directory exists; rustup creates it when installing a channel.
+    std::fs::create_dir(home.join(".rustup/update-hashes")).unwrap();
     private_file(
         &home.join(".rustup/settings.toml"),
         format!("version = \"12\"\ndefault_toolchain = \"arany-default\"\ndefault_host_triple = \"{host}\"\nprofile = \"minimal\"\n").as_bytes(),
