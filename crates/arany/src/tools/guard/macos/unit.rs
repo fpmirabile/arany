@@ -1098,10 +1098,8 @@ pub(super) async fn run_unit(
                 }
             }
             if primary_command && bytes != b"SELECT_READY\n" {
-                return Err(serde_json::from_slice::<BootstrapFailure>(&bytes).map_or(
-                    ToolError::Configuration,
-                    ToolError::GuardBootstrap,
-                ));
+                return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
+                    .map_or(ToolError::Configuration, ToolError::GuardBootstrap));
             }
             let command_deadline = if bytes == b"SELECT_READY\n" {
                 // The command runtime starts at selection, after storage and cache preparation.

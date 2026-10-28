@@ -664,10 +664,7 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
         tool_report(Some(observation))
     );
     assert!(
-        matches!(
-            observation.attestation,
-            Some(arany::Attestation::Guard(_))
-        ),
+        matches!(observation.attestation, Some(arany::Attestation::Guard(_))),
         "{}",
         tool_report(Some(observation))
     );

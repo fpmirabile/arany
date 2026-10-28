@@ -2698,7 +2698,10 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
             "guard_executable": env!("CARGO_BIN_EXE_arany")
         });
         if case == "missing_command_deadline" {
-            task_value.as_object_mut().unwrap().remove("command_deadline");
+            task_value
+                .as_object_mut()
+                .unwrap()
+                .remove("command_deadline");
         }
         if case == "unknown_task_field" {
             task_value["unexpected"] = json!(false);
