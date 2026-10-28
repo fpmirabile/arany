@@ -478,7 +478,7 @@ fn native_journey_with_rust_sysroot(
         }
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if rust_sysroot.is_some() {
+    if registry.is_none() && rust_sysroot.is_some() {
         assert!(
             String::from_utf8_lossy(&output.stdout)
                 .lines()

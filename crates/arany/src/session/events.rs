@@ -1,6 +1,8 @@
 mod goal;
 mod records;
+mod selection_timing;
 mod shared_editors;
+pub(crate) use selection_timing::{add_selection_timing, pre_selection_timing_payload};
 pub(crate) use shared_editors::{
     live_editor_payload, pre_shared_editor_payload, retired_worker_payload,
     run_started_v23_payload, run_started_v24_payload, run_started_v24_to_v25,
@@ -175,8 +177,8 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("ToolProposed", 5),
     ("ToolPreflightRefused", 1),
     ("HookStarted", 16),
-    ("HookFinished", 22),
-    ("ToolFinished", 33),
+    ("HookFinished", 23),
+    ("ToolFinished", 34),
     ("RunStarted", 26),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),

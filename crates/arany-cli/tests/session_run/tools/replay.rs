@@ -98,7 +98,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "",
             "stderr": "",
             "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
@@ -651,7 +651,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         let digest = Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "",
             "stderr": "",
             "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
@@ -968,7 +968,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         },
     };
     let command_result = serde_json::json!({
-        "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":7,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":changeset
+        "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":7,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":changeset
     })
     .to_string();
     let mut integrated = prefix[..TOOL_STARTED].to_vec();
@@ -1092,7 +1092,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     if let Event::ToolFinished { observation, .. } = &mut unfinalized_cache[COMMAND_FINISHED] {
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "build complete",
             "stderr": "",
             "stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset": changeset,
@@ -1108,7 +1108,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     if let Event::ToolFinished { observation, .. } = &mut uncertain_cache[COMMAND_FINISHED] {
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
-            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
+            "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "build complete",
             "stderr": "",
             "stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset": changeset,
@@ -2136,12 +2136,14 @@ pub(super) async fn native_command_changeset_corpus(
                 );
             }
             if case == "selection" {
+                let elapsed = result["selection"]["elapsed_ms"].as_u64().unwrap();
+                assert!(elapsed <= u64::from(command.intent.limits.runtime_ms));
                 assert_eq!(
                     result["selection"],
                     if cfg!(target_os = "linux") {
-                        json!({"ignored_entries":2,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":2})
+                        json!({"elapsed_ms":elapsed,"ignored_entries":2,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":2})
                     } else {
-                        json!({"ignored_entries":1,"pruned_directories":1,"oversized_inputs":1,"discarded_outputs":1})
+                        json!({"elapsed_ms":elapsed,"ignored_entries":1,"pruned_directories":1,"oversized_inputs":1,"discarded_outputs":1})
                     }
                 );
                 assert!(!workspace.join("src/ignored/new").exists());

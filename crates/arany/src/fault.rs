@@ -10,6 +10,8 @@ use tokio::time::Instant;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use injection::{FaultPlan, GitStorageFault};
+#[cfg(test)]
+pub(crate) use injection::PRIVATE_RECORD_GATE_DEADLINE;
 
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub(crate) mod git_write;
@@ -83,6 +85,12 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
         return Err(StoreError::Io(io::Error::other("record publication fault")));
     }
     Ok(())
+}
+
+#[cfg_attr(not(test), expect(unused_variables))]
+pub(crate) fn private_record_admission(state: &std::path::Path, record: &str) {
+    #[cfg(test)]
+    FaultPlan::private_record_admission_gate(state, record);
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -473,6 +481,13 @@ mod injection {
         GuardCachePublication(uuid::Uuid, oneshot::Sender<()>, oneshot::Receiver<()>),
         RecordSync(std::path::PathBuf, &'static str),
         RecordPublication(std::path::PathBuf, &'static str),
+        #[cfg(test)]
+        PrivateRecordAdmission(
+            std::path::PathBuf,
+            &'static str,
+            std::sync::mpsc::Sender<()>,
+            std::sync::mpsc::Receiver<()>,
+        ),
         GoalAppend(SessionId, Admits),
         GoalAcknowledgment(
             SessionId,
@@ -514,6 +529,19 @@ mod injection {
         let mut plan = plan();
         let index = plan.iter().position(&mut matches)?;
         Some(plan.remove(index))
+    }
+
+    // Bounds both sides of a record admission gate, so a broken fixture fails instead of hanging.
+    #[cfg(test)]
+    pub(crate) const PRIVATE_RECORD_GATE_DEADLINE: std::time::Duration =
+        std::time::Duration::from_secs(10);
+
+    #[cfg(test)]
+    fn take_private_record_admission(state: &std::path::Path, record: &str) -> Option<Fault> {
+        take(|fault| {
+            matches!(fault, Fault::PrivateRecordAdmission(path, name, ..)
+                if path == state && *name == record)
+        })
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -783,6 +811,38 @@ mod injection {
         pub(crate) fn record_publication_fails(state: &std::path::Path, record: &str) -> bool {
             take(|fault| matches!(fault, Fault::RecordPublication(path, name) if path == state && *name == record))
                 .is_some()
+        }
+
+        // Holds the named record's next admission there after its open or metadata snapshot.
+        #[cfg(test)]
+        pub(crate) fn gate_private_record_admission(
+            state: std::path::PathBuf,
+            record: &'static str,
+        ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+            let (entered, wait_entered) = std::sync::mpsc::channel();
+            let (release, wait_release) = std::sync::mpsc::channel();
+            plan().push(Fault::PrivateRecordAdmission(state, record, entered, wait_release));
+            (wait_entered, release)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn clear_private_record_admission(state: &std::path::Path, record: &str) {
+            drop(take_private_record_admission(state, record));
+        }
+
+        #[cfg(test)]
+        pub(crate) fn private_record_admission_gate(state: &std::path::Path, record: &str) {
+            if let Some(Fault::PrivateRecordAdmission(_, _, entered, release)) =
+                take_private_record_admission(state, record)
+            {
+                let _ = entered.send(());
+                // Disconnection resumes an unwinding fixture; only an expired deadline fails.
+                let released = release.recv_timeout(PRIVATE_RECORD_GATE_DEADLINE);
+                assert!(
+                    !matches!(released, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                    "private record admission gate was not released in time"
+                );
+            }
         }
 
         pub fn fail_file_parent_sync(intent: uuid::Uuid) {

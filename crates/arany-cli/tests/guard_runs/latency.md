@@ -37,6 +37,9 @@ strict replay and compares every JSONL envelope from a fresh `arany show` proces
 Edit checks its digest-bound FileReceipt and publication checkpoint. Command
 checks its intent-bound Guard receipt, zero exit, empty stdout/stderr and changeset,
 unchanged Workspace bytes and absence of an integration/publication checkpoint.
+Command selection shares the command timeout with the payload and records its
+elapsed milliseconds in the command selection summary; this is included in the
+measured step, with no separate setup allowance or deadline.
 Replay and inspection perform no Tool execution. SQLite journaling and durability
 settings stay unchanged.
 

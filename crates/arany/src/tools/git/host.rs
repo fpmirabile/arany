@@ -2823,14 +2823,19 @@ mod tests {
             assert!(!catalog.to_string().contains("fixture-auth-canary"));
             catalog["git"]["operations"].clone()
         };
-        let reads = json!(["git_status", "git_diff", "git_log", "git_branch"]);
-        let with_push = json!([
-            "git_status",
-            "git_diff",
-            "git_log",
-            "git_branch",
-            "git_push"
-        ]);
+        let local: Vec<&str> = if cfg!(target_os = "macos") {
+            vec![
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_commit",
+                "git_branch",
+            ]
+        } else {
+            vec!["git_status", "git_diff", "git_log", "git_branch"]
+        };
+        let reads = json!(local);
+        let with_push = json!([local.as_slice(), &["git_push"]].concat());
         runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
         assert_eq!(operations(&runtime), reads);
         std::fs::create_dir_all(home.join(".config/git")).unwrap();
@@ -2879,15 +2884,13 @@ mod tests {
         )
         .unwrap();
         runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
-        let with_pr_reads = json!([
-            "git_status",
-            "git_diff",
-            "git_log",
-            "git_branch",
-            "gh_pr_create",
-            "gh_pr_list",
-            "gh_pr_view"
-        ]);
+        let with_pr_reads = json!(
+            [
+                local.as_slice(),
+                &["gh_pr_create", "gh_pr_list", "gh_pr_view"]
+            ]
+            .concat()
+        );
         assert_eq!(operations(&runtime), with_pr_reads);
         runtime.config.commands.clear();
         assert_eq!(

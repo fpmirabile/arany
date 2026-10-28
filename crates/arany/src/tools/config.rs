@@ -484,6 +484,7 @@ impl Config {
                         ToolCall::GitBranch { name: Some(_), .. } => {
                             super::guard::git_branch_creation_available()
                         }
+                        ToolCall::GitCommit { .. } => super::guard::git_commit_available(),
                         _ => !call.mutates() || super::guard::git_writes_available(),
                     };
             }
