@@ -15,6 +15,7 @@ pub(super) fn format(call: &ToolCall) -> String {
             format!("{verb} {}", facts.subject)
         }
         Family::Git => git(call, &facts),
+        Family::Web => format!("{} {}", facts.verb, facts.subject),
         Family::Preparation => "Agent definition preparation".into(),
     }
 }
@@ -47,7 +48,9 @@ fn file(call: &ToolCall, facts: &DisplayFacts<'_>) -> String {
         | ToolCall::GitPush { .. }
         | ToolCall::GhPrCreate { .. }
         | ToolCall::GhPrList { .. }
-        | ToolCall::GhPrView { .. } => format!("{} {}", call.label(), facts.paths[0]),
+        | ToolCall::GhPrView { .. }
+        | ToolCall::WebFetch { .. }
+        | ToolCall::WebSearch { .. } => format!("{} {}", call.label(), facts.paths[0]),
     }
 }
 
@@ -80,6 +83,8 @@ fn git(call: &ToolCall, facts: &DisplayFacts<'_>) -> String {
         | ToolCall::Skill { .. }
         | ToolCall::McpList { .. }
         | ToolCall::McpCall { .. }
+        | ToolCall::WebFetch { .. }
+        | ToolCall::WebSearch { .. }
         | ToolCall::Glob { .. } => format!("{} {}", facts.verb, facts.subject),
     }
 }

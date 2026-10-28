@@ -327,6 +327,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
         write: true,
         child_unguarded: crate::tools::UnguardedGrant::Denied,
+        child_web: false,
         commands: vec![pinned, copied_program],
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -336,6 +337,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         locale: Default::default(),
         environment_sha256: None,
         network: None,
+        web_search: None,
     };
     for case in ["fresh", "changed-input", "changed-executable"] {
         let target = temp.path().join(case);

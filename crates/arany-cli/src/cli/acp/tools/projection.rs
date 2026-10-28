@@ -28,6 +28,16 @@ pub(super) fn project(call: &ToolCall) -> Projection<'_> {
             vec![],
         ),
         Family::Skill => ("read", "Read Skill", facts.subject, vec![]),
+        Family::Web => (
+            if matches!(call, ToolCall::WebSearch { .. }) {
+                "search"
+            } else {
+                "fetch"
+            },
+            facts.verb,
+            facts.subject,
+            vec![],
+        ),
         Family::Mcp | Family::Preparation => ("other", "Tool", "".into(), vec![]),
     };
     Projection {
@@ -66,7 +76,9 @@ fn file<'a>(call: &'a ToolCall, facts: DisplayFacts<'a>) -> Projection<'a> {
         | ToolCall::GitPush { .. }
         | ToolCall::GhPrCreate { .. }
         | ToolCall::GhPrList { .. }
-        | ToolCall::GhPrView { .. } => ("other", "Tool", facts.paths),
+        | ToolCall::GhPrView { .. }
+        | ToolCall::WebFetch { .. }
+        | ToolCall::WebSearch { .. } => ("other", "Tool", facts.paths),
     };
     Projection {
         kind,
@@ -111,6 +123,8 @@ fn git<'a>(call: &'a ToolCall, facts: DisplayFacts<'a>) -> Projection<'a> {
         | ToolCall::Skill { .. }
         | ToolCall::McpList { .. }
         | ToolCall::McpCall { .. }
+        | ToolCall::WebFetch { .. }
+        | ToolCall::WebSearch { .. }
         | ToolCall::Glob { .. } => ("other", "Tool", facts.subject, vec![]),
     };
     Projection {

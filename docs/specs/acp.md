@@ -176,7 +176,7 @@ Only committed serve items produce Tool updates. `item/started` becomes
 `tool_call` with the immutable intent ID, compiled title plus bounded escaped
 intent fields, kind, pending status and locations. Command calls are `execute`,
 file changes `edit` (delete-only sets are `delete`), Read/Skill/typed Git reads
-`read`, List/Search `search`, GhPrList/GhPrView `read`, and MCP/other calls `other`.
+`read`, List/Search `search`, GhPrList/GhPrView `read`, WebFetch `fetch`, WebSearch `search`, and MCP/other calls `other`.
 GhPrList and GhPrView titles identify GitHub pull-request listing or inspection
 and include bounded, escaped repository detail; their available journaled fields
 remain in `rawInput`, and neither has a Workspace location. Move retains the serve

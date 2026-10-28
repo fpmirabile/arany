@@ -191,7 +191,7 @@ impl ProviderRecord {
     }
 }
 
-fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
+pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
         .no_proxy()

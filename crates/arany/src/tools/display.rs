@@ -91,6 +91,8 @@ impl ToolCall {
             }
             Self::GhPrList { repository, .. } => ("PR list", repository.as_str().into(), vec![]),
             Self::GhPrView { repository, .. } => ("PR view", repository.as_str().into(), vec![]),
+            Self::WebFetch { url } => ("Fetch", url.as_str().into(), vec![]),
+            Self::WebSearch { query } => ("Web search", query.as_str().into(), vec![]),
             Self::ParseAgentDefinition { .. } => ("Parse agent definition", "".into(), vec![]),
         };
         DisplayFacts {

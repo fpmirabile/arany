@@ -2600,6 +2600,7 @@ done
                 workspace_paths,
                 write: true,
                 child_unguarded: crate::tools::UnguardedGrant::Denied,
+                child_web: false,
                 commands,
                 skills: Vec::new(),
                 mcp: vec![crate::tools::config::Server {
@@ -2624,6 +2625,7 @@ done
                 locale: Default::default(),
                 environment_sha256: None,
                 network: None,
+                web_search: None,
             },
             workspace: workspace.to_path_buf(),
             reads: None,
@@ -4133,6 +4135,7 @@ int main(int argc, char **argv) {
                     config: runtime.config.clone(),
                     cache: None,
                     hook_stdin: None,
+                    secret: None,
                     hidden: Default::default(),
                     intent: EffectIntent {
                         host: None,

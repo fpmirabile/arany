@@ -3,7 +3,11 @@ use crate::tools::types::NetworkGrant;
 
 pub(super) fn validate(task: &Task) -> Result<(), ToolError> {
     let proxied = task.intent.limits.network == NetworkGrant::Proxy;
-    if proxied && task.config.network.is_none() {
+    if proxied
+        && (!(task.intent.call.is_web() || task.config.network.is_some())
+            || task.intent.call.is_web()
+                && (!task.config.admits_web(&task.intent.call) || cfg!(not(target_os = "linux"))))
+    {
         return Err(ToolError::Configuration);
     }
     #[cfg(target_os = "macos")]
