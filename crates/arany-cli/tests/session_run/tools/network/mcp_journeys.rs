@@ -275,14 +275,20 @@ fn tools_call_reply(
         }
         return None;
     }
-    let mut reply = json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"done"}]}});
+    let mut reply =
+        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":"done"}]}});
     match mode {
         Mode::WrongReplyId => reply["id"] = json!(9999),
         Mode::WrongReplyVersion => reply["jsonrpc"] = json!("1.0"),
         Mode::ReplyWithResultAndError => reply["error"] = json!({"code":-1,"message":"x"}),
         _ => {}
     }
-    Some(respond("200 OK", "application/json", "", &reply.to_string()))
+    Some(respond(
+        "200 OK",
+        "application/json",
+        "",
+        &reply.to_string(),
+    ))
 }
 
 fn mcp_fixture(mode: Mode) -> McpFixture {
@@ -343,7 +349,8 @@ fn mcp_fixture(mode: Mode) -> McpFixture {
 }
 
 fn write_token(port: u16, access: &str, expires_at: u64) {
-    let root = StateRoot::admit(&StateRoot::account_path().unwrap()).unwrap();
+    // The test Engine pins this isolated account root on open, so the grant must be saved there first.
+    let root = StateRoot::admit(arany::test_support::isolate_account_root()).unwrap();
     let record = json!({"schema":1,"servers":{"remote":{
         "url": format!("http://127.0.0.1:{port}/mcp"),
         "client_id": "fixture-client",
