@@ -6,11 +6,8 @@ Maintain Arany's development skill sources here: `rust-clean-code` for Rust, `ar
 
 ## Select and load
 
-Use the description to choose a Skill for the actual task, then read its
-`SKILL.md` and only the supporting references that apply. Installation is not
-an instruction to run every workflow. Explicit user requests and Arany's
-mandatory Ponytail rule still apply. A Skill supplies procedure; the repository's
-contracts, permission boundaries and verification owners remain authoritative.
+A Skill supplies procedure; the repository's contracts, permission boundaries and
+verification owners remain authoritative.
 
 During documentation reviews, inspect checked-in sources and their manifest.
 Do not maintain ignored installations, vendored external Skills or new copies
@@ -25,7 +22,7 @@ Run from the repository root with Node.js/npm available. Use the reviewed Skills
 export DISABLE_TELEMETRY=1
 ```
 
-In PowerShell, use `$env:DISABLE_TELEMETRY = "1"` instead. Then install the three local skills and pinned Ponytail:
+Then install the three local skills and pinned Ponytail:
 
 ```sh
 npx --yes skills@1.7.0 add ./agents/skills --agent codex claude-code --yes
@@ -59,7 +56,7 @@ npx --yes skills@1.7.0 add ./agents/skills/rust-clean-code --agent codex claude-
 
 Review source changes and generated lock entries together. Never maintain project changes only in ignored installed copies. Preserve the Rust skill's license and attribution. Keep descriptions specific to the task and load supporting references only when needed, following the [Agent Skills guidance](https://agentskills.io/skill-creation/best-practices).
 
-When checking a move or installation, validate skill frontmatter and relative references, compare source and installed files, and verify restoration from a relocated checkout using its local lock entries. Changes to these instructions do not require rebuilding the Rust executable.
+When checking a move or installation, validate skill frontmatter and relative references, compare source and installed files, and verify restoration from a relocated checkout using its local lock entries.
 
 ## Ponytail
 

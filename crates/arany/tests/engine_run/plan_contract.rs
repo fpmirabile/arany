@@ -376,14 +376,7 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
             offset: 0,
             limit: 100,
         }),
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect notes".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect notes", None)]),
         crate::tool_outcome(facts_read()),
         crate::tool_outcome(arany::ToolCall::Read {
             path: "notes/other.txt".into(),
@@ -396,11 +389,7 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,

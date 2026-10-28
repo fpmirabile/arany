@@ -6,8 +6,7 @@ use arany::{
 use sha2::Digest;
 use std::{
     collections::HashSet,
-    io::Read,
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     process::{Command, Stdio},
     sync::mpsc,
     thread,
@@ -18,42 +17,6 @@ const WARMUPS: usize = 10;
 const SAMPLES: usize = 100;
 const FILE_BYTES: usize = 32 * 1024;
 const REQUEST_LIMIT: usize = 128 * 1024;
-
-fn read_large_request(stream: &mut TcpStream) -> Vec<u8> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("request deadline");
-    let mut request = Vec::new();
-    loop {
-        let mut chunk = [0; 4096];
-        let count = stream.read(&mut chunk).expect("request bytes");
-        assert!(count > 0 && request.len() + count <= REQUEST_LIMIT);
-        request.extend_from_slice(&chunk[..count]);
-        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-            let header_end = end + 4;
-            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
-            );
-            let body_len = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("Content-Length");
-            let total = header_end.checked_add(body_len).expect("request length");
-            assert!(total <= REQUEST_LIMIT, "bounded request");
-            if request.len() >= total {
-                return request[header_end..total].to_vec();
-            }
-        }
-    }
-}
 
 #[test]
 #[ignore = "run only with cargo test --release --test session_run startup_upper_bound_two_files -- --ignored --nocapture"]
@@ -100,7 +63,12 @@ fn startup_upper_bound_two_files_on_named_host() {
                     .send((Instant::now(), SystemTime::now()))
                     .expect("startup observation receiver");
             }
-            let body = read_large_request(&mut stream);
+            let body = crate::loopback::read_request_within(
+                &mut stream,
+                "/v1/responses",
+                "authorization: bearer test-key",
+                REQUEST_LIMIT,
+            );
             let wire: serde_json::Value =
                 serde_json::from_slice(&body).expect("synthetic Responses request");
             assert_eq!(wire["model"], "model-1");

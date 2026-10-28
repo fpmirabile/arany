@@ -774,19 +774,18 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
             .write_all(b"\x1b[200~CANARYKEY0\x1b[201~")
             .expect("unsubmitted secret paste");
         let key_at = transcript.len();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !transcript[key_at..]
-            .windows(b"10 chars".len())
-            .any(|part| part == b"10 chars")
-        {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "hidden input was not consumed: {}",
-                tail(&transcript)
-            );
-            thread::yield_now();
-        }
+        crate::session_picker::pump_until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "hidden input was not consumed",
+            |transcript| {
+                transcript[key_at..]
+                    .windows(b"10 chars".len())
+                    .any(|part| part == b"10 chars")
+            },
+        );
         let rejected_at = transcript.len();
         input
             .write_all(b"\x1b[200~ \r/setup\x1b[201~")

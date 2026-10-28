@@ -2,7 +2,9 @@ use super::{
     active_terminal::{self, ProductGuard, product_child_of, tty_settings},
     loopback::{self, ChildGuard},
     saved_ui_preferences,
-    session_picker::{checkpoint_screen, pump, screen_contains, tail, wait_for_screen},
+    session_picker::{
+        checkpoint_screen, pump, screen_contains, tail, wait_for, wait_for_after, wait_for_screen,
+    },
 };
 use arany::{
     CollaborationPolicy, RecordKind, SessionDefaults, SessionId, StateRoot, Store, list_sessions,
@@ -29,42 +31,6 @@ mod pickers;
 fn fresh_capture(transcript: &mut Vec<u8>, answered: &mut crate::session_picker::PtyResponses) {
     transcript.clear();
     *answered = crate::session_picker::PtyResponses::default();
-}
-
-#[track_caller]
-fn wait_for(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    needle: &[u8],
-) {
-    wait_for_after(output, input, transcript, answered, 0, needle);
-}
-
-#[track_caller]
-fn wait_for_after(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    from: usize,
-    needle: &[u8],
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(&transcript[from..], needle)
-        .next()
-        .is_none()
-    {
-        pump(output, input, transcript, answered);
-        assert!(
-            Instant::now() < deadline,
-            "PTY stage missing {}: {}",
-            tail(needle),
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
 }
 
 // A selector takes keys only once its armed frame shows `screen_ready`.

@@ -17,7 +17,7 @@ Arany aims to do the hard thinking about teams for you: on a big task it plans t
 
 ## Status
 
-Development beta; Linux and macOS have native Tool enforcement, but platform verification and release checks remain incomplete. Teams today are read-only researcher children: a primary agent can delegate bounded read-only work. Editing teams are in progress; see [next steps](./NEXT_STEPS.md) for the order and for remaining gaps. The [planning index](./planning/README.md#active-plans) locates proposed team features.
+Development beta; Linux and macOS have native Tool enforcement, but platform verification and release checks remain incomplete. A primary agent can delegate bounded read-only research and leased editing work to child agents on the shared Workspace. [Next steps](./NEXT_STEPS.md) lists remaining gaps; the [planning index](./planning/README.md#active-plans) locates proposed features.
 
 ## Get started
 
@@ -38,7 +38,7 @@ This installs the current source build into Cargo's binary directory; keep that 
 cargo run --locked
 ```
 
-Release packaging has a separate [build and distribution workflow](./docs/security/beta-dependency-inventory.md#release-checks-still-required).
+Release packaging has separate [release checks](./docs/security/beta-dependency-inventory.md#release-checks-still-required).
 
 ### Use Arany
 
@@ -68,7 +68,7 @@ To enable file edits, commands, runtime Skills or MCP, follow the [local Tool se
 
 - [Documentation map](./docs/README.md): find the owner for a topic.
 - [System overview](./docs/architecture/system-overview.md): architecture and data flow.
-- [Product specs](./docs/specs/README.md): behavior and acceptance scenarios.
+- [Product specs](./docs/specs/README.md): behavior.
 - [Next steps](./NEXT_STEPS.md): current gaps and upcoming work.
 - [Contribution guide](./CONTRIBUTING.md): bug reports, fixes, documentation and native platform testing are welcome. Coding agents start with [AGENTS.md](./AGENTS.md); both use the shared [development setup and checks](./docs/development.md) and the [development skill setup](./agents/skills/README.md#install-for-a-harness).
 

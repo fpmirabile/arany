@@ -24,7 +24,6 @@ impl ChildGuard {
         self.0.as_mut().expect("supervised child")
     }
 
-    #[cfg(target_os = "linux")]
     pub(super) fn take(&mut self) -> Child {
         self.0.take().expect("supervised child")
     }
@@ -53,6 +52,16 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -> Vec<u8> {
+    read_request_within(stream, path, auth, 64 * 1024)
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn read_request_within(
+    stream: &mut TcpStream,
+    path: &str,
+    auth: &str,
+    limit: usize,
+) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("request deadline");
@@ -60,7 +69,7 @@ pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -
     loop {
         let mut chunk = [0; 4096];
         let count = stream.read(&mut chunk).expect("request bytes");
-        assert!(count > 0 && request.len() + count <= 64 * 1024);
+        assert!(count > 0 && request.len() + count <= limit);
         request.extend_from_slice(&chunk[..count]);
         if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
             let header_end = end + 4;
@@ -86,8 +95,10 @@ pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -
                         .and_then(|value| value.parse::<usize>().ok())
                 })
                 .expect("Content-Length");
-            if request.len() >= header_end + body_len {
-                let body = request[header_end..header_end + body_len].to_vec();
+            let total = header_end.checked_add(body_len).expect("request length");
+            assert!(total <= limit, "bounded request");
+            if request.len() >= total {
+                let body = request[header_end..total].to_vec();
                 let wire: serde_json::Value = serde_json::from_slice(&body).expect("JSON request");
                 LAST_REQUEST_STREAMING.set(Some(wire["stream"] == true));
                 return body;

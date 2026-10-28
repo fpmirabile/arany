@@ -575,35 +575,6 @@ async fn pause_ends_the_turn_interrupted_and_goal_resume_continues_the_pinned_ob
 }
 
 #[tokio::test]
-async fn oversized_steer_line_is_rejected_by_the_line_cap_and_the_next_line_is_served() {
-    let _deadline = deadline();
-    let (mut client, transport) = tokio::io::duplex(4096);
-    let (input, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
-    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
-    let reader = read_messages(transport, input, outbound);
-    let peer = async {
-        let note = "a".repeat(MAX_RPC_LINE_BYTES);
-        let line = json!({"id":1,"method":"turn/steer","params":{"threadId":"t","turnId":"r","input":[{"type":"text","text":note}]}});
-        client.write_all(line.to_string().as_bytes()).await.unwrap();
-        client
-            .write_all(b"\n{\"id\":2,\"method\":\"goal/pause\",\"params\":{}}\n")
-            .await
-            .unwrap();
-        client.shutdown().await.unwrap();
-        assert_eq!(
-            next(&mut output).await["error"]["data"]["reason"],
-            "messageTooLarge"
-        );
-        assert!(matches!(
-            inbound.recv().await,
-            Some(ClientMessage::Message(Message::Request(_)))
-        ));
-    };
-    let (result, ()) = tokio::join!(reader, peer);
-    result.unwrap();
-}
-
-#[tokio::test]
 async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
     let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();

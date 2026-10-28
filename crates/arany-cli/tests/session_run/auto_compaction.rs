@@ -1,71 +1,15 @@
 use super::active_terminal::{ProductGuard, product_child_of};
-use super::loopback::wait_product;
+use super::loopback::{ChildGuard, wait_product};
 use super::*;
 use std::{
     io::{Read, Write},
     net::TcpListener,
     os::unix::fs::PermissionsExt,
-    process::{Child, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
-
-struct KillOnDrop(Option<Child>);
-
-impl KillOnDrop {
-    fn child(&mut self) -> &mut Child {
-        self.0.as_mut().expect("supervised child")
-    }
-
-    fn take(&mut self) -> Child {
-        self.0.take().expect("supervised child")
-    }
-}
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("HTTP request deadline");
-    let mut request = Vec::new();
-    loop {
-        let mut chunk = [0; 8192];
-        let count = stream.read(&mut chunk).expect("HTTP request bytes");
-        assert!(count > 0 && request.len() + count <= 512 * 1024);
-        request.extend_from_slice(&chunk[..count]);
-        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-            let header_end = end + 4;
-            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
-            );
-            let body_len = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("Content-Length");
-            assert!(body_len <= 512 * 1024);
-            if request.len() >= header_end + body_len {
-                return request[header_end..header_end + body_len].to_vec();
-            }
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 enum CompactionCase {
@@ -140,7 +84,12 @@ fn synthetic_server(
                 Err(error) => panic!("accept failed: {error}"),
             }
         };
-        let body = read_http_request(&mut stream);
+        let body = crate::loopback::read_request_within(
+            &mut stream,
+            "/v1/responses",
+            "authorization: bearer test-key",
+            512 * 1024,
+        );
         assert!(
             !body
                 .windows(b"OMITTED_CANARY".len())
@@ -506,7 +455,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut attached = KillOnDrop(Some(attached.spawn().expect("attached PTY process")));
+    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     assert_eq!(

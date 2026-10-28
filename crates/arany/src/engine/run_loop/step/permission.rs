@@ -839,7 +839,7 @@ mod host_prefix_tests {
 }
 
 #[cfg(test)]
-mod reuse_tests {
+pub(super) mod reuse_tests {
     use super::*;
 
     #[test]
@@ -1117,7 +1117,7 @@ mod reuse_tests {
         }
     }
 
-    fn allow(basis: PermissionSource) -> Permission {
+    pub(crate) fn allow(basis: PermissionSource) -> Permission {
         Permission {
             decision: Decision::Allow,
             basis,
@@ -1125,7 +1125,7 @@ mod reuse_tests {
         }
     }
 
-    fn asks(mode: ApprovalMode) -> Permission {
+    pub(crate) fn asks(mode: ApprovalMode) -> Permission {
         Permission {
             decision: Decision::Ask,
             basis: PermissionSource::Rule,
@@ -1133,7 +1133,7 @@ mod reuse_tests {
         }
     }
 
-    fn deny(basis: PermissionSource) -> Permission {
+    pub(crate) fn deny(basis: PermissionSource) -> Permission {
         Permission {
             decision: Decision::Deny,
             basis,

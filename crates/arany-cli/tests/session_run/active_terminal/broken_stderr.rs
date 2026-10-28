@@ -1,4 +1,7 @@
-use super::{ProductGuard, product_child_of, redacted_tail, transcript_field, tty_settings};
+use super::{
+    ProductGuard, collect_nonblocking, product_child_of, redacted_tail, transcript_field,
+    tty_settings,
+};
 use crate::loopback::{
     ChildGuard, check_profile, read_request, send_response_for, wait_product, write_profile,
 };
@@ -17,22 +20,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-fn collect_nonblocking(reader: &mut impl Read, bytes: &mut Vec<u8>, limit: usize) -> bool {
-    loop {
-        let mut chunk = [0; 4096];
-        match reader.read(&mut chunk) {
-            Ok(0) => return true,
-            Ok(count) => {
-                assert!(bytes.len() + count <= limit, "bounded PTY transcript");
-                bytes.extend_from_slice(&chunk[..count]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => panic!("PTY read failed: {error}"),
-        }
-    }
-}
 
 #[test]
 fn broken_stderr_during_active_run_restores_raw_mode_and_cancels_without_answer() {

@@ -150,30 +150,28 @@ An Anthropic API key not limited to one Console workspace needs an explicit
 `ANTHROPIC_WORKSPACE_ID` alongside the environment key. A workspace-scoped key
 may omit it. Saved-account setup instead asks Key scoped to workspace or Choose
 API workspace; saved selections never inherit ambient workspace variables.
-[Provider account spec](./specs/provider.md#native-models-and-accounts)
-own workspace validation and admission.
+The [Provider account spec](./specs/provider.md#native-models-and-accounts)
+owns workspace validation and admission.
 
 ## OpenAI-compatible and Anthropic custom routes
 
-Custom routes require a private version-2 `provider-profiles.json` in `STATE`
-and exact conformance before use. Only the selected `ARANY_PROVIDER_*`
-environment key is used; native accounts and workspace headers do not supply
-credentials. Keep the file private (`0600` on Unix).
+A custom route is a profile in a private version-2 `STATE/provider-profiles.json`.
+Keep the State directory outside the Workspace and the file private (`0600` on
+Unix). Each profile names one `ARANY_PROVIDER_*` environment key; supply it
+privately in Arany's launching environment. Native accounts, workspace headers,
+other vendors' keys and other clients' OAuth identities never supply its
+credentials, and Arany always identifies itself as `arany/<version>`. Existing
+valid version-1 Responses profiles migrate automatically and need a fresh check.
 
-All routes below require the exact text-compaction conformance check before use.
-Checks establish bounded protocol behavior, not live vendor compatibility or
-summary accuracy. Custom primary/child routes receive the same Workspace Tools
-as native routes but no images. If AI Tool review is needed, select a native review route in
+Every route must pass its exact [text-compaction conformance check](./specs/provider.md#custom-destinations-and-routing)
+before use; each model needs its own check.
+If AI Tool review is needed, select a native review route in
 [provider-routing.json](./specs/provider.md#per-role-selection-and-fallback);
 text compaction does not attest a strict review verdict.
 
-### Local OpenAI Chat Completions routes
-
-A local llama.cpp server or vLLM instance can use the Chat Completions family
-when it exposes `POST /v1/chat/completions`. Configure it to accept the Bearer
-credential Arany sends, and use the exact model ID exposed by the server. For a
-server listening on loopback port `8080`, the private
-`STATE/provider-profiles.json` entry is:
+This complete document admits a local llama.cpp or vLLM server exposing
+`POST /v1/chat/completions` on loopback port `8080`; configure the server to
+accept the Bearer credential and use its exact model ID:
 
 ```json
 {
@@ -194,203 +192,64 @@ server listening on loopback port `8080`, the private
 }
 ```
 
-Keep the State directory outside the Workspace and the profile file private
-(`0600` on Unix). Supply the selected Bearer credential through
-`ARANY_PROVIDER_LOCAL_KEY` in Arany's launching environment. Arany appends
-`/chat/completions` to the base URL. Run the exact synthetic conformance check
-before selecting the route; it sends no Workspace or chat content and may be
-billable:
+Check the route, then use it with the matching model ID only after the check succeeds:
 
 ```sh
 arany provider check custom:local --state-dir STATE
-```
-
-Only after that exact check succeeds, use the matching model ID:
-
-```sh
 arany exec --state-dir STATE --provider custom:local --model MODEL_ID "Your task"
 ```
 
-An empty effort list omits `reasoning_effort`. Custom routes receive the same
-Workspace Tools as native routes but no images; a passing check does not
-establish live vendor compatibility, Tool-call fidelity or summary accuracy.
+Chat Completions routes append `/chat/completions` to `base_url`; Anthropic
+Messages routes append `/v1/messages`. `efforts: []` omits the effort override
+(`reasoning_effort` for Chat Completions). Explicit efforts each need their own
+conformance; Arany never inherits Claude defaults or translates unsupported
+values. Vendor profiles keep the remaining fields of the example above and change
+these:
 
-DeepSeek API keys can use this private `STATE/provider-profiles.json`:
+| `name` | `protocol` | `base_url` | `auth` | `model` | `credential_env` | `outcome_encoding` |
+|---|---|---|---|---|---|---|
+| `deepseek` | `anthropic-messages` | `https://api.deepseek.com/anthropic` | `x-api-key` | `deepseek-flash` | `ARANY_PROVIDER_DEEPSEEK_KEY` | `native_tools` |
+| `kimi-api` | `anthropic-messages` | `https://api.moonshot.ai/anthropic` | `bearer` | `kimi-k3` | `ARANY_PROVIDER_KIMI_API_KEY` | `native_tools` |
+| `kimi-code` | `anthropic-messages` | `https://api.kimi.com/coding/` | `x-api-key` | `k3-256k` | `ARANY_PROVIDER_KIMI_CODE_KEY` | `native_tools` |
+| `glm-api` | `anthropic-messages` | `https://api.z.ai/api/anthropic` | `bearer` | `glm-5.3` | `ARANY_PROVIDER_GLM_STANDARD_KEY` | `native_tools` |
+| `glm-flash` | `anthropic-messages` | `https://api.z.ai/api/anthropic` | `bearer` | `glm-5.3-flash` | `ARANY_PROVIDER_GLM_STANDARD_KEY` | `native_tools` |
 
-```json
-{
-  "version": 2,
-  "profiles": [{
-    "name": "deepseek",
-    "protocol": "anthropic-messages",
-    "base_url": "https://api.deepseek.com/anthropic",
-    "auth": "x-api-key",
-    "model": "deepseek-flash",
-    "credential_env": "ARANY_PROVIDER_DEEPSEEK_KEY",
-    "outcome_encoding": "native_tools",
-    "privacy": "user_authorized",
-    "max_output_tokens": 4096,
-    "capability_evidence_version": 2,
-    "efforts": []
-  }]
-}
-```
+Vendor notes:
 
-Supply the API key privately through `ARANY_PROVIDER_DEEPSEEK_KEY`, then run
-`arany provider check custom:deepseek --state-dir STATE`. Only a successful
-check permits `arany exec --state-dir STATE --provider custom:deepseek --model deepseek-flash "Your task"`.
-No DeepSeek subscription route is included.
+- **DeepSeek.** API keys only; no DeepSeek subscription route is included.
+- **Kimi platform.** Explicit platform efforts `["low", "high", "max"]` each need
+  their own conformance.
+- **Kimi Code.** Its console keys belong to a separate subscription service and
+  billing route; it needs its own check and subscription entitlement, and platform
+  compatibility does not establish Code support. It sends to
+  `https://api.kimi.com/coding/v1/messages`; keep `.com` unless the owner
+  explicitly selects another region, and confirm the tier-visible model and billing
+  settings first. Other Code candidates (`k3`, `kimi-for-coding`,
+  `kimi-for-coding-highspeed`) each need their own check; a mistyped HighSpeed ID
+  can select another model. An entitlement failure can return 401 and never selects
+  a platform key or another billing route. Arany never impersonates kimi-cli or
+  reuses its OAuth client or registration.
+- **GLM Standard API.** Use only a newly issued, console-classified **Standard API
+  Key** and confirm account-balance or standard-bundle billing first. Reject
+  pre-update **Compatible** keys: they can consume Coding Plan quota at this same
+  endpoint. Key type cannot be inferred from key bytes or a successful check; the
+  owner must verify its console classification. The
+  [key-management guide](https://docs.z.ai/devpack/notice/api-key-management.md)
+  explains the October 16, 2026 billing split. Ordinary Messages text needs no
+  provider-enforced response schema; Chat `reasoning_content` and JSON mode do not
+  establish Messages thinking support.
+- **GLM Coding Plan remains EXCLUDED.** Arany is absent from its
+  [supported tools](https://docs.z.ai/devpack/tool/others), and its
+  [terms, section 4](https://docs.z.ai/legal-agreement/subscription-terms) restrict
+  subscription quota to approved tools. Never substitute a plan key, Compatible
+  key, ZCode OAuth identity or another client's User-Agent.
 
-Kimi platform API keys use the following complete document in
-`STATE/provider-profiles.json`, outside the Workspace, with mode `0600`:
-
-```json
-{
-  "version": 2,
-  "profiles": [
-    {
-      "name": "kimi-api",
-      "protocol": "anthropic-messages",
-      "base_url": "https://api.moonshot.ai/anthropic",
-      "auth": "bearer",
-      "model": "kimi-k3",
-      "credential_env": "ARANY_PROVIDER_KIMI_API_KEY",
-      "outcome_encoding": "native_tools",
-      "privacy": "user_authorized",
-      "max_output_tokens": 4096,
-      "capability_evidence_version": 2,
-      "efforts": []
-    }
-  ]
-}
-```
-
-Supply your platform key through `ARANY_PROVIDER_KIMI_API_KEY`, using your
-private environment outside the repository. The exact endpoint/model must pass
-Arany's text-compaction conformance check. Checks send synthetic data only and may be billable:
-
-```sh
-arany provider check custom:kimi-api --state-dir STATE
-```
-
-Only after that exact check succeeds:
-
-```sh
-arany exec --state-dir STATE --provider custom:kimi-api --model kimi-k3 "Your task"
-```
-
-An empty effort list omits the override. Explicit platform efforts
-`["low", "high", "max"]` require individual conformance; never inherit Claude
-defaults or translate unsupported values. The platform base sends to
-`https://api.moonshot.ai/anthropic/v1/messages`.
-
-Kimi Code requires its own exact check and subscription entitlement. Its console
-keys belong to a separate subscription service and billing route. Platform
-compatibility does not establish Code support. Use this separate candidate:
-
-```json
-{
-  "version": 2,
-  "profiles": [
-    {
-      "name": "kimi-code",
-      "protocol": "anthropic-messages",
-      "base_url": "https://api.kimi.com/coding/",
-      "auth": "x-api-key",
-      "model": "k3-256k",
-      "credential_env": "ARANY_PROVIDER_KIMI_CODE_KEY",
-      "outcome_encoding": "native_tools",
-      "privacy": "user_authorized",
-      "max_output_tokens": 4096,
-      "capability_evidence_version": 2,
-      "efforts": []
-    }
-  ]
-}
-```
-
-The Code candidate sends to `https://api.kimi.com/coding/v1/messages`; retain
-`.com` unless the owner explicitly selects another region. Confirm the exact
-tier-visible model and billing settings first. Other Code candidates (`k3`,
-`kimi-for-coding`, `kimi-for-coding-highspeed`) each need their own exact check;
-a mistyped HighSpeed ID can select another model. An entitlement failure can
-return 401 and never selects a platform key or another billing route. Native
-Anthropic credentials and the two Kimi keys are isolated, even when another key
-is available. Arany always identifies itself as `arany/<version>`; it never
-impersonates kimi-cli or reuses its OAuth client or registration.
-
-The [dated vendor research](./research/deepseek-kimi-glm-providers-2026-10.md#kimi-platform-api-and-code-subscription)
-links the platform schema and Code endpoint, model and identity sources. Existing
-valid version-1 Responses profiles migrate automatically and require a fresh
-check. Live acceptance and native platform evidence remain
-[next steps](../NEXT_STEPS.md#daily-use-first).
-
-GLM Standard API candidates require their exact text-compaction checks. Ordinary
-Messages text needs no provider-enforced response schema. Synthetic fixtures do
-not establish live vendor support.
-
-Candidate document for `STATE/provider-profiles.json`, outside the Workspace,
-with mode `0600`:
-
-```json
-{
-  "version": 2,
-  "profiles": [
-    {
-      "name": "glm-api",
-      "protocol": "anthropic-messages",
-      "base_url": "https://api.z.ai/api/anthropic",
-      "auth": "bearer",
-      "model": "glm-5.3",
-      "credential_env": "ARANY_PROVIDER_GLM_STANDARD_KEY",
-      "outcome_encoding": "native_tools",
-      "privacy": "user_authorized",
-      "max_output_tokens": 4096,
-      "capability_evidence_version": 2,
-      "efforts": []
-    },
-    {
-      "name": "glm-flash",
-      "protocol": "anthropic-messages",
-      "base_url": "https://api.z.ai/api/anthropic",
-      "auth": "bearer",
-      "model": "glm-5.3-flash",
-      "credential_env": "ARANY_PROVIDER_GLM_STANDARD_KEY",
-      "outcome_encoding": "native_tools",
-      "privacy": "user_authorized",
-      "max_output_tokens": 4096,
-      "capability_evidence_version": 2,
-      "efforts": []
-    }
-  ]
-}
-```
-
-Both candidates derive `https://api.z.ai/api/anthropic/v1/messages`. Use only a
-newly issued, console-classified **Standard API Key**, supplied privately as
-`ARANY_PROVIDER_GLM_STANDARD_KEY`; confirm account-balance or standard-bundle
-billing first. Reject pre-update **Compatible** keys: they can consume Coding
-Plan quota at this same endpoint. Key type cannot be inferred from opaque key
-bytes or a successful check; the owner must verify its console classification.
-The [key-management guide](https://docs.z.ai/devpack/notice/api-key-management.md)
-explains the October 16, 2026 billing split.
-
-The **GLM Coding Plan remains EXCLUDED**: Arany is absent from its
-[supported tools](https://docs.z.ai/devpack/tool/others), and its
-[terms, section 4](https://docs.z.ai/legal-agreement/subscription-terms) restrict
-subscription quota to approved tools. Never substitute a plan key, Compatible
-key, ZCode OAuth identity or another client's User-Agent. Arany sends its honest
-`arany/<version>` identity and never falls back to native or Kimi credentials.
-
-Keep `efforts: []` to omit native Claude overrides. Chat `reasoning_content`
-and JSON mode do not establish Messages thinking support. Run the exact
-`arany provider check custom:glm-api --state-dir STATE` or
-`arany provider check custom:glm-flash --state-dir STATE`. These checks use
-synthetic data and may be billable. Each model needs its own passing check
-before a Run; failure leaves it unadmitted.
-[Vendor research](./research/deepseek-kimi-glm-providers-2026-10.md#glm-standard-api-key-subscription-excluded)
-owns the source review; [next steps](../NEXT_STEPS.md#daily-use-first) own live
-billing, compatibility and native evidence.
+The [dated vendor research](./research/deepseek-kimi-glm-providers-2026-10.md)
+owns the source review for
+[Kimi](./research/deepseek-kimi-glm-providers-2026-10.md#kimi-platform-api-and-code-subscription)
+and [GLM](./research/deepseek-kimi-glm-providers-2026-10.md#glm-standard-api-key-subscription-excluded);
+[next steps](../NEXT_STEPS.md#daily-use-first) own live billing, compatibility and
+native evidence.
 
 ## Select a private roster preset
 
@@ -452,10 +311,8 @@ retry. Development builds expose bounded safe failure categories in the
 [local diagnostic log](./specs/diagnostics.md).
 
 [Next steps](../NEXT_STEPS.md) owns pending native, live and accessibility checks.
-Developers running an explicitly authorized live gate should follow the
-[native/live evidence procedure](../agents/references/testing-details.md#native-and-live-evidence)
-and its test owner. This guide does not establish support for an untested model,
-account, OS or credential backend.
+Developers running an explicitly authorized live gate follow the
+[native/live evidence procedure](../agents/references/testing-details.md#native-and-live-evidence).
 
 ## Use an ACP editor
 
@@ -475,6 +332,5 @@ keys, so configure the editor launch environment or use an admitted saved
 account roster. Do not put credentials in ACP messages.
 
 The [ACP contract](./specs/acp.md) lists the supported core text surface. Tools
-and rich attachments are unavailable in this slice; ignored editor MCP entries
-produce one stderr notice. Native editor compatibility remains a user-owned
-check in NEXT_STEPS.
+and rich attachments are unavailable; ignored editor MCP entries produce one
+stderr notice. Native editor compatibility remains unverified.

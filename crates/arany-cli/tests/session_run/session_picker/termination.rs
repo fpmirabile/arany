@@ -1,5 +1,7 @@
 use super::{pump, tail};
-use crate::active_terminal::{ProductGuard, product_child_of_executable, tty_settings};
+use crate::active_terminal::{
+    ProductGuard, collect_nonblocking, product_child_of_executable, tty_settings,
+};
 use crate::loopback::{ChildGuard, wait_product};
 use arany::{SessionView, StateRoot, Store, create_session};
 use rustix::{
@@ -10,7 +12,7 @@ use rustix::{
 };
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Write,
     process::Stdio,
     thread,
     time::{Duration, Instant},
@@ -221,21 +223,7 @@ fn picker_signals_release_and_reacquire_mouse_with_terminal_ownership() {
     }
 }
 
-fn drain(reader: &mut impl Read, bytes: &mut Vec<u8>) {
-    loop {
-        let mut chunk = [0; 4096];
-        match reader.read(&mut chunk) {
-            Ok(0) => return,
-            Ok(count) => {
-                assert!(bytes.len() + count <= 64 * 1024, "bounded PTY transcript");
-                bytes.extend_from_slice(&chunk[..count]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => panic!("PTY read failed: {error}"),
-        }
-    }
-}
+const PTY_CAPTURE_LIMIT: usize = 64 * 1024;
 
 #[test]
 fn picker_renderer_failure_restores_raw_mode_without_changing_session() {
@@ -318,8 +306,8 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
     while crate::armed_selector(&stderr_bytes, 0, columns.into(), rows.into()).is_none() {
-        drain(&mut output, &mut stdout_bytes);
-        drain(&mut stderr_master, &mut stderr_bytes);
+        collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
+        collect_nonblocking(&mut stderr_master, &mut stderr_bytes, PTY_CAPTURE_LIMIT);
         crate::process::decline_workspace_consent(&mut input, &stderr_bytes, &mut declined);
         let queries = stdout_bytes
             .windows(4)
@@ -368,8 +356,8 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
             input.write_all(keys).expect("attached picker transition");
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                drain(&mut output, &mut stdout_bytes);
-                drain(&mut stderr_master, &mut stderr_bytes);
+                collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
+                collect_nonblocking(&mut stderr_master, &mut stderr_bytes, PTY_CAPTURE_LIMIT);
                 let queries = stdout_bytes
                     .windows(4)
                     .chain(stderr_bytes.windows(4))
@@ -441,7 +429,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     input.write_all(b"\x1b[A").expect("trigger picker redraw");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        drain(&mut output, &mut stdout_bytes);
+        collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
         if attached
             .child()
             .try_wait()
@@ -457,7 +445,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
         thread::yield_now();
     }
     let result = wait_product(attached.take());
-    drain(&mut output, &mut stdout_bytes);
+    collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
     assert!(
         !result.status.success(),
         "broken renderer exits unsuccessfully"

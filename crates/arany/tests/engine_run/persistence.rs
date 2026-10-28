@@ -8,9 +8,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         .unwrap();
     runtime.block_on(async {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).unwrap();
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        let workspace = facts_workspace(temp.path(), "Fact");
         // Each admitted action reserves its worst-case Event envelope before dispatch, including three
         // same-route retry facts per call; the boundary is the largest prefix that still admits the Run.
         // A single plain Run commits 11 Events and one Team child 17.
@@ -34,7 +32,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             engine.close().await.unwrap();
             pad_capacity_history(&path, id, i64::from(prefix), branch);
             let responses = if matches!(policy, CollaborationPolicy::Team { .. }) {
-                vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Child".into(), profile: None }] }), finish(), finish()]
+                vec![delegate(&[("Child", None)]), finish(), finish()]
             } else { vec![finish()] };
             let provider = ScriptedProvider::new(responses);
             let requests = provider.requests.clone();
@@ -141,7 +139,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             transaction.commit().unwrap();
             drop(connection);
             let provider = ScriptedProvider::new(vec![
-                ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Child one".into(), profile: None }, arany::ChildAssignment { editor: None, objective: "Child two".into(), profile: None }] }),
+                delegate(&[("Child one", None), ("Child two", None)]),
                 finish(),
                 finish(),
                 finish(),
@@ -275,9 +273,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         .unwrap();
     runtime.block_on(async {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).unwrap();
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "answer".into() })]));
         let engine = engine_support::open(StateRoot::admit(&state_path).unwrap(), EngineConfig::default())
@@ -470,9 +466,7 @@ fn bounded_answer_output_must_fit_canonical_json() {
         .unwrap();
     runtime.block_on(async {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).unwrap();
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        let workspace = facts_workspace(temp.path(), "Fact");
         for (index, (bytes, child, accepted)) in [
             (8_000, false, true),
             (10_000, false, false),
@@ -486,14 +480,7 @@ fn bounded_answer_output_must_fit_canonical_json() {
             let result = "\0".repeat(bytes);
             let mut responses = Vec::new();
             if child {
-                responses.push(ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Child".into(),
-                        profile: None,
-                    }],
-                }));
+                responses.push(delegate(&[("Child", None)]));
             }
             let attempts = if accepted || child { 1 } else { 3 };
             for _ in 0..attempts {
@@ -565,9 +552,7 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider =
             ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "ok".into() })]);
@@ -822,9 +807,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let other_workspace = temp.path().join("other");
         std::fs::create_dir_all(&other_workspace).expect("other workspace");
         let state_path = temp.path().join("state");
