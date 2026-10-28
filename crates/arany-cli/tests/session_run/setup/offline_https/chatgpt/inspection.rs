@@ -103,7 +103,7 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
         let disconnected = matches!(access, Access::Disconnected | Access::PlanDisabled);
         let token = (storage == "private_file" && !disconnected).then(|| {
             serde_json::json!({
-                "schema": 1,
+                "schema": 2, "slot": null,
                 "credentials": {
                     "client_id": client, "host_id": host, "subject": "synthetic-subject",
                     "id_token": ACCESS, "access_token": ACCESS,
@@ -116,15 +116,18 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
                 }
             })
         });
+        let keyring_slot =
+            (storage == "keyring").then(|| crate::setup::legacy_chatgpt_slot(client));
         serde_json::json!({
             "id": id, "host_id": host, "client_id": client, "subject": "synthetic-subject",
+            "chatgpt_account_id": null, "keyring_slot": keyring_slot,
             "storage": storage, "renewal_pending": matches!(access, Access::RenewalPending),
             "signout_pending": matches!(access, Access::SignOutPending), "disconnected": disconnected,
             "plan_permission_missing": matches!(access, Access::PlanDisabled), "token": token
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema": 2, "selected": selected,
+        "schema": 3, "selected": selected,
         "accounts": [entry(selected, "oaiapp_selected_inspection"), entry(inspected, "oaiapp_other_inspection")],
         "model_checks": []
     })).unwrap()).unwrap();

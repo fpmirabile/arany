@@ -9,6 +9,16 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const REMOVED_CLIENT: &str = "oaiapp_removed_account";
+
+// Local: this module also compiles in the binary unit tests, which lack `crate::setup`.
+fn legacy_chatgpt_slot(client_id: &str) -> String {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(client_id.as_bytes());
+    format!(
+        "chatgpt-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    )
+}
+
 const ROOT: &str = "ARANY_TEST_REMOVAL_ROOT";
 const PHASE: &str = "ARANY_TEST_REMOVAL_PHASE";
 const STAGE: &str = "cli::attached::setup::removal::manager_stage";
@@ -84,14 +94,7 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     let deleted: Vec<_> = deleted.lines().collect();
     assert_eq!(deleted.len(), 2);
     assert_eq!(deleted[0], deleted[1]);
-    assert_eq!(
-        deleted[0],
-        format!(
-            "chatgpt-{}",
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(Sha256::digest(REMOVED_CLIENT.as_bytes()))
-        )
-    );
+    assert_eq!(deleted[0], legacy_chatgpt_slot(REMOVED_CLIENT));
 }
 
 fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
@@ -101,12 +104,13 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     let entry = |id, client| {
         serde_json::json!({
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
+            "chatgpt_account_id":null,"keyring_slot":legacy_chatgpt_slot(client),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
             "disconnected":false,"plan_permission_missing":false,"token":null
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema":2,"selected":selected,
+        "schema":3,"selected":selected,
         "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)],
         "model_checks":[]
     })).unwrap()).unwrap();

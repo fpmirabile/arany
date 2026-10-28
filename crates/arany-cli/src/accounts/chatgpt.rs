@@ -22,7 +22,7 @@ pub(crate) mod registration;
 
 pub(crate) use account::{
     AccountAccess, AccountInspection, MAX_TOKEN_RECORD_BYTES, ReauthorizationTarget, save_verified,
-    save_without_plan_permission, valid_keyring_record,
+    save_without_plan_permission, valid_keyring_record, valid_written_keyring_record,
 };
 pub(crate) use browser::open_authorization_url;
 pub(crate) use callback::CallbackListener;
