@@ -484,7 +484,7 @@ pub(in super::super) async fn read_setup_value(
     .await
 }
 
-pub(in super::super) async fn read_optional_setup_value(
+pub(super) async fn read_optional_setup_value(
     terminal: &mut AttachedTerminal,
     title: &str,
     instruction: &str,
