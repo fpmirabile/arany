@@ -17,9 +17,14 @@ impl EnvironmentSession<'_> {
         let outcome = self
             .engine
             .capture_command_environment(*self.id, &self.admission.workspace, |intent| async move {
-                approve(terminal, &intent)
-                    .await
-                    .unwrap_or(arany::ApprovalReply::Unavailable)
+                match approve(terminal, &intent).await {
+                    Ok(reply) => reply,
+                    Err(SetupError::Shutdown(signal)) => {
+                        terminal.defer_input(TerminalInput::Shutdown(signal));
+                        arany::ApprovalReply::Unavailable
+                    }
+                    Err(_) => arany::ApprovalReply::Unavailable,
+                }
             })
             .await;
         *self.view = super::super::load_view(&self.admission.state_dir, *self.id).await?;
