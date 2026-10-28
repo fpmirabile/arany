@@ -1941,7 +1941,7 @@ mod usage_tests {
                 .unwrap()
                 .rows,
             latest_unavailable: None,
-            latest_unreported: false,
+            latest_omitted: None,
         });
         let pages = crate::presentation::usage::usage_pages(&view, false, None);
         assert!(pages.len() > 2);

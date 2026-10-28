@@ -1,7 +1,7 @@
 use super::{AgentRunId, Event, ReplayError, RunId, SessionId, SessionView};
 use crate::provider::{
-    ApiLimit, ApiLimitDialect, LimitFailure, ProviderIdentity, ProviderKind, ProviderRole,
-    RateLimits,
+    ApiLimit, ApiLimitDialect, ApiLimitDimension, LimitFailure, ProviderIdentity, ProviderKind,
+    ProviderRole, RateLimits,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14,7 +14,7 @@ pub struct ApiUsage {
     pub dialect: ApiLimitDialect,
     pub rows: Vec<ApiLimit>,
     pub latest_unavailable: Option<LimitFailure>,
-    pub latest_unreported: bool,
+    pub latest_omitted: Option<Vec<ApiLimitDimension>>,
 }
 
 pub(super) fn apply(
@@ -70,7 +70,7 @@ pub(super) fn apply(
                 dialect: sample.dialect,
                 rows: Vec::new(),
                 latest_unavailable: None,
-                latest_unreported: true,
+                latest_omitted: Some(Vec::new()),
             });
             view.usage.api_limits.len() - 1
         }
@@ -82,12 +82,18 @@ fn update(
     group: &mut ApiUsage,
     sample: Option<&crate::provider::ApiLimits>,
 ) -> Result<(), ReplayError> {
-    group.latest_unreported = sample.is_none_or(|sample| {
-        group
-            .rows
-            .iter()
-            .any(|old| !sample.rows.iter().any(|row| row.dimension == old.dimension))
-    });
+    group.latest_omitted = match sample {
+        None => Some(Vec::new()),
+        Some(sample) => {
+            let omitted: Vec<_> = group
+                .rows
+                .iter()
+                .map(|old| old.dimension)
+                .filter(|dimension| !sample.rows.iter().any(|row| row.dimension == *dimension))
+                .collect();
+            (!omitted.is_empty()).then_some(omitted)
+        }
+    };
     group.latest_unavailable = sample.and_then(|sample| sample.unavailable);
     let Some(sample) = sample else { return Ok(()) };
     if group.dialect != sample.dialect {
