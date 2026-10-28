@@ -9,7 +9,9 @@ use crate::tools::permissions::{
     PermissionConfig, feedback_lines, narrows, peer_name, post_tool_use_input, pre_tool_use_input,
 };
 use crate::tools::types::model_observation;
-use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
+use crate::tools::{
+    CommandTool, EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime,
+};
 use std::ops::ControlFlow;
 
 mod command_tools;
@@ -134,6 +136,7 @@ type HookPlanRefusal = (&'static str, Option<(u8, u8)>);
 
 struct HookPlan {
     command_subject: Option<uuid::Uuid>,
+    command_tool: Option<CommandTool>,
     group: u8,
     handler: u8,
     call: ToolCall,
@@ -148,6 +151,7 @@ fn hook_plan(
 ) -> Option<HookPlan> {
     Some(HookPlan {
         command_subject: None,
+        command_tool: None,
         group,
         handler,
         call: hook_call(runtime, hook)?,
@@ -1186,8 +1190,7 @@ impl RunLoop<'_> {
                 subject_digest: digests.0,
                 intent: hook_intent.clone(),
                 command_subject: plan.command_subject,
-                command_tool: (*event == HookEvent::CommandRewrite)
-                    .then(|| runtime.command_tools().entries()[usize::from(plan.group)].clone()),
+                command_tool: plan.command_tool.clone(),
                 input_digest: digests.1,
             },
         })

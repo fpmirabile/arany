@@ -10,7 +10,7 @@ use std::path::Path;
 pub const MAX_COMMAND_TOOL_CANDIDATES: usize = 256;
 pub const MAX_COMMAND_TOOLS: usize = 8;
 const VERSION: u8 = 1;
-pub(crate) const PROBE_COMMAND: &str = "cargo test";
+pub const PROBE_COMMAND: &str = "cargo test";
 pub(crate) const TOOL_NAME: &str = "command-tool";
 pub(crate) const TIMEOUT_MS: u32 = (super::permissions::MAX_TIMEOUT_SECONDS * 1000) as u32;
 

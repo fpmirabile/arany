@@ -50,7 +50,7 @@ impl RunLoop<'_> {
         Ok(Ok(intent))
     }
 
-    fn rewrite_fits(&self, runtime: &ToolRuntime, plan: &HookPlan, tool: &CommandTool) -> bool {
+    fn rewrite_fits(&self, runtime: &ToolRuntime, plan: &HookPlan) -> bool {
         let occurrence = HookOccurrence {
             agent: self.primary_id,
             event: HookEvent::CommandRewrite,
@@ -60,7 +60,7 @@ impl RunLoop<'_> {
         let intent = self.hook_intent(runtime, &occurrence, u32::MAX);
         let hook = HookInvocation {
             command_subject: plan.command_subject,
-            command_tool: Some(tool.clone()),
+            command_tool: plan.command_tool.clone(),
             event: HookEvent::CommandRewrite,
             group: plan.group,
             handler: plan.handler,
@@ -100,12 +100,13 @@ impl RunLoop<'_> {
         };
         let plan = HookPlan {
             command_subject: Some(intent.id),
+            command_tool: Some(tool.clone()),
             group: u8::try_from(index).expect("command tools are bounded"),
             handler: 0,
             call: tool.call(),
             timeout_ms: command_tools::TIMEOUT_MS,
         };
-        if !self.rewrite_fits(&hook_runtime, &plan, tool) {
+        if !self.rewrite_fits(&hook_runtime, &plan) {
             return Ok(unavailable(fact, RewriteStage::InputLimit));
         }
         let outcome = self

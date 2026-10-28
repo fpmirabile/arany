@@ -84,7 +84,7 @@ async fn choose_tools(
             "disabled"
         };
         (
-            ENTRY_BASE + index as u8,
+            ENTRY_BASE + u8::try_from(index).expect("command tools are capped"),
             format!(
                 "{} · Rewrite hook · {pin} · last probe {} · {status}",
                 executable_name(&tool.selected_path),
@@ -145,17 +145,21 @@ async fn edit_entry(
 fn saved(result: Result<CommandTools, arany::ToolError>) -> Result<String, SetupError> {
     match result {
         Ok(_) => Ok("Saved for the next Run. Probe a selected tool before enabling it.".into()),
-        Err(arany::ToolError::Uncertain) => Err(record_error(arany::ToolError::Uncertain)),
+        Err(arany::ToolError::Uncertain) => Err(uncertain_save()),
         Err(error) => Ok(format!("Command tools unchanged: {error}")),
     }
 }
 
-fn record_error(error: arany::ToolError) -> SetupError {
+fn uncertain_save() -> SetupError {
+    SetupError::Uncertain("Command tools save is uncertain; reopen /permissions to verify".into())
+}
+
+fn save_failure(error: arany::ToolError) -> Result<String, SetupError> {
     match error {
-        arany::ToolError::Uncertain => SetupError::Uncertain(
-            "Command tools save is uncertain; reopen /permissions to verify".into(),
-        ),
-        error => SetupError::from(error.to_string()),
+        arany::ToolError::Uncertain => Err(uncertain_save()),
+        error => Ok(format!(
+            "Probe save failed: {error}; reopen /permissions to verify"
+        )),
     }
 }
 
@@ -203,7 +207,7 @@ async fn select(
         )
         .await?
         {
-            Some(1) => match super::super::setup::read_optional_setup_value(
+            Some(1) => match super::super::setup::read_setup_value(
                 terminal,
                 "Fixed argument",
                 "Argument",
@@ -219,14 +223,24 @@ async fn select(
             _ => return Ok(None),
         }
     }
-    CommandTool::pin(
+    match CommandTool::pin(
         editor.state,
         &editor.admission.workspace,
         &candidates[index],
         args,
-    )
-    .map(Some)
-    .map_err(|error| SetupError::from(error.to_string()))
+    ) {
+        Ok(tool) => Ok(Some(tool)),
+        Err(error) => {
+            super::super::setup::review_warning(
+                terminal,
+                "Command tools",
+                &format!("Cannot select executable: {error}"),
+                "Return to Command tools",
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn candidate(
@@ -242,7 +256,7 @@ async fn candidate(
             .take(PAGE_SIZE)
             .map(|(index, path)| {
                 (
-                    ENTRY_BASE + (index - offset) as u8,
+                    ENTRY_BASE + u8::try_from(index - offset).expect("pages are capped"),
                     format!(
                         "{} · {}",
                         executable_name(path),
@@ -291,10 +305,11 @@ async fn probe(
 ) -> Result<String, SetupError> {
     let mut disabled = tool.clone();
     disabled.enabled = false;
-    CommandTools::edit(editor.state, |record| {
+    if let Err(error) = CommandTools::edit(editor.state, |record| {
         record.replace(index, tool, disabled.clone())
-    })
-    .map_err(record_error)?;
+    }) {
+        return save_failure(error);
+    }
     super::super::materialize_session(editor.admission, editor.session, editor.view).await?;
     let result = match await_probe(terminal, engine, editor, &disabled).await? {
         Ok(probe) => probe,
@@ -317,10 +332,11 @@ async fn probe(
     };
     let mut probed = disabled.clone();
     probed.last_probe = Some(stage);
-    CommandTools::edit(editor.state, |record| {
+    if let Err(error) = CommandTools::edit(editor.state, |record| {
         record.replace(index, &disabled, probed.clone())
-    })
-    .map_err(record_error)?;
+    }) {
+        return save_failure(error);
+    }
     confirm_probe(terminal, editor, index, &probed, &preview).await
 }
 
@@ -337,12 +353,13 @@ async fn confirm_probe(
     let mut updated = probed.clone();
     if matches!(stage, RewriteStage::Rewritten | RewriteStage::Unchanged) {
         let warning = format!(
-            "Selected: {}\nExecutable: {}\nRole: Rewrite hook\nFixed arguments: {}\nSample: cargo test\nPreview: {}",
+            "Selected: {}\nExecutable: {}\nRole: Rewrite hook\nFixed arguments: {}\nSample: {}\nPreview: {}",
             crate::presentation::escape_terminal(&probed.selected_path),
             crate::presentation::escape_terminal(&probed.executable),
             crate::presentation::escape_terminal(
                 &serde_json::to_string(&probed.args).expect("typed arguments serialize")
             ),
+            arany::PROBE_COMMAND,
             crate::presentation::escape_terminal(preview)
         );
         updated.enabled = super::super::setup::review_warning(
@@ -366,10 +383,7 @@ async fn confirm_probe(
             stage.label(),
             crate::presentation::escape_terminal(preview)
         )),
-        Err(arany::ToolError::Uncertain) => Err(record_error(arany::ToolError::Uncertain)),
-        Err(error) => Ok(format!(
-            "Probe save failed: {error}; reopen /permissions to verify"
-        )),
+        Err(error) => save_failure(error),
     }
 }
 

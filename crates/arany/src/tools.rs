@@ -15,8 +15,8 @@ pub use discovery::{
 pub(crate) mod command_environment;
 pub(crate) mod command_tools;
 pub use command_tools::{
-    CommandRewrite, CommandTool, CommandToolProbe, CommandToolRole, CommandTools, RewriteStage,
-    command_tool_candidates,
+    CommandRewrite, CommandTool, CommandToolProbe, CommandToolRole, CommandTools, PROBE_COMMAND,
+    RewriteStage, command_tool_candidates,
 };
 mod executable;
 mod fs;
