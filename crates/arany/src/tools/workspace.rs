@@ -487,6 +487,8 @@ impl WorkspacePermissions {
             runtime_grants: self.runtime_grants.clone(),
             git: super::git::discover(),
             git_identity: super::git::user_identity(),
+            locale: Default::default(),
+            environment_sha256: None,
             network: None,
             web_search: None,
         };

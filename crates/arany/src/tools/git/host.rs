@@ -2823,17 +2823,7 @@ mod tests {
             assert!(!catalog.to_string().contains("fixture-auth-canary"));
             catalog["git"]["operations"].clone()
         };
-        let local: Vec<&str> = if cfg!(target_os = "macos") {
-            vec![
-                "git_status",
-                "git_diff",
-                "git_log",
-                "git_commit",
-                "git_branch",
-            ]
-        } else {
-            vec!["git_status", "git_diff", "git_log", "git_branch"]
-        };
+        let local = vec!["git_status", "git_diff", "git_log", "git_branch"];
         let reads = json!(local);
         let with_push = json!([local.as_slice(), &["git_push"]].concat());
         runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));

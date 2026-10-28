@@ -129,6 +129,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         &site.intent.limits,
     )?;
     command.current_dir(site.workspace.join(cwd));
+    command.envs(&site.config.locale);
     command.env("ARANY_TOOL_WORKSPACE", site.workspace);
     command.stdin(if site.hook_stdin.is_some() {
         std::process::Stdio::piped()

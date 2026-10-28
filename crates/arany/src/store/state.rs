@@ -115,6 +115,7 @@ record_kinds!(
     ProviderRoster,
     Permissions,
     UnguardedCommands,
+    CommandEnvironment,
     SavedAccount,
     UiPreferences,
     ModelPreferences,
@@ -150,6 +151,12 @@ impl RecordKind {
             Self::UnguardedCommands => (
                 "unguarded-commands.json",
                 "unguarded-commands.pending",
+                64 * 1024,
+                true,
+            ),
+            Self::CommandEnvironment => (
+                "command-environment.json",
+                "command-environment.pending",
                 64 * 1024,
                 true,
             ),

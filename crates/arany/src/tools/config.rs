@@ -29,6 +29,10 @@ pub(crate) struct Config {
     pub git: Option<Program>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_identity: Option<GitIdentity>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub locale: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<super::network::Network>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +153,11 @@ pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
 };
 
 impl Config {
+    pub(crate) fn bind_environment(&mut self, environment: &super::CommandEnvironment) {
+        self.locale = environment.locale();
+        self.environment_sha256 = Some(environment.sha256().to_owned());
+    }
+
     pub(crate) fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let bytes = state
             .read_current(&TOOLS_CONFIG)
@@ -163,6 +172,8 @@ impl Config {
         let config: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
         config.validate()?;
         if !config.runtime_grants.is_empty()
+            || !config.locale.is_empty()
+            || config.environment_sha256.is_some()
             || config.network.as_ref().is_some_and(|network| {
                 !network.deny.is_empty()
                     || network.allow.len() > super::network::MAX_NETWORK_PATTERNS
@@ -198,6 +209,14 @@ impl Config {
             return Err(ToolError::Configuration);
         }
         validate_selection(&self.runtime_grants)?;
+        if !super::command_environment::valid_locale(&self.locale)
+            || self
+                .environment_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_digest(digest))
+        {
+            return Err(ToolError::Configuration);
+        }
         if self
             .network
             .as_ref()
@@ -424,13 +443,7 @@ impl Config {
             | ToolCall::GitBranch { .. }
             | ToolCall::GitSwitch { .. } => {
                 return self.git_available()
-                    && match call {
-                        ToolCall::GitBranch { name: Some(_), .. } => {
-                            super::guard::git_branch_creation_available()
-                        }
-                        ToolCall::GitCommit { .. } => super::guard::git_commit_available(),
-                        _ => !call.mutates() || super::guard::git_writes_available(),
-                    };
+                    && (!call.mutates() || super::guard::git_writes_available());
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self
