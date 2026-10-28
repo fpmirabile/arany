@@ -1424,7 +1424,7 @@ printf cache-changed
         let requests = provider.requests.lock().unwrap();
         assert_eq!(
             requests.len(),
-            if matches!(case, "cancelled" | "cancelled-report") {
+            if matches!(case, "cancelled" | "cancelled-report" | "guarded") {
                 2
             } else {
                 3
