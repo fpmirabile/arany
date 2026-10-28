@@ -44,9 +44,9 @@ mod landlock;
 #[cfg(target_os = "linux")]
 mod linux;
 mod network;
-pub(super) use network::set_environment as set_proxy_environment;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
+pub(super) use network::set_environment as set_proxy_environment;
 #[cfg(target_os = "linux")]
 mod profile;
 #[cfg(target_os = "linux")]

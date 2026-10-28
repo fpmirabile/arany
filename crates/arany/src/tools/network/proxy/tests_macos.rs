@@ -124,7 +124,10 @@ async fn a_cleanup_failure_surfaces_only_after_the_tunnel_and_listener_close() {
         ))
     ));
     // No await since settlement returned: a merely requested abort cannot have completed on this runtime.
-    assert!(server.is_finished(), "server and tunnels joined by settlement");
+    assert!(
+        server.is_finished(),
+        "server and tunnels joined by settlement"
+    );
     let mut rest = Vec::new();
     timeout(Duration::from_secs(5), stream.read_to_end(&mut rest))
         .await

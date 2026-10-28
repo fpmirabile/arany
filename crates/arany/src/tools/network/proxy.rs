@@ -391,13 +391,7 @@ async fn refuse(client: &mut Client, status: u16, reason: NetworkRefusalReason) 
     let _ = client.write_all(response.as_bytes()).await;
 }
 
-async fn tunnel(
-    client: Client,
-    upstream: TcpStream,
-    early: &[u8],
-    host: &str,
-    context: &Context,
-) {
+async fn tunnel(client: Client, upstream: TcpStream, early: &[u8], host: &str, context: &Context) {
     let (client_read, client_write) = client.into_split();
     let (upstream_read, upstream_write) = upstream.into_split();
     let activity = Activity {
