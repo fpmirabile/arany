@@ -555,6 +555,22 @@ async fn remote_mcp_without_a_saved_token_refuses_before_any_request() {
 #[tokio::test]
 #[cfg_attr(
     not(arany_ci),
+    ignore = "native Linux remote MCP: a server-rejected unexpired token refuses"
+)]
+async fn remote_mcp_refuses_a_server_rejected_unexpired_token() {
+    if !crate::isolation::enter_native_account_isolated_test() {
+        return;
+    }
+    let server = mcp_fixture(Mode::Normal);
+    write_token(server.port, "rejected-token", unix_now() + 3600);
+    let listed = list_remote(server.port).await;
+    assert_eq!(listed["disposition"], "Failed");
+    assert_eq!(listed["output"]["error"], "unauthorized");
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(arany_ci),
     ignore = "native Linux remote MCP: an expired token renews through the saved refresh token"
 )]
 async fn remote_mcp_renews_an_expired_token_before_the_call() {
