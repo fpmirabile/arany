@@ -18,6 +18,8 @@ use std::time::Duration;
 mod network;
 #[path = "tools_macos/repository.rs"]
 mod repository;
+#[path = "tools_macos/shell.rs"]
+mod shell;
 
 const MCP_SCRIPT: &str = r#"set -eu
 while IFS= read -r request; do
@@ -1016,6 +1018,7 @@ async fn native_file_journey_helper() {
         .expect("recorded Guard discovery intent");
     guard_refuses_before_go(root, &workspace, &discovery.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
+    shell::refuse_options(root, &workspace, &config).await;
 }
 
 #[tokio::test]
@@ -2665,6 +2668,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
+        ("missing_command_deadline", "admission"),
         ("workspace_write", "admission"),
         ("unknown_task_field", "admission"),
         ("invalid_go", "admission"),
@@ -2695,8 +2699,21 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
-        let mut task_value = json!({"command_deadline":null,"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
-            "intent":intent,"definition":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
+        let mut task_value = json!({
+            "command_deadline": null,
+            "config": serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
+            "intent": intent,
+            "definition": null,
+            "handover": null,
+            "workspace": workspace,
+            "guard_executable": env!("CARGO_BIN_EXE_arany")
+        });
+        if case == "missing_command_deadline" {
+            task_value
+                .as_object_mut()
+                .unwrap()
+                .remove("command_deadline");
+        }
         if case == "unknown_task_field" {
             task_value["unexpected"] = json!(false);
         }

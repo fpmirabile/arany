@@ -94,6 +94,7 @@ mod cache_directory;
 mod cache_recovery;
 pub use cache_recovery::recover_build_cache;
 pub(super) mod selection_phase;
+mod shell;
 pub(super) mod transfer;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
@@ -479,6 +480,7 @@ pub enum GuardCheck {
     SelectionTimedOut,
     SelectionInputVanished,
     SelectionInputConflict,
+    ShellArguments,
 }
 
 impl GuardCheck {
@@ -502,7 +504,8 @@ impl GuardCheck {
             | Self::ControllerFailed
             | Self::PayloadTimeout
             | Self::PayloadLimit
-            | Self::PayloadFailed => None,
+            | Self::PayloadFailed
+            | Self::ShellArguments => None,
         }
     }
 
@@ -527,6 +530,9 @@ impl GuardCheck {
             Self::SelectionTimedOut => "project selection timed out",
             Self::SelectionInputVanished => "project input vanished",
             Self::SelectionInputConflict => "project input conflict",
+            Self::ShellArguments => {
+                "pinned shell requires -c SCRIPT; login, interactive and script-file forms are refused"
+            }
         }
     }
 }
@@ -969,11 +975,24 @@ async fn read_discovery_report<R: tokio::io::AsyncBufRead + Unpin>(
     read_worker_report(reader, intent).await
 }
 
+impl ToolRuntime {
+    pub(crate) fn refuses_shell_arguments(&self, call: &ToolCall) -> bool {
+        let Err(ToolError::GuardBootstrap(failure)) = shell::validate_command(&self.config, call)
+        else {
+            return false;
+        };
+        failure.check == Some(GuardCheck::ShellArguments)
+    }
+}
+
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     cancellation: Cancellation,
 ) -> Result<ToolObservation, ToolError> {
+    if let Err(error) = shell::validate_command(&runtime.config, &intent.call) {
+        return dispatch_result(intent, false, Err(error));
+    }
     if let Err(error) = check_available() {
         return dispatch_result(intent, false, Err(error));
     }
@@ -2107,13 +2126,8 @@ fn prefix_shell_runtime_compat(
     if !args.first().is_some_and(|arg| arg == "-c") {
         return Ok(());
     }
-    let script = args.get_mut(1).ok_or(ToolError::Configuration)?;
-    let text = script.to_str().ok_or(ToolError::Path)?;
-    // Shells parse options after -c; reject ambiguous script positions before changing argv.
-    if text.starts_with(['-', '+']) {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    *script = format!(
+    let text = shell::script(args)?;
+    args[1] = format!(
         "export DYLD_INSERT_LIBRARIES='{}'\n{text}",
         path.replace('\'', "'\\''"),
     )
@@ -2557,14 +2571,16 @@ mod tests {
             let original = args.clone();
             assert!(matches!(
                 prefix_shell_runtime_compat(&mut args, path),
-                Err(ToolError::ProtectionUnavailable)
+                Err(ToolError::GuardBootstrap(failure))
+                    if failure.check == Some(GuardCheck::ShellArguments)
             ));
             assert_eq!(args, original);
         }
         let mut missing = [OsString::from("-c")];
         assert!(matches!(
             prefix_shell_runtime_compat(&mut missing, path),
-            Err(ToolError::Configuration)
+            Err(ToolError::GuardBootstrap(failure))
+                if failure.check == Some(GuardCheck::ShellArguments)
         ));
         let mut file = [OsString::from("script.sh"), OsString::from("-c")];
         let original = file.clone();
@@ -3375,7 +3391,7 @@ mod tests {
         }
     }
 
-    fn intent(call: ToolCall) -> EffectIntent {
+    pub(super) fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
             host_command: None,

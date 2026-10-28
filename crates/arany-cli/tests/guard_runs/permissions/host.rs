@@ -663,10 +663,11 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
         "{}",
         tool_report(Some(observation))
     );
-    assert!(matches!(
-        observation.attestation,
-        Some(arany::Attestation::Guard(_))
-    ));
+    assert!(
+        matches!(observation.attestation, Some(arany::Attestation::Guard(_))),
+        "{}",
+        tool_report(Some(observation))
+    );
     assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
     let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
     assert_eq!(command["exit_code"], Value::Null);

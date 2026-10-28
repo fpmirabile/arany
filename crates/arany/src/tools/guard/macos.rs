@@ -277,7 +277,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 const MACOS_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
 
-const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
+const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-from-select-ready-pinned-runtime-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
@@ -1469,7 +1469,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(MACOS_SELECTION_CONTRACT),
-            "a66a758e6b033ed1c57f64c9fcdb86ceab80ed061eb05a1937744c68ca8b5c52"
+            "daf8d84c308a2bed54df0548b1badb17f3004f3cc4ee96c4299b973fde8c93f6"
         );
         super::super::tests::assert_enforcement_prose(
             MACOS_SELECTION_CONTRACT,
