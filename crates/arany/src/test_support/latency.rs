@@ -54,6 +54,8 @@ fn operation(call: &ToolCall) -> Operation {
         | ToolCall::GhPrCreate { .. }
         | ToolCall::GhPrList { .. }
         | ToolCall::GhPrView { .. }
+        | ToolCall::WebFetch { .. }
+        | ToolCall::WebSearch { .. }
         | ToolCall::Glob { .. } => Operation::Other,
     }
 }

@@ -4,7 +4,7 @@ pub(super) fn operation(call: &ToolCall) -> String {
     match call.family() {
         Family::File => file(call),
         Family::Process => process(call),
-        Family::Skill => simple(call),
+        Family::Skill | Family::Web => simple(call),
         Family::Mcp => mcp(call),
         Family::Git => match call.site() {
             Site::Guard => git(call),
@@ -173,7 +173,7 @@ pub(super) fn read_group(call: &ToolCall) -> Option<ReadGroup> {
         .then_some(ReadGroup::Git),
         Family::Skill => Some(ReadGroup::Skill),
         Family::Mcp => matches!(call, ToolCall::McpList { .. }).then_some(ReadGroup::Mcp),
-        Family::Process | Family::Preparation => None,
+        Family::Process | Family::Web | Family::Preparation => None,
     }
 }
 
@@ -195,9 +195,12 @@ pub(super) fn result_kind(call: &ToolCall) -> ResultKind {
         Family::Git if matches!(call, ToolCall::GitCommit { .. }) => ResultKind::GitCommit,
         Family::Git if matches!(call, ToolCall::GitSwitch { .. }) => ResultKind::GitSwitch,
         Family::Git if read_group(call).is_none() => ResultKind::GitWrite,
-        Family::File | Family::Git | Family::Skill | Family::Mcp | Family::Preparation => {
-            ResultKind::Read
-        }
+        Family::File
+        | Family::Git
+        | Family::Skill
+        | Family::Mcp
+        | Family::Web
+        | Family::Preparation => ResultKind::Read,
     }
 }
 

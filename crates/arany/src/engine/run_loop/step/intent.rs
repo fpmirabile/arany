@@ -112,6 +112,9 @@ impl RunLoop<'_> {
             }
             runtime.bind_build_jobs(&mut intent)?;
         }
+        if actor == self.primary_id && intent.call.is_web() {
+            runtime.bind_web_network(&mut intent)?;
+        }
         let fixed_overhead_ms = duration_ms(
             runtime
                 .reservation_overhead(&intent.call)
@@ -159,9 +162,12 @@ impl RunLoop<'_> {
         child: &ChildWork,
         call: ToolCall,
         deadline: Instant,
-    ) -> Option<EffectIntent> {
-        let intent = runtime.intent(self.run_id, child.agent_run_id, call);
-        self.limit_child_intent(runtime, intent, deadline)
+    ) -> Result<Option<EffectIntent>, EngineError> {
+        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        if intent.call.is_web() {
+            runtime.bind_web_network(&mut intent)?;
+        }
+        Ok(self.limit_child_intent(runtime, intent, deadline))
     }
 
     fn limit_child_intent(
@@ -405,7 +411,7 @@ impl RunLoop<'_> {
                         .await?
                         .and_then(|intent| self.limit_child_intent(runtime, intent, deadline))
                 } else {
-                    self.researcher_intent(runtime, child, call, deadline)
+                    self.researcher_intent(runtime, child, call, deadline)?
                 };
                 let Some(intent) = intent else {
                     return Ok(Err(deadline_refusal));

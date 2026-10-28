@@ -480,6 +480,7 @@ impl WorkspacePermissions {
             workspace_paths: vec![".".into()],
             write: true,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
+            child_web: false,
             commands,
             skills: Vec::new(),
             mcp: Vec::new(),
@@ -489,6 +490,7 @@ impl WorkspacePermissions {
             locale: Default::default(),
             environment_sha256: None,
             network: None,
+            web_search: None,
         };
         config.validate()?;
         Ok(config)
