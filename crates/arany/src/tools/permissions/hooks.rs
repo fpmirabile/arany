@@ -23,6 +23,7 @@ const _: () = assert!(MAX_STOP_CONTINUATIONS * MAX_HOOK_REASON_BYTES <= MAX_STOP
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum HookEvent {
+    CommandRewrite,
     PreToolUse,
     PostToolUse,
     Stop,
@@ -102,6 +103,11 @@ impl HookConfig {
         }
         let mut groups = BTreeMap::new();
         for (event, entries) in raw {
+            if event == HookEvent::CommandRewrite {
+                return Err(ConfigError::Hook(
+                    "command tools are selected through /permissions",
+                ));
+            }
             let mut validated = Vec::new();
             for group in entries {
                 if group.hooks.is_empty() {
@@ -243,6 +249,10 @@ impl CommandHook {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookInvocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_subject: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_tool: Option<crate::tools::CommandTool>,
     pub event: HookEvent,
     pub group: u8,
     pub handler: u8,
@@ -314,6 +324,7 @@ impl HookResult {
     pub(crate) fn valid_for(&self, observation: &ToolObservation) -> bool {
         // The parse is deterministic and bounded, so a recorded result must equal it.
         [
+            HookEvent::CommandRewrite,
             HookEvent::PreToolUse,
             HookEvent::PostToolUse,
             HookEvent::Stop,
@@ -333,6 +344,9 @@ impl HookResult {
 
     pub(crate) fn for_event(event: HookEvent, observation: &ToolObservation) -> Self {
         use crate::tools::ToolDisposition::{Failed, Limit, Succeeded};
+        if event == HookEvent::CommandRewrite {
+            return crate::tools::command_tools::result(observation);
+        }
         let not_completed = Self::Ignored {
             why: HookIgnoreReason::NotCompleted,
         };

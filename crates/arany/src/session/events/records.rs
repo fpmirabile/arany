@@ -18,6 +18,8 @@ impl EffectTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolIntentRecord {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rewrite: Vec<crate::tools::CommandRewrite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,6 +41,7 @@ impl From<EffectIntent> for ToolIntentRecord {
     fn from(intent: EffectIntent) -> Self {
         Self {
             host: intent.host,
+            rewrite: intent.rewrite,
             host_command: intent.host_command,
             target: intent.target,
             id: intent.id,
@@ -59,6 +62,7 @@ impl From<ToolIntentRecord> for EffectIntent {
     fn from(intent: ToolIntentRecord) -> Self {
         Self {
             host: intent.host,
+            rewrite: intent.rewrite,
             host_command: intent.host_command,
             target: intent.target,
             id: intent.id,

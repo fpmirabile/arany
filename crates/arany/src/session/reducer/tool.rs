@@ -3,6 +3,7 @@ use super::definition_mode;
 mod hook;
 mod lifecycle;
 mod permission;
+mod rewrite;
 use super::{
     AgentStatus, HookView, MAX_HOST_SESSION_GRANTS, RunView, SessionView, ToolView, active_run,
     active_run_goal, current_goal_mut, observed_command_changeset,
@@ -600,6 +601,9 @@ fn start_lifecycle(
     hook: &crate::tools::permissions::HookInvocation,
     sequence: u64,
 ) -> Result<(), ReplayError> {
+    if hook.event == HookEvent::CommandRewrite {
+        return rewrite::started(current, run_id, agent_id, hook, sequence);
+    }
     use crate::session::{AgentRole, ChildGrant, RunStatus};
     use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, compact_subject, stop_subject};
     let previous = current.previous_subject_sequence();

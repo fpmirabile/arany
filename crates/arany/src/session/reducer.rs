@@ -1,3 +1,4 @@
+mod command_tools;
 use super::events::{
     AgentDisposition, AgentRole, AgentRunId, CompactionRecord, Event, EventEnvelope, ForkLineage,
     GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage,
@@ -1034,6 +1035,7 @@ pub struct SessionView {
     pub runs: Vec<RunView>,
     pub compactions: Vec<CompactionView>,
     pub goals: Vec<GoalView>,
+    pub command_tool_probe: Option<crate::tools::CommandToolProbe>,
     pub pending_provider_setup_edit: Option<uuid::Uuid>,
     pub provider_setup_uncertain: bool,
 }
@@ -1134,6 +1136,7 @@ impl SessionView {
                         runs: Vec::new(),
                         compactions: Vec::new(),
                         goals: Vec::new(),
+                        command_tool_probe: None,
                         pending_provider_setup_edit: None,
                         provider_setup_uncertain: false,
                     });
@@ -1177,6 +1180,7 @@ impl SessionView {
                         compactions: inherited
                             .map_or_else(Vec::new, |inherited| inherited.compactions.clone()),
                         goals: Vec::new(),
+                        command_tool_probe: None,
                         pending_provider_setup_edit: None,
                         provider_setup_uncertain: false,
                     });
@@ -1317,6 +1321,9 @@ impl SessionView {
             Event::SessionRenamed { .. }
             | Event::SessionDefaultChanged { .. }
             | Event::ContextCompacted { .. } => session::apply(current, &envelope.event, prior)?,
+            Event::CommandToolProbeStarted { .. } | Event::CommandToolProbeFinished { .. } => {
+                command_tools::apply(current, &envelope.event)?;
+            }
             Event::ProviderSetupEditStarted { operation_id, .. } => {
                 current.pending_provider_setup_edit = Some(*operation_id);
             }

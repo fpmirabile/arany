@@ -29,6 +29,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 
     let intent = EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -57,6 +58,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
     let intent = |call| EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
@@ -214,6 +216,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_tools: std::sync::Arc::new(super::CommandTools::default()),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
             "/usr/bin:/bin",
         )),

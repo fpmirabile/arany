@@ -171,6 +171,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("RunStarted", 25, crate::session::pre_command_tools_payload),
+        variant_step!("ToolProposed", 4, crate::session::pre_command_tools_payload),
+        variant_step!("ToolStarted", 26, crate::session::pre_command_tools_payload),
+        variant_step!("ToolFinished", 33, crate::session::pre_command_tools_payload),
+        variant_step!("HookStarted", 15, crate::session::pre_command_tools_payload),
+        variant_step!("HookFinished", 22, crate::session::pre_command_tools_payload),
         EventStep {
             kind: "ToolFinished",
             from: 32,
@@ -396,7 +402,9 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
 };
 
 // Payload versions when migrations landed; older history is archived, never upgraded.
-const EVENT_FLOOR: [(&str, i64); 41] = [
+const EVENT_FLOOR: [(&str, i64); 43] = [
+    ("CommandToolProbeStarted", 1),
+    ("CommandToolProbeFinished", 1),
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),

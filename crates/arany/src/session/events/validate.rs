@@ -1,6 +1,7 @@
 use super::*;
 
 mod agent;
+mod command_tools;
 mod goal;
 mod run;
 mod session;
@@ -28,6 +29,9 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         match self {
+            Self::CommandToolProbeStarted { .. } | Self::CommandToolProbeFinished { .. } => {
+                self.validate_command_probe()
+            }
             Self::SupervisorVerdictRecorded { .. }
             | Self::WorkspaceRewindStarted { .. }
             | Self::WorkspaceRewindFinished { .. }

@@ -1,3 +1,5 @@
+mod command_tools;
+pub(crate) use command_tools::pre_command_tools_payload;
 mod goal;
 mod records;
 mod selection_timing;
@@ -144,7 +146,9 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 43] = [
+    ("CommandToolProbeStarted", 1),
+    ("CommandToolProbeFinished", 1),
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -174,16 +178,16 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolProposed", 4),
+    ("ToolProposed", 5),
     ("ToolPreflightRefused", 1),
-    ("HookStarted", 15),
-    ("HookFinished", 22),
-    ("ToolFinished", 33),
-    ("RunStarted", 25),
+    ("HookStarted", 16),
+    ("HookFinished", 23),
+    ("ToolFinished", 34),
+    ("RunStarted", 26),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 26),
+    ("ToolStarted", 27),
     ("ToolActiveTimeReserved", 1),
     ("ContextCompacted", 7),
 ];
@@ -262,6 +266,12 @@ pub enum Event {
     },
     SessionRenamed {
         title: String,
+    },
+    CommandToolProbeStarted {
+        probe: Box<crate::tools::CommandToolProbe>,
+    },
+    CommandToolProbeFinished {
+        outcome: Box<crate::tools::permissions::HookOutcome>,
     },
     ProviderSetupEditStarted {
         operation_id: uuid::Uuid,
@@ -860,6 +870,8 @@ impl Event {
             Self::SessionForked { .. } => "SessionForked",
             Self::ContextCompacted { .. } => "ContextCompacted",
             Self::SessionRenamed { .. } => "SessionRenamed",
+            Self::CommandToolProbeStarted { .. } => "CommandToolProbeStarted",
+            Self::CommandToolProbeFinished { .. } => "CommandToolProbeFinished",
             Self::ProviderSetupEditStarted { .. } => "ProviderSetupEditStarted",
             Self::ProviderSetupEditFinished { .. } => "ProviderSetupEditFinished",
             Self::GoalStarted { .. } => "GoalStarted",
@@ -906,6 +918,8 @@ impl Event {
             | Self::SessionForked { .. }
             | Self::ContextCompacted { .. }
             | Self::SessionRenamed { .. }
+            | Self::CommandToolProbeStarted { .. }
+            | Self::CommandToolProbeFinished { .. }
             | Self::ProviderSetupEditStarted { .. }
             | Self::ProviderSetupEditFinished { .. }
             | Self::GoalStarted { .. }
@@ -1039,6 +1053,8 @@ impl Event {
                 workspace_inode: *workspace_inode,
             }),
             Self::SessionRenamed { title } => serialize(&TitlePayloadRef { title }),
+            Self::CommandToolProbeStarted { probe } => serialize(probe),
+            Self::CommandToolProbeFinished { outcome } => serialize(outcome),
             Self::ProviderSetupEditStarted {
                 operation_id,
                 target,
@@ -1358,6 +1374,12 @@ impl Event {
                 Self::SessionRenamed {
                     title: parse::<TitlePayload>(payload)?.title,
                 }
+            }
+            "CommandToolProbeStarted" if run_id.is_none() && agent_run_id.is_none() => {
+                Self::CommandToolProbeStarted { probe: parse(payload)? }
+            }
+            "CommandToolProbeFinished" if run_id.is_none() && agent_run_id.is_none() => {
+                Self::CommandToolProbeFinished { outcome: parse(payload)? }
             }
             "ProviderSetupEditStarted" if run_id.is_none() && agent_run_id.is_none() => {
                 let data: ProviderSetupEditStartedPayload = parse(payload)?;

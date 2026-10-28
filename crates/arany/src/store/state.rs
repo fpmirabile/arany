@@ -116,6 +116,7 @@ record_kinds!(
     Permissions,
     UnguardedCommands,
     CommandEnvironment,
+    CommandTools,
     SavedAccount,
     UiPreferences,
     ModelPreferences,
@@ -154,6 +155,7 @@ impl RecordKind {
                 64 * 1024,
                 true,
             ),
+            Self::CommandTools => ("command-tools.json", "command-tools.pending", 64 * 1024, true),
             Self::CommandEnvironment => (
                 "command-environment.json",
                 "command-environment.pending",

@@ -51,6 +51,7 @@ impl Fixture {
     fn intent(&self, actor: AgentRunId, call: ToolCall, target: EffectTarget) -> EffectIntent {
         EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target,
             id: uuid::Uuid::now_v7(),
@@ -476,6 +477,7 @@ fn fixture_with_grant(
         compaction_content_digest: None,
         tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
             host_epoch: None,
+            command_tools_digest: None,
             host_prefixes: Vec::new(),
             contract_version: 1,
             config_digest: [1; 32],

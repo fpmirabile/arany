@@ -2021,6 +2021,7 @@ mod tests {
     fn fallback_command_deadlines_share_runtime_with_selection() {
         let mut intent = EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -4105,6 +4106,7 @@ int main(int argc, char **argv) {
                     hidden: Default::default(),
                     intent: EffectIntent {
                         host: None,
+                        rewrite: Vec::new(),
                         host_command: None,
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),

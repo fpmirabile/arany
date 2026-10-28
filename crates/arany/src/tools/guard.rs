@@ -3382,6 +3382,7 @@ mod tests {
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -4258,6 +4259,7 @@ mod tests {
                 config: config.clone(),
                 intent: EffectIntent {
                     host: None,
+                    rewrite: Vec::new(),
                     host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),

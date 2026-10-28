@@ -22,6 +22,7 @@ use crate::{
     tools::{
         FRAME_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
         NETWORK_IDLE_MS, WRITE_FRAME_BYTES,
+        command_tools::{MAX_COMMAND_TOOLS, MAX_COMMAND_TOOL_CANDIDATES},
         permissions::MAX_CONFIG_BYTES,
         toolchains::MAX_RUNTIME_GRANTS,
         types::{
@@ -55,6 +56,18 @@ pub struct LimitsTable {
 
 pub const LIMITS: LimitsTable = LimitsTable {
     rows: &[
+        Limit {
+            name: "MAX_COMMAND_TOOLS",
+            value: MAX_COMMAND_TOOLS as u64,
+            unit: "tools",
+            owner: "crates/arany/src/tools/command_tools.rs",
+        },
+        Limit {
+            name: "MAX_COMMAND_TOOL_CANDIDATES",
+            value: MAX_COMMAND_TOOL_CANDIDATES as u64,
+            unit: "directory entries",
+            owner: "crates/arany/src/tools/command_tools.rs",
+        },
         Limit {
             name: "MAX_EDITOR_CHANGE_REPORT_BYTES",
             value: MAX_EDITOR_CHANGE_REPORT_BYTES as u64,

@@ -964,6 +964,7 @@ fn new_conversation(defaults: SessionDefaults) -> SessionView {
         runs: Vec::new(),
         compactions: Vec::new(),
         goals: Vec::new(),
+        command_tool_probe: None,
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
     }

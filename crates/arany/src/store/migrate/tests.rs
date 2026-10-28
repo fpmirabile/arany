@@ -6,6 +6,8 @@ use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+#[path = "command_tools_tests.rs"]
+mod command_tools;
 #[path = "retired_worker_tests.rs"]
 mod retired_worker;
 #[path = "selection_timing_tests.rs"]
@@ -20,7 +22,33 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 89] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 95] = [
+    (
+        "RunStarted",
+        25,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
+    ),
+    (
+        "ToolProposed",
+        4,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        26,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    ("ToolFinished", 33, SELECTION_TOOLFINISHED, SELECTION_TOOLFINISHED),
+    (
+        "HookStarted",
+        15,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    ("HookFinished", 22, SELECTION_HOOKFINISHED, SELECTION_HOOKFINISHED),
     (
         "ToolFinished",
         32,
@@ -3149,7 +3177,7 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(upgraded, source);
         let event = Event::decode(
             "RunStarted",
-            25,
+            crate::session::payload_version("RunStarted").unwrap(),
             &upgraded.to_string(),
             Some(RunId::new()),
             None,
@@ -3163,7 +3191,14 @@ fn run_provider_migration_preserves_exact_names_and_canonical_bytes() {
         assert_eq!(config.provider.profile(), profile);
     }
     let fixture = include_str!("runstarted-v24.json");
-    let event = Event::decode("RunStarted", 25, fixture, Some(RunId::new()), None).unwrap();
+    let event = Event::decode(
+        "RunStarted",
+        crate::session::payload_version("RunStarted").unwrap(),
+        fixture,
+        Some(RunId::new()),
+        None,
+    )
+    .unwrap();
     assert_eq!(event.payload().unwrap(), fixture);
     for profile in ["", "unknown", "custom:", "custom:Upper", "custom:bad/name"] {
         let source = GLOBAL_RUNSTARTED.replace(

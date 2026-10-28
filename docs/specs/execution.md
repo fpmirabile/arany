@@ -162,9 +162,9 @@ Event decoding retains owned payload records and strict current-field validation
 
 | Event kind | Current payload version |
 |---|---|
-| `RunStarted` | 25; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 33 |
-| `ToolStarted` | 26; required nullable `verdict`, with the configured or host permission verdict before dispatch |
+| `RunStarted` | 26; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
+| `ToolFinished` | 34 |
+| `ToolStarted` | 27; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
 | `AgentSpawned` | 17 |
 | `AgentFinished` | 12 |
@@ -172,20 +172,21 @@ Event decoding retains owned payload records and strict current-field validation
 | `RunFinished` | 9 |
 | `ProviderSetupEditStarted` | 3 |
 | `ProviderSetupEditFinished` | 1 |
+| `CommandToolProbeStarted`, `CommandToolProbeFinished` | 1; idle, intent-bound Guard probe and outcome; [Command tools](./tools.md#hook-execution) owns confirmation and interruption |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalPlanContractRecorded` | 14 |
 | `GoalStarted` | 8 |
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolProposed` | 4 |
+| `ToolProposed` | 5 |
 | `ToolPreflightRefused` | 1 |
 | `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerStopObserved`, `WorkerVerificationRecorded` | 1 |
 | `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
 | `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
-| `HookStarted` | 15 |
-| `HookFinished` | 22 |
+| `HookStarted` | 16 |
+| `HookFinished` | 23 |
 | All other supported Event kinds | 6 |
 
 `ProviderCallRecorded` wire provenance remains an optional closed enum. `chat_completions_stop_storage_unspecified` records acceptance of a Chat Completions `stop` or `tool_calls` finish with the local non-streaming request; it claims nothing about remote retention. This additive enum value preserves the payload version and existing record bytes. An older reader rejects a record carrying the new value as unsupported history and follows the existing archive path.
