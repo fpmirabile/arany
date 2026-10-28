@@ -16,13 +16,13 @@ The single feature this plan delivers, the harness responsibility it serves and 
 
 ## Research
 
-Verified facts with citations: the affected contract, editing rules, implementation and evidence owner, and peer harness behavior read from source. Findings that outlive this plan go to `docs/research/` and are linked here.
+Verified facts with citations: the affected contract, editing rules, implementation and existing tests, and peer harness behavior read from source. Findings that outlive this plan go to `docs/research/` and are linked here.
 
 ## Contract and scenarios
 
 - Owning spec or unmigrated contract, and the proposed change:
 - Successful path and meaningful rejection/failure/recovery scenarios:
-- Evidence owner and deferred checks:
+- Tests that will prove them, and deferred checks:
 
 For work with no observable behavior impact, replace this section with that conclusion.
 

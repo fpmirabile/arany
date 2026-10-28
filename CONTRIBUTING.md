@@ -56,8 +56,7 @@ each PR focused so reviewers can assess it independently.
 
 Respond to review feedback and resolve conversations before merging. The
 [CI checks](./.github/workflows/ci.yml) must pass; a maintainer may need to approve
-CI for a first-time contributor. Report limitations rather than claiming checks
-you could not run.
+CI for a first-time contributor.
 
 If you use a coding agent, have it start with [AGENTS.md](./AGENTS.md). Review its
 changes and verification before submitting, just as you would your own work.

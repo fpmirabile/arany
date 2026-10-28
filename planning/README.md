@@ -9,37 +9,11 @@ conversation; create a repository plan when work needs durable coordination,
 multiple slices or a later handoff. Keep only substantive template sections.
 Neither a template nor an unresolved proposal expands the user's authorized scope.
 
-## Mechanism
-
-- Create one kebab-case folder per initiative.
-- Put its main plan in `README.md`.
-- Keep the plan decision-oriented: one feature, its research, constraints, chosen direction, risks, vertical slices, and exit criteria ([PLANNING.md](./PLANNING.md)).
-- Update the same plan as decisions change.
-- Resolve facts from code, configuration, research, and authoritative documentation. Promote the remaining material uncertainty to `Open questions`.
-- A plan is implementation-ready only when every material assumption is resolved or explicit.
-- Each vertical slice is one PR; a feature small enough for one reviewable PR is one slice.
-- Status changes when work starts and when the plan closes; slice progress is recorded under [slice delivery](./PLANNING.md#slice-delivery).
-
 ## Conventions
 
-- Repository content is English.
-- Folder names are descriptive kebab-case without dates or numeric prefixes.
-- Diagrams, fixtures, benchmarks, and initiative-specific notes live beside the plan.
-- A supporting document must answer a distinct question; avoid distributing one decision across several files.
-
-## Status
-
-- `Draft`
-- `Ready` (Research and Plan gates passed; no material open questions)
-- `Ready`
-- `Ready` — Research and Plan gates passed; no material open question remains.
-- `Ready` (Research and Plan gates passed; implementation may await a named dependency)
-- `Ready` (Plan gate passed; implementation may depend on a linked slice)
-- `In progress`
-- `Blocked`
-- `Done`
-
-`Draft` may contain open questions. `Ready` means Research and Plan gates passed, with no material open question; implementation has not started.
+- One descriptive kebab-case folder per initiative, without dates or numeric prefixes; its main plan is `README.md`, updated as decisions change. [PLANNING.md](./PLANNING.md) owns plan content, gates and [slice delivery](./PLANNING.md#slice-delivery).
+- Diagrams, fixtures, benchmarks, and initiative-specific notes live beside the plan. A supporting document must answer a distinct question; avoid distributing one decision across several files.
+- Status is one of `Draft`, `Ready`, `In progress`, `Blocked` or `Done`, optionally with a short parenthetical such as a named dependency. `Draft` may contain open questions. `Ready` means Research and Plan gates passed, with no material open question; implementation has not started.
 
 ## Lifecycle
 
