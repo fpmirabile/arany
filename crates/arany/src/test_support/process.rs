@@ -169,8 +169,7 @@ pub trait BoundedOutput {
     fn bounded_output_with_input(&mut self) -> io::Result<Output>;
 }
 
-#[cfg(test)]
-pub(crate) fn isolate_test() -> bool {
+pub fn isolate_test() -> bool {
     const CHILD: &str = "ARANY_ISOLATED_TEST";
     let thread = std::thread::current();
     let test = thread.name().expect("named test thread");
@@ -180,6 +179,7 @@ pub(crate) fn isolate_test() -> bool {
     // With no sibling tests or subprocesses, dropping a flock owner closes its last descriptor.
     let output = Command::new(std::env::current_exe().expect("test executable"))
         .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .current_dir(std::env::current_dir().expect("test working directory"))
         .env_clear()
         .env(CHILD, test)
         .env(

@@ -15,7 +15,7 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
 - Each slice is one branch or PR under [slice delivery](#slice-delivery), describable in one sentence, and leaves the repository coherent. Split a slice further only by risk, never by layer.
 - Set status to `In progress` in the PR that starts implementation, and close completed plans under the [planning lifecycle](./README.md#lifecycle), including local uncommitted work. Progress between those PRs follows [slice delivery](#slice-delivery).
 - Cite adjacent rules, specs and research instead of restating them. Match detail to the work: empty headings and repeated repository rules do not make a plan implementation-ready.
-- For behavior work, link the owning spec and its evidence owner and describe the successful path plus meaningful rejection, failure and recovery scenarios before implementation; the [spec workflow](../docs/specs/README.md) owns contract updates.
+- For behavior work, link the owning spec, describe the successful path plus meaningful rejection, failure and recovery scenarios, and name the tests that will prove them before implementation; the [spec workflow](../docs/specs/README.md) owns contract updates.
 
 ## Slice delivery
 

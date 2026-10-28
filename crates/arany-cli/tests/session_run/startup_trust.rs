@@ -555,19 +555,23 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             answered: &mut crate::session_picker::PtyResponses,
             page: usize,
         ) {
-            let deadline = Instant::now() + Duration::from_secs(10);
             let next = format!("Page {page}/");
-            while !(super::session_picker::screen_contains(transcript, 80, 24, &next)
-                || super::session_picker::screen_contains(transcript, 80, 24, "Continue read only"))
-            {
-                super::session_picker::pump(output, input, transcript, answered);
-                assert!(
-                    Instant::now() < deadline,
-                    "consent page {page} missing: {}",
-                    super::session_picker::tail(transcript)
-                );
-                thread::yield_now();
-            }
+            super::session_picker::pump_until(
+                output,
+                input,
+                transcript,
+                answered,
+                &format!("consent page {page} missing"),
+                |transcript| {
+                    super::session_picker::screen_contains(transcript, 80, 24, &next)
+                        || super::session_picker::screen_contains(
+                            transcript,
+                            80,
+                            24,
+                            "Continue read only",
+                        )
+                },
+            );
         }
         let mut page = 1;
         wait_for(output, input, transcript, answered, page);
@@ -594,16 +598,14 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             done: impl Fn(&[u8]) -> bool,
         ) {
             input.write_all(key).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !done(transcript) {
-                super::session_picker::pump(output, input, transcript, answered);
-                assert!(
-                    Instant::now() < deadline,
-                    "consent did not advance: {}",
-                    super::session_picker::tail(transcript)
-                );
-                thread::yield_now();
-            }
+            super::session_picker::pump_until(
+                output,
+                input,
+                transcript,
+                answered,
+                "consent did not advance",
+                done,
+            );
         }
         let shows = |text: &'static str| {
             move |transcript: &[u8]| {

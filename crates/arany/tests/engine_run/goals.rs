@@ -793,6 +793,8 @@ async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_ref
             program: "rg".into(),
             args: vec!["--glob=*.md,spec.md".into(), "x".repeat(543)],
             cwd: cwd.into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let provider = Arc::new(ScriptedProvider::new(
             std::iter::once(crate::tool_outcome(facts_read()))
@@ -2113,6 +2115,8 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         program: "unconfigured".into(),
         args: Vec::new(),
         cwd: "notes".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let provider = Arc::new(
         ScriptedProvider::new(
@@ -2244,6 +2248,8 @@ async fn near_full_context_refuses_command_before_dispatch() {
         program: "unconfigured".into(),
         args: Vec::new(),
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(command)]));
     let mut input = request(&workspace, &"x".repeat(60 * 1024));

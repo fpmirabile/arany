@@ -80,6 +80,8 @@ impl Engine {
             program: "sh".into(),
             args: vec!["-c".into(), command_tools::PROBE_COMMAND.into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let stdin = match tool.role {
             command_tools::CommandToolRole::Rewrite => command_tools::input(&sample)?,

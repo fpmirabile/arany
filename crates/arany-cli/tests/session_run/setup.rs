@@ -4,7 +4,7 @@ use super::active_terminal::{ProductGuard, product_child_of_executable};
 use super::active_terminal::{product_child_of, tty_settings, wait_stopped};
 use super::loopback::{ChildGuard, wait_product};
 use super::process::BoundedOutput;
-use super::session_picker::{pump, tail};
+use super::session_picker::{pump, tail, wait_for, wait_for_after};
 use arany::{RecordKind, SessionView, StateRoot, Store};
 #[cfg(any(debug_assertions, target_os = "linux"))]
 use arany::{SessionDefaults, create_session, set_session_defaults};
@@ -73,17 +73,28 @@ fn prepare_selected_chatgpt_account(root: &Path) -> Uuid {
     prepare_selected_chatgpt_account_at(&root.join("account-root"))
 }
 
+pub(crate) fn legacy_chatgpt_slot(client_id: &str) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    format!(
+        "chatgpt-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(client_id))
+    )
+}
+
 fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 2,
+        "schema": 3,
         "selected": account_id,
         "accounts": [{
             "id": account_id,
             "host_id": "123e4567-e89b-42d3-a456-426614174000",
             "client_id": "oaiapp_synthetic_saved",
             "subject": "synthetic-subject",
+            "chatgpt_account_id": null,
+            "keyring_slot": legacy_chatgpt_slot("oaiapp_synthetic_saved"),
             "storage": "keyring",
             "renewal_pending": false, "signout_pending": false,
             "disconnected": false, "plan_permission_missing": false, "token": null
@@ -103,51 +114,6 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
         .replace(&serde_json::to_vec(&registration).expect("registration"))
         .expect("test ChatGPT registration");
     account_id
-}
-
-fn wait_for(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    needle: &[u8],
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(transcript, needle)
-        .next()
-        .is_none()
-    {
-        pump(output, input, transcript, answered);
-        assert!(
-            Instant::now() < deadline,
-            "setup PTY stage missing: {}",
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
-}
-
-fn wait_for_after(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    start: usize,
-    needle: &[u8],
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(&transcript[start..], needle)
-        .next()
-        .is_none()
-    {
-        pump(output, input, transcript, answered);
-        assert!(
-            Instant::now() < deadline,
-            "setup PTY stage missing: {}",
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
 }
 
 #[cfg(debug_assertions)]

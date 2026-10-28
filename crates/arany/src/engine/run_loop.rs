@@ -1360,7 +1360,7 @@ impl<'a> RunLoop<'a> {
         use ProposalRefusalCause::*;
         let existing = self.ledger().plan_contract()?;
         let budget = self.ledger().effective_budget()?;
-        let settings = self.ledger().requested_command_resources()?.2;
+        let settings = self.ledger().resource_settings()?;
         let contract = &plan.contract;
         let cause = if self.controls.tools.is_none() {
             Some(NotOffered)

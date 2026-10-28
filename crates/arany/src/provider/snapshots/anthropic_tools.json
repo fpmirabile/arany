@@ -397,12 +397,33 @@
               "bash"
             ],
             "type": "string"
+          },
+          "resource_class": {
+            "description": "Optional resource sizing: build for compile and test commands; null inherits the plan or default class. Never widens a recorded plan or grants access.",
+            "enum": [
+              "default",
+              "build",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "timeout_ms": {
+            "description": "Optional command timeout in milliseconds, 1000 through 600000 inclusive; null inherits the plan or pinned default. The pinned maximum and any recorded plan remain ceilings.",
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
           "program",
           "args",
-          "cwd"
+          "cwd",
+          "resource_class",
+          "timeout_ms"
         ],
         "type": "object"
       },
@@ -978,13 +999,34 @@
                               "bash"
                             ],
                             "type": "string"
+                          },
+                          "resource_class": {
+                            "description": "Optional resource sizing: build for compile and test commands; null inherits the plan or default class. Never widens a recorded plan or grants access.",
+                            "enum": [
+                              "default",
+                              "build",
+                              null
+                            ],
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "timeout_ms": {
+                            "description": "Optional command timeout in milliseconds, 1000 through 600000 inclusive; null inherits the plan or pinned default. The pinned maximum and any recorded plan remain ceilings.",
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
                           }
                         },
                         "required": [
                           "operation",
                           "program",
                           "args",
-                          "cwd"
+                          "cwd",
+                          "resource_class",
+                          "timeout_ms"
                         ],
                         "type": "object"
                       },

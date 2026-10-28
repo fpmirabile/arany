@@ -564,17 +564,20 @@ fn build_jobs_are_bound_to_goal_resources_before_tool_admission() {
             program: "cargo".into(),
             args: vec!["build".into()],
             cwd: String::new(),
+            resource_class: Some(crate::tools::ToolResourceClass::Build),
+            timeout_ms: None,
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = jobs;
         intent.limits.build_cpu_cores = limit_cpu;
         intent.limits.cache_bytes = 0;
         intent.limits.cache_candidate_bytes = 0;
-        assert_eq!(
-            crate::session::validate_tool_started(&view, &tool_proposed(run, agent, &intent))
-                .is_ok(),
-            admitted
-        );
+        let result =
+            crate::session::validate_tool_started(&view, &tool_proposed(run, agent, &intent));
+        assert_eq!(result.is_ok(), admitted);
+        if let Err(refusal) = result {
+            assert!(refusal.valid());
+        }
     }
 }
 

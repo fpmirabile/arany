@@ -37,21 +37,7 @@ impl Provider for PendingChildren {
         match request.phase {
             AgentPhase::RootPlan => Ok(ProviderResponse {
                 turn: arany::ProviderTurn::scripted(),
-                outcome: ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "First child".into(),
-                            profile: None,
-                        },
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Second child".into(),
-                            profile: None,
-                        },
-                    ],
-                }),
+                outcome: delegate(&[("First child", None), ("Second child", None)]),
                 response_id: None,
                 usage: arany::Usage {
                     input_tokens: Some(0),
@@ -143,14 +129,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("facts say v1"),
         finish_with("synthesized"),
@@ -158,11 +137,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     input.goal.budget = Some(arany::GoalBudget {
         max_provider_calls: Some(8),
         ..arany::GoalBudget::default()
@@ -264,25 +239,14 @@ async fn child_mcp_write_or_unguarded_request_is_rejected_before_dispatch() {
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect facts".into(),
-                    profile: None,
-                }],
-            }),
+            delegate(&[("Inspect facts", None)]),
             crate::tool_outcome(call),
             finish_with("never reached"),
         ]);
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
         let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-        let mut input = request(&workspace, "Check the facts");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Check the facts");
         let outcome = run_with(
             &engine,
             &provider,
@@ -325,14 +289,7 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
-        let mut outcomes = vec![ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        })];
+        let mut outcomes = vec![delegate(&[("Inspect facts", None)])];
         outcomes.extend((0..16).map(|_| crate::tool_outcome(facts_read())));
         if further_tool {
             outcomes.push(crate::tool_outcome(facts_read()));
@@ -344,11 +301,7 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
         let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-        let mut input = request(&workspace, "Check the facts");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Check the facts");
         let outcome = run_with(
             &engine,
             &provider,
@@ -397,14 +350,7 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
     let state_path = temp.path().join("state");
     let cancellation = RunCancellation::new();
     let mut provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ]);
@@ -412,11 +358,7 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,
@@ -466,25 +408,14 @@ async fn delegation_turn_is_replayed_before_synthesis() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         finish_with("facts say v1"),
         finish_with("synthesized"),
     ]);
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let input = team_request(&workspace, "Check the facts");
     let outcome = run_with(
         &engine,
         &provider,
@@ -701,17 +632,7 @@ async fn researcher_multi_call_steps_charge_each_call_and_keep_model_order() {
                     .collect(),
             )
         };
-        let mut script = vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    objective: "Read the facts".into(),
-                    profile: None,
-                    editor: None,
-                }],
-            }),
-            batch(4),
-        ];
+        let mut script = vec![delegate(&[("Read the facts", None)]), batch(4)];
         if exhausted {
             script.extend([batch(4), batch(4), batch(2), batch(3)]);
         } else {
@@ -721,11 +642,7 @@ async fn researcher_multi_call_steps_charge_each_call_and_keep_model_order() {
             ]);
         }
         let provider = Arc::new(ScriptedProvider::new(script));
-        let mut input = request(&workspace, "Delegate the reading");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Delegate the reading");
         let outcome = run_with(
             &engine,
             &provider,
@@ -789,14 +706,7 @@ async fn researcher_deadline_records_every_batch_intent_before_non_dispatched_re
         let state = temp.path().join("state");
         let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
         let mut provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    objective: "Read the facts".into(),
-                    profile: None,
-                    editor: None,
-                }],
-            }),
+            delegate(&[("Read the facts", None)]),
             ProviderOutcome::Tools(
                 (0..count)
                     .map(|index| arany::ToolRequest {
@@ -811,11 +721,7 @@ async fn researcher_deadline_records_every_batch_intent_before_non_dispatched_re
         .with_active_time_per_call(DELEGATION_ALLOWANCE - REMAINING_TOOL_TIME);
         provider.identity.limits.deadline = DELEGATION_ALLOWANCE;
         let provider = Arc::new(provider);
-        let mut input = request(&workspace, "Delegate the reading");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Delegate the reading");
         let outcome = run_with(
             &engine,
             &provider,

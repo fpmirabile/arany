@@ -47,9 +47,19 @@ pub(super) enum Truncation {
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
-        ToolCall::Command { program, args, cwd } => {
+        ToolCall::Command {
+            program,
+            args,
+            cwd,
+            timeout_ms,
+            ..
+        } => {
             (valid_name(program) || super::config::valid_absolute(program))
                 && valid_command("command", args, cwd)
+                && timeout_ms.is_none_or(|timeout| {
+                    (super::types::MIN_COMMAND_TIMEOUT_MS..=super::types::MAX_COMMAND_TIMEOUT_MS)
+                        .contains(&timeout)
+                })
         }
         ToolCall::CommandUnguarded {
             program,
@@ -94,6 +104,10 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
         ("args", json!({"type":"array", "items": {"type":"string"}})),
         ("cwd", string()),
     ];
+    if name == "command" {
+        fields.push(("resource_class", json!({"type":["string","null"], "enum":["default","build",null], "description":"Optional resource sizing: build for compile and test commands; null inherits the plan or default class. Never widens a recorded plan or grants access."})));
+        fields.push(("timeout_ms", json!({"type":["integer","null"], "description":format!("Optional command timeout in milliseconds, {} through {} inclusive; null inherits the plan or pinned default. The pinned maximum and any recorded plan remain ceilings.", super::types::MIN_COMMAND_TIMEOUT_MS, super::types::MAX_COMMAND_TIMEOUT_MS)})));
+    }
     if name == "command_unguarded" {
         fields.push(("justification", string()));
         fields.push(("prefix_rule", json!({"type":["array","null"], "items":{"type":"string"}, "description":format!("Optional literal argv prefix including the executable; at least {} tokens. Suggest remembrance only for a narrow eligible command, never scripts, interpreters, wrappers, Git/gh or rm.", super::permissions::MIN_HOST_PREFIX_TOKENS)})));
@@ -102,7 +116,10 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
 }
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
-    let ToolCall::Command { program, args, cwd } = &site.intent.call else {
+    let ToolCall::Command {
+        program, args, cwd, ..
+    } = &site.intent.call
+    else {
         return Err(ToolError::Configuration);
     };
     if let Some(wrap) = &site.intent.wrap {
@@ -403,6 +420,8 @@ mod tests {
                 program: "sh".into(),
                 args: Vec::new(),
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         intent.limits.resource_class = super::super::ToolResourceClass::Build;

@@ -396,6 +396,9 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
         crate::session::MAX_STEP_TOOL_CALLS
     );
     let remediation = match refusal.cause {
+        InvalidArguments if refusal.operation == "arany_command" => {
+            "Send a command matching the offered schema and timeout bounds. If Build is unavailable for this Goal (unresolved jobs or CPU cores), run under default instead."
+        }
         InvalidArguments => arguments.as_str(),
         InvalidPath => {
             "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Leading ./ and one trailing directory / are normalized; file trailing /, absolute paths, empty components, traversal and private paths are forbidden."

@@ -12,6 +12,57 @@ use std::{
 
 pub(super) use crate::{PtyResponses, pump, screen_rows, tail};
 
+#[track_caller]
+pub(super) fn pump_until(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+    what: &str,
+    done: impl Fn(&[u8]) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done(transcript) {
+        pump(output, input, transcript, answered);
+        assert!(Instant::now() < deadline, "{what}: {}", tail(transcript));
+        thread::yield_now();
+    }
+}
+
+#[track_caller]
+pub(super) fn wait_for(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+    needle: &[u8],
+) {
+    wait_for_after(output, input, transcript, answered, 0, needle);
+}
+
+#[track_caller]
+pub(super) fn wait_for_after(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+    from: usize,
+    needle: &[u8],
+) {
+    pump_until(
+        output,
+        input,
+        transcript,
+        answered,
+        &format!("PTY stage missing {}", tail(needle)),
+        |transcript| {
+            crate::process::pty_text_matches(&transcript[from..], needle)
+                .next()
+                .is_some()
+        },
+    );
+}
+
 pub(super) fn screen_contains(
     transcript: &[u8],
     columns: usize,
@@ -177,20 +228,20 @@ fn run_picker_case(
     );
     if width < 20 {
         let cues: [&[u8]; 5] = [b"Up/Dn", b"Enter", b"Esc", b"Older", b"Newer"];
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !cues.iter().all(|cue| {
-            screen_rows(&transcript, width.into(), 24)
-                .iter()
-                .any(|line| line.contains(std::str::from_utf8(cue).unwrap()))
-        }) {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "narrow picker frame incomplete in {name}: {}",
-                tail(&transcript)
-            );
-            thread::yield_now();
-        }
+        pump_until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            &format!("narrow picker frame incomplete in {name}"),
+            |transcript| {
+                cues.iter().all(|cue| {
+                    screen_rows(transcript, width.into(), 24)
+                        .iter()
+                        .any(|line| line.contains(std::str::from_utf8(cue).unwrap()))
+                })
+            },
+        );
     }
     if fullscreen {
         // Rows respond to the pointer once Fullscreen has enabled its global capture.
@@ -207,19 +258,18 @@ fn run_picker_case(
     }
     let selected_at = transcript.len();
     input.write_all(selection).expect("picker selection");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[selected_at..]
-        .windows(b"\x1b[?25h".len())
-        .any(|part| part == b"\x1b[?25h")
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "picker did not close in {name}: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
+    pump_until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        &format!("picker did not close in {name}"),
+        |transcript| {
+            transcript[selected_at..]
+                .windows(b"\x1b[?25h".len())
+                .any(|part| part == b"\x1b[?25h")
+        },
+    );
     if fullscreen {
         let selected = &transcript[selected_at..];
         let returned = selected

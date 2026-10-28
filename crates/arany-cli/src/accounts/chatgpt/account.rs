@@ -18,37 +18,93 @@ use std::{
 };
 use uuid::{Uuid, Variant, Version};
 
-pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 1;
+pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 2;
+const LEGACY_TOKEN_RECORD_SCHEMA: u8 = 1;
 
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
+const MAX_ACCOUNT_ID_BYTES: usize = 128;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
 const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-journal-v40";
 const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v39";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
-fn keyring_slot(client_id: &str) -> String {
-    format!(
-        "chatgpt-{}",
-        URL_SAFE_NO_PAD.encode(Sha256::digest(client_id.as_bytes()))
+fn slot_name(digest: impl AsRef<[u8]>) -> String {
+    format!("chatgpt-{}", URL_SAFE_NO_PAD.encode(digest))
+}
+
+fn legacy_keyring_slot(client_id: &str) -> String {
+    slot_name(Sha256::digest(client_id.as_bytes()))
+}
+
+fn account_keyring_slot(client_id: &str, id: Uuid) -> String {
+    slot_name(
+        Sha256::new()
+            .chain_update(client_id.as_bytes())
+            .chain_update([0])
+            .chain_update(id.as_bytes())
+            .finalize(),
     )
 }
 
-pub(crate) fn valid_keyring_record(slot: &str, bytes: &[u8]) -> bool {
+fn new_keyring_slot(storage: AccountStorage, client_id: &str, id: Uuid) -> Option<String> {
+    (storage == AccountStorage::Keyring).then(|| account_keyring_slot(client_id, id))
+}
+
+#[derive(Deserialize)]
+struct SchemaProbe {
+    schema: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyTokenRecord {
+    schema: u8,
+    credentials: VerifiedCredentials,
+    consent: ConsentReceipt,
+}
+
+// A version-1 record has no slot; it upgrades in memory to the client-derived slot it sits at.
+// Typed decoding keeps duplicate-key rejection for both supported versions.
+fn decode_keyring_record(bytes: &[u8]) -> Option<TokenRecord> {
     if bytes.len() > MAX_TOKEN_RECORD_BYTES {
-        return false;
+        return None;
     }
-    let Ok(record) = serde_json::from_slice::<TokenRecord>(bytes) else {
-        return false;
-    };
-    record.valid_for(AccountStorage::Keyring) && keyring_slot(&record.credentials.client_id) == slot
+    match serde_json::from_slice::<SchemaProbe>(bytes).ok()?.schema {
+        LEGACY_TOKEN_RECORD_SCHEMA => {
+            let legacy: LegacyTokenRecord = serde_json::from_slice(bytes).ok()?;
+            (legacy.schema == LEGACY_TOKEN_RECORD_SCHEMA).then(|| TokenRecord {
+                schema: TOKEN_RECORD_SCHEMA,
+                slot: Some(legacy_keyring_slot(&legacy.credentials.client_id)),
+                credentials: legacy.credentials,
+                consent: legacy.consent,
+            })
+        }
+        TOKEN_RECORD_SCHEMA => serde_json::from_slice(bytes).ok(),
+        _ => None,
+    }
+}
+
+pub(crate) fn valid_keyring_record(slot: &str, bytes: &[u8]) -> bool {
+    decode_keyring_record(bytes).is_some_and(|record| {
+        record.valid_for(AccountStorage::Keyring) && record.slot.as_deref() == Some(slot)
+    })
+}
+
+pub(crate) fn valid_written_keyring_record(slot: &str, bytes: &[u8]) -> bool {
+    bytes.len() <= MAX_TOKEN_RECORD_BYTES
+        && serde_json::from_slice::<TokenRecord>(bytes).is_ok_and(|record| {
+            record.valid_for(AccountStorage::Keyring) && record.slot.as_deref() == Some(slot)
+        })
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TokenRecord {
     schema: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
+    slot: Option<String>,
     credentials: VerifiedCredentials,
     consent: ConsentReceipt,
 }
@@ -59,6 +115,19 @@ pub(super) struct SelectedAccount {
     pub(super) credentials: VerifiedCredentials,
     pub(super) consent: ConsentReceipt,
     pub(super) storage: AccountStorage,
+}
+
+#[derive(Clone, Copy)]
+struct SignedIn<'a> {
+    client_id: &'a str,
+    subject: &'a str,
+    host_id: Uuid,
+}
+
+impl SignedIn<'_> {
+    fn unchanged_in(self, entry: &AccountEntry, storage: AccountStorage) -> bool {
+        entry.subject == self.subject && entry.host_id == self.host_id && entry.storage == storage
+    }
 }
 
 pub(crate) struct ReauthorizationTarget {
@@ -118,10 +187,14 @@ impl SelectedAccount {
 }
 
 impl TokenRecord {
-    fn valid_for(&self, storage: AccountStorage) -> bool {
+    fn content_valid(&self, storage: AccountStorage) -> bool {
         self.schema == TOKEN_RECORD_SCHEMA
             && self.credentials.valid_saved()
             && self.consent.matches(&self.credentials, storage)
+    }
+
+    fn valid_for(&self, storage: AccountStorage) -> bool {
+        self.content_valid(storage) && self.slot.is_some() == (storage == AccountStorage::Keyring)
     }
 }
 
@@ -132,6 +205,10 @@ struct AccountEntry {
     host_id: Uuid,
     client_id: String,
     subject: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    chatgpt_account_id: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    keyring_slot: Option<String>,
     storage: AccountStorage,
     renewal_pending: bool,
     signout_pending: bool,
@@ -188,6 +265,23 @@ impl AccountEntry {
         Ok(())
     }
 
+    fn same_identity(&self, other: &Self) -> bool {
+        self.client_id == other.client_id
+            && self.subject == other.subject
+            && self.chatgpt_account_id == other.chatgpt_account_id
+    }
+
+    fn slot_valid(&self) -> bool {
+        match (self.storage, &self.keyring_slot) {
+            (AccountStorage::Keyring, Some(slot)) => {
+                *slot == legacy_keyring_slot(&self.client_id)
+                    || *slot == account_keyring_slot(&self.client_id, self.id)
+            }
+            (AccountStorage::PrivateFile, None) => true,
+            _ => false,
+        }
+    }
+
     fn valid(&self) -> bool {
         self.id.get_version() == Some(Version::SortRand)
             && self.host_id.get_version() == Some(Version::Random)
@@ -196,12 +290,18 @@ impl AccountEntry {
             && !self.subject.is_empty()
             && self.subject.len() <= 512
             && self.subject.bytes().all(|byte| byte.is_ascii_graphic())
+            && self
+                .chatgpt_account_id
+                .as_deref()
+                .is_none_or(|id| super::bounded_graphic(id, MAX_ACCOUNT_ID_BYTES))
+            && self.slot_valid()
             && !(self.signout_pending && (self.renewal_pending || self.disconnected))
             && (!self.plan_permission_missing || (self.disconnected && self.token.is_none()))
             && match (&self.storage, &self.token) {
                 (AccountStorage::PrivateFile, Some(token)) => {
                     !self.disconnected
                         && token.schema == TOKEN_RECORD_SCHEMA
+                        && token.slot.is_none()
                         && token.credentials.valid_saved()
                         && token.credentials.client_id == self.client_id
                         && token.credentials.host_id == self.host_id
@@ -238,11 +338,17 @@ pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptAccounts,
     field: "schema",
     floor: 1,
-    current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_account_index,
-    }],
+    current: 3,
+    steps: &[
+        RecordStep {
+            from: 1,
+            transform: migrate_account_index,
+        },
+        RecordStep {
+            from: 2,
+            transform: migrate_account_slots,
+        },
+    ],
     accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
 };
 
@@ -251,23 +357,61 @@ fn migrate_account_index(mut record: serde_json::Value) -> Option<serde_json::Va
     if checks.len() > MAX_MODEL_CHECKS {
         return None;
     }
-    for check in checks {
+    for check in checks.iter_mut() {
         let object = check.as_object_mut()?;
         if object.contains_key("check_id") {
             return None;
         }
-        // Validate the old shape before discarding checks that cannot prove a journal link.
         object.insert(
             "check_id".into(),
             "01a15ecf-a92a-7707-8af6-ce3d36320b67".into(),
         );
     }
-    record
-        .as_object_mut()?
-        .insert("schema".into(), CHATGPT_ACCOUNTS.current.into());
-    let mut index = AccountIndex::decode(&serde_json::to_vec(&record).ok()?).ok()?;
-    index.model_checks.clear();
-    serde_json::to_value(index).ok()
+    // Validate the complete source index before discarding checks that cannot prove a journal link.
+    let mut candidate = record.clone();
+    candidate.as_object_mut()?.insert("schema".into(), 2.into());
+    let candidate = migrate_account_slots(candidate)?;
+    AccountIndex::decode(&serde_json::to_vec(&candidate).ok()?).ok()?;
+    record.get_mut("model_checks")?.as_array_mut()?.clear();
+    record.as_object_mut()?.insert("schema".into(), 2.into());
+    Some(record)
+}
+
+// Existing keyring entries keep the client-derived slot their token was written at.
+fn migrate_account_slots(mut record: serde_json::Value) -> Option<serde_json::Value> {
+    let mut clients = Vec::new();
+    for entry in record.get_mut("accounts")?.as_array_mut()? {
+        let object = entry.as_object_mut()?;
+        // Source schemas allow one account per client; only schema 3 admits several.
+        let client = object.get("client_id")?.as_str()?.to_owned();
+        if clients.contains(&client) {
+            return None;
+        }
+        clients.push(client);
+        if object.contains_key("keyring_slot") || object.contains_key("chatgpt_account_id") {
+            return None;
+        }
+        let slot = match object.get("storage")?.as_str()? {
+            "keyring" => Some(legacy_keyring_slot(object.get("client_id")?.as_str()?)),
+            "private_file" => None,
+            _ => return None,
+        };
+        object.insert("keyring_slot".into(), slot.into());
+        object.insert("chatgpt_account_id".into(), serde_json::Value::Null);
+        if let Some(token) = object
+            .get_mut("token")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let legacy = u64::from(LEGACY_TOKEN_RECORD_SCHEMA);
+            if token.get("schema")?.as_u64()? != legacy || token.contains_key("slot") {
+                return None;
+            }
+            token.insert("schema".into(), TOKEN_RECORD_SCHEMA.into());
+            token.insert("slot".into(), serde_json::Value::Null);
+        }
+    }
+    record.as_object_mut()?.insert("schema".into(), 3.into());
+    Some(record)
 }
 
 pub(super) fn retained_checks(state: &StateRoot) -> Result<Vec<CheckId>, arany::StoreError> {
@@ -299,22 +443,28 @@ impl AccountIndex {
             .ok_or(AuthorizationError::InvalidIdentity)
     }
 
-    fn matching_account_position(
+    fn signed_in_position(
         &self,
-        client_id: &str,
-        host_id: Uuid,
-        subject: &str,
+        who: SignedIn<'_>,
         storage: AccountStorage,
+        expected_selected: Option<Uuid>,
     ) -> Result<Option<usize>, AuthorizationError> {
-        let Some(position) = self
-            .accounts
-            .iter()
-            .position(|entry| entry.client_id == client_id)
-        else {
+        let position = match expected_selected {
+            Some(id) => {
+                self.require_selected_client(id, who.client_id)?;
+                Some(self.account_position(id)?)
+            }
+            None => self.accounts.iter().position(|entry| {
+                entry.client_id == who.client_id
+                    && entry.subject == who.subject
+                    && entry.chatgpt_account_id.is_none()
+            }),
+        };
+        let Some(position) = position else {
             return Ok(None);
         };
         let entry = &self.accounts[position];
-        if entry.subject != subject || entry.host_id != host_id || entry.storage != storage {
+        if !who.unchanged_in(entry, storage) {
             return Err(AuthorizationError::RegistrationConflict);
         }
         Ok(Some(position))
@@ -371,10 +521,11 @@ impl AccountIndex {
             return Err(AuthorizationError::InvalidIdentity);
         }
         for (index, account) in self.accounts.iter().enumerate() {
-            if self.accounts[..index]
-                .iter()
-                .any(|prior| prior.id == account.id || prior.client_id == account.client_id)
-            {
+            if self.accounts[..index].iter().any(|prior| {
+                prior.id == account.id
+                    || prior.same_identity(account)
+                    || (prior.keyring_slot.is_some() && prior.keyring_slot == account.keyring_slot)
+            }) {
                 return Err(AuthorizationError::InvalidIdentity);
             }
         }
@@ -511,9 +662,7 @@ fn load_selected_snapshot(
         return Err(AuthorizationError::InvalidIdentity);
     }
     let token = match entry.storage {
-        AccountStorage::Keyring => {
-            read_keyring_token(&entry.client_id, &entry.subject, entry.host_id)?
-        }
+        AccountStorage::Keyring => read_keyring_token(entry)?,
         AccountStorage::PrivateFile => entry
             .token
             .clone()
@@ -908,17 +1057,19 @@ fn save_without_plan_permission_at(
             {
                 return Err(AuthorizationError::RegistrationConflict);
             }
-            if let Some(id) = expected_selected {
-                index.require_selected_client(id, &identity.client_id)?;
-            }
-            let previous = index.matching_account_position(
-                &identity.client_id,
-                identity.host_id,
-                &identity.subject,
+            let previous = index.signed_in_position(
+                SignedIn {
+                    client_id: &identity.client_id,
+                    subject: &identity.subject,
+                    host_id: identity.host_id,
+                },
                 storage,
+                expected_selected,
             )?;
+            let mut slot = None;
             let id = if let Some(position) = previous {
                 let entry = &mut index.accounts[position];
+                slot = entry.keyring_slot.clone();
                 entry.token = None;
                 entry.renewal_pending = false;
                 entry.signout_pending = false;
@@ -927,9 +1078,12 @@ fn save_without_plan_permission_at(
                 entry.id
             } else {
                 index.ensure_account_capacity()?;
+                let id = Uuid::now_v7();
                 index.push_account(AccountEntry {
-                    id: Uuid::now_v7(),
+                    id,
                     host_id: identity.host_id,
+                    keyring_slot: new_keyring_slot(storage, &identity.client_id, id),
+                    chatgpt_account_id: None,
                     client_id: identity.client_id.clone(),
                     subject: identity.subject,
                     storage,
@@ -944,9 +1098,7 @@ fn save_without_plan_permission_at(
             index.write(state)?;
             registration::complete_issued_client_at(state, &identity.client_id, identity.host_id)
                 .map_err(uncertain_account_publication)?;
-            let local_cleared = storage != AccountStorage::Keyring
-                || previous.is_none()
-                || delete(&keyring_slot(&identity.client_id)).is_ok();
+            let local_cleared = slot.is_none_or(|slot| delete(&slot).is_ok());
             Ok(DisabledSignInOutcome { id, local_cleared })
         })
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -961,6 +1113,7 @@ pub(super) fn save_private_file_at(
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
         schema: TOKEN_RECORD_SCHEMA,
+        slot: None,
         credentials,
         consent,
     };
@@ -981,15 +1134,15 @@ pub(super) fn save_private_file_at(
                 return Err(AuthorizationError::RegistrationConflict);
             }
             let client_id = &token.credentials.client_id;
-            if let Some(expected_id) = expected_selected {
-                index.require_selected_client(expected_id, client_id)?;
-            }
             let subject = &token.credentials.subject;
-            let position = index.matching_account_position(
-                client_id,
-                host_id,
-                subject,
+            let position = index.signed_in_position(
+                SignedIn {
+                    client_id,
+                    subject,
+                    host_id,
+                },
                 AccountStorage::PrivateFile,
+                expected_selected,
             )?;
             let id = if let Some(position) = position {
                 let entry = &mut index.accounts[position];
@@ -1006,6 +1159,8 @@ pub(super) fn save_private_file_at(
                     host_id,
                     client_id: client_id.clone(),
                     subject: subject.clone(),
+                    chatgpt_account_id: None,
+                    keyring_slot: None,
                     storage: AccountStorage::PrivateFile,
                     renewal_pending: false,
                     signout_pending: false,
@@ -1050,17 +1205,14 @@ fn save_keyring_at_with(
     expected_selected: Option<Uuid>,
     write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
 ) -> Result<Uuid, AuthorizationError> {
-    let token = TokenRecord {
+    let mut token = TokenRecord {
         schema: TOKEN_RECORD_SCHEMA,
+        slot: None,
         credentials,
         consent,
     };
-    if !token.valid_for(AccountStorage::Keyring) {
+    if !token.content_valid(AccountStorage::Keyring) {
         return Err(AuthorizationError::ConsentRequired);
-    }
-    let record = serde_json::to_string(&token).map_err(|_| AuthorizationError::Unavailable)?;
-    if record.len() > MAX_TOKEN_RECORD_BYTES {
-        return Err(AuthorizationError::InvalidIdentity);
     }
     let completed_client_id = token.credentials.client_id.clone();
     let host_id = token.credentials.host_id;
@@ -1075,39 +1227,38 @@ fn save_keyring_at_with(
             {
                 return Err(AuthorizationError::RegistrationConflict);
             }
-            let client_id = &token.credentials.client_id;
-            if let Some(expected_id) = expected_selected {
-                index.require_selected_client(expected_id, client_id)?;
-            }
-            let subject = &token.credentials.subject;
-            let position = index.matching_account_position(
-                client_id,
-                host_id,
-                subject,
-                AccountStorage::Keyring,
-            )?;
-            let id = if let Some(position) = position {
-                let entry = &mut index.accounts[position];
-                let id = entry.id;
-                entry.renewal_pending = true;
-                index.write(state)?;
-                id
-            } else {
-                index.ensure_account_capacity()?;
-                index.push_account(AccountEntry {
-                    id: Uuid::now_v7(),
+            let client_id = token.credentials.client_id.clone();
+            let subject = token.credentials.subject.clone();
+            let position = index.signed_in_position(
+                SignedIn {
+                    client_id: &client_id,
+                    subject: &subject,
                     host_id,
-                    client_id: client_id.clone(),
-                    subject: subject.clone(),
+                },
+                AccountStorage::Keyring,
+                expected_selected,
+            )?;
+            let (id, slot, record) = prepare_keyring_record(&index, position, &mut token)?;
+            if let Some(position) = position {
+                index.accounts[position].renewal_pending = true;
+                index.write(state)?;
+            } else {
+                index.push_account(AccountEntry {
+                    id,
+                    host_id,
+                    client_id,
+                    subject,
+                    chatgpt_account_id: None,
+                    keyring_slot: Some(slot.clone()),
                     storage: AccountStorage::Keyring,
                     renewal_pending: false,
                     signout_pending: false,
                     disconnected: false,
                     plan_permission_missing: false,
                     token: None,
-                })
-            };
-            write(&keyring_slot(client_id), &record).map_err(|error| {
+                });
+            }
+            write(&slot, &record).map_err(|error| {
                 if position.is_some() {
                     uncertain_account_publication(error)
                 } else {
@@ -1132,6 +1283,34 @@ fn save_keyring_at_with(
             Ok(id)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn prepare_keyring_record(
+    index: &AccountIndex,
+    position: Option<usize>,
+    token: &mut TokenRecord,
+) -> Result<(Uuid, String, String), AuthorizationError> {
+    let (id, slot) = match position {
+        Some(position) => {
+            let entry = &index.accounts[position];
+            let slot = entry
+                .keyring_slot
+                .clone()
+                .ok_or(AuthorizationError::InvalidIdentity)?;
+            (entry.id, slot)
+        }
+        None => {
+            index.ensure_account_capacity()?;
+            let id = Uuid::now_v7();
+            (id, account_keyring_slot(&token.credentials.client_id, id))
+        }
+    };
+    token.slot = Some(slot.clone());
+    let record = serde_json::to_string(token).map_err(|_| AuthorizationError::Unavailable)?;
+    if record.len() > MAX_TOKEN_RECORD_BYTES {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    Ok((id, slot, record))
 }
 
 fn uncertain_account_publication(_: AuthorizationError) -> AuthorizationError {
@@ -1181,28 +1360,31 @@ pub(super) fn load_selected_keyring_at(
         return Err(AuthorizationError::InvalidIdentity);
     }
     entry.ensure_usable()?;
-    Ok(read_keyring_token(&entry.client_id, &entry.subject, entry.host_id)?.credentials)
+    Ok(read_keyring_token(&entry)?.credentials)
 }
 
-fn read_keyring_token(
-    client_id: &str,
-    subject: &str,
-    host_id: Uuid,
-) -> Result<TokenRecord, AuthorizationError> {
-    let slot = keyring_slot(client_id);
-    let bytes = read_chatgpt_keyring_record(&slot)
+fn read_keyring_token(entry: &AccountEntry) -> Result<TokenRecord, AuthorizationError> {
+    let slot = entry
+        .keyring_slot
+        .as_deref()
+        .ok_or(AuthorizationError::InvalidIdentity)?;
+    let bytes = read_chatgpt_keyring_record(slot)
         .map_err(AuthorizationError::CredentialStore)?
         .ok_or(AuthorizationError::CredentialMissing)?;
-    if bytes.len() > MAX_TOKEN_RECORD_BYTES {
-        return Err(AuthorizationError::InvalidIdentity);
-    }
-    let token: TokenRecord =
-        serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
-    if token.schema != TOKEN_RECORD_SCHEMA
+    admit_keyring_record(entry, &bytes)
+}
+
+fn admit_keyring_record(
+    entry: &AccountEntry,
+    bytes: &[u8],
+) -> Result<TokenRecord, AuthorizationError> {
+    let token = decode_keyring_record(bytes).ok_or(AuthorizationError::InvalidIdentity)?;
+    if entry.keyring_slot.is_none()
+        || token.slot != entry.keyring_slot
         || !token.credentials.valid_saved()
-        || token.credentials.subject != subject
-        || token.credentials.host_id != host_id
-        || keyring_slot(&token.credentials.client_id) != slot
+        || token.credentials.client_id != entry.client_id
+        || token.credentials.subject != entry.subject
+        || token.credentials.host_id != entry.host_id
     {
         return Err(AuthorizationError::InvalidIdentity);
     }
@@ -1225,7 +1407,7 @@ pub(super) fn selected_keyring_slot(
     }
     let entry = &index.accounts[index.account_position(expected_id)?];
     entry.ensure_usable()?;
-    Ok((entry.storage == AccountStorage::Keyring).then(|| keyring_slot(&entry.client_id)))
+    Ok(entry.keyring_slot.clone())
 }
 
 pub(super) async fn selected_for_use(
@@ -1424,7 +1606,7 @@ pub(crate) async fn remove_account_locally(
 fn sign_out_at_with(
     state: &StateRoot,
     workspace: &Path,
-    read_keyring: impl FnOnce(&str, &str, Uuid) -> Result<TokenRecord, AuthorizationError>,
+    read_keyring: impl FnOnce(&AccountEntry) -> Result<TokenRecord, AuthorizationError>,
     revoke: impl FnOnce(&VerifiedCredentials) -> Result<(), AuthorizationError>,
     delete_keyring: impl FnOnce(&str) -> Result<(), AuthorizationError>,
 ) -> Result<SignOutOutcome, AuthorizationError> {
@@ -1448,7 +1630,7 @@ fn sign_out_target_at_with(
     workspace: &Path,
     target: SignOutTarget<'_>,
     actions: SignOutActions<
-        impl FnOnce(&str, &str, Uuid) -> Result<TokenRecord, AuthorizationError>,
+        impl FnOnce(&AccountEntry) -> Result<TokenRecord, AuthorizationError>,
         impl FnOnce(&VerifiedCredentials) -> Result<(), AuthorizationError>,
         impl FnOnce(&str) -> Result<(), AuthorizationError>,
     >,
@@ -1471,10 +1653,11 @@ fn sign_out_target_at_with(
                 .ok_or(AuthorizationError::NoSelectedAccount)?;
             let position = index.account_position(id)?;
             let entry = &index.accounts[position];
-            let slot = keyring_slot(&entry.client_id);
+            let slot = entry.keyring_slot.clone();
             if entry.disconnected {
-                let local_cleared = entry.storage == AccountStorage::PrivateFile
-                    || (actions.delete_keyring)(&slot).is_ok();
+                let local_cleared = slot
+                    .as_deref()
+                    .is_none_or(|slot| (actions.delete_keyring)(slot).is_ok());
                 if !local_cleared {
                     return Err(AuthorizationError::SignOutStorageUncertain);
                 }
@@ -1492,9 +1675,7 @@ fn sign_out_target_at_with(
             }
             let entry = &index.accounts[position];
             let token = match storage {
-                AccountStorage::Keyring => {
-                    (actions.read_keyring)(&entry.client_id, &entry.subject, entry.host_id).ok()
-                }
+                AccountStorage::Keyring => (actions.read_keyring)(entry).ok(),
                 AccountStorage::PrivateFile => entry.token.clone(),
             };
             let remote_confirmed =
@@ -1511,8 +1692,9 @@ fn sign_out_target_at_with(
             index
                 .write(state)
                 .map_err(|_| AuthorizationError::SignOutStorageUncertain)?;
-            let local_cleared =
-                storage == AccountStorage::PrivateFile || (actions.delete_keyring)(&slot).is_ok();
+            let local_cleared = slot
+                .as_deref()
+                .is_none_or(|slot| (actions.delete_keyring)(slot).is_ok());
             if !local_cleared {
                 return Err(AuthorizationError::SignOutStorageUncertain);
             }
@@ -1551,9 +1733,7 @@ fn select_saved_at(
                 return Err(AuthorizationError::RenewalStorageUncertain);
             }
             let token = match entry.storage {
-                AccountStorage::Keyring => {
-                    read_keyring_token(&entry.client_id, &entry.subject, entry.host_id)?
-                }
+                AccountStorage::Keyring => read_keyring_token(entry)?,
                 AccountStorage::PrivateFile => entry
                     .token
                     .clone()
@@ -1655,7 +1835,7 @@ fn refresh_selected_with(
             let subject = entry.subject.clone();
             let storage = entry.storage;
             let token = match storage {
-                AccountStorage::Keyring => read_keyring_token(&client_id, &subject, entry.host_id)?,
+                AccountStorage::Keyring => read_keyring_token(entry)?,
                 AccountStorage::PrivateFile => entry
                     .token
                     .as_ref()
@@ -1707,6 +1887,7 @@ fn refresh_selected_with(
             }
             let updated = TokenRecord {
                 schema: TOKEN_RECORD_SCHEMA,
+                slot: token.slot.clone(),
                 credentials: replacement,
                 consent: token.consent,
             };
@@ -1717,7 +1898,11 @@ fn refresh_selected_with(
                 AccountStorage::Keyring => {
                     let record = serde_json::to_string(&updated)
                         .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    write_chatgpt_keyring_record(&keyring_slot(&client_id), &record)
+                    let slot = index.accounts[position]
+                        .keyring_slot
+                        .as_deref()
+                        .ok_or(AuthorizationError::RenewalStorageUncertain)?;
+                    write_chatgpt_keyring_record(slot, &record)
                         .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
                     index.accounts[position].renewal_pending = false;
                     index
@@ -1753,7 +1938,7 @@ fn disconnect_unusable_refresh_with(
 ) -> Result<(), AuthorizationError> {
     let entry = &mut index.accounts[position];
     let id = entry.id;
-    let slot = (entry.storage == AccountStorage::Keyring).then(|| keyring_slot(&entry.client_id));
+    let slot = entry.keyring_slot.clone();
     entry.token = None;
     entry.renewal_pending = false;
     entry.disconnected = true;

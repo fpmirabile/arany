@@ -90,17 +90,23 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             program: "bash".into(),
             args: vec!["x".into(); 65],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         // Within its field limits, but over the serialized bound every non-content operation keeps.
         ToolCall::Command {
             program: "bash".into(),
             args: vec!["x".repeat(300); 64],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         ToolCall::Command {
             program: "bash".into(),
             args: vec!["nul\0argument".into()],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
     ] {
         assert!(!call.valid());
@@ -208,6 +214,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             program: "cargo".into(),
             args: vec!["build".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         build.limits.resource_class = ToolResourceClass::Build;
         build.limits.cache_bytes = 0;
@@ -238,6 +246,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             program: "cargo".into(),
             args: vec!["build".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         build.limits.resource_class = ToolResourceClass::Build;
         build.limits.cache_bytes = 0;
@@ -290,6 +300,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         program: "cargo".into(),
         args: vec!["build".into()],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let command_guard = GuardReceipt {
         contract_version: 1,
@@ -493,6 +505,8 @@ fn guard_stage_is_valid_only_on_unattested_guard_failures() {
         program: "sh".into(),
         args: vec![],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     assert!(observation(command.clone(), ToolDisposition::Failed).valid());
     assert!(!observation(command, ToolDisposition::Succeeded).valid());

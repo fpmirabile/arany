@@ -9,37 +9,11 @@ conversation; create a repository plan when work needs durable coordination,
 multiple slices or a later handoff. Keep only substantive template sections.
 Neither a template nor an unresolved proposal expands the user's authorized scope.
 
-## Mechanism
-
-- Create one kebab-case folder per initiative.
-- Put its main plan in `README.md`.
-- Keep the plan decision-oriented: one feature, its research, constraints, chosen direction, risks, vertical slices, and exit criteria ([PLANNING.md](./PLANNING.md)).
-- Update the same plan as decisions change.
-- Resolve facts from code, configuration, research, and authoritative documentation. Promote the remaining material uncertainty to `Open questions`.
-- A plan is implementation-ready only when every material assumption is resolved or explicit.
-- Each vertical slice is one PR; a feature small enough for one reviewable PR is one slice.
-- Status changes when work starts and when the plan closes; slice progress is recorded under [slice delivery](./PLANNING.md#slice-delivery).
-
 ## Conventions
 
-- Repository content is English.
-- Folder names are descriptive kebab-case without dates or numeric prefixes.
-- Diagrams, fixtures, benchmarks, and initiative-specific notes live beside the plan.
-- A supporting document must answer a distinct question; avoid distributing one decision across several files.
-
-## Status
-
-- `Draft`
-- `Ready` (Research and Plan gates passed; no material open questions)
-- `Ready`
-- `Ready` — Research and Plan gates passed; no material open question remains.
-- `Ready` (Research and Plan gates passed; implementation may await a named dependency)
-- `Ready` (Plan gate passed; implementation may depend on a linked slice)
-- `In progress`
-- `Blocked`
-- `Done`
-
-`Draft` may contain open questions. `Ready` means Research and Plan gates passed, with no material open question; implementation has not started.
+- One descriptive kebab-case folder per initiative, without dates or numeric prefixes; its main plan is `README.md`, updated as decisions change. [PLANNING.md](./PLANNING.md) owns plan content, gates and [slice delivery](./PLANNING.md#slice-delivery).
+- Diagrams, fixtures, benchmarks, and initiative-specific notes live beside the plan. A supporting document must answer a distinct question; avoid distributing one decision across several files.
+- Status is one of `Draft`, `Ready`, `In progress`, `Blocked` or `Done`, optionally with a short parenthetical such as a named dependency. `Draft` may contain open questions. `Ready` means Research and Plan gates passed, with no material open question; implementation has not started.
 
 ## Lifecycle
 
@@ -50,6 +24,5 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | Plan | Remaining scope |
 |---|---|
 | [Reported Provider limits](./usage-limits/README.md) | `Ready`; OWNER DECISIONS D2 (2026-10-27) and D4 (2026-10-28): Codex/Pi `openai-codex` backend and public Codex OAuth client profile replace the public ChatGPT route and SIWC profile. UL0a per-account keyring slots (900) → UL0b public-client sign-in/identity/migrations with route refusal (1,000) → UL0c refresh/revocation (450) → UL0d backend catalog (600) → UL1a backend request/SSE end to end (1,250) → UL1b plan windows/report (750); independent UL2a OpenAI JSON/report (900) → UL2b JSON compaction/paging (300) → UL3 streaming/attempts (850) → UL4 Anthropic (1,250 total) → UL5 custom routes/closeout (1,350 total). Complete-flow splits; hard ceiling 1,500 per ID. Scoped UL0a–UL1b freeze exception (UL0a–UL0d include the auth profile); owner live checks remain in NEXT_STEPS |
-| [Per-command Build class and timeout](./command-resource-request/README.md) | `Ready`; one OWNER DECISION (null plan timeout as strict ceiling, recommended) resolved by merging; R1 per-call `resource_class` and `timeout_ms` on `command`, end to end (about 1,100, closing checklist); deferred native `cargo test` checks move to NEXT_STEPS |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.

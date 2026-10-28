@@ -69,6 +69,8 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 0".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: arany::ToolLimits::default(),
             use_count: 1,
@@ -226,14 +228,7 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
         )
         .unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    objective: "Inspect notes".into(),
-                    profile: None,
-                    editor: None,
-                }],
-            }),
+            delegate(&[("Inspect notes", None)]),
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
                 offset: None,
@@ -242,11 +237,7 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
             arany::test_support::goals::finish_with("child report"),
             arany::test_support::goals::finish_with("answer"),
         ]));
-        let mut input = request(&workspace, "Inspect notes");
-        input.include_paths.clear();
-        input.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
+        let input = team_request(&workspace, "Inspect notes");
         let result = run_with(
             &engine,
             &provider,
@@ -311,14 +302,7 @@ async fn child_unguarded_inheritance_is_explicit_narrowing_and_pinned_on_replay(
     )
     .unwrap();
     let provider = Arc::new(ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         arany::test_support::goals::finish_with("fact"),
         arany::test_support::goals::finish_with("answer"),
     ]));

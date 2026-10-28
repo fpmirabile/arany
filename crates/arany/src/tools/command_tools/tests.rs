@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::ToolResourceClass;
 use crate::tools::toolchains::{GrantRoot, RuntimeKind, RuntimeManager};
 use std::os::unix::fs::PermissionsExt;
 
@@ -125,6 +126,8 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
         program: "printf".into(),
         args: vec!["a b".into(), "it's".into(), "$(x)".into()],
         cwd: "src".into(),
+        resource_class: Some(ToolResourceClass::Build),
+        timeout_ms: Some(1_000),
     };
     assert_eq!(script(&original).unwrap(), "printf 'a b' 'it'\\''s' '$(x)'");
     let input: serde_json::Value = serde_json::from_str(&input(&original).unwrap()).unwrap();
@@ -146,6 +149,16 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
         assert_eq!(parse_output(Some(0), output), expected);
     }
     assert_eq!(parse_output(Some(2), "{}"), Err(RewriteStage::NonZeroExit));
+    assert!(matches!(
+        rewritten(&original, "printf rewritten".into()),
+        ToolCall::Command {
+            program,
+            cwd,
+            resource_class: Some(ToolResourceClass::Build),
+            timeout_ms: Some(1_000),
+            ..
+        } if program == "sh" && cwd == "src"
+    ));
     let host = ToolCall::CommandUnguarded {
         program: "printf".into(),
         args: vec!["original".into()],

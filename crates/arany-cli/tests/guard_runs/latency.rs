@@ -14,12 +14,6 @@ const SAMPLE_CAP: u64 = 8 * 1024 * 1024;
 const EVIDENCE_CAP: u64 = 256 * 1024 * 1024;
 const SHOW_BYTES_PER_READ: usize = 64 * 1024;
 
-fn private_file(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
 fn noop_pin(root: &Path) -> serde_json::Value {
     use std::os::unix::fs::MetadataExt;
     let executable = ["/usr/bin/true", "/bin/true"]
@@ -50,7 +44,7 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
         },
         Operation::Edit => arany::ToolCall::Edit {
             path: path.into(),
-            expected_digest: digest_hex(fixture_content(operation).as_bytes()),
+            expected_digest: hash(fixture_content(operation).as_bytes()),
             old: "fn pick".into(),
             new: "fn done".into(),
         },
@@ -58,6 +52,8 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
             program: "noop".into(),
             args: Vec::new(),
             cwd: "src".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         Operation::Other | Operation::InvalidProposal => panic!("unsupported latency operation"),
     }
@@ -148,13 +144,6 @@ fn fixture_content(operation: Operation) -> String {
     }
 }
 
-fn digest_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn controls() -> RunControls {
     RunControls {
         tools: ToolGrant::Configured,
@@ -189,7 +178,7 @@ fn assert_read(view: &SessionView, reads: usize) {
             Some(arany::Attestation::InProcess { .. })
         ));
         let page: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
-        let digest = digest_hex(FIXTURE.repeat(4096).as_bytes());
+        let digest = hash(FIXTURE.repeat(4096).as_bytes());
         assert_eq!(
             page,
             serde_json::json!({

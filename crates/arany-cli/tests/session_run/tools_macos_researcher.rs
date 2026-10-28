@@ -98,42 +98,10 @@ done
 
     #[cfg(all(not(debug_assertions), arany_ci))]
     pub(super) fn release_researcher_journey() {
-        use crate::process::BoundedOutput;
-
-        let _gate = crate::process::NATIVE_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::tempdir().unwrap();
-        for directory in ["home", "environment-state", "environment-data"] {
-            std::fs::create_dir(temp.path().join(directory)).unwrap();
-        }
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "tools_researcher::journey::native_researcher_journey_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env_clear()
-            .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
-            .env("HOME", temp.path().join("home"))
-            .env("XDG_STATE_HOME", temp.path().join("environment-state"))
-            .env("XDG_DATA_HOME", temp.path().join("environment-data"))
-            .current_dir(temp.path());
-        crate::process::isolate_host_authentication(&mut command, &temp.path().join("home"));
-        let output = command
-            .bounded_output_for(Duration::from_secs(360), 32 * 1024)
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "native researcher journey: {:?}; stdout={:?}; stderr={:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::tools_git::release_native_journey(
+            "tools_researcher::journey::native_researcher_journey_helper",
+            "native researcher journey",
         );
-        crate::process::assert_single_test_completed(&output.stdout, "native researcher journey");
-        assert!(output.stderr.is_empty());
     }
 
     #[tokio::test]
@@ -208,6 +176,8 @@ done
                     program: "shell".into(),
                     args: vec!["-c".into(), "printf changed > src/facts.txt".into()],
                     cwd: "".into(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
             ),
             (

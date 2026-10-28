@@ -56,7 +56,7 @@ Apple's [Disk Arbitration queue](https://github.com/apple-oss-distributions/Disk
 and [asynchronous requests](https://github.com/apple-oss-distributions/DiskArbitration/blob/main/diskarbitrationd/DARequest.c)
 (reviewed 2026-10-12, mutable sources) do not establish DiskImages' pending-attach
 barrier. Caller death alone is not cancellation proof. The [storage owner](../../crates/arany/src/tools/guard/macos/storage.rs)
-and [native scenarios](../specs/tools.md#acceptance-scenarios-and-evidence-owners)
+and [Tool contract](../specs/tools.md)
 own reconciliation and verification. Cooperative async deadlines also do not
 interrupt synchronous filesystem calls; no measured ordinary-host overrun was
 established by the review.

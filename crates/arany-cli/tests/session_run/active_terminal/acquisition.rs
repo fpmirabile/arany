@@ -1,4 +1,7 @@
-use super::{kill_process, product_child_of, redacted_tail, transcript_field, tty_settings};
+use super::{
+    collect_nonblocking, kill_process, product_child_of, redacted_tail, transcript_field,
+    tty_settings,
+};
 use crate::loopback::{ChildGuard, wait_product};
 use crate::session_picker::{pump, tail};
 use rustix::{
@@ -10,7 +13,7 @@ use rustix::{
 };
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Write,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::Stdio,
@@ -96,21 +99,7 @@ impl Drop for ProductGuard {
     }
 }
 
-fn drain_nonblocking(reader: &mut impl Read, bytes: &mut Vec<u8>) {
-    loop {
-        let mut chunk = [0; 4096];
-        match reader.read(&mut chunk) {
-            Ok(0) => return,
-            Ok(count) => {
-                assert!(bytes.len() + count <= 16 * 1024, "bounded PTY transcript");
-                bytes.extend_from_slice(&chunk[..count]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => panic!("PTY read failed: {error}"),
-        }
-    }
-}
+const PTY_CAPTURE_LIMIT: usize = 16 * 1024;
 
 #[test]
 fn default_fullscreen_startup_without_cursor_replies_restores_raw_mode_without_session() {
@@ -170,7 +159,7 @@ fn startup_case(case: &str, signal: Option<Signal>) {
     let mut consent = false;
     let mut suggested_input = Vec::new();
     loop {
-        drain_nonblocking(&mut output, &mut transcript);
+        collect_nonblocking(&mut output, &mut transcript, PTY_CAPTURE_LIMIT);
         crate::process::decline_workspace_consent(&mut suggested_input, &transcript, &mut consent);
         if consent {
             break;
@@ -200,7 +189,7 @@ fn startup_case(case: &str, signal: Option<Signal>) {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        drain_nonblocking(&mut output, &mut transcript);
+        collect_nonblocking(&mut output, &mut transcript, PTY_CAPTURE_LIMIT);
         if attached
             .child()
             .try_wait()
@@ -216,7 +205,7 @@ fn startup_case(case: &str, signal: Option<Signal>) {
         thread::yield_now();
     }
     let result = wait_product(attached.take());
-    drain_nonblocking(&mut output, &mut transcript);
+    collect_nonblocking(&mut output, &mut transcript, PTY_CAPTURE_LIMIT);
     assert_eq!(
         result.status.success(),
         signal.is_none() || signal == Some(Signal::INT),
@@ -343,8 +332,8 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
     let mut suggested_input = Vec::new();
     let mut answered = 0;
     loop {
-        drain_nonblocking(&mut output, &mut stdout_bytes);
-        drain_nonblocking(&mut stderr_master, &mut stderr_bytes);
+        collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
+        collect_nonblocking(&mut stderr_master, &mut stderr_bytes, PTY_CAPTURE_LIMIT);
         let queries = stderr_bytes
             .windows(4)
             .filter(|part| *part == b"\x1b[6n")
@@ -419,7 +408,7 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
         .expect("redraw the consent choice");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        drain_nonblocking(&mut output, &mut stdout_bytes);
+        collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
         if attached
             .child()
             .try_wait()
@@ -432,7 +421,7 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
         thread::yield_now();
     }
     let result = wait_product(attached.take());
-    drain_nonblocking(&mut output, &mut stdout_bytes);
+    collect_nonblocking(&mut output, &mut stdout_bytes, PTY_CAPTURE_LIMIT);
     assert!(!result.status.success(), "failed acquisition exits");
     assert_eq!(result.stderr, b"");
     let transcript = String::from_utf8(stdout_bytes).expect("PTY transcript UTF-8");

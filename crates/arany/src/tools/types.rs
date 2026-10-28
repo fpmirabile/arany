@@ -359,6 +359,10 @@ pub enum ToolCall {
         program: String,
         args: Vec<String>,
         cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_class: Option<ToolResourceClass>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u32>,
     },
     CommandUnguarded {
         program: String,
@@ -930,6 +934,7 @@ pub enum ToolResourceProfile {
     MacosSupervised,
 }
 
+pub(crate) const MIN_COMMAND_TIMEOUT_MS: u32 = 1_000;
 pub(crate) const DEFAULT_COMMAND_TIMEOUT_MS: u32 = 120_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -964,8 +969,10 @@ impl Default for ToolResourceSettings {
 
 impl ToolResourceSettings {
     pub fn valid(self) -> bool {
-        (1_000..=self.max_command_timeout_ms).contains(&self.default_command_timeout_ms)
-            && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.max_command_timeout_ms)
+        (MIN_COMMAND_TIMEOUT_MS..=self.max_command_timeout_ms)
+            .contains(&self.default_command_timeout_ms)
+            && (MIN_COMMAND_TIMEOUT_MS..=MAX_COMMAND_TIMEOUT_MS)
+                .contains(&self.max_command_timeout_ms)
             && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
             && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
             && self.build_jobs != Some(0)
@@ -1043,7 +1050,7 @@ impl ToolLimits {
 
     fn valid(&self) -> bool {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
-            && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
+            && (MIN_COMMAND_TIMEOUT_MS..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
             && (1..=self.max_processes).contains(&self.build_jobs)
             && self.build_cpu_cores > 0
             && (self.resource_class == ToolResourceClass::Build
@@ -2209,6 +2216,8 @@ mod unguarded_vocabulary_tests {
             program: "sh".into(),
             args: args.iter().map(|arg| (*arg).into()).collect(),
             cwd: cwd.into(),
+            resource_class: None,
+            timeout_ms: None,
         }
     }
 

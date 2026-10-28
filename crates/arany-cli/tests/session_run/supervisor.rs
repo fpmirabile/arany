@@ -57,6 +57,8 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
         program: "synthetic".into(),
         args: vec![canaries[2].into()],
         cwd: canaries[1].into(),
+        resource_class: None,
+        timeout_ms: None,
     }));
     outcomes.push(tool_outcome(arany::ToolCall::Write {
         path: format!("{}/new", canaries[1]),

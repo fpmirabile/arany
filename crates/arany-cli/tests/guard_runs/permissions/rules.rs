@@ -87,6 +87,8 @@ async fn late_approval_keeps_file_and_executable_preconditions() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "printf approved > notes/ran.txt".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             }
         };
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -678,8 +680,22 @@ fn guarded_discovery_fixture(whole: bool) -> Fixture {
     fixture
 }
 
-#[tokio::test]
-async fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
+#[test]
+fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if process::isolate_test() {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(guarded_discovery_replay());
+}
+
+async fn guarded_discovery_replay() {
     for whole in [false, true] {
         let fixture = guarded_discovery_fixture(whole);
         let calls = [
