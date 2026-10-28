@@ -2214,6 +2214,7 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
     for case in [
         "success",
         "failed",
+        "unavailable",
         "cancelled",
         "retry",
         "omitted",
@@ -2269,6 +2270,14 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                 .unwrap()
                 .push_front(Err(ProviderError::RateLimited(None)));
         } else if case == "fallback" {
+            // A pre-admission 5xx switches without retrying when Retry-After exceeds the cap.
+            let retry_after = Some(Duration::MAX);
+            primary
+                .responses
+                .get_mut()
+                .unwrap()
+                .push_front(Err(ProviderError::HttpServerUnavailable(retry_after)));
+        } else if case == "unavailable" {
             primary
                 .responses
                 .get_mut()
@@ -2280,7 +2289,7 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
             ScriptedProvider::new(vec![finish("replacement")]).with_profile("openai", "model-b"),
         );
         let mut bindings = routes(&primary);
-        if case == "fallback" {
+        if matches!(case, "fallback" | "unavailable") {
             bindings.roles.primary.push(replacement.clone());
         }
         let engine = open(&state);
@@ -2315,7 +2324,8 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                 2
             } else {
                 1
-            }
+            },
+            "case {case}"
         );
         if case == "append failure" {
             assert!(outcome.is_err());
@@ -2327,11 +2337,28 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         assert_eq!(
             result.run.status,
             match case {
-                "failed" => RunStatus::Failed,
+                "failed" | "unavailable" => RunStatus::Failed,
                 "cancelled" => RunStatus::Cancelled,
                 _ => RunStatus::Finished,
-            }
+            },
+            "case {case}"
         );
+        assert_eq!(
+            view.runs[0].provider_fallbacks.len(),
+            usize::from(case == "fallback"),
+            "case {case}"
+        );
+        if case == "fallback" {
+            assert_eq!(
+                view.runs[0].provider_fallbacks[0].1.rate_limits,
+                Some(api_sample(1000))
+            );
+            assert!(
+                view.runs[0].agents[0].provider_calls[0]
+                    .rate_limits
+                    .is_none()
+            );
+        }
         let group = &view.usage.api_limits[0];
         assert_eq!(group.rows[0].observed_at, 1000);
         assert_eq!(
