@@ -59,14 +59,22 @@ pub(super) async fn post_json_observed(
     key: &str,
     observe: impl FnOnce(&reqwest::header::HeaderMap) -> Result<(), ProviderError>,
 ) -> Result<Vec<u8>, ProviderError> {
-    let mut response = request.send().await.map_err(|error| send_failure(&error))?;
-    observe(response.headers())?;
-    if !response.status().is_success() {
-        return Err(http_failure(&mut response).await);
-    }
+    let mut response = send_observed(request, observe).await?;
     let bytes = read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
     if raw_reflects_secret(&bytes, key) {
         return Err(ProviderError::InvalidOutcome);
     }
     Ok(bytes)
+}
+
+pub(super) async fn send_observed(
+    request: reqwest::RequestBuilder,
+    observe: impl FnOnce(&reqwest::header::HeaderMap) -> Result<(), ProviderError>,
+) -> Result<reqwest::Response, ProviderError> {
+    let mut response = request.send().await.map_err(|error| send_failure(&error))?;
+    observe(response.headers())?;
+    if !response.status().is_success() {
+        return Err(http_failure(&mut response).await);
+    }
+    Ok(response)
 }

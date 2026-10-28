@@ -221,14 +221,22 @@ impl Provider for OpenAiProvider {
         preview: Option<super::ResponsePreview>,
         limits: super::RateLimitSlot,
     ) -> Result<ProviderResponse, ProviderError> {
-        if let Some(preview) = preview {
-            return self.invoke_with_preview(request, preview).await;
-        }
         native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
-        let body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
-        let response = self.send_observed(body, limits).await?;
-        self.decode_run(&response, &request, &conversation)
+        let mut body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
+        let Some(preview) = preview else {
+            let response = self.send_observed(body, limits).await?;
+            return self.decode_run(&response, &request, &conversation);
+        };
+        body["stream"] = Value::Bool(true);
+        invoke_streamed(
+            self.request(body)?
+                .header(reqwest::header::ACCEPT, "text/event-stream"),
+            wire::RunScope::new(&request, &conversation, &self.key),
+            preview,
+            limits,
+        )
+        .await
     }
 
     async fn invoke_with_preview(
@@ -236,38 +244,8 @@ impl Provider for OpenAiProvider {
         request: ProviderRequest,
         preview: super::ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
-        native::admit_request(&self.identity, &request)?;
-        let conversation = render::conversation(&request)?;
-        let mut body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
-        body["stream"] = Value::Bool(true);
-        let mut response = self
-            .request(body)?
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .send()
+        self.invoke_observed(request, Some(preview), super::RateLimitSlot::default())
             .await
-            .map_err(|error| super::send_failure(&error))?;
-        if !response.status().is_success() {
-            return Err(super::http_failure(&mut response).await);
-        }
-        let bytes = read_streamed_reply(
-            &mut response,
-            &self.key,
-            &self.identity.model,
-            Some(preview),
-            request.max_output_tokens,
-        )
-        .await?;
-        let decoded = wire::decode_streamed_run(
-            &bytes,
-            &wire::RunScope::new(&request, &conversation, &self.key),
-        )
-        .map_err(wire::ResponseError::provider_error)?;
-        if !valid_usage(decoded.usage, request.max_output_tokens)
-            || decoded.reflects_secret(&self.key)
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        Ok(decoded)
     }
 
     async fn compact(
@@ -297,6 +275,32 @@ impl Provider for OpenAiProvider {
             .await?;
         self.decode_compaction(&response, request.max_output_tokens)
     }
+}
+
+async fn invoke_streamed(
+    request: reqwest::RequestBuilder,
+    scope: wire::RunScope<'_>,
+    preview: super::ResponsePreview,
+    limits: super::RateLimitSlot,
+) -> Result<ProviderResponse, ProviderError> {
+    let mut response = native::send_observed(request, |headers| {
+        api_limits::headers(headers, scope.secret, &limits)
+    })
+    .await?;
+    let bytes = read_streamed_reply(
+        &mut response,
+        scope.secret,
+        scope.model,
+        Some(preview),
+        scope.output_cap,
+    )
+    .await?;
+    let decoded =
+        wire::decode_streamed_run(&bytes, &scope).map_err(wire::ResponseError::provider_error)?;
+    if !valid_usage(decoded.usage, scope.output_cap) || decoded.reflects_secret(scope.secret) {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    Ok(decoded)
 }
 
 pub(crate) async fn read_streamed_reply(

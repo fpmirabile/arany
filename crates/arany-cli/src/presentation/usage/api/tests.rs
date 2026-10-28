@@ -1,4 +1,64 @@
+use arany::Provider;
 use arany::test_support::{engine::run_to_end, routing::*, scenario::ScriptedProvider};
+
+#[tokio::test]
+async fn reopened_streaming_fallback_report_labels_both_attempt_identities() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let mut primary = ScriptedProvider::new(vec![])
+        .with_profile("openai", "model-a")
+        .with_saved_api_account(uuid::Uuid::now_v7());
+    primary.responses.get_mut().unwrap().push_back(Err(
+        arany::ProviderError::HttpServerUnavailable(Some(std::time::Duration::MAX)),
+    ));
+    primary
+        .rate_limits
+        .get_mut()
+        .unwrap()
+        .push_back(Some(api_sample(1000)));
+    let primary = route(primary);
+    let mut replacement = ScriptedProvider::new(vec![finish("done")])
+        .with_profile("openai", "model-b")
+        .with_saved_api_account(uuid::Uuid::now_v7());
+    replacement
+        .rate_limits
+        .get_mut()
+        .unwrap()
+        .push_back(Some(api_sample(1100)));
+    let replacement = route(replacement);
+    let mut bindings = routes(&primary);
+    bindings.roles.primary.push(replacement.clone());
+    let engine = open(&state);
+    let result = arany::test_support::engine::run_routed(
+        &engine,
+        bindings,
+        input(&workspace),
+        arany::RunControls::default(),
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    let (_, view) = reopen(&state, result.session_id).await;
+    assert_eq!(
+        view.runs[0].provider_fallbacks[0].1.from,
+        *primary.identity()
+    );
+    assert_eq!(
+        view.runs[0].provider_fallbacks[0].1.to,
+        *replacement.identity()
+    );
+    assert_eq!(view.usage.api_limits[0].identity, *primary.identity());
+    assert_eq!(view.usage.api_limits[1].identity, *replacement.identity());
+    let expected = [
+        "\nAPI rate limits · Run 1 · route 1 · historical\nProvider: openai\nModel: model-a\nRole: primary\nReported header dialect: OpenAI\nProvider-reported counters; not a plan balance or this Session's share\nRequests\nLimit: 100\nRemaining: 0\nLast reported: 1970-01-01T00:16:40Z · headers\nObservation age unknown\nReset: 1970-01-01T00:17:40Z\n".to_owned(),
+        "\nAPI rate limits · Run 1 · route 2 · historical\nProvider: openai\nModel: model-b\nRole: primary\nReported header dialect: OpenAI\nProvider-reported counters; not a plan balance or this Session's share\nRequests\nLimit: 100\nRemaining: 0\nLast reported: 1970-01-01T00:18:20Z · headers\nObservation age unknown\nReset: 1970-01-01T00:19:20Z\n".to_owned(),
+    ];
+    assert_eq!(super::sections(&view, None), expected);
+    assert_eq!(primary.requests.lock().unwrap().len(), 1);
+    assert_eq!(replacement.requests.lock().unwrap().len(), 1);
+}
 
 #[tokio::test]
 async fn reopened_api_report_keeps_exact_rows_omissions_age_and_run_scope() {

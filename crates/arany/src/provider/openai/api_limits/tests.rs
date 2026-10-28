@@ -219,3 +219,218 @@ async fn json_transport_retains_headers_on_status_body_loss_and_dropped_future()
         .expect("bounded JSON transport fixture");
     }
 }
+
+const STREAM_KEY: &str = "selected-stream-secret";
+
+fn stream_body(case: &str) -> String {
+    let text = if case == "review" {
+        r#"{"verdict":"approve"}"#
+    } else {
+        "safe answer"
+    };
+    match case {
+        "malformed" => "data: {broken}\n\n".to_owned(),
+        "body loss" => String::new(),
+        "cut" => "data: {\"type\":\"response.created\"}\n\n".to_owned(),
+        "429" | "503" => "{}".to_owned(),
+        _ => format!(
+            "data: {}\n\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "codex.rate_limits",
+                "rate_limits": {"primary": {"used_percent": 25, "window_minutes": 300}}
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_stream", "status": "completed", "model": "gpt-5.4",
+                    "output": [{"type": "message", "role": "assistant", "status": "completed",
+                        "content": [{"type": "output_text", "text": text}]}],
+                    "usage": {"input_tokens": 12, "output_tokens": 8}
+                }
+            })
+        ),
+    }
+}
+
+async fn stream_peer(
+    listener: tokio::net::TcpListener,
+    case: &'static str,
+    requested: tokio::sync::oneshot::Sender<()>,
+    released: tokio::sync::oneshot::Receiver<()>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const REQUEST_BOUND: usize = 8192;
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut request = Vec::new();
+    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+        let mut chunk = [0; 1024];
+        let read = socket.read(&mut chunk).await.unwrap();
+        assert!(read > 0 && request.len() + read <= REQUEST_BOUND);
+        request.extend_from_slice(&chunk[..read]);
+    }
+    assert!(request.starts_with(b"POST /responses HTTP/1.1\r\n"));
+    requested.send(()).unwrap();
+    if case == "drop before headers" {
+        let _ = released.await;
+        return;
+    }
+    let status = if case.ends_with("429") {
+        429
+    } else if case.ends_with("503") {
+        503
+    } else {
+        200
+    };
+    let body = stream_body(case);
+    let reported = if case == "unreported" {
+        ""
+    } else {
+        "x-ratelimit-limit-requests: 100\r\nx-ratelimit-remaining-requests: 0\r\nx-ratelimit-reset-requests: 1.001s\r\n"
+    };
+    let reflection = if case.starts_with("reflection") {
+        format!("x-reflected: {STREAM_KEY}\r\n")
+    } else {
+        String::new()
+    };
+    let held = matches!(case, "drop after headers" | "deadline after headers");
+    let length = if held || case == "body loss" {
+        body.len() + 1
+    } else {
+        body.len()
+    };
+    socket.write_all(format!(
+        "HTTP/1.1 {status} Test\r\nContent-Type: text/event-stream\r\n{reported}{reflection}Content-Length: {length}\r\nConnection: close\r\n\r\n"
+    ).as_bytes()).await.unwrap();
+    if held {
+        let _ = released.await;
+    } else if !case.starts_with("reflection") {
+        socket.write_all(body.as_bytes()).await.unwrap();
+    }
+}
+
+fn assert_stream_result(case: &str, result: Result<crate::ProviderResponse, ProviderError>) {
+    assert_eq!(
+        result.is_ok(),
+        matches!(case, "completed" | "child" | "review" | "unreported"),
+        "{case}"
+    );
+    match case {
+        "429" => assert!(matches!(result, Err(ProviderError::RateLimited(_)))),
+        "503" => assert!(matches!(
+            result,
+            Err(ProviderError::HttpServerUnavailable(_))
+        )),
+        "cut" => assert!(matches!(result, Err(ProviderError::StreamEnded))),
+        "body loss" => assert!(matches!(result, Err(ProviderError::PartialTransport))),
+        case if case.starts_with("reflection") => {
+            assert!(matches!(result, Err(ProviderError::InvalidOutcome)));
+        }
+        _ => {}
+    }
+}
+
+async fn streamed_attempt(case: &'static str) {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    use tokio::sync::oneshot;
+    use tokio::time::{Duration, timeout};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (requested, request_received) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let mut peer = tokio::task::JoinSet::new();
+    peer.spawn(stream_peer(listener, case, requested, released));
+    let slot = RateLimitSlot::default();
+    let mut request = crate::provider::test_support::read_only_request("gpt-5.4");
+    if case == "child" {
+        request.phase = crate::AgentPhase::ChildWork;
+        request.collaboration = crate::CollaborationPolicy::Single;
+    } else if case == "review" {
+        request.phase = crate::AgentPhase::ToolReview;
+        request.input = crate::provider::RunInput::new(
+            crate::provider::PromptRole::ToolReview,
+            "review request".into(),
+        );
+    }
+    let conversation = crate::provider::render::conversation(&request).unwrap();
+    let (preview, _receiver) = crate::provider::ResponsePreview::new();
+    let http = crate::provider::http_client(Duration::from_secs(3))
+        .build()
+        .unwrap()
+        .post(format!("http://{address}/responses"));
+    {
+        let future = super::super::invoke_streamed(
+            http,
+            super::super::wire::RunScope::new(&request, &conversation, STREAM_KEY),
+            preview,
+            slot.clone(),
+        );
+        tokio::pin!(future);
+        if case == "drop before headers" {
+            tokio::select! {
+                _ = request_received => {},
+                _ = &mut future => panic!("response must remain pending"),
+            }
+        } else if matches!(case, "drop after headers" | "deadline after headers") {
+            poll_fn(|cx| {
+                assert!(future.as_mut().poll(cx).is_pending());
+                if slot.snapshot().is_some() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            if case == "deadline after headers" {
+                assert!(timeout(Duration::ZERO, &mut future).await.is_err());
+            }
+        } else {
+            assert_stream_result(case, future.await);
+        }
+    }
+    drop(release);
+    peer.join_next().await.unwrap().unwrap();
+    let sample = slot.take();
+    let expected =
+        case != "drop before headers" && case != "unreported" && !case.starts_with("reflection");
+    assert_eq!(sample.is_some(), expected, "{case}");
+    if let Some(sample) = sample {
+        assert!(sample.primary.is_none() && sample.secondary.is_none());
+        let api = sample.api.unwrap();
+        assert_eq!(api.dialect, ApiLimitDialect::OpenAi);
+        assert_eq!(api.rows.len(), 1);
+        let row = &api.rows[0];
+        assert_eq!(row.limit, Some(100));
+        assert_eq!(row.remaining, Some(0));
+        assert_eq!(row.reset_at, Some(row.observed_at + 2));
+    }
+    assert!(slot.take().is_none());
+}
+
+#[tokio::test]
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+async fn streamed_attempts_keep_only_admitted_headers_independently_of_the_body() {
+    for case in [
+        "completed",
+        "child",
+        "review",
+        "429",
+        "503",
+        "malformed",
+        "cut",
+        "body loss",
+        "drop before headers",
+        "drop after headers",
+        "deadline after headers",
+        "reflection 200",
+        "reflection 429",
+        "reflection 503",
+        "unreported",
+    ] {
+        tokio::time::timeout(std::time::Duration::from_secs(5), streamed_attempt(case))
+            .await
+            .expect("bounded streaming transport fixture");
+    }
+}
