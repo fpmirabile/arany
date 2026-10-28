@@ -2037,8 +2037,14 @@ mod tests {
         let mut composer = Composer::default();
         composer.apply(crate::terminal::TerminalInput::Character('x'));
         composer.set_approval_mode(Some(ApprovalMode::AutoEdits));
-        let choice =
-            super::super::permissions::admit(&mut terminal, &workspace, &mut composer, false).await;
+        let choice = super::super::permissions::admit(
+            &mut terminal,
+            &workspace,
+            account.path(),
+            &mut composer,
+            false,
+        )
+        .await;
         #[cfg(debug_assertions)]
         assert!(
             matches!(&choice, Ok(super::super::permissions::PermissionChoice::Selected(access)) if access.is_trusted())
@@ -2275,7 +2281,7 @@ mod tests {
                     Duration::from_secs(3),
                     super::super::permissions::choose(
                         &mut terminal,
-                        access.prepare_profile_selection(),
+                        access.prepare_profile_selection(account.path()),
                         &mut composer,
                         false,
                     ),

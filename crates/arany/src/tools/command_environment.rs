@@ -1,6 +1,6 @@
 use super::ToolError;
 use crate::session::LoginShellIdentity;
-use crate::store::{RecordFormat, RecordKind, RecordStep, StateRoot};
+use crate::store::{RecordFormat, RecordKind, RecordStep, StateRoot, StoreError};
 use crate::validate::{MAX_PATH_BYTES, digest, hex_digest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -128,6 +128,29 @@ fn valid_entry(entry: &str) -> bool {
 }
 
 impl CommandEnvironment {
+    pub(super) fn for_discovery(path: &Path) -> Result<Self, ToolError> {
+        let found = match StateRoot::open_existing(path) {
+            Ok(state) => state
+                .record(RecordKind::CommandEnvironment)
+                .read()
+                .map_err(|_| ToolError::Configuration)?,
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    _ => return Err(ToolError::Configuration),
+                }
+            }
+            Err(_) => return Err(ToolError::Configuration),
+        };
+        match found {
+            Some(bytes) => Self::parse(&COMMAND_ENVIRONMENT.upgrade(&bytes).unwrap_or(bytes)),
+            None => Self::from_process().map_err(|error| match error {
+                CommandEnvironmentError::TooLarge(_) => ToolError::Limit,
+                _ => ToolError::Configuration,
+            }),
+        }
+    }
+
     pub fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let found = state
             .read_current(&COMMAND_ENVIRONMENT)
@@ -626,6 +649,62 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let state = StateRoot::admit(&temp.path().join("state")).unwrap();
         (temp, state)
+    }
+
+    #[test]
+    fn discovery_preserves_absent_state_and_existing_records_without_fallback_on_damage() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing/state");
+        let preview = CommandEnvironment::for_discovery(&path).unwrap();
+        assert_eq!(preview.source(), "process");
+        assert!(!temp.path().join("missing").exists());
+
+        let state = StateRoot::admit(&path).unwrap();
+        let entries = || {
+            let mut names = std::fs::read_dir(&path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let seeded = entries();
+        let preview = CommandEnvironment::for_discovery(&path).unwrap();
+        assert_eq!(preview.source(), "process");
+        assert_eq!(entries(), seeded, "discovery must create no files or locks");
+
+        let selected = CommandEnvironment::for_path("/opt/selected").with_name("KEEP_ME", "1");
+        selected.save(&state).unwrap();
+        let record = state.record(RecordKind::CommandEnvironment);
+        let saved = record.read().unwrap();
+        assert_eq!(CommandEnvironment::for_discovery(&path).unwrap(), selected);
+        assert_eq!(record.read().unwrap(), saved);
+
+        let mut previous = selected.clone();
+        previous.version = 2;
+        previous.sha256 = hex_digest(&timestamped_canonical(&previous));
+        let previous_bytes = serde_json::to_vec(&previous).unwrap();
+        record.replace(&previous_bytes).unwrap();
+        assert_eq!(CommandEnvironment::for_discovery(&path).unwrap(), selected);
+        assert_eq!(record.read().unwrap().unwrap(), previous_bytes);
+
+        record.replace(b"invalid saved environment").unwrap();
+        assert!(matches!(
+            CommandEnvironment::for_discovery(&path),
+            Err(ToolError::Configuration)
+        ));
+        assert_eq!(
+            record.read().unwrap().unwrap(),
+            b"invalid saved environment"
+        );
+
+        selected.save(&state).unwrap();
+        std::fs::remove_file(path.join("events.sqlite3")).unwrap();
+        assert!(matches!(
+            CommandEnvironment::for_discovery(&path),
+            Err(ToolError::Configuration)
+        ));
+        assert_eq!(record.read().unwrap(), saved);
     }
 
     #[test]

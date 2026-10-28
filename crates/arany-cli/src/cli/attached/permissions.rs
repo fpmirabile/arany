@@ -50,6 +50,7 @@ pub(super) fn refresh_mode(
 pub(super) async fn admit(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
+    state_dir: &Path,
     composer: &mut Composer,
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
@@ -64,7 +65,7 @@ pub(super) async fn admit(
     } else {
         choose(
             terminal,
-            access.prepare_profile_selection(),
+            access.prepare_profile_selection(state_dir),
             composer,
             configured,
         )
@@ -1222,10 +1223,11 @@ fn parse_linear_selection(
             for number in numbers {
                 let index = number.parse::<usize>().ok()?.checked_sub(3)?;
                 let option = options.get(index)?;
-                if selected
-                    .iter()
-                    .zip(options)
-                    .any(|(chosen, other)| *chosen && other.group == option.group)
+                if option.exclusive
+                    && selected
+                        .iter()
+                        .zip(options)
+                        .any(|(chosen, other)| *chosen && other.group == option.group)
                 {
                     return None;
                 }
@@ -1239,10 +1241,12 @@ fn parse_linear_selection(
 
 fn toggle_profile(selected: &mut [bool], options: &[arany::RuntimeProfileOption], index: usize) {
     let check = !selected[index];
-    let group = options[index].group;
-    for (chosen, option) in selected.iter_mut().zip(options) {
-        if option.group == group {
-            *chosen = false;
+    if options[index].exclusive {
+        let group = options[index].group;
+        for (chosen, option) in selected.iter_mut().zip(options) {
+            if option.group == group {
+                *chosen = false;
+            }
         }
     }
     selected[index] = check;
@@ -1492,7 +1496,7 @@ mod tests {
             let mut composer = Composer::default();
             let access = WorkspacePermissions::open(&workspace)
                 .unwrap()
-                .prepare_profile_selection();
+                .prepare_profile_selection(&arany::StateRoot::account_path().unwrap());
             let cache = workspace.join(".cargo/registry/cache");
             let index = access
                 .runtime_profile_choices()
@@ -1556,7 +1560,39 @@ mod tests {
             path: std::path::PathBuf::from("/opt/profile"),
             detected: true,
             selected: false,
+            exclusive: true,
         }
+    }
+
+    #[test]
+    fn independent_profiles_toggle_alone_while_toolchain_kinds_keep_one_choice() {
+        let independent = |token, group| arany::RuntimeProfileOption {
+            exclusive: false,
+            ..option(token, group)
+        };
+        let options = [
+            option("rust-a", "Rust"),
+            option("rust-b", "Rust"),
+            independent("user-a", "User programs"),
+            independent("user-b", "User programs"),
+        ];
+        let mut selected = [true, false, false, false];
+        toggle_profile(&mut selected, &options, 1);
+        assert_eq!(selected, [false, true, false, false]);
+        toggle_profile(&mut selected, &options, 2);
+        toggle_profile(&mut selected, &options, 3);
+        assert_eq!(selected, [false, true, true, true]);
+        toggle_profile(&mut selected, &options, 2);
+        assert_eq!(selected, [false, true, false, true]);
+
+        assert_eq!(
+            parse_linear_selection("trust 5 6", &options, &selected),
+            Some((1, vec![false, false, true, true]))
+        );
+        assert_eq!(
+            parse_linear_selection("trust 3 4", &options, &selected),
+            None
+        );
     }
 
     #[test]

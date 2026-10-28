@@ -1,9 +1,13 @@
 use super::{ToolError, fs};
 use crate::validate::MAX_PATH_BYTES;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-pub(crate) const MAX_RUNTIME_GRANTS: usize = 11;
+const EXCLUSIVE_RUNTIME_GRANTS: usize = 11;
+pub(crate) const MAX_USER_PROGRAM_GRANTS: usize = 8;
+pub(crate) const MAX_MANAGER_SHIM_GRANTS: usize = 4;
+pub(crate) const MAX_RUNTIME_GRANTS: usize =
+    EXCLUSIVE_RUNTIME_GRANTS + MAX_USER_PROGRAM_GRANTS + MAX_MANAGER_SHIM_GRANTS;
 const MAX_TOOLCHAIN_CANDIDATES: usize = 64;
 const MAX_DIRECTORY_ENTRIES: usize = 128;
 #[cfg(target_os = "macos")]
@@ -39,7 +43,60 @@ pub(crate) enum RuntimeKind {
     PipWheelCache,
     AppleCompiler,
     AppleSdk,
+    UserPrograms,
+    ManagerShims,
 }
+
+struct ShimEntry {
+    manager: RuntimeManager,
+    directory: &'static str,
+    homebrew: bool,
+    root: &'static str,
+    variable: &'static str,
+}
+
+const MANAGER_SHIMS: [ShimEntry; 5] = [
+    ShimEntry {
+        manager: RuntimeManager::Rustup,
+        directory: ".cargo/bin",
+        homebrew: false,
+        root: ".rustup",
+        variable: "RUSTUP_HOME",
+    },
+    ShimEntry {
+        manager: RuntimeManager::Rustup,
+        directory: "opt/rustup/bin",
+        homebrew: true,
+        root: ".rustup",
+        variable: "RUSTUP_HOME",
+    },
+    ShimEntry {
+        manager: RuntimeManager::Pyenv,
+        directory: ".pyenv/shims",
+        homebrew: false,
+        root: ".pyenv",
+        variable: "PYENV_ROOT",
+    },
+    ShimEntry {
+        manager: RuntimeManager::Volta,
+        directory: ".volta/bin",
+        homebrew: false,
+        root: ".volta",
+        variable: "VOLTA_HOME",
+    },
+    ShimEntry {
+        manager: RuntimeManager::Asdf,
+        directory: ".asdf/shims",
+        homebrew: false,
+        root: ".asdf",
+        variable: "ASDF_DATA_DIR",
+    },
+];
+
+const MAX_DISCOVERY_PATH_BYTES: usize = super::command_environment::PATH_LIMIT_BYTES;
+pub(crate) const MAX_DISCOVERY_PATH_ENTRIES: usize = 32;
+
+const HOMEBREW_PREFIXES: [&str; 3] = ["/home/linuxbrew/.linuxbrew", "/opt/homebrew", "/usr/local"];
 
 impl RuntimeKind {
     pub(crate) fn label(self) -> &'static str {
@@ -55,7 +112,27 @@ impl RuntimeKind {
             Self::PipWheelCache => "pip wheel cache",
             Self::AppleCompiler => "Command Line Tools compiler",
             Self::AppleSdk => "macOS SDK",
+            Self::UserPrograms => "User programs",
+            Self::ManagerShims => "Manager shims",
         }
+    }
+
+    pub(crate) fn is_multi(self) -> bool {
+        matches!(self, Self::UserPrograms | Self::ManagerShims)
+    }
+
+    // Both multi-select kinds share a rank so discovery (environment) order survives sorting.
+    fn display_rank(self) -> Self {
+        if self.is_multi() {
+            Self::UserPrograms
+        } else {
+            self
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_host_mounted(self) -> bool {
+        self.is_toolchain() || self.is_multi()
     }
 
     pub(crate) fn is_toolchain(self) -> bool {
@@ -90,6 +167,8 @@ impl RuntimeKind {
             Self::PipWheelCache => "pip-wheel-cache",
             Self::AppleCompiler => "apple-compiler",
             Self::AppleSdk => "apple-sdk",
+            Self::UserPrograms => "user-programs",
+            Self::ManagerShims => "manager-shims",
         }
     }
 
@@ -125,6 +204,27 @@ pub(crate) enum RuntimeManager {
     Pyenv,
     HostCache,
     AppleCommandLineTools,
+    UserDirectory,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GrantRoot {
+    pub(crate) path: PathBuf,
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+}
+
+impl GrantRoot {
+    fn valid_shape(&self) -> bool {
+        self.inode != 0
+            && self.path.is_absolute()
+            && self.path.as_os_str().len() <= MAX_PATH_BYTES
+            && self
+                .path
+                .components()
+                .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -136,6 +236,8 @@ pub(crate) struct RuntimeGrant {
     pub(crate) path: PathBuf,
     pub(crate) device: u64,
     pub(crate) inode: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) root: Option<GrantRoot>,
 }
 
 impl RuntimeGrant {
@@ -144,6 +246,11 @@ impl RuntimeGrant {
         let mut identity = path.as_bytes().to_vec();
         identity.extend_from_slice(&self.device.to_le_bytes());
         identity.extend_from_slice(&self.inode.to_le_bytes());
+        if let Some(root) = &self.root {
+            identity.extend_from_slice(root.path.to_str().ok_or(ToolError::Path)?.as_bytes());
+            identity.extend_from_slice(&root.device.to_le_bytes());
+            identity.extend_from_slice(&root.inode.to_le_bytes());
+        }
         let hash = crate::validate::hex_digest(&identity);
         Ok(format!("{}-{}", self.kind.token_prefix(), &hash[..12]))
     }
@@ -155,6 +262,9 @@ impl RuntimeGrant {
             self.version.as_deref().unwrap_or(match self.kind {
                 RuntimeKind::AppleCompiler => "selected CLT compiler",
                 RuntimeKind::AppleSdk => "selected physical SDK",
+                RuntimeKind::UserPrograms | RuntimeKind::ManagerShims => {
+                    "runs whatever the directory currently holds"
+                }
                 _ => "selected cache",
             }),
             self.path.display()
@@ -179,11 +289,15 @@ impl RuntimeGrant {
     }
 
     pub(crate) fn reject_overlap(&self, protected: &[&Path]) -> Result<(), ToolError> {
-        for path in protected {
-            fs::reject_overlap(&self.path, path)?;
-        }
-        for runtime in super::guard::runtime_roots() {
-            fs::reject_overlap(&self.path, Path::new(runtime))?;
+        for owned in std::iter::once(&self.path).chain(self.root.iter().map(|root| &root.path)) {
+            for path in protected {
+                fs::reject_overlap(owned, path)?;
+            }
+            if !self.in_system_root(owned) {
+                for runtime in super::guard::runtime_roots() {
+                    fs::reject_overlap(owned, Path::new(runtime))?;
+                }
+            }
         }
         Ok(())
     }
@@ -214,13 +328,19 @@ impl RuntimeGrant {
         if !has_executables(self.kind, path) {
             return Err(ToolError::ChangedInput);
         }
+        if let Some(root) = &self.root {
+            let directory = fs::open_directory(&root.path).map_err(|_| ToolError::ChangedInput)?;
+            if fs::identity(&directory)? != (root.device, root.inode) {
+                return Err(ToolError::ChangedInput);
+            }
+        }
         Ok(())
     }
 
     // Mount Linux toolchains at their host paths so absolute shebangs resolve.
     #[cfg(target_os = "linux")]
     pub(crate) fn mounted_path(&self, cache_enabled: bool) -> Result<PathBuf, ToolError> {
-        if self.kind.is_toolchain() {
+        if self.kind.is_host_mounted() {
             Ok(self.path.clone())
         } else {
             let relative = self
@@ -231,7 +351,82 @@ impl RuntimeGrant {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mounts(&self, cache_enabled: bool) -> Result<Vec<(PathBuf, PathBuf)>, ToolError> {
+        let mut mounts = Vec::new();
+        if !self.in_system_root(&self.path) {
+            mounts.push((self.path.clone(), self.mounted_path(cache_enabled)?));
+        }
+        if let Some(root) = self
+            .root
+            .as_ref()
+            .filter(|root| !self.in_system_root(&root.path))
+        {
+            mounts.push((root.path.clone(), root.path.clone()));
+        }
+        Ok(mounts)
+    }
+
+    // A subtree of a fixed system mount such as /usr/local is already read-only and executable in the Guard.
+    fn in_system_root(&self, path: &Path) -> bool {
+        self.kind.is_multi()
+            && super::guard::runtime_roots()
+                .iter()
+                .any(|runtime| path.starts_with(runtime))
+    }
+
+    pub(crate) fn manager_home(&self) -> Option<(&'static str, &Path)> {
+        let root = self.root.as_ref()?;
+        Some((self.shim_entry()?.variable, root.path.as_path()))
+    }
+
+    fn shim_entry(&self) -> Option<&'static ShimEntry> {
+        MANAGER_SHIMS.iter().find(|entry| {
+            entry.manager == self.manager
+                && if entry.homebrew {
+                    homebrew_rustup_layout(&self.path)
+                } else {
+                    self.path.ends_with(entry.directory)
+                }
+        })
+    }
+
+    fn multi_layout_matches(&self) -> bool {
+        if !cfg!(target_os = "linux") || self.version.is_some() {
+            return false;
+        }
+        match self.kind {
+            RuntimeKind::UserPrograms => {
+                self.manager == RuntimeManager::UserDirectory
+                    && self
+                        .root
+                        .as_ref()
+                        .is_none_or(|root| root.valid_shape() && self.path.starts_with(&root.path))
+            }
+            RuntimeKind::ManagerShims => {
+                let (Some(entry), Some(root)) = (self.shim_entry(), self.root.as_ref()) else {
+                    return false;
+                };
+                root.valid_shape()
+                    && root.path.file_name().is_some_and(|name| name == entry.root)
+                    && (entry.homebrew
+                        || entry
+                            .directory
+                            .split('/')
+                            .try_fold(self.path.as_path(), |path, _| path.parent())
+                            .is_some_and(|base| root.path == base.join(entry.root)))
+            }
+            _ => false,
+        }
+    }
+
     fn matches_known_layout(&self) -> bool {
+        if self.kind.is_multi() {
+            return self.multi_layout_matches();
+        }
+        if self.root.is_some() {
+            return false;
+        }
         if matches!(
             self.kind,
             RuntimeKind::AppleCompiler | RuntimeKind::AppleSdk
@@ -362,7 +557,7 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
         RuntimeKind::PipWheelCache,
     ] {
         let path = home.join(kind.cache_suffix().ok_or(ToolError::Configuration)?);
-        if let Some(grant) = admit_directory(kind, RuntimeManager::HostCache, None, path)? {
+        if let Some(grant) = admit_directory(kind, RuntimeManager::HostCache, None, path, None)? {
             push_candidate(&mut candidates, grant)?;
         }
     }
@@ -374,6 +569,220 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
     Ok(candidates)
 }
 
+pub(crate) fn discover_user_environment(
+    home: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Vec<Candidate>, ToolError> {
+    if cfg!(target_os = "linux") {
+        discover_user_programs(home, path, &HOMEBREW_PREFIXES)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+pub(crate) fn discover_user_programs(
+    home: &Path,
+    path: Option<&std::ffi::OsStr>,
+    prefixes: &[&str],
+) -> Result<Vec<Candidate>, ToolError> {
+    if !home.is_absolute() {
+        return Err(ToolError::Path);
+    }
+    let entries = scoped_path_entries(home, path, prefixes)?;
+    let shims = shim_candidates(home, prefixes)?;
+    let mut on_path = Vec::new();
+    let mut off_path = Vec::new();
+    for (logical, grant) in &shims {
+        let list = if entries.contains(logical) {
+            &mut on_path
+        } else {
+            &mut off_path
+        };
+        if !list.contains(&grant.manager) {
+            list.push(grant.manager);
+        }
+    }
+    off_path.retain(|manager| !on_path.contains(manager));
+    if entries.len() + off_path.len() > MAX_DISCOVERY_PATH_ENTRIES {
+        return Err(ToolError::Limit);
+    }
+    let mut candidates = Vec::new();
+    for grant in order_by_environment(entries, shims, prefixes)? {
+        push_candidate(&mut candidates, grant)?;
+    }
+    Ok(candidates)
+}
+
+fn scoped_path_entries(
+    home: &Path,
+    path: Option<&std::ffi::OsStr>,
+    prefixes: &[&str],
+) -> Result<Vec<PathBuf>, ToolError> {
+    if path.is_some_and(|path| path.len() > MAX_DISCOVERY_PATH_BYTES) {
+        return Err(ToolError::Limit);
+    }
+    let entries = path
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .components()
+                .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+                && (entry.starts_with(home)
+                    || prefixes.iter().any(|prefix| entry.starts_with(prefix)))
+        })
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_DISCOVERY_PATH_ENTRIES {
+        return Err(ToolError::Limit);
+    }
+    Ok(entries)
+}
+
+fn shim_candidates(
+    home: &Path,
+    prefixes: &[&str],
+) -> Result<Vec<(PathBuf, RuntimeGrant)>, ToolError> {
+    let mut shims = Vec::new();
+    for entry in &MANAGER_SHIMS {
+        let bases = if entry.homebrew {
+            prefixes.iter().map(PathBuf::from).collect()
+        } else {
+            vec![home.to_owned()]
+        };
+        for base in bases {
+            if let Some(found) = shim_grant(entry, home, &base)? {
+                shims.push(found);
+                break;
+            }
+        }
+    }
+    Ok(shims)
+}
+
+// Environment order wins: the PATH-listed alternative of a manager replaces its siblings.
+fn order_by_environment(
+    entries: Vec<PathBuf>,
+    mut pending: Vec<(PathBuf, RuntimeGrant)>,
+    prefixes: &[&str],
+) -> Result<Vec<RuntimeGrant>, ToolError> {
+    let mut ordered: Vec<RuntimeGrant> = Vec::new();
+    let mut excluded: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        if excluded.contains(&entry) {
+            continue;
+        }
+        if let Some(index) = pending.iter().position(|(logical, _)| *logical == entry) {
+            let grant = pending.remove(index).1;
+            let (siblings, rest): (Vec<_>, Vec<_>) = pending
+                .into_iter()
+                .partition(|(_, other)| other.manager == grant.manager);
+            excluded.extend(siblings.into_iter().map(|(logical, _)| logical));
+            pending = rest;
+            ordered.push(grant);
+        } else if let Some(grant) = user_program_grant(entry, prefixes)?
+            && !ordered.iter().any(|other| other.path == grant.path)
+        {
+            ordered.push(grant);
+        }
+    }
+    for (_, grant) in pending {
+        if !ordered.iter().any(|other| other.manager == grant.manager) {
+            ordered.push(grant);
+        }
+    }
+    Ok(ordered)
+}
+
+// A Homebrew prefix mounts whole for its libraries; opt/ aliases resolve inside it.
+fn user_program_grant(
+    entry: PathBuf,
+    prefixes: &[&str],
+) -> Result<Option<RuntimeGrant>, ToolError> {
+    let Some(prefix) = prefixes.iter().find(|prefix| entry.starts_with(prefix)) else {
+        return admit_directory(
+            RuntimeKind::UserPrograms,
+            RuntimeManager::UserDirectory,
+            None,
+            entry,
+            None,
+        );
+    };
+    let (Ok(physical), Ok(prefix)) = (std::fs::canonicalize(&entry), std::fs::canonicalize(prefix))
+    else {
+        return Ok(None);
+    };
+    let Ok(directory) = fs::open_directory(&prefix) else {
+        return Ok(None);
+    };
+    if !physical.starts_with(&prefix) {
+        return Ok(None);
+    }
+    let (device, inode) = fs::identity(&directory)?;
+    admit_directory(
+        RuntimeKind::UserPrograms,
+        RuntimeManager::UserDirectory,
+        None,
+        physical,
+        Some(GrantRoot {
+            path: prefix,
+            device,
+            inode,
+        }),
+    )
+}
+
+fn shim_grant(
+    entry: &ShimEntry,
+    home: &Path,
+    base: &Path,
+) -> Result<Option<(PathBuf, RuntimeGrant)>, ToolError> {
+    let logical = base.join(entry.directory);
+    let mut path = logical.clone();
+    if entry.homebrew {
+        // Homebrew links opt/<formula> to the Cellar, so the physical directory is pinned.
+        let (Ok(physical), Ok(prefix)) =
+            (std::fs::canonicalize(&path), std::fs::canonicalize(base))
+        else {
+            return Ok(None);
+        };
+        if !physical.starts_with(&prefix) || !homebrew_rustup_layout(&physical) {
+            return Ok(None);
+        }
+        path = physical;
+    }
+    let root = home.join(entry.root);
+    let Ok(directory) = fs::open_directory(&root) else {
+        return Ok(None);
+    };
+    let (device, inode) = fs::identity(&directory)?;
+    admit_directory(
+        RuntimeKind::ManagerShims,
+        entry.manager,
+        None,
+        path,
+        Some(GrantRoot {
+            path: root,
+            device,
+            inode,
+        }),
+    )
+    .map(|grant| grant.map(|grant| (logical, grant)))
+}
+
+fn homebrew_rustup_layout(path: &Path) -> bool {
+    let names = path
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let linked = matches!(names.as_slice(), [.., opt, formula, bin] if *opt == "opt" && *formula == "rustup" && *bin == "bin");
+    let cellar = matches!(names.as_slice(), [.., cellar, formula, _, bin] if *cellar == "Cellar" && *formula == "rustup" && *bin == "bin");
+    linked || cellar
+}
+
 pub(super) fn default_profile_selection(
     candidates: &[Candidate],
     saved: &[RuntimeGrant],
@@ -381,6 +790,7 @@ pub(super) fn default_profile_selection(
     use RuntimeKind::*;
     let mut selected = saved
         .iter()
+        .filter(|grant| !grant.kind.is_multi())
         .filter_map(|grant| grant.token().ok().map(|token| (grant.kind, token)))
         .collect::<std::collections::BTreeMap<_, _>>();
     for kind in [
@@ -403,6 +813,7 @@ pub(super) fn default_profile_selection(
             }
             NpmCache => selected.contains_key(&Node),
             PipHttpCache | PipWheelCache => selected.contains_key(&Python),
+            UserPrograms | ManagerShims => false,
         };
         if !enabled || selected.contains_key(&kind) {
             continue;
@@ -417,7 +828,7 @@ pub(super) fn default_profile_selection(
                     }
                     AppleSdk => valid_apple_sdk_version(candidate.grant.version.as_deref()?)?,
                     CargoCache | CargoSource | CargoIndex | NpmCache | PipHttpCache
-                    | PipWheelCache | AppleCompiler => (0, 0, 0),
+                    | PipWheelCache | AppleCompiler | UserPrograms | ManagerShims => (0, 0, 0),
                 };
                 Some((candidate, version))
             })
@@ -430,7 +841,15 @@ pub(super) fn default_profile_selection(
             selected.insert(kind, candidate.token.clone());
         }
     }
-    selected.into_values().collect()
+    selected
+        .into_values()
+        .chain(
+            saved
+                .iter()
+                .filter(|grant| grant.kind.is_multi())
+                .filter_map(|grant| grant.token().ok()),
+        )
+        .collect()
 }
 
 pub(super) fn profile_order(
@@ -438,10 +857,18 @@ pub(super) fn profile_order(
     (right, right_token): (&RuntimeGrant, &str),
 ) -> std::cmp::Ordering {
     left.kind
-        .cmp(&right.kind)
+        .display_rank()
+        .cmp(&right.kind.display_rank())
         .then_with(|| right.version.cmp(&left.version))
-        .then_with(|| left.path.cmp(&right.path))
-        .then_with(|| left_token.cmp(right_token))
+        .then_with(|| {
+            if left.kind.is_multi() {
+                std::cmp::Ordering::Equal
+            } else {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left_token.cmp(right_token))
+            }
+        })
 }
 
 pub(crate) fn validate_selection(grants: &[RuntimeGrant]) -> Result<(), ToolError> {
@@ -449,10 +876,29 @@ pub(crate) fn validate_selection(grants: &[RuntimeGrant]) -> Result<(), ToolErro
         return Err(ToolError::Limit);
     }
     let mut kinds = std::collections::BTreeSet::new();
+    let mut identities = std::collections::BTreeSet::new();
+    let mut managers = Vec::new();
+    let mut user_programs = 0;
     for grant in grants {
         grant.validate_shape()?;
-        if !kinds.insert(grant.kind) {
+        if !grant.kind.is_multi() {
+            if !kinds.insert(grant.kind) {
+                return Err(ToolError::Configuration);
+            }
+            continue;
+        }
+        if !identities.insert((&grant.path, grant.device, grant.inode)) {
             return Err(ToolError::Configuration);
+        }
+        if grant.kind == RuntimeKind::UserPrograms {
+            user_programs += 1;
+            if user_programs > MAX_USER_PROGRAM_GRANTS {
+                return Err(ToolError::Limit);
+            }
+        } else if managers.contains(&grant.manager) {
+            return Err(ToolError::Configuration);
+        } else {
+            managers.push(grant.manager);
         }
     }
     Ok(())
@@ -505,7 +951,9 @@ fn has_executables(kind: RuntimeKind, path: &Path) -> bool {
         | RuntimeKind::CargoIndex
         | RuntimeKind::NpmCache
         | RuntimeKind::PipHttpCache
-        | RuntimeKind::PipWheelCache => true,
+        | RuntimeKind::PipWheelCache
+        | RuntimeKind::UserPrograms
+        | RuntimeKind::ManagerShims => true,
     }
 }
 
@@ -596,6 +1044,7 @@ fn admit_directory(
     manager: RuntimeManager,
     version: Option<String>,
     path: PathBuf,
+    root: Option<GrantRoot>,
 ) -> Result<Option<RuntimeGrant>, ToolError> {
     let Ok(directory) = fs::open_directory(&path) else {
         return Ok(None);
@@ -608,6 +1057,7 @@ fn admit_directory(
         path,
         device,
         inode,
+        root,
     };
     grant.validate_shape()?;
     Ok(Some(grant))
@@ -623,7 +1073,7 @@ fn push(
     if installation_version(kind, &version).is_none() {
         return Ok(());
     }
-    if let Some(grant) = admit_directory(kind, manager, Some(version), path)? {
+    if let Some(grant) = admit_directory(kind, manager, Some(version), path, None)? {
         push_candidate(candidates, grant)?;
     }
     Ok(())
@@ -732,6 +1182,7 @@ fn discover_apple_runtimes(candidates: &mut Vec<Candidate>) -> Result<(), ToolEr
         manager,
         None,
         PathBuf::from(APPLE_CLT_USR),
+        None,
     )? && grant.verify_host().is_ok()
     {
         push_candidate(candidates, grant)?;
@@ -767,6 +1218,7 @@ fn discover_apple_runtimes(candidates: &mut Vec<Candidate>) -> Result<(), ToolEr
             manager,
             Some(version.to_owned()),
             path,
+            None,
         )?
         else {
             continue;
@@ -898,8 +1350,297 @@ fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Resul
     Ok(())
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod user_environment_tests {
+    use super::*;
+
+    fn directory(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path).unwrap();
+        path.to_owned()
+    }
+
+    fn root_of(path: &Path) -> GrantRoot {
+        let (device, inode) = fs::identity(&fs::open_directory(&directory(path)).unwrap()).unwrap();
+        GrantRoot {
+            path: path.to_owned(),
+            device,
+            inode,
+        }
+    }
+
+    fn grant(
+        kind: RuntimeKind,
+        manager: RuntimeManager,
+        path: &Path,
+        root: Option<&Path>,
+    ) -> RuntimeGrant {
+        let (device, inode) = fs::identity(&fs::open_directory(path).unwrap()).unwrap();
+        RuntimeGrant {
+            kind,
+            manager,
+            version: None,
+            path: path.to_owned(),
+            device,
+            inode,
+            root: root.map(root_of),
+        }
+    }
+
+    fn user_directory(path: &Path) -> RuntimeGrant {
+        grant(
+            RuntimeKind::UserPrograms,
+            RuntimeManager::UserDirectory,
+            path,
+            None,
+        )
+    }
+
+    fn paths(candidates: &[Candidate]) -> Vec<PathBuf> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.grant.path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn homebrew_aliases_resolve_inside_the_prefix_and_rustup_follows_path_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        directory(&home.join(".rustup"));
+        let cargo = directory(&home.join(".cargo/bin"));
+        let local = directory(&home.join(".local/bin"));
+        let volta = directory(&home.join(".volta/bin"));
+        let outside = directory(&temp.path().join("outside/bin"));
+        let prefix = std::fs::canonicalize(directory(&temp.path().join("brew"))).unwrap();
+        directory(&prefix.join("opt"));
+        for formula in ["rustup", "tool"] {
+            directory(&prefix.join(format!("Cellar/{formula}/1.0/bin")));
+            std::os::unix::fs::symlink(
+                format!("../Cellar/{formula}/1.0"),
+                prefix.join(format!("opt/{formula}")),
+            )
+            .unwrap();
+        }
+        let escape = directory(&temp.path().join("elsewhere/bin"));
+        std::os::unix::fs::symlink(&escape, prefix.join("opt/escape")).unwrap();
+        let prefixes = [prefix.to_str().unwrap()];
+        let search = |entries: &[PathBuf]| std::env::join_paths(entries).unwrap();
+
+        let brew_first = search(&[
+            prefix.join("opt/rustup/bin"),
+            prefix.join("opt/tool/bin"),
+            prefix.join("opt/escape"),
+            local.clone(),
+            cargo.clone(),
+            local.clone(),
+            outside,
+            PathBuf::from("relative/bin"),
+            home.join("missing"),
+        ]);
+        let found = discover_user_programs(&home, Some(&brew_first), &prefixes).unwrap();
+        assert_eq!(
+            paths(&found),
+            [
+                prefix.join("Cellar/rustup/1.0/bin"),
+                prefix.join("Cellar/tool/1.0/bin"),
+                local,
+                volta.clone()
+            ]
+        );
+        assert_eq!(found[1].grant.root.as_ref().unwrap().path, prefix);
+        let cargo_first = search(&[cargo.clone(), prefix.join("opt/rustup/bin")]);
+        let found = discover_user_programs(&home, Some(&cargo_first), &prefixes).unwrap();
+        assert_eq!(paths(&found), [cargo, volta]);
+    }
+
+    #[test]
+    fn a_system_prefix_subtree_is_pinned_without_a_second_mount() {
+        let bin = Path::new("/usr/local/bin");
+        if !bin.is_dir() || std::fs::symlink_metadata(bin).unwrap().is_symlink() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let workspace = directory(&temp.path().join("project"));
+        let path = std::env::join_paths([bin]).unwrap();
+        let found = discover_user_programs(&home, Some(&path), &HOMEBREW_PREFIXES).unwrap();
+        assert_eq!(paths(&found), [PathBuf::from("/usr/local/bin")]);
+        let grant = &found[0].grant;
+        grant.reject_overlap(&[workspace.as_path()]).unwrap();
+        grant.verify_host().unwrap();
+        validate_selection(std::slice::from_ref(grant)).unwrap();
+        assert!(grant.mounts(false).unwrap().is_empty());
+        assert_eq!(
+            super::super::guard::runtime_path(std::slice::from_ref(grant)).unwrap(),
+            "/usr/local/bin:/usr/bin:/bin"
+        );
+        let hostile = user_directory(&workspace);
+        assert!(hostile.reject_overlap(&[workspace.as_path()]).is_err());
+    }
+
+    #[test]
+    fn discovery_bounds_path_bytes_and_scanned_directories_and_offers_every_survivor() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let directories = (0..MAX_USER_PROGRAM_GRANTS + 2)
+            .map(|index| directory(&home.join(format!("tools/{index}"))))
+            .collect::<Vec<_>>();
+        let path = std::env::join_paths(&directories).unwrap();
+        let candidates = discover_user_programs(&home, Some(&path), &[]).unwrap();
+        assert_eq!(candidates.len(), directories.len());
+
+        let many = (0..=MAX_DISCOVERY_PATH_ENTRIES)
+            .map(|index| home.join(format!("tools/{index}")))
+            .collect::<Vec<_>>();
+        let path = std::env::join_paths(&many).unwrap();
+        assert!(matches!(
+            discover_user_programs(&home, Some(&path), &[]),
+            Err(ToolError::Limit)
+        ));
+        let at_bound = std::env::join_paths(&many[..MAX_DISCOVERY_PATH_ENTRIES]).unwrap();
+        discover_user_programs(&home, Some(&at_bound), &[]).unwrap();
+
+        let volta = directory(&home.join(".volta/bin"));
+        assert!(matches!(
+            discover_user_programs(&home, Some(&at_bound), &[]),
+            Err(ToolError::Limit)
+        ));
+        let mut mixed = many[..MAX_DISCOVERY_PATH_ENTRIES].to_vec();
+        mixed.push(volta);
+        let mixed = std::env::join_paths(&mixed).unwrap();
+        assert!(matches!(
+            discover_user_programs(&home, Some(&mixed), &[]),
+            Err(ToolError::Limit)
+        ));
+
+        let long = std::ffi::OsString::from("a".repeat(MAX_DISCOVERY_PATH_BYTES + 1));
+        assert!(matches!(
+            discover_user_programs(&home, Some(&long), &[]),
+            Err(ToolError::Limit)
+        ));
+    }
+
+    #[test]
+    fn selection_allows_many_user_directories_but_keeps_toolchain_kinds_exclusive() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let first = user_directory(&directory(&home.join("a")));
+        let second = user_directory(&directory(&home.join("b")));
+        validate_selection(&[first.clone(), second.clone()]).unwrap();
+        assert!(validate_selection(&[first.clone(), first.clone()]).is_err());
+
+        let many = (0..=MAX_USER_PROGRAM_GRANTS)
+            .map(|index| user_directory(&directory(&home.join(format!("many/{index}")))))
+            .collect::<Vec<_>>();
+        assert!(matches!(validate_selection(&many), Err(ToolError::Limit)));
+
+        let mut node = grant(
+            RuntimeKind::Node,
+            RuntimeManager::Nvm,
+            &directory(&home.join(".nvm/versions/node/v22.3.0")),
+            None,
+        );
+        node.version = Some("v22.3.0".into());
+        validate_selection(&[node.clone(), first.clone()]).unwrap();
+        assert!(validate_selection(&[node.clone(), node, first]).is_err());
+
+        let rustup = grant(
+            RuntimeKind::ManagerShims,
+            RuntimeManager::Rustup,
+            &directory(&home.join(".cargo/bin")),
+            Some(&home.join(".rustup")),
+        );
+        let python = grant(
+            RuntimeKind::ManagerShims,
+            RuntimeManager::Pyenv,
+            &directory(&home.join(".pyenv/shims")),
+            Some(&home.join(".pyenv")),
+        );
+        validate_selection(&[rustup.clone(), python.clone()]).unwrap();
+
+        let wrong_root = RuntimeGrant {
+            root: Some(root_of(&home.join(".elsewhere"))),
+            ..rustup.clone()
+        };
+        let no_root = RuntimeGrant {
+            root: None,
+            ..rustup.clone()
+        };
+        let wrong_manager = RuntimeGrant {
+            manager: RuntimeManager::Volta,
+            ..rustup.clone()
+        };
+        for malformed in [wrong_root, no_root, wrong_manager] {
+            assert!(validate_selection(&[malformed]).is_err());
+        }
+
+        let first = grant(
+            RuntimeKind::ManagerShims,
+            RuntimeManager::Rustup,
+            &directory(&home.join("brew/opt/rustup/bin")),
+            Some(&home.join(".rustup")),
+        );
+        validate_selection(std::slice::from_ref(&first)).unwrap();
+        assert!(validate_selection(&[rustup, first]).is_err());
+    }
+
+    #[test]
+    fn user_directories_join_path_after_toolchains_and_set_only_manager_homes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let local = user_directory(&directory(&home.join(".local/bin")));
+        let pyenv = grant(
+            RuntimeKind::ManagerShims,
+            RuntimeManager::Pyenv,
+            &directory(&home.join(".pyenv/shims")),
+            Some(&home.join(".pyenv")),
+        );
+        let python = home.join(".pyenv/versions/3.13.0");
+        directory(&python.join("bin"));
+        let toolchain = RuntimeGrant {
+            version: Some("3.13.0".into()),
+            ..grant(RuntimeKind::Python, RuntimeManager::Pyenv, &python, None)
+        };
+        let expected = format!(
+            "{}/bin:{}:{}:/usr/bin:/bin",
+            python.display(),
+            local.path.display(),
+            pyenv.path.display()
+        );
+        assert_eq!(
+            super::super::guard::runtime_path(&[local, pyenv, toolchain]).unwrap(),
+            expected
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{EXCLUSIVE_RUNTIME_GRANTS, RuntimeKind};
+
+    #[test]
+    fn exclusive_runtime_grants_count_the_non_multi_kinds() {
+        let kinds = [
+            RuntimeKind::Rust,
+            RuntimeKind::Node,
+            RuntimeKind::Python,
+            RuntimeKind::CargoCache,
+            RuntimeKind::CargoSource,
+            RuntimeKind::CargoIndex,
+            RuntimeKind::NpmCache,
+            RuntimeKind::PipHttpCache,
+            RuntimeKind::PipWheelCache,
+            RuntimeKind::AppleCompiler,
+            RuntimeKind::AppleSdk,
+            RuntimeKind::UserPrograms,
+            RuntimeKind::ManagerShims,
+        ];
+        assert_eq!(
+            kinds.iter().filter(|kind| !kind.is_multi()).count(),
+            EXCLUSIVE_RUNTIME_GRANTS
+        );
+    }
+
     #[test]
     fn sdk_versions_require_bounded_canonical_numeric_components() {
         for (label, expected) in [

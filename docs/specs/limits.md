@@ -70,7 +70,10 @@
 | <a id="command_snapshot_depth"></a>[`COMMAND_SNAPSHOT_DEPTH`](#command_snapshot_depth) | 32 | levels | `crates/arany/src/tools/types.rs` |
 | <a id="command_path_metadata_bytes"></a>[`COMMAND_PATH_METADATA_BYTES`](#command_path_metadata_bytes) | 16777216 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_runtime_bytes"></a>[`MAX_RUNTIME_BYTES`](#max_runtime_bytes) | 100663296 | bytes | `crates/arany/src/tools/types.rs` |
-| <a id="max_runtime_grants"></a>[`MAX_RUNTIME_GRANTS`](#max_runtime_grants) | 11 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_runtime_grants"></a>[`MAX_RUNTIME_GRANTS`](#max_runtime_grants) | 23 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_user_program_grants"></a>[`MAX_USER_PROGRAM_GRANTS`](#max_user_program_grants) | 8 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_manager_shim_grants"></a>[`MAX_MANAGER_SHIM_GRANTS`](#max_manager_shim_grants) | 4 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_discovery_path_entries"></a>[`MAX_DISCOVERY_PATH_ENTRIES`](#max_discovery_path_entries) | 32 | entries | `crates/arany/src/tools/toolchains.rs` |
 | <a id="scratch_bytes"></a>[`SCRATCH_BYTES`](#scratch_bytes) | 67108864 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="memory_bytes"></a>[`MEMORY_BYTES`](#memory_bytes) | 536870912 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_processes_or_threads"></a>[`MAX_PROCESSES_OR_THREADS`](#max_processes_or_threads) | 64 | processes or threads | `crates/arany/src/tools/types.rs` |

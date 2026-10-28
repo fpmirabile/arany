@@ -181,7 +181,7 @@ Event decoding retains owned payload records and strict current-field validation
 | `ToolPreflightRefused` | 1 |
 | `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerStopObserved`, `WorkerVerificationRecorded` | 1 |
 | `WorkspaceRewindStarted` | 2; no preview expiry |
-| `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
+| `ToolResultsCleared`, `AgentSteeringNoteRecorded`, `HostEnvironmentCapture` | 1 |
 | `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
 | `HookStarted` | 16 |

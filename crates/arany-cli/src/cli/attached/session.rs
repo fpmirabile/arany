@@ -965,7 +965,9 @@ impl AttachedSession {
         )
         .await?
         {
-            permissions::TrustAdmission::Loaded(access) => access.prepare_profile_selection(),
+            permissions::TrustAdmission::Loaded(access) => {
+                access.prepare_profile_selection(&self.admission.state_dir)
+            }
             permissions::TrustAdmission::Exit => {
                 self.ui.notice = Some(Feedback::History(
                     "Folder trust could not be loaded; existing permissions unchanged".into(),
