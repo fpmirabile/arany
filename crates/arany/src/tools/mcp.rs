@@ -222,38 +222,89 @@ async fn converse<W: Wire>(
 ) -> Result<String, ToolError> {
     let name = &server.name;
     tokio::time::timeout(Duration::from_millis(u64::from(super::types::MCP_TIMEOUT_MS)), async {
-        let init = session.request("initialize", json!({"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"arany","version":env!("CARGO_PKG_VERSION")}})).await?;
-        if init["protocolVersion"] != VERSION || !init["capabilities"]["tools"].is_object() { return Err(ToolError::ProtectionUnavailable); }
+        let init = session
+            .request(
+                "initialize",
+                json!({"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"arany","version":env!("CARGO_PKG_VERSION")}}),
+            )
+            .await?;
+        if init["protocolVersion"] != VERSION || !init["capabilities"]["tools"].is_object() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
         session.wire.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
         let tools = session.catalog(&server.tools).await?;
         if matches!(call, ToolCall::McpList { .. }) {
-            return fit_result(json!({"server":name,"protocol":VERSION,"tools":tools.values().collect::<Vec<_>>()}), result_bytes, captured);
+            return fit_result(
+                json!({"server":name,"protocol":VERSION,"tools":tools.values().collect::<Vec<_>>()}),
+                result_bytes,
+                captured,
+            );
         }
-        let ToolCall::McpCall { tool, schema_digest, arguments, .. } = call else { return Err(ToolError::Operation); };
+        let ToolCall::McpCall {
+            tool,
+            schema_digest,
+            arguments,
+            ..
+        } = call
+        else {
+            return Err(ToolError::Operation);
+        };
         let definition = tools.get(tool).ok_or(ToolError::Configuration)?;
-        if definition["sha256"].as_str() != Some(schema_digest) { return Err(ToolError::ChangedInput); }
+        if definition["sha256"].as_str() != Some(schema_digest) {
+            return Err(ToolError::ChangedInput);
+        }
         let arguments = parse_mcp_arguments(arguments)?;
-        if !compile_schema(&definition["inputSchema"])?.is_valid(&arguments) { return Err(ToolError::Configuration); }
-        let reply = session.request("tools/call", json!({"name":tool,"arguments":arguments})).await?;
-        let is_error = match reply.get("isError") { None => false, Some(value) => value.as_bool().ok_or(ToolError::Operation)? };
-        let content = reply["content"].as_array().filter(|items| items.len() <= 64).ok_or(ToolError::Operation)?;
+        if !compile_schema(&definition["inputSchema"])?.is_valid(&arguments) {
+            return Err(ToolError::Configuration);
+        }
+        let reply = session
+            .request("tools/call", json!({"name":tool,"arguments":arguments}))
+            .await?;
+        let is_error = match reply.get("isError") {
+            None => false,
+            Some(value) => value.as_bool().ok_or(ToolError::Operation)?,
+        };
+        let content = reply["content"]
+            .as_array()
+            .filter(|items| items.len() <= 64)
+            .ok_or(ToolError::Operation)?;
         let mut normalized = Vec::new();
         for item in content {
             match item["type"].as_str() {
-                Some("text") => { let text = item["text"].as_str().ok_or(ToolError::Operation)?; normalized.push(json!({"type":"text","text":text})); }
+                Some("text") => {
+                    let text = item["text"].as_str().ok_or(ToolError::Operation)?;
+                    normalized.push(json!({"type":"text","text":text}));
+                }
                 Some("resource_link") => {
-                    let uri = item["uri"].as_str().filter(|uri| uri.len() <= 2048).ok_or(ToolError::Operation)?;
+                    let uri = item["uri"]
+                        .as_str()
+                        .filter(|uri| uri.len() <= 2048)
+                        .ok_or(ToolError::Operation)?;
                     normalized.push(json!({"type":"resource_link","uri":uri,"fetch":"not authorized or performed"}));
                 }
                 _ => return Err(ToolError::Operation),
             }
         }
         let structured = reply.get("structuredContent");
-        if structured.is_some_and(|value| !value.is_object()) { return Err(ToolError::Operation); }
-        if !is_error && let Some(output) = definition.get("outputSchema")
-            && !structured.is_some_and(|value| compile_schema(output).is_ok_and(|validator| validator.is_valid(value))) { return Err(ToolError::Operation); }
-        fit_result(json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}), result_bytes, captured)
-    }).await.unwrap_or(Err(ToolError::Timeout(String::new())))
+        if structured.is_some_and(|value| !value.is_object()) {
+            return Err(ToolError::Operation);
+        }
+        if !is_error
+            && let Some(output) = definition.get("outputSchema")
+            && !structured.is_some_and(|value| {
+                compile_schema(output).is_ok_and(|validator| validator.is_valid(value))
+            })
+        {
+            return Err(ToolError::Operation);
+        }
+        fit_result(
+            json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}),
+            result_bytes,
+            captured,
+        )
+    })
+    .await
+    .unwrap_or(Err(ToolError::Timeout(String::new())))
 }
 
 pub(super) async fn execute(

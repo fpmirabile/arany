@@ -94,7 +94,11 @@ fn mcp_reply(
     exchange: &Exchange,
     mode: Mode,
     executed: &AtomicUsize,
-    (answered, requested): (&std::sync::atomic::AtomicBool, &tokio::sync::Notify),
+    (answered, requested, stop): (
+        &std::sync::atomic::AtomicBool,
+        &tokio::sync::Notify,
+        &std::sync::atomic::AtomicBool,
+    ),
     stream: &mut std::net::TcpStream,
 ) -> Option<String> {
     let host = exchange.headers.get("host").cloned().unwrap_or_default();
@@ -125,7 +129,9 @@ fn mcp_reply(
     if exchange.path == "/token" {
         requested.notify_one();
         if mode == Mode::HoldTokenReply {
-            std::thread::sleep(PAGE_IO_TIMEOUT);
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             return None;
         }
         if mode == Mode::LoseTokenReply {
@@ -245,6 +251,7 @@ fn mcp_fixture(mode: Mode) -> McpFixture {
     let port = listener.local_addr().unwrap().port();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = stop.clone();
+    let gate = stop.clone();
     let exchanges = Arc::new(Mutex::new(Vec::new()));
     let recorded = exchanges.clone();
     let executed = Arc::new(AtomicUsize::new(0));
@@ -258,11 +265,12 @@ fn mcp_fixture(mode: Mode) -> McpFixture {
             if flag.load(Ordering::SeqCst) {
                 break;
             }
-            let (recorded, count, answered, notify) = (
+            let (recorded, count, answered, notify, gate) = (
                 recorded.clone(),
                 count.clone(),
                 answered.clone(),
                 notify.clone(),
+                gate.clone(),
             );
             handlers.push(std::thread::spawn(move || {
                 stream.set_read_timeout(Some(PAGE_IO_TIMEOUT)).unwrap();
@@ -274,7 +282,7 @@ fn mcp_fixture(mode: Mode) -> McpFixture {
                     &exchange,
                     mode,
                     &count,
-                    (&answered, &notify),
+                    (&answered, &notify, &gate),
                     &mut stream,
                 );
                 if let Some(reply) = reply {

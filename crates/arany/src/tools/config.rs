@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const MAX_WORKSPACE_PATHS: usize = 32;
+pub(super) const MAX_MCP_SERVERS: usize = 4;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -250,7 +251,7 @@ impl Config {
             })
             || self.commands.len() > 8
             || self.skills.len() > MAX_SKILLS
-            || self.mcp.len() > 4
+            || self.mcp.len() > MAX_MCP_SERVERS
         {
             return Err(ToolError::Configuration);
         }

@@ -1,7 +1,8 @@
-use super::super::config::{Config, McpAuth, Server};
+use super::super::config::{MAX_MCP_SERVERS, Config, McpAuth, Server};
 use super::super::web::{MAX_URL_BYTES, valid_endpoint};
 use crate::store::{RecordFormat, RecordKind, StateRoot};
 use crate::validate::{parse_json_bounded, valid_name};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,8 +17,10 @@ use url::Url;
 pub(crate) const MAX_ACCESS_TOKEN_BYTES: usize = 4096;
 const MAX_CLIENT_ID_BYTES: usize = 256;
 const MAX_CLAIM_BYTES: usize = 64;
-const MAX_SERVERS: usize = 4;
 pub(crate) const MAX_METADATA_BYTES: usize = 64 * 1024;
+const MAX_JSON_NODES: usize = 4096;
+const MAX_JSON_DEPTH: usize = 16;
+const RANDOM_TEXT_BYTES: usize = 32;
 const MAX_CALLBACK_HEAD_BYTES: usize = 8192;
 const MAX_CALLBACK_CONNECTIONS: usize = 8;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
@@ -118,7 +121,7 @@ impl Tokens {
     fn decode(bytes: &[u8]) -> Result<Self, McpAuthError> {
         let tokens: Self = serde_json::from_slice(bytes).map_err(|_| McpAuthError::Storage)?;
         (tokens.schema == 1
-            && tokens.servers.len() <= MAX_SERVERS
+            && tokens.servers.len() <= MAX_MCP_SERVERS
             && tokens
                 .servers
                 .iter()
@@ -192,14 +195,23 @@ fn mutate<T>(
     .map_err(|_| McpAuthError::Storage)?
 }
 
+fn random_text(bytes: usize) -> Result<String, McpAuthError> {
+    let mut buffer = vec![0_u8; bytes];
+    SystemRandom::new()
+        .fill(&mut buffer)
+        .map_err(|_| McpAuthError::Unavailable)?;
+    Ok(URL_SAFE_NO_PAD.encode(buffer))
+}
+
 // Moves a still-unchanged, ready grant to Renewing; any other state means another process or a logout got there first.
 fn claim_renewal(tokens: &mut Tokens, name: &str, seen: &Grant) -> Result<Grant, McpAuthError> {
+    let claim = random_text(RANDOM_TEXT_BYTES)?;
     let grant = tokens.servers.get_mut(name).ok_or(McpAuthError::Rejected)?;
     if seen.renewal != Renewal::Ready || *grant != *seen {
         return Err(McpAuthError::Rejected);
     }
     grant.renewal = Renewal::Renewing;
-    grant.claim = Some(uuid::Uuid::new_v4().simple().to_string());
+    grant.claim = Some(claim);
     Ok(grant.clone())
 }
 
@@ -325,13 +337,9 @@ pub async fn mcp_login(
         .port();
     let redirect = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
     let client_id = register(&metadata, &redirect).await?;
-    let verifier = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
+    let verifier = random_text(RANDOM_TEXT_BYTES)?;
     let challenge = challenge(&verifier);
-    let expected_state = uuid::Uuid::new_v4().simple().to_string();
+    let expected_state = random_text(RANDOM_TEXT_BYTES)?;
     let mut authorize = Url::parse(&metadata.authorization_endpoint)
         .map_err(|_| McpAuthError::Unsupported)?;
     authorize
@@ -470,7 +478,7 @@ async fn well_known(base: &Url, document: &str) -> Option<Value> {
     url.set_query(None);
     let client = client_for(&url).await.ok()?;
     let body = read_body(client.get(url).send().await.ok()?).await.ok()?;
-    parse_json_bounded(&body, MAX_METADATA_BYTES, 4096, 16).ok()
+    parse_json_bounded(&body, MAX_METADATA_BYTES, MAX_JSON_NODES, MAX_JSON_DEPTH).ok()
 }
 
 async fn register(metadata: &Metadata, redirect: &str) -> Result<String, McpAuthError> {
@@ -480,22 +488,24 @@ async fn register(metadata: &Metadata, redirect: &str) -> Result<String, McpAuth
         .ok_or(McpAuthError::Unsupported)?;
     let url = Url::parse(endpoint).map_err(|_| McpAuthError::Unsupported)?;
     let client = client_for(&url).await?;
+    let registration = json!({
+        "client_name": "Arany",
+        "redirect_uris": [redirect],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    });
     let body = read_body(
         client
             .post(url)
-            .json(&json!({
-                "client_name": "Arany",
-                "redirect_uris": [redirect],
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-                "token_endpoint_auth_method": "none",
-            }))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&registration).map_err(|_| McpAuthError::Unavailable)?)
             .send()
             .await
             .map_err(|_| McpAuthError::Unavailable)?,
     )
     .await?;
-    parse_json_bounded(&body, MAX_METADATA_BYTES, 4096, 16)
+    parse_json_bounded(&body, MAX_METADATA_BYTES, MAX_JSON_NODES, MAX_JSON_DEPTH)
         .ok()
         .and_then(|reply| reply["client_id"].as_str().map(str::to_owned))
         .filter(|id| token_text(id, MAX_CLIENT_ID_BYTES))
@@ -552,7 +562,8 @@ fn grant_from(reply: &Value, kept_refresh: Option<String>) -> Result<Grant, McpA
 
 async fn request_token(endpoint: &str, form: &[(&str, &str)]) -> Result<Value, McpAuthError> {
     let body = post_form(endpoint, form).await?;
-    parse_json_bounded(&body, MAX_METADATA_BYTES, 4096, 16).map_err(|_| McpAuthError::Unavailable)
+    parse_json_bounded(&body, MAX_METADATA_BYTES, MAX_JSON_NODES, MAX_JSON_DEPTH)
+        .map_err(|_| McpAuthError::Unavailable)
 }
 
 async fn post_form(endpoint: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, McpAuthError> {
@@ -561,7 +572,15 @@ async fn post_form(endpoint: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, Mcp
     read_body(
         client
             .post(url)
-            .form(form)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(
+                url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(form)
+                    .finish(),
+            )
             .send()
             .await
             .map_err(|_| McpAuthError::Unavailable)?,

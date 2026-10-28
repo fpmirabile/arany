@@ -987,8 +987,7 @@ async fn read_effect_observation<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
-// The search key or MCP token reaches the Guard over the private task pipe only; it is never part of an intent, Event or digest.
-// `renewing` is set while a token renewal may be consuming the refresh token, so a stop in that window is an unknown outcome.
+// `renewing` marks a renewal that may consume the refresh token; a stop then is an unknown outcome.
 async fn secret_for(
     runtime: &ToolRuntime,
     intent: &EffectIntent,

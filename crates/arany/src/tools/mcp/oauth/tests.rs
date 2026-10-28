@@ -99,7 +99,7 @@ fn token_record_round_trips_and_rejects_unsafe_content() {
         schema: 1,
         servers: BTreeMap::new(),
     };
-    for index in 0..=MAX_SERVERS {
+    for index in 0..=MAX_MCP_SERVERS {
         crowded.servers.insert(format!("server{index}"), grant());
     }
     assert!(Tokens::decode(&serde_json::to_vec(&crowded).unwrap()).is_err());
