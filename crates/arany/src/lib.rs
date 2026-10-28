@@ -116,15 +116,15 @@ pub use tools::{
     CommandToolProbe, CommandToolRole, CommandTools, DEFAULT_PR_LIMIT, DefinitionFilePin,
     DefinitionRegistryPin, DisplayFacts, EffectIntent, EnforcementCause, FailureStage, FileChange,
     FileReceipt, FileSuggestionSource, FileVersion, GuardReceipt, GuardStageFact, HostIntent,
-    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputSpill, OutputTotal,
-    PrState, ProjectSkills, RewriteStage, RuntimeProfileOption, SUGGESTION_LIFETIME,
+    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, McpAuthError, NetworkGrant, OutputSpill,
+    OutputTotal, PrState, ProjectSkills, RewriteStage, RuntimeProfileOption, SUGGESTION_LIFETIME,
     SUGGESTION_QUERY_TIME, SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext,
     ToolDisposition, ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
     ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError,
     TrustReset, UnguardedGrant, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions,
-    command_tool_candidates, configured_skill_names, mention_paths, native_protection_supported,
-    now_ms, project_skills, recover_build_cache, runtime_skill_names, tool_guard_main,
-    tool_host_main,
+    command_tool_candidates, configured_skill_names, mcp_login, mcp_logout, mention_paths,
+    native_protection_supported, now_ms, project_skills, recover_build_cache, runtime_skill_names,
+    tool_guard_main, tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

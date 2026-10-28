@@ -101,6 +101,9 @@
 | <a id="max_url_bytes"></a>[`MAX_URL_BYTES`](#max_url_bytes) | 2048 | bytes | `crates/arany/src/tools/web.rs` |
 | <a id="max_query_bytes"></a>[`MAX_QUERY_BYTES`](#max_query_bytes) | 512 | bytes | `crates/arany/src/tools/web.rs` |
 | <a id="max_search_field_chars"></a>[`MAX_SEARCH_FIELD_CHARS`](#max_search_field_chars) | 512 | characters per search result field | `crates/arany/src/tools/web.rs` |
+| <a id="max_mcp_response_bytes"></a>[`MAX_MCP_RESPONSE_BYTES`](#max_mcp_response_bytes) | 524288 | bytes per remote MCP HTTP response | `crates/arany/src/tools/mcp/remote.rs` |
+| <a id="max_access_token_bytes"></a>[`MAX_ACCESS_TOKEN_BYTES`](#max_access_token_bytes) | 4096 | bytes | `crates/arany/src/tools/mcp/oauth.rs` |
+| <a id="max_metadata_bytes"></a>[`MAX_METADATA_BYTES`](#max_metadata_bytes) | 65536 | bytes per authorization-server response | `crates/arany/src/tools/mcp/oauth.rs` |
 | <a id="max_markdown_parse_bytes"></a>[`MAX_MARKDOWN_PARSE_BYTES`](#max_markdown_parse_bytes) | 32768 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_depth"></a>[`MAX_MARKDOWN_DEPTH`](#max_markdown_depth) | 32 | containers | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_events"></a>[`MAX_MARKDOWN_EVENTS`](#max_markdown_events) | 65536 | events | `crates/arany-cli/src/terminal/markdown.rs` |

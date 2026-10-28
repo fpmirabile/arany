@@ -32,6 +32,9 @@ mod network;
 mod web;
 pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
+pub(crate) use mcp::MAX_MCP_RESPONSE_BYTES;
+pub(crate) use mcp::oauth::{MAX_ACCESS_TOKEN_BYTES, MAX_METADATA_BYTES, MCP_OAUTH};
+pub use mcp::oauth::{McpAuthError, mcp_login, mcp_logout};
 pub(crate) use network::{
     MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, NETWORK_IDLE_MS,
 };
@@ -468,11 +471,12 @@ fn admission_resources(
     state: &StateRoot,
     account: &Path,
 ) -> Result<(), ToolError> {
-    for program in config
-        .commands
-        .iter()
-        .chain(config.mcp.iter().map(|server| &server.program))
-    {
+    for program in config.commands.iter().chain(
+        config
+            .mcp
+            .iter()
+            .filter_map(|server| server.program.as_ref()),
+    ) {
         program.verify()?;
     }
     if let Some(git) = &config.git {
@@ -1361,7 +1365,7 @@ impl ToolRuntime {
             "command_contract": catalog::COMMAND_CONTRACT,
             "host_commands": true,
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
+            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| server.catalog_row(catalog::MCP_PROTOCOL)).collect::<Vec<_>>(),
             "git": if self.guard_available && self.config.git_available() {
                 let write = self.config.write && self.git_writes_available;
                 let operations: Vec<_> = catalog::git_operations(write, true)
@@ -1512,7 +1516,7 @@ impl ToolRuntime {
             "file_tools": if self.guard_available { catalog::RESEARCH_FILE_TOOLS } else { "" },
             "commands": [],
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
+            "mcp_servers": self.config.mcp.iter().filter(|server| self.guard_available && server.url.is_none()).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
             "tool_calls_remaining": tool_calls_remaining,
         });
         if self.config.child_web && self.guard_available && cfg!(target_os = "linux") {

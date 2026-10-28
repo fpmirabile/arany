@@ -31,6 +31,7 @@ pub const RECORD_FORMATS: [&RecordFormat; 6] = [
     &crate::tools::command_environment::COMMAND_ENVIRONMENT,
     &crate::tools::command_tools::COMMAND_TOOLS,
     &crate::provider::PROVIDER_PROFILES,
+    &crate::tools::MCP_OAUTH,
 ];
 
 impl RecordFormat {

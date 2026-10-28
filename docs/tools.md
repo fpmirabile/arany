@@ -35,7 +35,9 @@ Use [slash completion](./specs/terminal.md#interactive-commands-and-completion) 
 
 ## Local MCP
 
-Follow the [local MCP configuration](./specs/tools.md#local-mcp) for pinned server inputs, fixed arguments and allowed tool names. This offline stdio profile supports local data/computation rather than external APIs or credentialed services.
+Follow the [local MCP configuration](./specs/tools.md#local-mcp) for pinned server inputs, fixed arguments and allowed tool names. The stdio profile is offline and supports local data/computation rather than external APIs or credentialed services.
+
+On Linux an `mcp` entry with `"url": "https://…"` and `"auth": "oauth"` is a [remote server](./specs/tools.md#remote-mcp-and-oauth) reached through the egress proxy. Run `arany mcp login <server>`, open the printed URL and approve; `arany mcp logout <server>` revokes and removes the saved token. A call without a valid token fails with an `unauthorized` result naming that command.
 
 ## Limits and failure behavior
 

@@ -677,12 +677,12 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     unprivileged_helper()?;
     let root = command_root(task)?;
     let mut required_system_programs = Vec::new();
-    for program in task
-        .config
-        .commands
-        .iter()
-        .chain(task.config.mcp.iter().map(|server| &server.program))
-    {
+    for program in task.config.commands.iter().chain(
+        task.config
+            .mcp
+            .iter()
+            .filter_map(|server| server.program.as_ref()),
+    ) {
         program.verify()?;
         if system_program(&program.executable)? {
             required_system_programs.push(PathBuf::from(&program.executable));
