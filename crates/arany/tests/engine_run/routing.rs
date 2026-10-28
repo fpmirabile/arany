@@ -2015,6 +2015,75 @@ async fn a_single_route_boundary_compaction_retries_a_transient_failure_then_sav
 }
 
 #[tokio::test]
+async fn api_compaction_observations_reopen_only_after_committed_settlement() {
+    for case in ["success", "error", "append failure"] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let response = if case == "error" {
+            Err(ProviderError::RemoteHttp(401))
+        } else {
+            Ok(CompactionResponse {
+                summary: "summary".into(),
+                response_id: None,
+                usage: arany::Usage::default(),
+                wire_provenance: None,
+            })
+        };
+        let mut provider = ScriptedProvider::new(vec![finish("done")])
+            .with_profile("openai", "model-a")
+            .with_saved_api_account(Uuid::now_v7())
+            .with_compactions(vec![response]);
+        provider
+            .compact_rate_limits
+            .get_mut()
+            .unwrap()
+            .push_back(Some(api_sample(1000)));
+        let provider = route(provider);
+        let engine = open(&state);
+        let run = run_to_end(&engine, &provider, input(&workspace))
+            .await
+            .unwrap();
+        if case == "append failure" {
+            arany::FaultPlan::fail_goal_append(run.session_id, |event| {
+                matches!(event, Event::ContextCompacted { .. })
+            });
+        }
+        let outcome = engine
+            .compact_session(&routes(&provider), run.session_id, workspace)
+            .await;
+        let _ = engine.close().await;
+        let (events, view) = reopen(&state, run.session_id).await;
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
+        if case == "append failure" {
+            assert!(outcome.is_err());
+            assert!(view.compactions.is_empty());
+            assert!(view.usage.api_limits.is_empty());
+        } else {
+            let record = outcome.unwrap();
+            assert_eq!(record.rate_limits, Some(api_sample(1000)));
+            assert_eq!(
+                matches!(record.status, CompactionStatus::Succeeded { .. }),
+                case == "success"
+            );
+            assert!(events.iter().any(|event| matches!(
+                &event.event,
+                Event::ContextCompacted { record: committed, .. } if committed == &record
+            )));
+            let group = &view.usage.api_limits[0];
+            assert_eq!(group.run_id, run.run.id);
+            assert_eq!(group.role, ProviderRole::Compaction);
+            assert_eq!(group.identity.profile, provider.identity().profile);
+            assert_eq!(group.identity.model, provider.identity().model);
+            assert_eq!(group.identity.provenance, provider.identity().provenance);
+            assert_eq!(group.rows, api_sample(1000).api.unwrap().rows);
+        }
+    }
+}
+
+#[tokio::test]
 async fn plan_observations_settle_each_attempt_and_replay_without_dispatch_or_backfill() {
     for cancelled in [false, true] {
         let temp = tempfile::tempdir().unwrap();
