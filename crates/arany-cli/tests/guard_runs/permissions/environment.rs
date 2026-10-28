@@ -5,6 +5,17 @@ use arany::{
 
 #[tokio::test]
 async fn login_capture_decline_is_journaled_and_each_capture_needs_a_fresh_human() {
+    let login_shell = nix::unistd::User::from_uid(nix::unistd::geteuid())
+        .unwrap()
+        .unwrap()
+        .shell;
+    if !matches!(
+        login_shell.file_name().and_then(|name| name.to_str()),
+        Some("zsh" | "bash" | "sh")
+    ) {
+        eprintln!("skipped: the login shell is not one that environment capture supports");
+        return;
+    }
     let fixture = Fixture::new(None, false);
     let session = fixture
         .engine
@@ -21,11 +32,10 @@ async fn login_capture_decline_is_journaled_and_each_capture_needs_a_fresh_human
             .engine
             .capture_command_environment(session, &fixture.workspace, |intent| {
                 asks += 1;
-                let shell = nix::unistd::User::from_uid(nix::unistd::geteuid())
-                    .unwrap()
-                    .unwrap()
-                    .shell;
-                assert_eq!(Path::new(&intent.shell.path), shell.canonicalize().unwrap());
+                assert_eq!(
+                    Path::new(&intent.shell.path),
+                    login_shell.canonicalize().unwrap()
+                );
                 std::future::ready(arany::ApprovalReply::Deny)
             })
             .await

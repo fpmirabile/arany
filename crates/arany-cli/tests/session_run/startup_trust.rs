@@ -8,6 +8,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(target_os = "linux")]
+mod login_shell;
 
 #[test]
 #[cfg(target_os = "linux")]
@@ -1753,6 +1755,31 @@ fn login_shell_capture_requires_review_and_preserves_private_values() {
 }
 
 #[cfg(target_os = "linux")]
+fn until(
+    output: &mut std::process::ChildStdout,
+    input: &mut std::process::ChildStdin,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    what: &str,
+    ready: &dyn Fn(&[u8]) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready(transcript) {
+        super::session_picker::pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "{what}: {}",
+            super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
+        );
+        thread::yield_now();
+    }
+}
+#[cfg(target_os = "linux")]
+fn shows(needle: &'static str) -> impl Fn(&[u8]) -> bool {
+    move |transcript: &[u8]| super::session_picker::screen_contains(transcript, 80, 24, needle)
+}
+
+#[cfg(target_os = "linux")]
 enum PermissionsJourney {
     TypedRules,
     LoginShellCapture,
@@ -1806,28 +1833,6 @@ fn run_permissions_journey(journey: PermissionsJourney) {
     let mut transcript = Vec::new();
     let mut answered = crate::session_picker::PtyResponses::manual_consent();
     let file = state.join("permissions.json");
-    fn until(
-        output: &mut std::process::ChildStdout,
-        input: &mut std::process::ChildStdin,
-        transcript: &mut Vec<u8>,
-        answered: &mut crate::session_picker::PtyResponses,
-        what: &str,
-        ready: &dyn Fn(&[u8]) -> bool,
-    ) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready(transcript) {
-            super::session_picker::pump(output, input, transcript, answered);
-            assert!(
-                Instant::now() < deadline,
-                "{what}: {}",
-                super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
-            );
-            thread::yield_now();
-        }
-    }
-    let shows = |needle: &'static str| {
-        move |transcript: &[u8]| super::session_picker::screen_contains(transcript, 80, 24, needle)
-    };
     until(
         &mut output,
         &mut input,
@@ -1899,118 +1904,12 @@ fn run_permissions_journey(journey: PermissionsJourney) {
         &shows("Select a name from the Arany process"),
     );
     if matches!(journey, PermissionsJourney::LoginShellCapture) {
-        macro_rules! review_capture {
-            () => {
-                loop {
-                    until(
-                        &mut output,
-                        &mut input,
-                        &mut transcript,
-                        &mut answered,
-                        "capture approval review",
-                        &|screen| shows("Read all pages")(screen) || shows("Tab/Enter")(screen),
-                    );
-                    if shows("Tab/Enter")(&transcript) {
-                        break;
-                    }
-                    let page = super::session_picker::screen_rows(&transcript, 80, 24)
-                        .into_iter()
-                        .find(|line| line.contains("PgDn/Enter"));
-                    input.write_all(b"\r").unwrap();
-                    until(
-                        &mut output,
-                        &mut input,
-                        &mut transcript,
-                        &mut answered,
-                        "next capture review page",
-                        &|screen| {
-                            shows("Tab/Enter")(screen)
-                                || (shows("Read all pages")(screen)
-                                    && super::session_picker::screen_rows(screen, 80, 24)
-                                        .into_iter()
-                                        .find(|line| line.contains("PgDn/Enter"))
-                                        != page)
-                        },
-                    );
-                }
-            };
-        }
-        let environment_file = state.join("command-environment.json");
-        let previous = std::fs::read(&environment_file).unwrap();
-        input.write_all(b"\x1b[B\r").unwrap();
-        review_capture!();
-        input.write_all(b"\r").unwrap();
-        until(
+        login_shell::review_login_shell_capture(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            "capture declined",
-            &shows("Login-shell capture declined"),
-        );
-        assert_eq!(std::fs::read(&environment_file).unwrap(), previous);
-        input.write_all(b"/permissions\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "capture area",
-            &shows("Network domains"),
-        );
-        input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "capture page",
-            &shows("Select a name from the Arany process"),
-        );
-        input.write_all(b"\x1b[B\r").unwrap();
-        review_capture!();
-        input.write_all(b"\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "capture saved",
-            &shows("Login-shell environment captured"),
-        );
-        let captured_bytes = std::fs::read(&environment_file).unwrap();
-        let captured: serde_json::Value = serde_json::from_slice(&captured_bytes).unwrap();
-        assert_eq!(captured["source"], "login-shell");
-        assert_eq!(captured["path"], serde_json::json!(["/bin", "/usr/bin"]));
-        assert!(captured["shell"]["sha256"].as_str().is_some());
-        for bytes in [
-            &captured_bytes,
-            &transcript,
-            &std::fs::read(state.join("events.sqlite3")).unwrap(),
-        ] {
-            assert!(
-                !bytes
-                    .windows(b"CAPTURE_SECRET_CANARY".len())
-                    .any(|part| part == b"CAPTURE_SECRET_CANARY")
-            );
-        }
-        input.write_all(b"/permissions\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "environment cancellation area",
-            &shows("Network domains"),
-        );
-        input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "command environment page",
-            &shows("Select a name from the Arany process"),
+            &state,
         );
     }
     input.write_all(b"\x1b").unwrap();
