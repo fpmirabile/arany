@@ -634,17 +634,16 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
     }
 }
 
-#[tokio::test]
-async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
+async fn timed_out_command(maximum: u32) -> (Fixture, arany::RunOutcome) {
     let mut fixture = Fixture::new(None, true);
-    fixture.command_maximum = Some(1_000);
+    fixture.command_maximum = Some(maximum);
     let call = arany::ToolCall::Command {
         program: "sh".into(),
         args: vec!["-c".into(), "printf 'head\\n'; printf '%100000s' ''; printf 'tail\\n'; printf 'partial error\\n' >&2; printf changed > notes/new.txt; sleep 20".into()],
         cwd: "".into(),
     };
     let mut plan = plan(&call);
-    plan.command_timeout_ms = Some(1_000);
+    plan.command_timeout_ms = Some(maximum);
     let (result, _, _) = fixture
         .run(
             vec![
@@ -656,6 +655,12 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
             false,
         )
         .await;
+    (fixture, result)
+}
+
+#[tokio::test]
+async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
+    let (fixture, result) = timed_out_command(1_000).await;
     let observation = result.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(
         observation.disposition,
@@ -663,10 +668,25 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
         "{}",
         tool_report(Some(observation))
     );
-    assert!(matches!(
-        observation.attestation,
-        Some(arany::Attestation::Guard(_))
-    ));
+    assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+    assert!(!fixture.workspace.join("notes/new.txt").exists());
+}
+
+#[tokio::test]
+async fn a_timed_out_command_keeps_attested_bounded_partial_output() {
+    let (fixture, result) = timed_out_command(10_000).await;
+    let observation = result.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.disposition,
+        arany::ToolDisposition::Limit,
+        "{}",
+        tool_report(Some(observation))
+    );
+    assert!(
+        matches!(observation.attestation, Some(arany::Attestation::Guard(_))),
+        "{}",
+        tool_report(Some(observation))
+    );
     assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
     let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
     assert_eq!(command["exit_code"], Value::Null);

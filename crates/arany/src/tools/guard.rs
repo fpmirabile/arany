@@ -46,6 +46,7 @@ mod linux;
 mod network;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
+pub(super) use network::set_environment as set_proxy_environment;
 #[cfg(target_os = "linux")]
 mod profile;
 #[cfg(target_os = "linux")]
@@ -56,19 +57,14 @@ pub(super) fn git_writes_available() -> bool {
     {
         landlock::available()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         false
     }
-}
-
-// macOS offers branch creation and commits until its units cover switches.
-pub(super) fn git_branch_creation_available() -> bool {
-    cfg!(target_os = "macos") || git_writes_available()
-}
-
-pub(super) fn git_commit_available() -> bool {
-    git_branch_creation_available()
 }
 
 #[cfg(target_os = "macos")]
@@ -93,6 +89,7 @@ mod cache_directory;
 mod cache_recovery;
 pub use cache_recovery::recover_build_cache;
 pub(super) mod selection_phase;
+mod shell;
 pub(super) mod transfer;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
@@ -158,6 +155,9 @@ struct Task {
     #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_stage: Option<GitStage>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_port: Option<u16>,
     #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     git_fault: Option<crate::fault::git_write::GitWriteStage>,
@@ -475,6 +475,7 @@ pub enum GuardCheck {
     SelectionTimedOut,
     SelectionInputVanished,
     SelectionInputConflict,
+    ShellArguments,
 }
 
 impl GuardCheck {
@@ -498,7 +499,8 @@ impl GuardCheck {
             | Self::ControllerFailed
             | Self::PayloadTimeout
             | Self::PayloadLimit
-            | Self::PayloadFailed => None,
+            | Self::PayloadFailed
+            | Self::ShellArguments => None,
         }
     }
 
@@ -523,6 +525,9 @@ impl GuardCheck {
             Self::SelectionTimedOut => "project selection timed out",
             Self::SelectionInputVanished => "project input vanished",
             Self::SelectionInputConflict => "project input conflict",
+            Self::ShellArguments => {
+                "pinned shell requires -c SCRIPT; login, interactive and script-file forms are refused"
+            }
         }
     }
 }
@@ -970,11 +975,24 @@ async fn read_discovery_report<R: tokio::io::AsyncBufRead + Unpin>(
     read_worker_report(reader, intent).await
 }
 
+impl ToolRuntime {
+    pub(crate) fn refuses_shell_arguments(&self, call: &ToolCall) -> bool {
+        let Err(ToolError::GuardBootstrap(failure)) = shell::validate_command(&self.config, call)
+        else {
+            return false;
+        };
+        failure.check == Some(GuardCheck::ShellArguments)
+    }
+}
+
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     cancellation: Cancellation,
 ) -> Result<ToolObservation, ToolError> {
+    if let Err(error) = shell::validate_command(&runtime.config, &intent.call) {
+        return dispatch_result(intent, false, Err(error));
+    }
     if let Err(error) = check_available() {
         return dispatch_result(intent, false, Err(error));
     }
@@ -1734,6 +1752,8 @@ pub(super) struct GuardContext<'a> {
     pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "macos")]
     pub(super) git: GitWork,
+    #[cfg(target_os = "macos")]
+    proxy_port: Option<u16>,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
@@ -2011,6 +2031,8 @@ pub(super) fn helper_main() -> ExitCode {
             git_plan: Default::default(),
             #[cfg(target_os = "macos")]
             git,
+            #[cfg(target_os = "macos")]
+            proxy_port: task.proxy_port,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
@@ -2109,13 +2131,8 @@ fn prefix_shell_runtime_compat(
     if !args.first().is_some_and(|arg| arg == "-c") {
         return Ok(());
     }
-    let script = args.get_mut(1).ok_or(ToolError::Configuration)?;
-    let text = script.to_str().ok_or(ToolError::Path)?;
-    // Shells parse options after -c; reject ambiguous script positions before changing argv.
-    if text.starts_with(['-', '+']) {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    *script = format!(
+    let text = shell::script(args)?;
+    args[1] = format!(
         "export DYLD_INSERT_LIBRARIES='{}'\n{text}",
         path.replace('\'', "'\\''"),
     )
@@ -2193,7 +2210,6 @@ pub(super) fn payload(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    network::set_environment(&mut command, limits);
     #[cfg(target_os = "macos")]
     let payload_args = {
         let mut args = payload_args;
@@ -2564,14 +2580,16 @@ mod tests {
             let original = args.clone();
             assert!(matches!(
                 prefix_shell_runtime_compat(&mut args, path),
-                Err(ToolError::ProtectionUnavailable)
+                Err(ToolError::GuardBootstrap(failure))
+                    if failure.check == Some(GuardCheck::ShellArguments)
             ));
             assert_eq!(args, original);
         }
         let mut missing = [OsString::from("-c")];
         assert!(matches!(
             prefix_shell_runtime_compat(&mut missing, path),
-            Err(ToolError::Configuration)
+            Err(ToolError::GuardBootstrap(failure))
+                if failure.check == Some(GuardCheck::ShellArguments)
         ));
         let mut file = [OsString::from("script.sh"), OsString::from("-c")];
         let original = file.clone();
@@ -2607,6 +2625,8 @@ mod tests {
             system_programs: None,
             #[cfg(target_os = "macos")]
             git_stage: None,
+            #[cfg(target_os = "macos")]
+            proxy_port: None,
             #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
             git_fault: None,
         };
@@ -2707,6 +2727,8 @@ mod tests {
             system_programs: None,
             #[cfg(target_os = "macos")]
             git_stage: None,
+            #[cfg(target_os = "macos")]
+            proxy_port: None,
             #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
             git_fault: None,
         };
@@ -3379,7 +3401,7 @@ mod tests {
         }
     }
 
-    fn intent(call: ToolCall) -> EffectIntent {
+    pub(super) fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
             rewrite: Vec::new(),
@@ -4286,6 +4308,8 @@ mod tests {
                 system_programs: None,
                 #[cfg(target_os = "macos")]
                 git_stage: None,
+                #[cfg(target_os = "macos")]
+                proxy_port: None,
                 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
                 git_fault: None,
             };

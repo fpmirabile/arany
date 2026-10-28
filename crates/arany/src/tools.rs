@@ -1358,13 +1358,10 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.guard_available && self.config.git_available() {
-                let write = self.config.write
-                    && (self.git_writes_available || guard::git_branch_creation_available());
+                let write = self.config.write && self.git_writes_available;
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
-                        "git_commit" => self.git_writes_available || cfg!(target_os = "macos"),
-                        "git_switch" => self.git_writes_available,
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()

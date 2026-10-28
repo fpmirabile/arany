@@ -161,13 +161,13 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 }
 
 #[test]
-fn network_grant_is_closed_pinned_and_linux_only() {
+fn network_grant_is_closed_and_pinned() {
     let base = config_value();
     let mut value = base.clone();
     value["network"] = json!({"allow": ["example.com", "*.pypi.org", "127.0.0.1"]});
     let bytes = serde_json::to_vec(&value).unwrap();
     let parsed = Config::parse(&bytes);
-    assert_eq!(parsed.is_ok(), cfg!(target_os = "linux"));
+    assert!(parsed.is_ok());
     let config: Config = serde_json::from_value(value.clone()).unwrap();
     assert_ne!(
         config.digest(),

@@ -258,11 +258,11 @@ impl CommandEnvironment {
             .collect()
     }
 
+    // Capture time is informational; keeping it out of the identity keeps the pinned digest stable across state roots.
     fn canonical(&self) -> Vec<u8> {
         serde_json::to_vec(&(
             self.version,
             self.source,
-            self.captured_at,
             &self.path,
             &self.names,
             &self.excluded,
