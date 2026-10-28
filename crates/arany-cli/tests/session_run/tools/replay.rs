@@ -1713,9 +1713,13 @@ pub(super) async fn native_command_changeset_corpus(
                 timeout_ms: None,
             }
         } else if case == "partial" {
-            ToolCall::Command { program: program.into(), args: vec!["-c".into(), "set -eu; chmod u+w src/z; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()], cwd: "".into()     resource_class: None,
-     timeout_ms: None,
- }
+            ToolCall::Command {
+                program: program.into(),
+                args: vec!["-c".into(), "set -eu; chmod u+w src/z; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()],
+                cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
+            }
         } else if case == "large-changeset" {
             ToolCall::Command {
                 program: program.into(),
