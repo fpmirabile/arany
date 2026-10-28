@@ -23,7 +23,10 @@ use crate::{
         FRAME_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
         NETWORK_IDLE_MS, WRITE_FRAME_BYTES,
         permissions::MAX_CONFIG_BYTES,
-        toolchains::MAX_RUNTIME_GRANTS,
+        toolchains::{
+            MAX_DISCOVERY_PATH_ENTRIES, MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS,
+            MAX_USER_PROGRAM_GRANTS,
+        },
         types::{
             COMMAND_COMPARE_BYTES_PER_UPPER_BYTE, COMMAND_PATH_METADATA_BYTES,
             COMMAND_SCAN_ENTRIES, COMMAND_SNAPSHOT_BYTES, COMMAND_SNAPSHOT_DEPTH,
@@ -446,6 +449,24 @@ pub const LIMITS: LimitsTable = LimitsTable {
             name: "MAX_RUNTIME_GRANTS",
             value: MAX_RUNTIME_GRANTS as u64,
             unit: "roots",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_USER_PROGRAM_GRANTS",
+            value: MAX_USER_PROGRAM_GRANTS as u64,
+            unit: "roots",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_MANAGER_SHIM_GRANTS",
+            value: MAX_MANAGER_SHIM_GRANTS as u64,
+            unit: "roots",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_DISCOVERY_PATH_ENTRIES",
+            value: MAX_DISCOVERY_PATH_ENTRIES as u64,
+            unit: "entries",
             owner: "crates/arany/src/tools/toolchains.rs",
         },
         Limit {
