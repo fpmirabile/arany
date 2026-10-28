@@ -163,9 +163,12 @@ pub(super) async fn roundtrip() {
             "chatgpt-{}",
             URL_SAFE_NO_PAD.encode(Sha256::digest(credentials.client_id.as_bytes()))
         );
-        let record = serde_json::to_string(
-            &serde_json::json!({"schema":1,"credentials":credentials,"consent":consent}),
-        )
+        let record = serde_json::to_string(&serde_json::json!({
+            "schema": crate::accounts::chatgpt::account::TOKEN_RECORD_SCHEMA,
+            "slot": slot,
+            "credentials": credentials,
+            "consent": consent,
+        }))
         .unwrap();
         keyring_helper::write(&slot, &record).unwrap();
         assert!(

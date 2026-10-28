@@ -323,7 +323,7 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
         let outcome = sign_out_at_with(
             &state,
             &workspace,
-            |_, _, _| panic!("file account must not read keyring"),
+            |_| panic!("file account must not read keyring"),
             |saved| {
                 assert_eq!(saved.refresh_token, "synthetic-refresh");
                 let pending = AccountIndex::read(&state).unwrap();
@@ -414,7 +414,8 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     )
     .unwrap();
     let token = TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
+        slot: Some(account_keyring_slot("oaiapp_keyring_signout", id)),
         credentials,
         consent,
     };
@@ -431,15 +432,15 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
             expected_index: Some(&expected_index),
         },
         SignOutActions {
-            read_keyring: |client: &str, subject: &str, host: Uuid| {
-                assert_eq!(client, token.credentials.client_id);
-                assert_eq!(subject, token.credentials.subject);
-                assert_eq!(host, token.credentials.host_id);
+            read_keyring: |entry: &AccountEntry| {
+                assert_eq!(entry.client_id, token.credentials.client_id);
+                assert_eq!(entry.subject, token.credentials.subject);
+                assert_eq!(entry.host_id, token.credentials.host_id);
                 Ok(token.clone())
             },
             revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
             delete_keyring: |slot: &str| {
-                assert_eq!(slot, keyring_slot("oaiapp_keyring_signout"));
+                assert_eq!(slot, account_keyring_slot("oaiapp_keyring_signout", id));
                 Err(AuthorizationError::Unavailable)
             },
         },
@@ -463,9 +464,7 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
             expected_index: None,
         },
         SignOutActions {
-            read_keyring: |_: &str, _: &str, _: Uuid| {
-                panic!("disconnected account must not load token")
-            },
+            read_keyring: |_: &AccountEntry| panic!("disconnected account must not load token"),
             revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
             delete_keyring: |_: &str| Ok(()),
         },
@@ -497,7 +496,7 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
             AccountStorage::Keyring,
             Some(id),
             |slot| {
-                assert_eq!(slot, keyring_slot("oaiapp_keyring_signout"));
+                assert_eq!(slot, account_keyring_slot("oaiapp_keyring_signout", id));
                 let blocked = AccountIndex::read(&state).unwrap();
                 assert!(blocked.accounts[0].plan_permission_missing);
                 assert!(blocked.accounts[0].disconnected);
@@ -580,7 +579,7 @@ fn unreadable_keyring_still_disconnects_before_cleanup() {
     let outcome = sign_out_at_with(
         &state,
         &workspace,
-        |_, _, _| {
+        |_| {
             let pending = AccountIndex::read(&state).unwrap();
             assert!(pending.accounts[0].signout_pending);
             assert!(!pending.accounts[0].renewal_pending);
@@ -682,13 +681,15 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
     let credentials = credentials("oaiapp_terminal_keyring", "subject-one");
     let id = Uuid::now_v7();
     AccountIndex {
-        schema: 2,
+        schema: CHATGPT_ACCOUNTS.current as u8,
         selected: Some(id),
         accounts: vec![AccountEntry {
             id,
             host_id: credentials.host_id,
             client_id: credentials.client_id,
             subject: credentials.subject,
+            chatgpt_account_id: None,
+            keyring_slot: Some(account_keyring_slot("oaiapp_terminal_keyring", id)),
             storage: AccountStorage::Keyring,
             renewal_pending: true,
             signout_pending: false,
@@ -710,7 +711,7 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
     let mut index = AccountIndex::read(&state).unwrap();
     assert!(matches!(
         disconnect_unusable_refresh_with(&state, &mut index, 0, |slot| {
-            assert_eq!(slot, keyring_slot("oaiapp_terminal_keyring"));
+            assert_eq!(slot, account_keyring_slot("oaiapp_terminal_keyring", id));
             let blocked = AccountIndex::read(&state).unwrap();
             assert!(blocked.accounts[0].disconnected);
             assert!(blocked.model_checks.is_empty());
@@ -775,8 +776,6 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
     std::fs::create_dir(&workspace).expect("workspace");
     let state = StateRoot::admit(&temp.path().join("state")).expect("private account state");
     let client_id = format!("oaiapp_native_{}", Uuid::now_v7().simple());
-    let slot = keyring_slot(&client_id);
-    let _cleanup = Cleanup(slot.clone());
     let executable = std::env::var_os("ARANY_TEST_EXE").expect("set ARANY_TEST_EXE to built arany");
     let first = credentials(&client_id, "synthetic-subject");
     let consent = RiskPrompt::new(AccountStorage::Keyring)
@@ -784,14 +783,17 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
         .expect("test risk acceptance")
         .bind(&first)
         .expect("test consent");
+    let id = save_keyring_at(&state, &workspace, first.clone(), consent.clone(), None)
+        .expect("save synthetic subscription record");
+    let slot = account_keyring_slot(&client_id, id);
+    let _cleanup = Cleanup(slot.clone());
     let record = serde_json::to_vec(&TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
+        slot: Some(slot.clone()),
         credentials: first.clone(),
-        consent: consent.clone(),
+        consent,
     })
     .expect("synthetic token record");
-    let id = save_keyring_at(&state, &workspace, first.clone(), consent, None)
-        .expect("save synthetic subscription record");
     let read = product_helper(&executable, "read", &slot, None);
     assert!(read.status.success() && read.stdout == record);
     let rejected = product_helper(&executable, "write", &slot, Some(b"invalid record"));
@@ -811,7 +813,8 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
         .bind(&replacement)
         .expect("replacement consent");
     let replacement_record = serde_json::to_vec(&TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
+        slot: Some(slot.clone()),
         credentials: replacement.clone(),
         consent: consent.clone(),
     })
@@ -868,37 +871,855 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
     );
 }
 
-#[test]
-fn keyring_slot_and_consent_bind_token_to_its_registration() {
-    let credentials = credentials("oaiapp_first", "subject-one");
-    let consent = RiskPrompt::new(AccountStorage::Keyring)
+fn keyring_consent(credentials: &VerifiedCredentials) -> ConsentReceipt {
+    RiskPrompt::new(AccountStorage::Keyring)
         .accept("Accept")
         .unwrap()
-        .bind(&credentials)
-        .unwrap();
-    let record = serde_json::to_vec(&TokenRecord {
-        schema: 1,
-        credentials,
-        consent,
-    })
-    .unwrap();
-    let slot = keyring_slot("oaiapp_first");
+        .bind(credentials)
+        .unwrap()
+}
+
+fn token_record_json(
+    schema: u8,
+    slot: Option<&str>,
+    credentials: &VerifiedCredentials,
+) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "schema": schema,
+        "credentials": credentials,
+        "consent": keyring_consent(credentials),
+    });
+    if let Some(slot) = slot {
+        value["slot"] = slot.into();
+    }
+    value
+}
+
+fn keyring_entry(id: Uuid, credentials: &VerifiedCredentials, slot: String) -> AccountEntry {
+    AccountEntry {
+        id,
+        host_id: credentials.host_id,
+        client_id: credentials.client_id.clone(),
+        subject: credentials.subject.clone(),
+        chatgpt_account_id: None,
+        keyring_slot: Some(slot),
+        storage: AccountStorage::Keyring,
+        renewal_pending: false,
+        signout_pending: false,
+        disconnected: false,
+        plan_permission_missing: false,
+        token: None,
+    }
+}
+
+fn to_version_two_shape(value: &mut serde_json::Value) {
+    for entry in value["accounts"].as_array_mut().unwrap() {
+        let entry = entry.as_object_mut().unwrap();
+        entry.remove("keyring_slot");
+        entry.remove("chatgpt_account_id");
+        if let Some(token) = entry.get_mut("token").and_then(|t| t.as_object_mut()) {
+            token.insert("schema".into(), LEGACY_TOKEN_RECORD_SCHEMA.into());
+            token.remove("slot");
+        }
+    }
+}
+
+fn version_two_value(index: &AccountIndex) -> serde_json::Value {
+    let mut value = serde_json::to_value(index).unwrap();
+    value["schema"] = 2.into();
+    to_version_two_shape(&mut value);
+    value
+}
+
+fn as_version_two(index: &AccountIndex) -> Vec<u8> {
+    serde_json::to_vec(&version_two_value(index)).unwrap()
+}
+
+#[test]
+fn keyring_slot_and_consent_bind_token_to_its_record() {
+    let id = Uuid::now_v7();
+    let creds = credentials("oaiapp_first", "subject-one");
+    let slot = account_keyring_slot("oaiapp_first", id);
+    let value = token_record_json(TOKEN_RECORD_SCHEMA, Some(&slot), &creds);
+    let record = serde_json::to_vec(&value).unwrap();
     assert!(valid_keyring_record(&slot, &record));
+    assert!(valid_written_keyring_record(&slot, &record));
+    let foreign = account_keyring_slot("oaiapp_first", Uuid::now_v7());
+    assert!(!valid_keyring_record(&foreign, &record));
     assert!(!valid_keyring_record(
-        &keyring_slot("oaiapp_other"),
+        &legacy_keyring_slot("oaiapp_first"),
         &record
     ));
     assert!(!valid_keyring_record(
         &slot,
         &vec![b'x'; MAX_TOKEN_RECORD_BYTES + 1]
     ));
-
-    let mut changed: serde_json::Value = serde_json::from_slice(&record).unwrap();
+    assert!(!valid_written_keyring_record(
+        &slot,
+        &vec![b'x'; MAX_TOKEN_RECORD_BYTES + 1]
+    ));
+    let mut changed = value.clone();
     changed["credentials"]["subject"] = "other-subject".into();
     assert!(!valid_keyring_record(
         &slot,
         &serde_json::to_vec(&changed).unwrap()
     ));
+    let mut unslotted = value;
+    unslotted["slot"] = serde_json::Value::Null;
+    assert!(!valid_keyring_record(
+        &slot,
+        &serde_json::to_vec(&unslotted).unwrap()
+    ));
+}
+
+#[test]
+fn version_one_keyring_records_upgrade_in_memory_at_their_client_derived_slot() {
+    let creds = credentials("oaiapp_legacy", "subject-one");
+    let legacy_slot = legacy_keyring_slot("oaiapp_legacy");
+    let mut value = token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds);
+    let record = serde_json::to_vec(&value).unwrap();
+    assert!(valid_keyring_record(&legacy_slot, &record));
+    assert!(!valid_written_keyring_record(&legacy_slot, &record));
+    let moved = account_keyring_slot("oaiapp_legacy", Uuid::now_v7());
+    assert!(!valid_keyring_record(&moved, &record));
+    let upgraded = decode_keyring_record(&record).unwrap();
+    assert_eq!(upgraded.schema, TOKEN_RECORD_SCHEMA);
+    assert_eq!(upgraded.slot.as_deref(), Some(legacy_slot.as_str()));
+    value["slot"] = legacy_slot.into();
+    assert!(decode_keyring_record(&serde_json::to_vec(&value).unwrap()).is_none());
+}
+
+#[test]
+fn keyring_read_admits_only_the_record_written_at_the_entry_slot() {
+    let id = Uuid::now_v7();
+    let creds = credentials("oaiapp_admit", "subject-one");
+    let slot = account_keyring_slot("oaiapp_admit", id);
+    let entry = keyring_entry(id, &creds, slot.clone());
+    let bytes = |schema: u8, slot: Option<&str>, credentials: &VerifiedCredentials| {
+        serde_json::to_vec(&token_record_json(schema, slot, credentials)).unwrap()
+    };
+    let admitted =
+        admit_keyring_record(&entry, &bytes(TOKEN_RECORD_SCHEMA, Some(&slot), &creds)).unwrap();
+    assert_eq!(admitted.slot.as_deref(), Some(slot.as_str()));
+    let foreign = account_keyring_slot("oaiapp_admit", Uuid::now_v7());
+    for record in [
+        bytes(TOKEN_RECORD_SCHEMA, Some(&foreign), &creds),
+        bytes(TOKEN_RECORD_SCHEMA, None, &creds),
+        bytes(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds),
+        bytes(
+            TOKEN_RECORD_SCHEMA,
+            Some(&slot),
+            &credentials("oaiapp_other", "subject-one"),
+        ),
+        bytes(
+            TOKEN_RECORD_SCHEMA,
+            Some(&slot),
+            &credentials("oaiapp_admit", "subject-two"),
+        ),
+    ] {
+        assert!(matches!(
+            admit_keyring_record(&entry, &record),
+            Err(AuthorizationError::InvalidIdentity)
+        ));
+    }
+    let migrated = keyring_entry(id, &creds, legacy_keyring_slot("oaiapp_admit"));
+    assert!(
+        admit_keyring_record(&migrated, &bytes(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds)).is_ok()
+    );
+}
+
+#[test]
+fn accounts_of_one_client_keep_distinct_slots_and_identities() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let first = credentials("oaiapp_shared", "subject-one");
+    let second = credentials("oaiapp_shared", "subject-two");
+    let mut written = Vec::new();
+    let mut save = |credentials: &VerifiedCredentials| {
+        save_keyring_at_with(
+            &state,
+            &workspace,
+            credentials.clone(),
+            keyring_consent(credentials),
+            None,
+            |slot, body| {
+                assert!(valid_written_keyring_record(slot, body.as_bytes()));
+                written.push(slot.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap()
+    };
+    let first_id = save(&first);
+    let second_id = save(&second);
+    assert_ne!(first_id, second_id);
+    assert_eq!(save(&first), first_id);
+    assert_eq!(written[0], account_keyring_slot("oaiapp_shared", first_id));
+    assert_eq!(written[1], account_keyring_slot("oaiapp_shared", second_id));
+    assert_ne!(written[0], written[1]);
+    assert_eq!(written[2], written[0]);
+
+    let index = AccountIndex::read(&state).unwrap();
+    assert_eq!(index.accounts.len(), 2);
+    assert_eq!(
+        index.accounts[0].keyring_slot.as_deref(),
+        Some(written[0].as_str())
+    );
+    assert_eq!(
+        index.accounts[1].keyring_slot.as_deref(),
+        Some(written[1].as_str())
+    );
+
+    let mut duplicate = serde_json::to_value(&index).unwrap();
+    duplicate["accounts"][1]["subject"] = "subject-one".into();
+    assert!(
+        serde_json::from_value::<AccountIndex>(duplicate)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    let mut shared = serde_json::to_value(&index).unwrap();
+    for account in 0..2 {
+        shared["accounts"][account]["keyring_slot"] = legacy_keyring_slot("oaiapp_shared").into();
+    }
+    assert!(
+        serde_json::from_value::<AccountIndex>(shared)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    let mut foreign = serde_json::to_value(&index).unwrap();
+    foreign["accounts"][0]["keyring_slot"] = legacy_keyring_slot("oaiapp_other").into();
+    assert!(
+        serde_json::from_value::<AccountIndex>(foreign)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+
+    let mut deleted = None;
+    let outcome = sign_out_target_at_with(
+        &state,
+        &workspace,
+        SignOutTarget {
+            account_id: Some(first_id),
+            expected_index: None,
+        },
+        SignOutActions {
+            read_keyring: |_: &AccountEntry| Err(AuthorizationError::Unavailable),
+            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+            delete_keyring: |slot: &str| {
+                deleted = Some(slot.to_owned());
+                Ok(())
+            },
+        },
+    )
+    .unwrap();
+    assert!(outcome.local_cleared);
+    assert_eq!(deleted.as_deref(), Some(written[0].as_str()));
+    let index = AccountIndex::read(&state).unwrap();
+    assert!(index.accounts[0].disconnected);
+    assert!(!index.accounts[1].disconnected);
+    assert_eq!(
+        index.accounts[1].keyring_slot.as_deref(),
+        Some(written[1].as_str())
+    );
+}
+
+#[test]
+fn private_file_entries_carry_no_slot() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let creds = credentials("oaiapp_file", "subject-one");
+    save_private_file_at(&state, &workspace, creds.clone(), accepted(&creds), None).unwrap();
+    let index = AccountIndex::read(&state).unwrap();
+    assert!(index.accounts[0].keyring_slot.is_none());
+    assert!(index.accounts[0].chatgpt_account_id.is_none());
+    assert!(index.accounts[0].token.as_ref().unwrap().slot.is_none());
+    let mut slotted = serde_json::to_value(&index).unwrap();
+    slotted["accounts"][0]["keyring_slot"] = legacy_keyring_slot("oaiapp_file").into();
+    assert!(
+        serde_json::from_value::<AccountIndex>(slotted)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    for field in ["keyring_slot", "chatgpt_account_id"] {
+        let mut missing = serde_json::to_value(&index).unwrap();
+        missing["accounts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(serde_json::from_value::<AccountIndex>(missing).is_err());
+    }
+}
+
+#[test]
+fn migrated_keyring_accounts_keep_their_slots_and_stay_distinct() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let first = credentials("oaiapp_first_issued", "shared-subject");
+    let second = credentials("oaiapp_second_issued", "shared-subject");
+    let file = credentials("oaiapp_file_issued", "shared-subject");
+    let first_id = save_keyring_at_with(
+        &state,
+        &workspace,
+        first.clone(),
+        keyring_consent(&first),
+        None,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let second_id = save_keyring_at_with(
+        &state,
+        &workspace,
+        second.clone(),
+        keyring_consent(&second),
+        None,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    save_private_file_at(&state, &workspace, file.clone(), accepted(&file), None).unwrap();
+    let legacy = as_version_two(&AccountIndex::read(&state).unwrap());
+    state
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&legacy)
+        .unwrap();
+
+    let migrated = AccountIndex::read(&state).unwrap();
+    assert_eq!(migrated.accounts.len(), 3);
+    assert_eq!(migrated.accounts[0].id, first_id);
+    assert_eq!(migrated.accounts[1].id, second_id);
+    let legacy_first = legacy_keyring_slot("oaiapp_first_issued");
+    let legacy_second = legacy_keyring_slot("oaiapp_second_issued");
+    assert_eq!(
+        migrated.accounts[0].keyring_slot,
+        Some(legacy_first.clone())
+    );
+    assert_eq!(
+        migrated.accounts[1].keyring_slot,
+        Some(legacy_second.clone())
+    );
+    assert!(migrated.accounts[2].keyring_slot.is_none());
+    let file_token = migrated.accounts[2].token.as_ref().unwrap();
+    assert_eq!(file_token.schema, TOKEN_RECORD_SCHEMA);
+    assert!(file_token.slot.is_none());
+    for account in &migrated.accounts {
+        assert!(account.chatgpt_account_id.is_none());
+    }
+    let current = serde_json::to_vec(&migrated).unwrap();
+    assert!(CHATGPT_ACCOUNTS.upgrade(&current).is_none());
+
+    let mut selected = migrated;
+    selected.selected = Some(first_id);
+    selected.write(&state).unwrap();
+    let mut writes = Vec::new();
+    assert!(matches!(
+        save_keyring_at_with(
+            &state,
+            &workspace,
+            first.clone(),
+            keyring_consent(&first),
+            Some(first_id),
+            |slot, body| {
+                assert!(valid_written_keyring_record(slot, body.as_bytes()));
+                writes.push(slot.to_owned());
+                Err(AuthorizationError::Unavailable)
+            },
+        ),
+        Err(AuthorizationError::CredentialStore(
+            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
+        ))
+    ));
+    assert!(AccountIndex::read(&state).unwrap().accounts[0].renewal_pending);
+    assert!(matches!(
+        load_selected_keyring_at(&state, first_id),
+        Err(AuthorizationError::RenewalStorageUncertain)
+    ));
+    assert_eq!(
+        save_keyring_at_with(
+            &state,
+            &workspace,
+            first.clone(),
+            keyring_consent(&first),
+            Some(first_id),
+            |slot, body| {
+                assert!(valid_written_keyring_record(slot, body.as_bytes()));
+                writes.push(slot.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap(),
+        first_id
+    );
+    assert_eq!(writes, [legacy_first.clone(), legacy_first.clone()]);
+    let restored = AccountIndex::read(&state).unwrap();
+    assert!(!restored.accounts[0].renewal_pending);
+    assert_eq!(restored.accounts[0].keyring_slot, Some(legacy_first));
+    assert_eq!(restored.accounts[1].keyring_slot, Some(legacy_second));
+}
+
+#[test]
+fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path() {
+    let id = Uuid::now_v7();
+    let creds = credentials("oaiapp_dup", "subject-one");
+    let slot = account_keyring_slot("oaiapp_dup", id);
+    let entry = keyring_entry(id, &creds, slot.clone());
+    let refused = |slot: &str, bytes: &[u8]| {
+        assert!(decode_keyring_record(bytes).is_none());
+        assert!(!valid_keyring_record(slot, bytes));
+        assert!(!valid_written_keyring_record(slot, bytes));
+        assert!(matches!(
+            admit_keyring_record(&entry, bytes),
+            Err(AuthorizationError::InvalidIdentity)
+        ));
+    };
+    for schema in [0, 3, 255] {
+        let value = token_record_json(schema, Some(&slot), &creds);
+        refused(&slot, &serde_json::to_vec(&value).unwrap());
+    }
+    let current = serde_json::to_string(&TokenRecord {
+        schema: TOKEN_RECORD_SCHEMA,
+        slot: Some(slot.clone()),
+        credentials: creds.clone(),
+        consent: keyring_consent(&creds),
+    })
+    .unwrap();
+    assert!(valid_keyring_record(&slot, current.as_bytes()));
+    for (from, to) in [
+        ("{\"schema\":2,", "{\"schema\":2,\"schema\":2,"),
+        (
+            "\"client_id\":\"oaiapp_dup\"",
+            "\"client_id\":\"oaiapp_dup\",\"client_id\":\"oaiapp_dup\"",
+        ),
+        (
+            "\"warning_version\":",
+            "\"warning_version\":0,\"warning_version\":",
+        ),
+    ] {
+        let duplicated = current.replacen(from, to, 1);
+        assert_ne!(duplicated, current);
+        refused(&slot, duplicated.as_bytes());
+    }
+    let legacy_slot = legacy_keyring_slot("oaiapp_dup");
+    let legacy =
+        serde_json::to_string(&token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds))
+            .unwrap();
+    assert!(valid_keyring_record(&legacy_slot, legacy.as_bytes()));
+    let legacy_entry = keyring_entry(id, &creds, legacy_slot.clone());
+    for (from, to) in [
+        ("\"schema\":1", "\"schema\":1,\"schema\":1"),
+        (
+            "\"client_id\":\"oaiapp_dup\"",
+            "\"client_id\":\"oaiapp_dup\",\"client_id\":\"oaiapp_dup\"",
+        ),
+        (
+            "\"warning_version\":",
+            "\"warning_version\":0,\"warning_version\":",
+        ),
+    ] {
+        let duplicated = legacy.replacen(from, to, 1);
+        assert_ne!(duplicated, legacy);
+        assert!(!valid_keyring_record(&legacy_slot, duplicated.as_bytes()));
+        assert!(matches!(
+            admit_keyring_record(&legacy_entry, duplicated.as_bytes()),
+            Err(AuthorizationError::InvalidIdentity)
+        ));
+    }
+}
+
+fn version_two_pair() -> serde_json::Value {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let keyring = credentials("oaiapp_keyring_pair", "subject-one");
+    let file = credentials("oaiapp_file_pair", "subject-one");
+    save_keyring_at_with(
+        &state,
+        &workspace,
+        keyring.clone(),
+        keyring_consent(&keyring),
+        None,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    save_private_file_at(&state, &workspace, file.clone(), accepted(&file), None).unwrap();
+    version_two_value(&AccountIndex::read(&state).unwrap())
+}
+
+#[test]
+fn account_index_migration_refuses_unvalidated_sources_unchanged() {
+    let base = version_two_pair();
+    let upgrade =
+        |value: &serde_json::Value| CHATGPT_ACCOUNTS.upgrade(&serde_json::to_vec(value).unwrap());
+    let upgraded = upgrade(&base).unwrap();
+    let upgraded: serde_json::Value = serde_json::from_slice(&upgraded).unwrap();
+    assert_eq!(upgraded["schema"], 3);
+    assert_eq!(upgraded["accounts"][1]["token"]["schema"], 2);
+
+    let mut source = base.clone();
+    source["accounts"][1]["token"]["schema"] = 255.into();
+    assert!(upgrade(&source).is_none());
+    let mut source = base.clone();
+    source["accounts"][1]["token"]["slot"] = serde_json::Value::Null;
+    assert!(upgrade(&source).is_none());
+    let mut source = base.clone();
+    source["accounts"][0]["keyring_slot"] = serde_json::Value::Null;
+    assert!(upgrade(&source).is_none());
+    let mut source = base.clone();
+    source["accounts"][0]["chatgpt_account_id"] = serde_json::Value::Null;
+    assert!(upgrade(&source).is_none());
+    let mut source = base.clone();
+    source["accounts"][0]["storage"] = "unknown".into();
+    assert!(upgrade(&source).is_none());
+
+    let account = base["accounts"][1]["id"].clone();
+    let check = |account: &serde_json::Value, fingerprint: u8| {
+        let fingerprint = [fingerprint; 32];
+        serde_json::json!({
+            "account_id": account,
+            "fingerprint": fingerprint,
+            "checked_at_sec": 1_700_000_000_u64,
+            "expires_at_sec": 1_700_000_000_u64 + MODEL_CHECK_AGE_SECONDS,
+            "context_window_tokens": null,
+        })
+    };
+    let mut legacy = base.clone();
+    legacy["schema"] = 1.into();
+    legacy["model_checks"] = serde_json::json!([check(&account, 7)]);
+    let cleared = upgrade(&legacy).unwrap();
+    let cleared: serde_json::Value = serde_json::from_slice(&cleared).unwrap();
+    assert_eq!(cleared["schema"], 3);
+    assert_eq!(cleared["model_checks"], serde_json::json!([]));
+    legacy["model_checks"] = serde_json::json!([check(&Uuid::now_v7().to_string().into(), 7)]);
+    assert!(upgrade(&legacy).is_none());
+    legacy["model_checks"] = serde_json::json!([check(&account, 7), check(&account, 7)]);
+    assert!(upgrade(&legacy).is_none());
+}
+
+#[test]
+fn account_index_migration_keeps_one_account_per_client_in_source_schemas() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    for subject in ["subject-one", "subject-two"] {
+        let creds = credentials("oaiapp_twin", subject);
+        save_private_file_at(&state, &workspace, creds.clone(), accepted(&creds), None).unwrap();
+    }
+    let current = AccountIndex::read(&state).unwrap();
+    assert_eq!(current.accounts.len(), 2);
+    assert!(current.validate().is_ok());
+
+    for version in [1, 2] {
+        let mut source = version_two_value(&current);
+        source["schema"] = version.into();
+        let bytes = serde_json::to_vec(&source).unwrap();
+        assert!(CHATGPT_ACCOUNTS.upgrade(&bytes).is_none());
+        let record = state.record(RecordKind::ChatgptAccounts);
+        record.replace(&bytes).unwrap();
+        assert!(AccountIndex::read(&state).is_err());
+        assert_eq!(record.read().unwrap().unwrap(), bytes);
+    }
+}
+
+#[cfg(unix)]
+const FAKE_HELPER: &str = r#"#!/bin/sh
+d="${0%/*}/store"
+case "$2" in
+read) [ -f "$d/$3" ] || exit 2; /bin/cat "$d/$3" ;;
+write) [ ! -f "$d/fail-write" ] || exit 1; /bin/cat > "$d/$3.tmp" && /bin/mv "$d/$3.tmp" "$d/$3" ;;
+delete) /bin/rm -f "$d/$3" ;;
+*) exit 1 ;;
+esac
+"#;
+
+#[cfg(unix)]
+struct FakeHelper {
+    store: PathBuf,
+    _gate: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(unix)]
+impl FakeHelper {
+    fn install(dir: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let store = dir.join("store");
+        std::fs::create_dir(&store).unwrap();
+        let helper = dir.join("helper");
+        std::fs::write(&helper, FAKE_HELPER).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        *crate::accounts::credentials::TEST_HELPER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(helper);
+        Self { store, _gate: gate }
+    }
+
+    fn put(&self, slot: &str, bytes: &[u8]) {
+        std::fs::write(self.store.join(slot), bytes).unwrap();
+    }
+
+    fn get(&self, slot: &str) -> Vec<u8> {
+        std::fs::read(self.store.join(slot)).unwrap()
+    }
+
+    fn holds(&self, slot: &str) -> bool {
+        self.store.join(slot).exists()
+    }
+
+    fn fail_writes(&self, fail: bool) {
+        let marker = self.store.join("fail-write");
+        if fail {
+            std::fs::write(marker, b"").unwrap();
+        } else {
+            std::fs::remove_file(marker).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FakeHelper {
+    fn drop(&mut self) {
+        *crate::accounts::credentials::TEST_HELPER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(unix)]
+fn rotate(previous: &VerifiedCredentials) -> Result<VerifiedCredentials, AuthorizationError> {
+    let mut next = previous.clone();
+    next.access_token = "synthetic-rotated-access".into();
+    next.refresh_token = "synthetic-rotated-refresh".into();
+    next.access_expires_at_unix = 1_800_003_600;
+    Ok(next)
+}
+
+#[cfg(unix)]
+#[test]
+fn migrated_keyring_accounts_load_refresh_and_block_through_their_retained_slots() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let first = credentials("oaiapp_first_issued", "shared-subject");
+    let second = credentials("oaiapp_second_issued", "shared-subject");
+    let mut ids = Vec::new();
+    for creds in [&first, &second] {
+        ids.push(
+            save_keyring_at_with(
+                &state,
+                &workspace,
+                creds.clone(),
+                keyring_consent(creds),
+                None,
+                |_, _| Ok(()),
+            )
+            .unwrap(),
+        );
+    }
+    let (first_id, second_id) = (ids[0], ids[1]);
+    let legacy = as_version_two(&AccountIndex::read(&state).unwrap());
+    state
+        .record(RecordKind::ChatgptAccounts)
+        .replace(&legacy)
+        .unwrap();
+
+    let helper = FakeHelper::install(temp.path());
+    let legacy_first = legacy_keyring_slot("oaiapp_first_issued");
+    let legacy_second = legacy_keyring_slot("oaiapp_second_issued");
+    let version_one = |creds: &VerifiedCredentials| {
+        serde_json::to_vec(&token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, creds)).unwrap()
+    };
+    helper.put(&legacy_first, &version_one(&first));
+    helper.put(&legacy_second, &version_one(&second));
+    let first_bytes = helper.get(&legacy_first);
+
+    let mut index = AccountIndex::read(&state).unwrap();
+    index.selected = Some(second_id);
+    index.write(&state).unwrap();
+    assert_eq!(
+        load_selected_keyring_at(&state, second_id)
+            .unwrap()
+            .refresh_token,
+        "synthetic-refresh"
+    );
+    assert_eq!(helper.get(&legacy_second), version_one(&second));
+
+    let renewed =
+        refresh_selected_with(&state, &workspace, second_id, 1_799_999_900, rotate).unwrap();
+    assert_eq!(
+        renewed.credentials.refresh_token,
+        "synthetic-rotated-refresh"
+    );
+    let stored: TokenRecord = serde_json::from_slice(&helper.get(&legacy_second)).unwrap();
+    assert_eq!(stored.schema, TOKEN_RECORD_SCHEMA);
+    assert_eq!(stored.slot.as_deref(), Some(legacy_second.as_str()));
+    assert_eq!(
+        stored.credentials.refresh_token,
+        "synthetic-rotated-refresh"
+    );
+    assert_eq!(helper.get(&legacy_first), first_bytes);
+    assert!(!AccountIndex::read(&state).unwrap().accounts[1].renewal_pending);
+
+    let mut index = AccountIndex::read(&state).unwrap();
+    index.selected = Some(first_id);
+    index.write(&state).unwrap();
+    helper.fail_writes(true);
+    assert!(matches!(
+        refresh_selected_with(&state, &workspace, first_id, 1_799_999_900, rotate),
+        Err(AuthorizationError::RenewalStorageUncertain)
+    ));
+    helper.fail_writes(false);
+    let reopened = StateRoot::open_existing(state.path()).unwrap();
+    assert!(AccountIndex::read(&reopened).unwrap().accounts[0].renewal_pending);
+    assert!(matches!(
+        load_selected_keyring_at(&reopened, first_id),
+        Err(AuthorizationError::RenewalStorageUncertain)
+    ));
+    assert_eq!(helper.get(&legacy_first), first_bytes);
+    assert_eq!(
+        serde_json::from_slice::<TokenRecord>(&helper.get(&legacy_second))
+            .unwrap()
+            .credentials
+            .refresh_token,
+        "synthetic-rotated-refresh"
+    );
+
+    assert_eq!(
+        save_keyring_at(
+            &reopened,
+            &workspace,
+            first.clone(),
+            keyring_consent(&first),
+            Some(first_id),
+        )
+        .unwrap(),
+        first_id
+    );
+    let repaired: TokenRecord = serde_json::from_slice(&helper.get(&legacy_first)).unwrap();
+    assert_eq!(repaired.schema, TOKEN_RECORD_SCHEMA);
+    assert_eq!(repaired.slot.as_deref(), Some(legacy_first.as_str()));
+    assert!(!AccountIndex::read(&reopened).unwrap().accounts[0].renewal_pending);
+
+    let removed = sign_out_target_at_with(
+        &reopened,
+        &workspace,
+        SignOutTarget {
+            account_id: Some(second_id),
+            expected_index: None,
+        },
+        SignOutActions {
+            read_keyring: read_keyring_token,
+            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+            delete_keyring: |slot: &str| {
+                delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable)
+            },
+        },
+    )
+    .unwrap();
+    assert!(removed.local_cleared);
+    assert!(!helper.holds(&legacy_second));
+    assert!(helper.holds(&legacy_first));
+}
+
+#[cfg(unix)]
+#[test]
+fn same_client_keyring_accounts_refresh_and_sign_out_in_isolation() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let helper = FakeHelper::install(temp.path());
+    let first = credentials("oaiapp_shared_pair", "subject-one");
+    let second = credentials("oaiapp_shared_pair", "subject-two");
+    let mut ids = Vec::new();
+    for creds in [&first, &second] {
+        ids.push(
+            save_keyring_at(
+                &state,
+                &workspace,
+                creds.clone(),
+                keyring_consent(creds),
+                None,
+            )
+            .unwrap(),
+        );
+    }
+    let (first_id, second_id) = (ids[0], ids[1]);
+    let index = AccountIndex::read(&state).unwrap();
+    let first_slot = index.accounts[0].keyring_slot.clone().unwrap();
+    let second_slot = index.accounts[1].keyring_slot.clone().unwrap();
+    assert_eq!(
+        first_slot,
+        account_keyring_slot("oaiapp_shared_pair", first_id)
+    );
+    assert_eq!(
+        second_slot,
+        account_keyring_slot("oaiapp_shared_pair", second_id)
+    );
+    assert_ne!(first_slot, second_slot);
+    let second_bytes = helper.get(&second_slot);
+
+    let mut selected = index;
+    selected.selected = Some(first_id);
+    selected.write(&state).unwrap();
+    let renewed = refresh_selected_with(&state, &workspace, first_id, 1_799_999_900, |previous| {
+        assert!(AccountIndex::read(&state).unwrap().accounts[0].renewal_pending);
+        rotate(previous)
+    })
+    .unwrap();
+    assert_eq!(
+        renewed.credentials.refresh_token,
+        "synthetic-rotated-refresh"
+    );
+    let stored: TokenRecord = serde_json::from_slice(&helper.get(&first_slot)).unwrap();
+    assert_eq!(stored.slot.as_deref(), Some(first_slot.as_str()));
+    assert_eq!(
+        stored.credentials.refresh_token,
+        "synthetic-rotated-refresh"
+    );
+    assert_eq!(helper.get(&second_slot), second_bytes);
+    assert!(!AccountIndex::read(&state).unwrap().accounts[0].renewal_pending);
+
+    let removed = sign_out_target_at_with(
+        &state,
+        &workspace,
+        SignOutTarget {
+            account_id: Some(first_id),
+            expected_index: None,
+        },
+        SignOutActions {
+            read_keyring: read_keyring_token,
+            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
+            delete_keyring: |slot: &str| {
+                delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable)
+            },
+        },
+    )
+    .unwrap();
+    assert!(removed.local_cleared);
+    assert!(!helper.holds(&first_slot));
+    assert_eq!(helper.get(&second_slot), second_bytes);
+    let mut index = AccountIndex::read(&state).unwrap();
+    index.selected = Some(second_id);
+    index.write(&state).unwrap();
+    assert_eq!(
+        load_selected_keyring_at(&state, second_id)
+            .unwrap()
+            .refresh_token,
+        "synthetic-refresh"
+    );
 }
 
 #[test]
@@ -907,13 +1728,15 @@ fn pending_keyring_renewal_blocks_load_before_os_store_access() {
     let state = StateRoot::admit(&temp.path().join("state")).unwrap();
     let id = Uuid::now_v7();
     AccountIndex {
-        schema: 2,
+        schema: CHATGPT_ACCOUNTS.current as u8,
         selected: Some(id),
         accounts: vec![AccountEntry {
             id,
             host_id: credentials("oaiapp_pending", "subject-one").host_id,
             client_id: "oaiapp_pending".into(),
             subject: "subject-one".into(),
+            chatgpt_account_id: None,
+            keyring_slot: Some(account_keyring_slot("oaiapp_pending", id)),
             storage: AccountStorage::Keyring,
             renewal_pending: true,
             signout_pending: false,
@@ -1812,9 +2635,7 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
             expected_index: Some(&snapshot),
         },
         SignOutActions {
-            read_keyring: |_: &str, _: &str, _: Uuid| {
-                panic!("private account must not read keyring")
-            },
+            read_keyring: |_: &AccountEntry| panic!("private account must not read keyring"),
             revoke: Some(|token: &VerifiedCredentials| {
                 assert_eq!(token.refresh_token, first.refresh_token);
                 Ok(())
@@ -1855,9 +2676,7 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
                 expected_index: Some(&stale),
             },
             SignOutActions {
-                read_keyring: |_: &str, _: &str, _: Uuid| {
-                    panic!("stale account must not read keyring")
-                },
+                read_keyring: |_: &AccountEntry| { panic!("stale account must not read keyring") },
                 revoke: Some(|_: &VerifiedCredentials| panic!("stale account must not revoke")),
                 delete_keyring: |_: &str| panic!("stale account must not delete keyring"),
             },
@@ -1894,9 +2713,7 @@ fn local_account_removal_disconnects_without_remote_revocation() {
             expected_index: Some(&snapshot),
         },
         SignOutActions {
-            read_keyring: |_: &str, _: &str, _: Uuid| {
-                panic!("private account must not read keyring")
-            },
+            read_keyring: |_: &AccountEntry| panic!("private account must not read keyring"),
             revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
             delete_keyring: |_: &str| panic!("private account must not delete keyring"),
         },
@@ -2178,7 +2995,13 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     let changed = credentials("oaiapp_second", "subject-other");
     let changed_receipt = accepted(&changed);
     assert!(matches!(
-        save_private_file_at(&reopened, &workspace, changed, changed_receipt, None),
+        save_private_file_at(
+            &reopened,
+            &workspace,
+            changed,
+            changed_receipt,
+            Some(second_id)
+        ),
         Err(AuthorizationError::RegistrationConflict)
     ));
     assert_eq!(AccountIndex::read(&reopened).unwrap().accounts.len(), 2);
@@ -2407,6 +3230,8 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         "signout_pending",
         "disconnected",
         "plan_permission_missing",
+        "keyring_slot",
+        "chatgpt_account_id",
         "token",
     ] {
         let mut missing = encoded.clone();
@@ -2554,6 +3379,7 @@ fn account_index_migration_clears_only_valid_optional_checks_and_preserves_crede
     let mut old_check = serde_json::to_value(record).unwrap();
     old_check.as_object_mut().unwrap().remove("check_id");
     legacy["schema"] = 1.into();
+    to_version_two_shape(&mut legacy);
     legacy["model_checks"] = serde_json::json!([old_check]);
     let bytes = serde_json::to_vec(&legacy).unwrap();
     state
@@ -2562,8 +3388,10 @@ fn account_index_migration_clears_only_valid_optional_checks_and_preserves_crede
         .unwrap();
     let migrated = AccountIndex::read(&state).unwrap();
     let actual = serde_json::to_value(&migrated).unwrap();
-    assert_eq!(actual["schema"], 2);
-    assert_eq!(actual["accounts"], legacy["accounts"]);
+    assert_eq!(actual["schema"], 3);
+    let mut downgraded = actual.clone();
+    to_version_two_shape(&mut downgraded);
+    assert_eq!(downgraded["accounts"], legacy["accounts"]);
     assert_eq!(actual["selected"], legacy["selected"]);
     assert!(migrated.model_checks.is_empty());
     assert!(
