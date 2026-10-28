@@ -101,12 +101,13 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     let entry = |id, client| {
         serde_json::json!({
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
+            "chatgpt_account_id":null,"keyring_slot":crate::setup::legacy_chatgpt_slot(client),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
             "disconnected":false,"plan_permission_missing":false,"token":null
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema":2,"selected":selected,
+        "schema":3,"selected":selected,
         "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)],
         "model_checks":[]
     })).unwrap()).unwrap();
