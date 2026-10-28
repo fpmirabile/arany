@@ -1112,7 +1112,7 @@ pub(super) async fn run_unit(
                     .write_all(&super::super::selection_phase::encode_deadline(command_deadline)?)
                     .await
                     .map_err(|_| ToolError::Operation)?;
-                let deadline = command_deadline.min(preparation_deadline);
+                let deadline = command_deadline.min(go_deadline);
                 let mut selection_cancel = go_cancellation.clone();
                 super::super::selection_phase::wait(
                     deadline,
