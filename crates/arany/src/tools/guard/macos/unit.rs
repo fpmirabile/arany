@@ -1109,7 +1109,9 @@ pub(super) async fn run_unit(
                     .map_err(|_| ToolError::Operation)?;
                 stream
                     .get_mut()
-                    .write_all(&super::super::selection_phase::encode_deadline(command_deadline)?)
+                    .write_all(&super::super::selection_phase::encode_deadline(
+                        command_deadline,
+                    )?)
                     .await
                     .map_err(|_| ToolError::Operation)?;
                 let deadline = command_deadline.min(go_deadline);
