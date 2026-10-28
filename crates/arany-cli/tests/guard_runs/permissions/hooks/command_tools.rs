@@ -1,4 +1,5 @@
 use super::*;
+use arany::permissions::HookResult;
 use arany::test_support::process::BoundedOutput;
 use std::os::unix::fs::MetadataExt;
 
@@ -59,13 +60,18 @@ impl CommandFixture {
             .await
             .unwrap();
         let outcome = probe.outcome.unwrap();
+        let result = match &outcome.result {
+            HookResult::Passed => "Passed",
+            HookResult::Stopped { .. } => "Stopped",
+            HookResult::Restricted { .. } => "Restricted",
+            HookResult::Blocked { .. } => "Blocked",
+            HookResult::Feedback { .. } => "Feedback",
+            HookResult::Narrowed { .. } => "Narrowed",
+            HookResult::Ignored { .. } => "Ignored",
+        };
         assert!(
-            matches!(
-                outcome.result,
-                arany::permissions::HookResult::Narrowed { .. }
-            ),
-            "probe: {:?}; {}",
-            outcome.result,
+            matches!(outcome.result, HookResult::Narrowed { .. }),
+            "probe: {result}; {}",
             tool_report(Some(&outcome.observation))
         );
         assert!(!arany::CommandTools::load(&self.state).unwrap().entries()[0].enabled);
