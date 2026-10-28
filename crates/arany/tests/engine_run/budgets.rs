@@ -1382,46 +1382,6 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
 }
 
-struct MeteredProvider {
-    tokens: u32,
-    responses: std::sync::Mutex<VecDeque<ProviderOutcome>>,
-}
-
-#[async_trait::async_trait]
-impl Provider for MeteredProvider {
-    fn identity(&self) -> &arany::ProviderIdentity {
-        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("openai", "metered-model", arany::Provenance::native())
-            });
-        &IDENTITY
-    }
-
-    async fn invoke(&self, _request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let outcome = self
-            .responses
-            .lock()
-            .expect("responses lock")
-            .pop_front()
-            .ok_or(ProviderError::InvalidOutcome)?;
-        Ok(ProviderResponse {
-            turn: arany::ProviderTurn::scripted(),
-            outcome,
-            response_id: None,
-            usage: arany::Usage {
-                input_tokens: Some(self.tokens),
-                output_tokens: Some(0),
-                ..Default::default()
-            },
-            wire_provenance: None,
-        })
-    }
-
-    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
-        Err(ProviderError::InvalidOutcome)
-    }
-}
-
 #[tokio::test]
 async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -1434,15 +1394,17 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     // Five input tokens per call: Plan, Read and Answer reach the 15-token cap exactly.
-    let provider = MeteredProvider {
-        tokens: 5,
-        responses: std::sync::Mutex::new(VecDeque::from([
-            arany::test_support::scenario::plan_outcome(plan),
-            crate::tool_outcome(facts_read()),
-            finish_with("first pass"),
-            finish_with("never requested"),
-        ])),
-    };
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
+        finish_with("first pass"),
+        finish_with("never requested"),
+    ])
+    .with_reported_usage(arany::Usage {
+        input_tokens: Some(5),
+        output_tokens: Some(0),
+        ..Default::default()
+    });
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
