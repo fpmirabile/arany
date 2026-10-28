@@ -765,7 +765,15 @@ async fn admit_startup(
     setup_notice: &mut Option<String>,
     selected: Option<super::provider::roster::SelectedRoster>,
 ) -> Result<ControlFlow<(), Option<arany::ArchivedHistory>>, String> {
-    match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
+    match permissions::admit(
+        terminal,
+        &admission.workspace,
+        &admission.state_dir,
+        composer,
+        admission.tools,
+    )
+    .await
+    {
         Ok(permissions::PermissionChoice::Selected(access)) => {
             for notice in access.stale_runtime_notices() {
                 append_notice(setup_notice, &notice);

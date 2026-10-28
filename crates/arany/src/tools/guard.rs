@@ -761,6 +761,11 @@ fn bind_runtime_grants(
         );
         bytes.extend_from_slice(RUST_GUARD_FLAGS.as_bytes());
     }
+    if runtime_grants.iter().any(|grant| grant.kind.is_multi()) {
+        bytes.extend_from_slice(
+            b";user-program-roots:read-only-exec;path-after-toolchains-in-record-order;manager-home-variables-only",
+        );
+    }
     bytes.extend_from_slice(b";private-output-capture-v1");
     bytes.extend_from_slice(&(super::spill::MAX_SPILL_RESULT_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(&(super::spill::MAX_REPORT_BYTES as u64).to_le_bytes());
@@ -2129,6 +2134,9 @@ pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, To
         let bin = grant.path.join("bin");
         paths.push(bin.to_str().ok_or(ToolError::Path)?.to_owned());
     }
+    for grant in runtime_grants.iter().filter(|grant| grant.kind.is_multi()) {
+        paths.push(grant.path.to_str().ok_or(ToolError::Path)?.to_owned());
+    }
     paths.extend(["/usr/bin".into(), "/bin".into()]);
     Ok(paths.join(":"))
 }
@@ -2227,6 +2235,9 @@ pub(super) fn payload(
         args
     };
     command.args(payload_args);
+    for (name, root) in runtime_grants.iter().filter_map(RuntimeGrant::manager_home) {
+        command.env(name, root);
+    }
     if runtime_grants
         .iter()
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
@@ -2503,6 +2514,7 @@ mod tests {
             path: root.join("home/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu"),
             device: 1,
             inode: 1,
+            root: None,
         };
         let args = ["build".into(), "--jobs=3".into()];
         for selected in [false, true] {
@@ -3428,6 +3440,7 @@ mod tests {
             path: home.join(".nvm/versions/node/v22.3.0"),
             device: 1,
             inode: 2,
+            root: None,
         }
     }
 
@@ -3686,6 +3699,7 @@ mod tests {
             path: root.clone(),
             device,
             inode,
+            root: None,
         }]);
         let file = intent(ToolCall::Read {
             path: "selected.txt".into(),

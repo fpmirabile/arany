@@ -26,7 +26,7 @@ pub(super) async fn run(root: &Path) {
         std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let choices = permissions.runtime_profile_choices();
     let tokens = choices
         .iter()

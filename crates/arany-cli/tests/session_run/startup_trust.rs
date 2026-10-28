@@ -1561,6 +1561,180 @@ fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
     }
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "native Linux PTY consent for independent user program directories"]
+fn consent_selects_several_user_directories_independently_and_remembers_their_order() {
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    consent_user_programs(temp.path(), false);
+}
+
+#[cfg(target_os = "linux")]
+fn consent_probe(
+    root: &std::path::Path,
+    search: &str,
+    expect_prompt: bool,
+    choice: Option<&[u8]>,
+) -> String {
+    use rustix::process::{Pid, Signal, kill_process};
+    use std::io::Write;
+    let workspace = root.join("workspace");
+    let state = root.join("state");
+    let (master, slave) = crate::process::cloexec_pty(None);
+    let mut input = master.try_clone().unwrap();
+    // The helper creates its passwd file exclusively, so each launch needs a fresh one.
+    let _ = std::fs::remove_file(root.join("passwd"));
+    let mut command = crate::isolation::native_account_isolated_test_command_with_timeout(
+        root,
+        std::path::Path::new("/usr/bin/env"),
+        std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
+        60,
+    );
+    command
+        .arg(if choice.is_some() {
+            "PATH=/usr/bin:/bin"
+        } else {
+            search
+        })
+        .arg("TERM=dumb")
+        .arg(env!("CARGO_BIN_EXE_arany"))
+        .args(["--screen-reader", "--no-color", "--workspace"])
+        .arg(&workspace)
+        .arg("--state-dir")
+        .arg(&state)
+        .arg("--setup")
+        .env_clear()
+        .current_dir(&workspace)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+    drop(command);
+    let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+    let mut consent_seen = false;
+    let mut stopped = false;
+    let mut transcript = String::new();
+    process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(30),
+        64 * 1024,
+        |bytes| {
+            let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+            if !consent_seen && text.contains(crate::process::READ_ONLY_CONSENT_PROMPT) {
+                assert!(expect_prompt, "remembered trust must skip consent");
+                consent_seen = true;
+                transcript = text.clone();
+                match choice {
+                    Some(choice) => input.write_all(choice).unwrap(),
+                    None => {
+                        kill_process(pid, Signal::INT).unwrap();
+                        stopped = true;
+                    }
+                }
+            }
+            if !stopped && text.contains("Setup: Provider setup\n") && text.ends_with("Input:\n") {
+                assert_eq!(consent_seen, expect_prompt);
+                kill_process(pid, Signal::INT).unwrap();
+                stopped = true;
+            }
+        },
+    );
+    assert!(stopped, "expected startup boundary was not reached");
+    transcript
+}
+
+#[cfg(target_os = "linux")]
+fn seed_command_environment(state: &std::path::Path, path: Vec<String>) {
+    let canonical = serde_json::to_vec(&serde_json::json!([1, "process", path, [], []])).unwrap();
+    StateRoot::admit(state)
+        .unwrap()
+        .record(arany::RecordKind::CommandEnvironment)
+        .replace(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1, "source": "process", "captured_at": 0, "path": path,
+                "names": [], "excluded": [], "sha256": hash(&canonical)
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
+    use std::os::unix::fs::DirBuilderExt;
+    for name in ["account-home", "home", "workspace"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join(name))
+            .unwrap();
+    }
+    let state = root.join("state");
+    let home = root.join("home");
+    let local = home.join(".local/bin");
+    let pyenv = home.join(".pyenv/shims");
+    let volta = home.join(".volta/bin");
+    arany::test_support::scenario::user_programs_fixture(&home);
+    let record_path = root.join("account-home/.local/state/arany/workspace-permissions.json");
+    if homebrew {
+        arany::test_support::scenario::homebrew_programs_fixture(root);
+    }
+    let brew_path = if homebrew {
+        ":/opt/homebrew/bin:/opt/homebrew/opt/rustup/bin"
+    } else {
+        ""
+    };
+    let search = format!(
+        "PATH={}:{}{brew_path}:/usr/bin:/bin",
+        local.display(),
+        pyenv.display()
+    );
+    let transcript = consent_probe(root, &search, true, None);
+    assert!(!record_path.exists(), "Ctrl+C must save no choice");
+    assert!(!state.exists(), "cancelled consent must create no State");
+    for row in ["3. ", "4. ", "5. "] {
+        assert!(transcript.contains(row), "{transcript}");
+    }
+    assert!(transcript.contains("runs whatever the directory currently holds"));
+
+    let path = std::env::split_paths(search.strip_prefix("PATH=").unwrap())
+        .map(|entry| entry.to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    seed_command_environment(&state, path);
+    consent_probe(
+        root,
+        &search,
+        true,
+        Some(if homebrew {
+            b"trust 3 4 5 6 7\n"
+        } else {
+            b"trust 3 4 5\n"
+        }),
+    );
+    let trusted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let grants = trusted["workspaces"][0]["runtime_grants"]
+        .as_array()
+        .unwrap();
+    let selected = grants
+        .iter()
+        .map(|grant| grant["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let mut expected = vec![local.to_str().unwrap(), pyenv.to_str().unwrap()];
+    if homebrew {
+        expected.extend(["/opt/homebrew/bin", "/opt/homebrew/Cellar/rustup/1.0/bin"]);
+    }
+    expected.push(volta.to_str().unwrap());
+    assert_eq!(selected, expected);
+    assert_eq!(trusted["version"], 2);
+    let remembered = std::fs::read(&record_path).unwrap();
+    consent_probe(root, &search, false, None);
+    assert_eq!(std::fs::read(&record_path).unwrap(), remembered);
+}
+
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[test]
 fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory() {

@@ -434,6 +434,7 @@ fn native_journey_with_rust_sysroot(
             .create(fixture_root.join(directory))
             .unwrap();
     }
+    StateRoot::admit(&fixture_root.join("account")).unwrap();
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", helper, "--ignored", "--nocapture"])
@@ -1239,7 +1240,7 @@ async fn native_offline_rust_build_helper() {
     const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let choices = permissions.runtime_profile_choices();
     let rust = choices
         .iter()
@@ -1278,7 +1279,7 @@ async fn native_offline_rust_build_helper() {
         .unwrap();
     let rust_only = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let denied_apple = ToolCall::Command {
         program: "sh".into(),
         args: vec![
@@ -1323,7 +1324,7 @@ async fn native_offline_rust_build_helper() {
 
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let selected = [rust_token, compiler_token, sdk_token];
     permissions
         .remember_profiles(true, arany::ApprovalMode::Request, &selected)
@@ -1565,7 +1566,12 @@ async fn native_runtime_mount_journey_helper() {
 
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
+    assert!(
+        permissions.discovery_error().is_none(),
+        "runtime profile discovery: {:?}",
+        permissions.discovery_error()
+    );
     let options = permissions.runtime_profile_choices();
     let node = options
         .iter()
@@ -1582,7 +1588,7 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap();
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
 
     let runtime_call = ToolCall::Command {
         program: "sh".into(),
@@ -1833,7 +1839,7 @@ async fn native_runtime_mount_journey_helper() {
 
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let cargo_cache = permissions
         .runtime_profile_choices()
         .into_iter()
@@ -1846,7 +1852,7 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap();
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
 
     let accepted_requests = Arc::new(Mutex::new(Vec::new()));
     let cache_write = ToolCall::Command {
@@ -2137,7 +2143,7 @@ async fn native_runtime_mount_journey_helper() {
 
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     permissions
         .remember_profiles(
             true,
@@ -2147,7 +2153,7 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap();
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let verify_cache = ToolCall::Command {
         program: "sh".into(),
         args: vec![

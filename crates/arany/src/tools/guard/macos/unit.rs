@@ -2501,6 +2501,7 @@ done
                 path: node_path,
                 device: node_device,
                 inode: node_inode,
+                root: None,
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::CargoCache,
@@ -2509,6 +2510,7 @@ done
                 path: cache_path,
                 device: cache_device,
                 inode: cache_inode,
+                root: None,
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::NpmCache,
@@ -2517,6 +2519,7 @@ done
                 path: npm_cache_path,
                 device: npm_cache_device,
                 inode: npm_cache_inode,
+                root: None,
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::PipHttpCache,
@@ -2525,6 +2528,7 @@ done
                 path: pip_cache_path,
                 device: pip_cache_device,
                 inode: pip_cache_inode,
+                root: None,
             },
         ];
         let process_enforcement_digest = super::super::super::macos_runtime_enforcement_digest(
@@ -2707,6 +2711,7 @@ done
             path: runtime,
             device: metadata.dev(),
             inode: metadata.ino(),
+            root: None,
         };
         let target = std::fs::canonicalize(&mountpoint).unwrap();
         assert!(
