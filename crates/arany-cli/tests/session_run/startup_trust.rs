@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
+#[path = "startup_trust/login_shell.rs"]
 mod login_shell;
 
 #[test]
