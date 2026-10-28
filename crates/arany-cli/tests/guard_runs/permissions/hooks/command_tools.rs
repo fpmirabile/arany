@@ -60,7 +60,10 @@ impl CommandFixture {
             .unwrap();
         let outcome = probe.outcome.unwrap();
         assert!(
-            matches!(outcome.result, arany::permissions::HookResult::Narrowed { .. }),
+            matches!(
+                outcome.result,
+                arany::permissions::HookResult::Narrowed { .. }
+            ),
             "probe: {:?}; {}",
             outcome.result,
             tool_report(Some(&outcome.observation))
@@ -204,7 +207,10 @@ async fn assert_rewrite_replay(fixture: CommandFixture, session: arany::SessionI
     let view = store.load_view(session).await.unwrap().unwrap();
     store.close().await.unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
-    assert_eq!(SessionView::replay(session, &events).unwrap().unwrap(), view);
+    assert_eq!(
+        SessionView::replay(session, &events).unwrap().unwrap(),
+        view
+    );
     let rewrite = events
         .iter()
         .position(|event| {
