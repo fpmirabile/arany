@@ -139,3 +139,95 @@ async fn reopened_api_report_keeps_exact_rows_omissions_age_and_run_scope() {
     assert!(text.contains("Observation age unknown"));
     assert!(!text.contains("Resets in"));
 }
+
+#[tokio::test]
+async fn reopened_messages_report_keeps_rounded_dimensions_separate_from_compaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let mut sample = api_sample(1000);
+    let api = sample.api.as_mut().unwrap();
+    api.dialect = arany::ApiLimitDialect::Anthropic;
+    let template = api.rows[0].clone();
+    api.rows = [
+        arany::ApiLimitDimension::Requests,
+        arany::ApiLimitDimension::Tokens,
+        arany::ApiLimitDimension::InputTokens,
+        arany::ApiLimitDimension::OutputTokens,
+        arany::ApiLimitDimension::PriorityInputTokens,
+        arany::ApiLimitDimension::PriorityOutputTokens,
+    ]
+    .map(|dimension| arany::ApiLimit {
+        dimension,
+        ..template.clone()
+    })
+    .to_vec();
+    api.rows[2].limit = None;
+    let mut provider = ScriptedProvider::new(vec![finish("done")])
+        .with_profile("anthropic", "claude-sonnet-5")
+        .with_compactions(vec![Ok(arany::CompactionResponse {
+            summary: "summary".into(),
+            response_id: None,
+            usage: arany::Usage::default(),
+            wire_provenance: None,
+        })]);
+    provider
+        .rate_limits
+        .get_mut()
+        .unwrap()
+        .push_back(Some(sample.clone()));
+    provider
+        .compact_rate_limits
+        .get_mut()
+        .unwrap()
+        .push_back(Some(sample));
+    let provider = route(provider);
+    let engine = open(&state);
+    let run = run_to_end(&engine, &provider, input(&workspace))
+        .await
+        .unwrap();
+    engine
+        .compact_session(&routes(&provider), run.session_id, workspace)
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let (_, view) = reopen(&state, run.session_id).await;
+    let expected = messages_report_sections();
+    assert_eq!(super::sections(&view, None), expected);
+    let pages = super::super::usage_pages(&view, false, None).concat();
+    for section in &expected {
+        assert!(pages.contains(section));
+    }
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
+}
+
+fn messages_report_sections() -> Vec<String> {
+    ["primary", "compaction"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, role)| {
+            let mut text = format!(
+                "\nAPI rate limits · Run 1 · route {} · historical\nProvider: anthropic\nModel: claude-sonnet-5\nRole: {role}\nReported header dialect: Anthropic\nProvider-reported counters; not a plan balance or this Session's share\nToken counters may be rounded by the Provider; dimensions are not additive\n",
+                index + 1
+            );
+            for label in [
+                "Requests",
+                "Tokens (most restrictive limit)",
+                "Input tokens",
+                "Output tokens",
+                "Priority input tokens",
+                "Priority output tokens",
+            ] {
+                let limit = if label == "Input tokens" {
+                    "unknown (not reported)"
+                } else {
+                    "100"
+                };
+                text.push_str(&format!("{label}\nLimit: {limit}\nRemaining: 0\nLast reported: 1970-01-01T00:16:40Z · headers\nObservation age unknown\nReset: 1970-01-01T00:17:40Z\n"));
+            }
+            text
+        })
+        .collect()
+}

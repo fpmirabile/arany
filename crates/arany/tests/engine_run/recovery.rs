@@ -1487,10 +1487,14 @@ async fn cancellation_after_clearing_refuses_compaction_before_reservation() {
 
 #[tokio::test]
 async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
+    let mut anthropic = api_sample(1234);
+    anthropic.api.as_mut().unwrap().dialect = arany::ApiLimitDialect::Anthropic;
     for (sample, append_failure) in [
         (plan_sample(1234), false),
         (api_sample(1234), false),
         (api_sample(1234), true),
+        (anthropic.clone(), false),
+        (anthropic, true),
     ] {
         interrupted_compaction_sample(sample, append_failure).await;
     }
@@ -1504,9 +1508,13 @@ async fn interrupted_compaction_sample(sample: arany::RateLimits, append_failure
     let mut failing = ScriptedProvider::new(vec![])
         .with_chatgpt_account(uuid::Uuid::now_v7(), [1; 32])
         .with_profile("chatgpt", "compact-primary");
-    if sample.api.is_some() {
+    if let Some(api) = &sample.api {
+        let profile = match api.dialect {
+            arany::ApiLimitDialect::OpenAi => "openai",
+            arany::ApiLimitDialect::Anthropic => "anthropic",
+        };
         failing.identity =
-            arany::ProviderIdentity::new("openai", "compact-primary", arany::Provenance::native());
+            arany::ProviderIdentity::new(profile, "compact-primary", arany::Provenance::native());
     }
     let error = if append_failure {
         ProviderError::InvalidOutcome

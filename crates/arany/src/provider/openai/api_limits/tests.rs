@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::LimitUnavailable;
 use crate::provider::limits::headers::{MAX_LIMIT_HEADER_VALUE_BYTES, MAX_LIMIT_HEADER_VALUES};
 use reqwest::header::HeaderValue;
 use std::cell::Cell;
