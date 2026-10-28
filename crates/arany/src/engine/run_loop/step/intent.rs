@@ -112,8 +112,8 @@ impl RunLoop<'_> {
             }
             runtime.bind_build_jobs(&mut intent)?;
         }
-        if actor == self.primary_id && intent.call.is_web() {
-            runtime.bind_web_network(&mut intent)?;
+        if actor == self.primary_id && (intent.call.is_web() || intent.call.is_mcp()) {
+            runtime.bind_egress(&mut intent)?;
         }
         let fixed_overhead_ms = duration_ms(
             runtime
@@ -165,7 +165,7 @@ impl RunLoop<'_> {
     ) -> Result<Option<EffectIntent>, EngineError> {
         let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
         if intent.call.is_web() {
-            runtime.bind_web_network(&mut intent)?;
+            runtime.bind_egress(&mut intent)?;
         }
         Ok(self.limit_child_intent(runtime, intent, deadline))
     }

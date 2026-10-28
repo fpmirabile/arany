@@ -20,19 +20,7 @@ const ROLE_SETUP_V2: &str = r#"{"operation_id":"01900000-0000-7000-8000-00000000
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 98] = [
-    (
-        "ToolFinished",
-        32,
-        SELECTION_TOOLFINISHED,
-        SELECTION_TOOLFINISHED,
-    ),
-    (
-        "HookFinished",
-        21,
-        SELECTION_HOOKFINISHED,
-        SELECTION_HOOKFINISHED,
-    ),
+const EVENT_FIXTURES: [EventFixture<'static>; 107] = [
     (
         "AgentFinished",
         11,
@@ -448,6 +436,67 @@ const EVENT_FIXTURES: [EventFixture<'static>; 98] = [
         25,
         include_str!("runstarted-v24.json"),
         include_str!("runstarted-v24.json"),
+    ),
+    ("AgentSpawned", 17, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    (
+        "ToolProposed",
+        4,
+        include_str!("toolproposed-v1.json"),
+        include_str!("toolproposed-v1.json"),
+    ),
+    (
+        "ToolStarted",
+        26,
+        include_str!("toolstarted-v23.json"),
+        include_str!("toolstarted-v23.json"),
+    ),
+    (
+        "ToolFinished",
+        33,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookStarted",
+        15,
+        include_str!("hookstarted-without-expiry.json"),
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        22,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
+    ),
+    (
+        "GoalPlanContractRecorded",
+        14,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        25,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    (
+        "RunStarted",
+        25,
+        include_str!("runstarted-v24.json"),
+        include_str!("runstarted-v24.json"),
+    ),
+    (
+        "ToolFinished",
+        32,
+        SELECTION_TOOLFINISHED,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookFinished",
+        21,
+        SELECTION_HOOKFINISHED,
+        SELECTION_HOOKFINISHED,
     ),
 ];
 

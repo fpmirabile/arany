@@ -2609,7 +2609,9 @@ done
                 skills: Vec::new(),
                 mcp: vec![crate::tools::config::Server {
                     name: "local".into(),
-                    program: crate::tools::config::Program {
+                    url: None,
+                    auth: None,
+                    program: Some(crate::tools::config::Program {
                         name: "mcp-shell".into(),
                         executable: shell.into(),
                         sha256: crate::validate::hex_digest(&std::fs::read(shell).unwrap()),
@@ -2619,7 +2621,7 @@ done
                             destination: "server.sh".into(),
                             sha256: crate::validate::hex_digest(MCP_SCRIPT.as_bytes()),
                         }],
-                    },
+                    }),
                     args: vec!["/inputs/mcp-shell/server.sh".into()],
                     tools: vec!["echo".into()],
                 }],

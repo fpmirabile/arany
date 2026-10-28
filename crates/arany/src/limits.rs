@@ -20,10 +20,10 @@ use crate::{
     },
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
-        FRAME_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
-        MAX_QUERY_BYTES, MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES,
-        NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
-        WRITE_FRAME_BYTES,
+        FRAME_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_MCP_RESPONSE_BYTES, MAX_METADATA_BYTES,
+        MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, MAX_QUERY_BYTES,
+        MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS,
+        WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS, WRITE_FRAME_BYTES,
         permissions::MAX_CONFIG_BYTES,
         toolchains::{
             MAX_DISCOVERY_PATH_ENTRIES, MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS,
@@ -632,6 +632,24 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: MAX_SEARCH_FIELD_CHARS as u64,
             unit: "characters per search result field",
             owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "MAX_MCP_RESPONSE_BYTES",
+            value: MAX_MCP_RESPONSE_BYTES as u64,
+            unit: "bytes per remote MCP HTTP response",
+            owner: "crates/arany/src/tools/mcp/remote.rs",
+        },
+        Limit {
+            name: "MAX_ACCESS_TOKEN_BYTES",
+            value: MAX_ACCESS_TOKEN_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/mcp/oauth.rs",
+        },
+        Limit {
+            name: "MAX_METADATA_BYTES",
+            value: MAX_METADATA_BYTES as u64,
+            unit: "bytes per authorization-server response",
+            owner: "crates/arany/src/tools/mcp/oauth.rs",
         },
     ],
 };

@@ -28,6 +28,7 @@ pub(crate) mod acp;
 pub(crate) mod attached;
 pub(crate) mod exec;
 pub(crate) mod generate_schema;
+pub(crate) mod mcp;
 pub(crate) mod provider;
 #[cfg(test)]
 mod record_formats;

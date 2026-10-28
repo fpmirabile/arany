@@ -259,6 +259,34 @@ pub(crate) fn guard_completion(intent: uuid::Uuid) -> Result<(), ToolError> {
     Ok(())
 }
 
+// Arm a shorter deadline only after the test observes the effect being exercised.
+#[cfg(target_os = "linux")]
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn action_deadline_cap(
+    call: &crate::tools::ToolCall,
+    deadline: Instant,
+) -> Instant {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((cap, trigger)) = FaultPlan::deadline_cap(call)
+        && trigger.await.is_ok()
+    {
+        return deadline.min(Instant::now() + cap);
+    }
+    std::future::pending().await
+}
+
+// Resolves when the test kills the launcher; without a fault it never resolves.
+#[cfg(target_os = "linux")]
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn launcher_kill(call: &crate::tools::ToolCall) {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(trigger) = FaultPlan::launcher_kill(call) {
+        let _ = trigger.await;
+        return;
+    }
+    std::future::pending::<()>().await
+}
+
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     #[cfg(any(test, feature = "test-support"))]
@@ -409,6 +437,8 @@ mod injection {
     #[cfg(any(target_os = "macos", test))]
     use std::io;
     use std::sync::Mutex;
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
     use tokio::sync::oneshot;
 
     type Admits = fn(&Event) -> bool;
@@ -437,6 +467,10 @@ mod injection {
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
         GuardDispatch(crate::tools::ToolCall, oneshot::Sender<()>),
+        #[cfg(target_os = "linux")]
+        DeadlineCap(crate::tools::ToolCall, Duration, oneshot::Receiver<()>),
+        #[cfg(target_os = "linux")]
+        LauncherKill(crate::tools::ToolCall, oneshot::Receiver<()>),
         #[cfg(target_os = "macos")]
         GuardDispatchGate(
             crate::tools::ToolCall,
@@ -879,6 +913,49 @@ mod injection {
                 serde_json::to_vec(&(fault, refusal_evidence)).map_err(io::Error::other)?;
             std::fs::write(root.join(crate::tools::GIT_STORAGE_CANARY), b"control")?;
             std::fs::write(root.join(crate::tools::GIT_STORAGE_FAULT), injection)
+        }
+
+        // The returned sender arms the real deadline after the test observes the intended phase.
+        #[cfg(target_os = "linux")]
+        pub fn cap_action_deadline(
+            call: crate::tools::ToolCall,
+            cap: Duration,
+        ) -> oneshot::Sender<()> {
+            let (trigger, fired) = oneshot::channel();
+            plan().push(Fault::DeadlineCap(call, cap, fired));
+            trigger
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn deadline_cap(
+            call: &crate::tools::ToolCall,
+        ) -> Option<(Duration, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::DeadlineCap(candidate, ..) if candidate == call),
+            ) {
+                Some(Fault::DeadlineCap(_, cap, trigger)) => Some((cap, trigger)),
+                _ => None,
+            }
+        }
+
+        /// Kills the launcher of the next action for `call` once the returned sender fires.
+        #[cfg(target_os = "linux")]
+        pub fn kill_launcher(call: crate::tools::ToolCall) -> oneshot::Sender<()> {
+            let (trigger, fired) = oneshot::channel();
+            plan().push(Fault::LauncherKill(call, fired));
+            trigger
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn launcher_kill(
+            call: &crate::tools::ToolCall,
+        ) -> Option<oneshot::Receiver<()>> {
+            match take(
+                |fault| matches!(fault, Fault::LauncherKill(candidate, _) if candidate == call),
+            ) {
+                Some(Fault::LauncherKill(_, fired)) => Some(fired),
+                _ => None,
+            }
         }
 
         pub fn observe_guard_dispatch(call: crate::tools::ToolCall) -> oneshot::Receiver<()> {
