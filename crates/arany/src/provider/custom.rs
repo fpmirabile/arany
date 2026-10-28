@@ -16,7 +16,6 @@ pub use check::{
 };
 pub(crate) use destination::MAX_ADDRESSES;
 use destination::PinnedDestination;
-#[cfg(target_os = "linux")]
 pub(crate) use destination::resolve_admitted;
 
 const MAX_PROFILES: usize = 32;
