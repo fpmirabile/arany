@@ -376,7 +376,7 @@ async fn selected_cache_canary_helper_inner() {
     assert_eq!(StateRoot::account_path().unwrap(), account);
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let options = permissions.runtime_profile_choices();
     let cache = options
         .iter()
@@ -390,7 +390,7 @@ async fn selected_cache_canary_helper_inner() {
     cache_progress("seed-admission-complete");
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
 
     let state_path = root.join("state");
     let seed_cache = ToolCall::Command {
@@ -501,7 +501,7 @@ async fn selected_cache_canary_helper_inner() {
 
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     permissions
         .remember_profiles(
             true,
@@ -511,7 +511,7 @@ async fn selected_cache_canary_helper_inner() {
         .unwrap();
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     assert!(
         permissions
             .runtime_profile_choices()
@@ -767,13 +767,13 @@ async fn selected_cache_canary_helper_inner() {
 
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     permissions
         .remember_profiles(true, arany::ApprovalMode::AutoEdits, &[])
         .unwrap();
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let verify_cache = ToolCall::Command {
         program: "sh".into(),
         args: vec![
@@ -1318,7 +1318,7 @@ async fn offline_cargo_helper() {
     arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), &workspace);
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
-        .prepare_profile_selection();
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let choices = permissions.runtime_profile_choices();
     let rust = choices
         .iter()
@@ -1335,6 +1335,54 @@ async fn offline_cargo_helper() {
     arany::test_support::scenario::guarded_offline_cargo_journey(
         root,
         &workspace,
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+    )
+    .await;
+}
+
+#[test]
+#[ignore = "native Linux Guard user program journey"]
+fn guarded_commands_run_selected_user_program_directories() {
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().unwrap();
+    crate::startup_trust::consent_user_programs(temp.path(), true);
+    std::fs::remove_file(temp.path().join("passwd")).unwrap();
+    let mut helper = crate::isolation::native_account_isolated_test_command_with_timeout(
+        temp.path(),
+        Path::new("/usr/bin/env"),
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        300,
+    );
+    helper
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tools::native_exec::user_programs_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .current_dir(temp.path());
+    let output = helper
+        .bounded_output_for(Duration::from_secs(320), 64 * 1024)
+        .unwrap();
+    if !output.status.success() {
+        let retained = temp.keep();
+        panic!("user program journey failed; fixture={retained:?}; output={output:?}");
+    }
+    crate::process::assert_single_test_completed(&output.stdout, "user program journey");
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by the native user program journey"]
+async fn user_programs_helper() {
+    let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    arany::test_support::scenario::guarded_user_programs_journey(
+        root,
+        &root.join("workspace"),
         Path::new(env!("CARGO_BIN_EXE_arany")),
     )
     .await;

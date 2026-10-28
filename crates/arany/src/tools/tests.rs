@@ -729,8 +729,16 @@ fn command_reservations_have_no_separate_selection_allowance() {
         args: vec!["-c".into(), "true".into()],
         cwd: String::new(),
     };
-    assert_eq!(
-        runtime.reservation_overhead(&call),
-        super::guard::RESERVATION_OVERHEAD
+    let mut intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        call.clone(),
     );
+    for runtime_ms in [1_000, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS] {
+        intent.limits.runtime_ms = runtime_ms;
+        assert_eq!(
+            runtime.reservation_overhead(&intent.call),
+            super::guard::RESERVATION_OVERHEAD
+        );
+    }
 }
