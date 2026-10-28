@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 const SEARCH_KEY: &str = "SYNTHETIC_WEB_KEY_4927";
 const JOURNEY_TIMEOUT: Duration = Duration::from_secs(40);
+const JOURNEY_PROCESS_TIMEOUT_SECONDS: u32 = 360;
 
 struct WebCase {
     calls: Vec<ToolCall>,
@@ -202,12 +203,14 @@ fn first_result(outcome: &arany::RunOutcome) -> &arany::ToolObservation {
     ignore = "native Guard web policy, search privacy and verified HTTPS journeys"
 )]
 fn web_policy_search_privacy_and_https() {
+    if !crate::isolation::enter_native_account_isolated_test_with_timeout(
+        JOURNEY_PROCESS_TIMEOUT_SECONDS,
+    ) {
+        return;
+    }
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !crate::isolation::enter_account_isolated_test() {
-        return;
-    }
     let root = tempfile::tempdir().unwrap();
     web_certificate(root.path());
     let executable = std::env::current_exe().unwrap();
@@ -221,7 +224,10 @@ fn web_policy_search_privacy_and_https() {
         .env("ARANY_WEB_SEARCH_JOURNEY_KEY", SEARCH_KEY)
         .env("ARANY_WEB_JOURNEY_ROOT", root.path())
         .env("SSL_CERT_FILE", root.path().join("ca.pem"))
-        .bounded_output_for(Duration::from_secs(360), 128 * 1024)
+        .bounded_output_for(
+            Duration::from_secs(u64::from(JOURNEY_PROCESS_TIMEOUT_SECONDS)),
+            128 * 1024,
+        )
         .unwrap();
     for bytes in [&output.stdout, &output.stderr] {
         assert!(
