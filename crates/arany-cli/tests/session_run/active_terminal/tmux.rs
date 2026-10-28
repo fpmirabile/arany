@@ -341,20 +341,14 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     wait_owned_product(&product_guard);
 
     let mut declined = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(screen) = capture_pane(&server) {
-            decline_initial_consent(&server, &screen, &mut declined);
-            if live_tail_layout(&screen, 80) {
-                break;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "inline tmux composer/status not visible"
-        );
-        thread::yield_now();
-    }
+    wait_screen(
+        &server,
+        "inline tmux composer/status not visible",
+        |screen| {
+            decline_initial_consent(&server, screen, &mut declined);
+            live_tail_layout(screen, 80)
+        },
+    );
     let startup = capture_pane(&server).expect("idle startup pane");
     let startup = String::from_utf8(startup).expect("idle startup UTF-8");
     eprintln!(
@@ -445,78 +439,38 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         if width == 16 && height == 24 {
             let opened = server.run(&["send-keys", "-t", "arany-test:0.0", "C-k"]);
             assert!(opened.status.success(), "open narrow quick actions");
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Some(screen) = capture_pane(&server)
-                    && String::from_utf8_lossy(&screen).contains("1-5 Enter Esc")
-                {
-                    break;
-                }
-                assert!(Instant::now() < deadline, "narrow quick actions visible");
-                thread::yield_now();
-            }
+            wait_screen(&server, "narrow quick actions visible", |screen| {
+                String::from_utf8_lossy(screen).contains("1-5 Enter Esc")
+            });
             let closed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
             assert!(closed.status.success(), "close narrow quick actions");
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Some(screen) = capture_pane(&server)
-                    && live_tail_layout(&screen, width)
-                {
-                    break;
-                }
-                assert!(Instant::now() < deadline, "narrow composer restored");
-                thread::yield_now();
-            }
+            wait_screen(&server, "narrow composer restored", |screen| {
+                live_tail_layout(screen, width)
+            });
             if no_color_flag {
                 let typed = server.run(&["send-keys", "-l", "-t", "arany-test:0.0", "/help"]);
                 assert!(typed.status.success(), "type narrow help command");
                 let submitted = server.run(&["send-keys", "-t", "arany-test:0.0", "Enter"]);
                 assert!(submitted.status.success(), "open narrow help");
-                let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    if let Some(screen) = capture_pane(&server) {
-                        let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/23")
-                            && screen.contains("1. /help")
-                            && screen.contains("Up/Dn Enter Esc")
-                        {
-                            break;
-                        }
-                    }
-                    assert!(Instant::now() < deadline, "narrow help not visible");
-                    thread::yield_now();
-                }
+                wait_screen(&server, "narrow help not visible", |screen| {
+                    let screen = String::from_utf8_lossy(screen);
+                    screen.contains("Commands 1/23")
+                        && screen.contains("1. /help")
+                        && screen.contains("Up/Dn Enter Esc")
+                });
                 let moved = server.run(&["send-keys", "-t", "arany-test:0.0", "End"]);
                 assert!(moved.status.success(), "navigate to last command");
-                let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    if let Some(screen) = capture_pane(&server) {
-                        let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 23/23")
-                            && screen.contains("23. /exit")
-                            && screen.contains("Exit Session")
-                        {
-                            break;
-                        }
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "last narrow help row not visible"
-                    );
-                    thread::yield_now();
-                }
+                wait_screen(&server, "last narrow help row not visible", |screen| {
+                    let screen = String::from_utf8_lossy(screen);
+                    screen.contains("Commands 23/23")
+                        && screen.contains("23. /exit")
+                        && screen.contains("Exit Session")
+                });
                 let closed = server.run(&["send-keys", "-t", "arany-test:0.0", "Escape"]);
                 assert!(closed.status.success(), "close narrow help");
-                let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    if let Some(screen) = capture_pane(&server)
-                        && live_tail_layout(&screen, width)
-                    {
-                        break;
-                    }
-                    assert!(Instant::now() < deadline, "composer after narrow help");
-                    thread::yield_now();
-                }
+                wait_screen(&server, "composer after narrow help", |screen| {
+                    live_tail_layout(screen, width)
+                });
             }
         }
     }
@@ -531,14 +485,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         "arany-test:0",
     ]);
     assert!(resized.status.success(), "resize before wrapped draft");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| live_tail_layout(&screen, 40)) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "empty resized composer ready");
-        thread::yield_now();
-    }
+    wait_screen(&server, "empty resized composer ready", |screen| {
+        live_tail_layout(screen, 40)
+    });
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", draft])
@@ -559,17 +508,11 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             && rows[composer + 4].contains("ready")
             && rows[composer + 5..].iter().all(|row| row.trim().is_empty())
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| wrapped_layout(&screen)) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "ordinary draft wraps into two rows"
-        );
-        thread::yield_now();
-    }
+    wait_screen(
+        &server,
+        "ordinary draft wraps into two rows",
+        &wrapped_layout,
+    );
     eprintln!(
         "Wrapped draft capture:\n{}",
         String::from_utf8_lossy(&capture_pane(&server).expect("wrapped capture"))
@@ -612,33 +555,16 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            String::from_utf8_lossy(&screen).contains("Up/Down · Enter open · Esc return")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "selector opened over wrapped draft"
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "selector opened over wrapped draft", |screen| {
+        String::from_utf8_lossy(screen).contains("Up/Down · Enter open · Esc return")
+    });
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "Escape"])
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| wrapped_layout(&screen)) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "same wrapped draft restored");
-        thread::yield_now();
-    }
+    wait_screen(&server, "same wrapped draft restored", &wrapped_layout);
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", "!"])
@@ -646,19 +572,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             .success()
     );
     let edited = format!("{}!.", &draft[..draft.len() - 1]);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server)
-            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains(&edited[38..]))
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "selector restored the mid-draft caret"
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "selector restored the mid-draft caret", |screen| {
+        String::from_utf8_lossy(screen).contains(&edited[38..])
+    });
     assert!(
         server
             .run(&["resize-window", "-x", "16", "-y", "8", "-t", "arany-test:0"])
@@ -700,37 +616,21 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            live_tail_layout(&screen, 80) && String::from_utf8_lossy(&screen).contains(&edited)
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "resize restores the complete unchanged draft"
-        );
-        thread::yield_now();
-    }
+    wait_screen(
+        &server,
+        "resize restores the complete unchanged draft",
+        |screen| live_tail_layout(screen, 80) && String::from_utf8_lossy(screen).contains(&edited),
+    );
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-c"])
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            live_tail_layout(&screen, 80)
-                && String::from_utf8_lossy(&screen)
-                    .contains("Ask a question, or type / for commands")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "clear draft without submission");
-        thread::yield_now();
-    }
+    wait_screen(&server, "clear draft without submission", |screen| {
+        live_tail_layout(screen, 80)
+            && String::from_utf8_lossy(screen).contains("Ask a question, or type / for commands")
+    });
 
     assert!(
         server
@@ -883,17 +783,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| live_tail_layout(&screen, 80)) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "composer after Unicode correction"
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "composer after Unicode correction", |screen| {
+        live_tail_layout(screen, 80)
+    });
 
     let before = read_trimmed(&before_path);
     assert_ne!(tty_settings(product_pid), before, "raw mode inside tmux");
@@ -1138,17 +1030,10 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         ProductGuard::for_executable(product_pid, state.clone(), executable.clone());
     wait_owned_product(&product_guard);
     let mut declined = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(screen) = capture_pane(&server) {
-            decline_initial_consent(&server, &screen, &mut declined);
-            if live_tail_layout(&screen, 40) {
-                break;
-            }
-        }
-        assert!(Instant::now() < deadline, "idle composer missing");
-        thread::yield_now();
-    }
+    wait_screen(&server, "idle composer missing", |screen| {
+        decline_initial_consent(&server, screen, &mut declined);
+        live_tail_layout(screen, 40)
+    });
     assert!(
         server
             .run(&[
@@ -1161,14 +1046,11 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| idle_multiline_layout(&screen)) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "inline multiline draft missing");
-        thread::yield_now();
-    }
+    wait_screen(
+        &server,
+        "inline multiline draft missing",
+        idle_multiline_layout,
+    );
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
@@ -1178,20 +1060,14 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     request_ready
         .recv_timeout(Duration::from_secs(10))
         .expect("active Provider request");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
+    wait_screen(
+        &server,
+        "committed user message missing during Run",
+        |screen| {
+            let text = String::from_utf8_lossy(screen);
             text.contains("You:") && text.contains("│ first") && text.contains("│ second")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "committed user message missing during Run"
-        );
-        thread::yield_now();
-    }
+        },
+    );
     let first_turn = capture_pane(&server).expect("first committed user frame");
     let first_turn = String::from_utf8(first_turn).expect("first frame UTF-8");
     assert!(
@@ -1214,38 +1090,25 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("> Cmd /setup") && text.contains("Tab completes")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "active slash choices missing");
-        thread::yield_now();
-    }
+    wait_screen(&server, "active slash choices missing", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("> Cmd /setup") && text.contains("Tab completes")
+    });
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "Down", "Enter"])
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
+    wait_screen(
+        &server,
+        "40-column request-size details missing",
+        |screen| {
+            let text = String::from_utf8_lossy(screen);
             text.lines()
                 .any(|row| row.contains("Working · request ") && row.contains("% of local limit"))
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "40-column request-size details missing"
-        );
-        thread::yield_now();
-    }
+        },
+    );
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/provder"])
@@ -1258,17 +1121,10 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("Unknown command") && text.contains("/provder")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "active typo draft was lost");
-        thread::yield_now();
-    }
+    wait_screen(&server, "active typo draft was lost", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("Unknown command") && text.contains("/provder")
+    });
     assert!(
         server
             .run(&[
@@ -1298,20 +1154,10 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("Provider: custom:local") && text.contains("unavailable while a Run")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "corrected active command missing"
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "corrected active command missing", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("Provider: custom:local") && text.contains("unavailable while a Run")
+    });
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/help"])
@@ -1324,39 +1170,25 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 21 local controls")
-                && text.contains("1. /help")
-                && text.contains("Enter/Esc close")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "active help panel missing");
-        thread::yield_now();
-    }
+    wait_screen(&server, "active help panel missing", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("Commands · 21 local controls")
+            && text.contains("1. /help")
+            && text.contains("Enter/Esc close")
+    });
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "Escape"])
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("Ask Arany")
-                && text.contains("primary · working")
-                && !text.contains("Commands · 20 local controls")
-                && !text.contains("Enter/Esc close")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "active composer after help");
-        thread::yield_now();
-    }
+    wait_screen(&server, "active composer after help", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("Ask Arany")
+            && text.contains("primary · working")
+            && !text.contains("Commands · 20 local controls")
+            && !text.contains("Enter/Esc close")
+    });
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", "pending"])
@@ -1375,17 +1207,11 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| active_layout_with_draft(&screen)) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "active shelf/draft layout missing"
-        );
-        thread::yield_now();
-    }
+    wait_screen(
+        &server,
+        "active shelf/draft layout missing",
+        active_layout_with_draft,
+    );
     assert!(
         server
             .run(&[
@@ -1398,42 +1224,26 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            active_layout_with_draft(&screen)
-                && String::from_utf8_lossy(&screen).contains("  draft correction")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "active word-edit fixture missing"
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "active word-edit fixture missing", |screen| {
+        active_layout_with_draft(screen)
+            && String::from_utf8_lossy(screen).contains("  draft correction")
+    });
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-w", "BSpace"])
             .status
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            active_layout_with_draft(&screen)
-                && String::from_utf8_lossy(&screen)
+    wait_screen(
+        &server,
+        "active word deletion did not retain the draft",
+        |screen| {
+            active_layout_with_draft(screen)
+                && String::from_utf8_lossy(screen)
                     .lines()
                     .any(|row| row == "  draft")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "active word deletion did not retain the draft"
-        );
-        thread::yield_now();
-    }
+        },
+    );
     assert!(
         server
             .run(&[
@@ -1449,27 +1259,20 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .success(),
         "widen active pane"
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            let rows: Vec<_> = text.lines().collect();
-            let status = rows
-                .iter()
-                .rposition(|row| row.contains("Ask Arany"))
-                .and_then(|composer| rows.get(composer + 4));
-            active_layout_with_draft(&screen)
-                && status.is_some_and(|row| {
-                    row.contains("working · custom:local/model-1")
-                        && !row.contains("context ")
-                        && !row.contains("% of local limit")
-                })
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "quiet active status missing");
-        thread::yield_now();
-    }
+    wait_screen(&server, "quiet active status missing", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        let rows: Vec<_> = text.lines().collect();
+        let status = rows
+            .iter()
+            .rposition(|row| row.contains("Ask Arany"))
+            .and_then(|composer| rows.get(composer + 4));
+        active_layout_with_draft(screen)
+            && status.is_some_and(|row| {
+                row.contains("working · custom:local/model-1")
+                    && !row.contains("context ")
+                    && !row.contains("% of local limit")
+            })
+    });
     let before_pages = capture_pane(&server).expect("Classic draft frame");
     assert!(
         server
@@ -1497,24 +1300,13 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         screen == before_pages
     });
     response_sender.send(()).expect("release Provider response");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("pending")
-                && text.contains("draft")
-                && text.contains("Draft retained:")
-                && text.contains("Enter sends")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "draft not retained after Run: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "draft not retained after Run", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        text.contains("pending")
+            && text.contains("draft")
+            && text.contains("Draft retained:")
+            && text.contains("Enter sends")
+    });
     assert!(
         server
             .run(&[
