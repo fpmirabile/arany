@@ -414,6 +414,9 @@ async fn run_remote_until(
         },
     )
     .unwrap();
+    let session = engine.create_session(workspace.clone(), None).await.unwrap();
+    let mut request = proposal_request(&workspace);
+    request.session_id = Some(session);
     let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
     let cancellation = arany::RunCancellation::new();
     let cancel_run = cancellation.clone();
@@ -431,7 +434,7 @@ async fn run_remote_until(
             run_with(
                 &engine,
                 &provider,
-                proposal_request(&workspace),
+                request,
                 RunControls {
                     tools: ToolGrant::Configured,
                     approvals: approve.then_some(approvals),
@@ -444,13 +447,20 @@ async fn run_remote_until(
     })
     .await
     .expect("remote MCP parent deadline");
-    let outcome = outcome.unwrap();
+    // An Uncertain stop journals no terminal Event and is reported unknown, so replay projects the Run.
+    let returned = match outcome {
+        Ok(outcome) => Some(outcome.run),
+        Err(arany::EngineError::Tool(arany::ToolError::Uncertain)) => None,
+        Err(error) => panic!("remote MCP Run failed: {error:?}"),
+    };
     engine.close().await.unwrap();
-    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    let (events, replay) = arany::test_support::goals::replayed(&state_path, session).await;
+    let run = &replay.runs[0];
+    if let Some(returned) = &returned {
+        assert_eq!(run, returned);
+    }
+    let observation = run.tools[0].observation.as_ref().unwrap();
     assert_seed_retired(observation.intent.id);
-    let (events, replay) =
-        arany::test_support::goals::replayed(&state_path, outcome.session_id).await;
-    assert_eq!(replay.runs[0], outcome.run);
     let evidence = events
         .iter()
         .map(|event| event.event.payload().unwrap())
@@ -460,9 +470,16 @@ async fn run_remote_until(
         "disposition": format!("{:?}", observation.disposition),
         "output": serde_json::from_str::<Value>(&observation.output).unwrap_or(Value::Null),
         "text": observation.output,
-        "status": format!("{:?}", outcome.run.status),
+        "stop": format!("{:?}", replay.run_stop(run)),
+        "reported_uncertain": returned.is_none(),
         "evidence": evidence,
     })
+}
+
+fn assert_reported_uncertain(run: &Value) {
+    assert_eq!(run["disposition"], "Uncertain");
+    assert_eq!(run["reported_uncertain"], true, "reported unknown, never settled");
+    assert_eq!(run["stop"], "Some(Uncertain)", "it stops the Run");
 }
 
 async fn list_remote(port: u16) -> Value {
@@ -568,12 +585,8 @@ async fn remote_mcp_never_resubmits_a_refresh_token_after_an_unconfirmed_reply()
     ] {
         let server = mcp_fixture(mode);
         write_token(server.port, "expired-token", unix_now() - 10);
-        let first = list_remote(server.port).await;
-        assert_eq!(
-            first["disposition"], "Uncertain",
-            "the renewal may have rotated the token"
-        );
-        assert_ne!(first["status"], "Finished");
+        // The renewal may have rotated the token.
+        assert_reported_uncertain(&list_remote(server.port).await);
         let second = list_remote(server.port).await;
         assert_eq!(second["disposition"], "Failed");
         assert_eq!(second["output"]["error"], "unauthorized");
@@ -607,8 +620,8 @@ async fn remote_mcp_cancelled_during_a_renewal_is_uncertain_and_blocks_reuse() {
     };
     let cancelled =
         run_remote_until(server.port, call, false, Some(server.requested.clone())).await;
-    assert_eq!(cancelled["status"], "Cancelled");
-    assert_eq!(cancelled["disposition"], "Uncertain");
+    // The unknown renewal outranks the cancellation.
+    assert_reported_uncertain(&cancelled);
     let reopened = list_remote(server.port).await;
     assert_eq!(reopened["disposition"], "Failed");
     assert_eq!(reopened["output"]["error"], "unauthorized");
@@ -648,8 +661,7 @@ async fn remote_mcp_stopped_during_a_renewal_is_uncertain_and_blocks_reuse() {
                 run.await
             }
         };
-        assert_eq!(stopped["disposition"], "Uncertain");
-        assert_ne!(stopped["status"], "Finished");
+        assert_reported_uncertain(&stopped);
         let reopened = list_remote(server.port).await;
         assert_eq!(reopened["disposition"], "Failed");
         assert_eq!(reopened["output"]["error"], "unauthorized");
@@ -757,7 +769,7 @@ async fn remote_mcp_call_with_a_refused_ping_reply_is_uncertain() {
     write_token(server.port, CLIENT_TOKEN, unix_now() + 3600);
     let called = run_remote(server.port, echo_call("Echo"), true).await;
     assert_eq!(server.executed.load(Ordering::SeqCst), 1);
-    assert_eq!(called["disposition"], "Uncertain");
+    assert_reported_uncertain(&called);
 }
 
 #[tokio::test]
@@ -793,11 +805,7 @@ async fn remote_mcp_call_with_a_lost_reply_is_uncertain() {
         1,
         "the server ran it"
     );
-    assert_eq!(called["disposition"], "Uncertain");
-    assert_ne!(
-        called["status"], "Finished",
-        "an unknown outcome stops the Run"
-    );
+    assert_reported_uncertain(&called);
     assert!(
         called["text"]
             .as_str()
@@ -845,7 +853,7 @@ async fn remote_mcp_call_with_an_invalid_reply_is_uncertain() {
         write_token(server.port, CLIENT_TOKEN, unix_now() + 3600);
         let called = run_remote(server.port, echo_call("Echo"), true).await;
         assert_eq!(server.executed.load(Ordering::SeqCst), 1);
-        assert_eq!(called["disposition"], "Uncertain");
+        assert_reported_uncertain(&called);
     }
 }
 
