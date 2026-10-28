@@ -1011,7 +1011,7 @@ pub(super) async fn execute_inner(
         permit = super::admit_operation(runtime, intent) => permit?,
     };
     let capacity_started = tokio::time::Instant::now();
-    let (active_window, command_deadline) =
+    let active_window =
         super::selection_phase::begin_action(runtime, intent, capacity_started).await?;
     let (preparation_deadline, go_deadline, deadline) =
         action_deadlines(active_window, intent, capacity_started);
@@ -1027,6 +1027,7 @@ pub(super) async fn execute_inner(
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let (mut cache, launch) =
         overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
+    let command_deadline = super::selection_phase::command_deadline(intent);
     let preparation_deadline =
         super::selection_phase::preparation_deadline(preparation_deadline, command_deadline);
     let mut unit = Unit::new(permit.id, &intent.limits);
@@ -1834,7 +1835,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(LINUX_SELECTION_CONTRACT),
-            "35f1aa2d4c41ec3e4703f055ab4a9921d8aa39d6daffd3c9d670ec73582e74d5"
+            "ac6ba2cdae3e03d83caaf69c0b224079af11bfc05ef3e5ce6da5577ae0edb03a"
         );
         super::super::tests::assert_enforcement_prose(
             LINUX_SELECTION_CONTRACT,

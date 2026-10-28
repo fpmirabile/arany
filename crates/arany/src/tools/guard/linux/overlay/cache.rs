@@ -165,7 +165,7 @@ impl View {
             &open_directory(&self.grant.root.join("view/lower"))?,
             &upper,
             &self.grant.exclusions,
-            std::time::Instant::now() + crate::tools::fs::command::overlay::cache::CAPTURE_TIME,
+            std::time::Instant::now() + cache_directory::CAPTURE_TIME,
             self.grant.bytes,
         );
         let report = validation

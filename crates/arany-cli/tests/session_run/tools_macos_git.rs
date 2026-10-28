@@ -737,40 +737,42 @@ async fn approved_git_write(
         arany::test_support::goals::finish_with("Done"),
     ]));
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
-    let running = run_with(
-        engine,
-        &provider,
-        RunRequest {
-            skill: None,
-            session_id: None,
-            title: Some("Git write".into()),
-            objective: "Create a branch".into(),
-            images: Vec::new(),
-            workspace: workspace.into(),
-            launch_directory: None,
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-            goal: arany::GoalRequest::default(),
-        },
-        RunControls {
-            tools: ToolGrant::Configured,
-            approvals: Some(approvals),
-            ..Default::default()
-        },
-    );
-    tokio::pin!(running);
-    let outcome = tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            tokio::select! {
-                biased;
-                outcome = &mut running => break outcome,
-                Some(approval) = inbox.next() => approval.decide(arany::ApprovalReply::AllowOnce),
+    let outcome = {
+        let running = run_with(
+            engine,
+            &provider,
+            RunRequest {
+                skill: None,
+                session_id: None,
+                title: Some("Git write".into()),
+                objective: "Create a branch".into(),
+                images: Vec::new(),
+                workspace: workspace.into(),
+                launch_directory: None,
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            },
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals),
+                ..Default::default()
+            },
+        );
+        tokio::pin!(running);
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                tokio::select! {
+                    biased;
+                    outcome = &mut running => break outcome,
+                    Some(approval) = inbox.next() => approval.decide(arany::ApprovalReply::AllowOnce),
+                }
             }
-        }
-    })
-    .await
-    .expect("Git write deadline")
-    .unwrap();
+        })
+        .await
+        .expect("Git write deadline")
+        .unwrap()
+    };
     (outcome, Arc::clone(&provider))
 }
 

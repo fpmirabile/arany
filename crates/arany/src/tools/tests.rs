@@ -100,6 +100,16 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         crate::test_support::recorded_tool_failure(unstarted.id).as_deref(),
         Some("Guard stage=connection deadline")
     );
+    let expired =
+        super::unstarted_observation(unstarted.clone(), super::ToolError::Timeout(String::new()));
+    assert_eq!(expired.disposition, ToolDisposition::Limit);
+    assert_eq!(expired.limit_cause, Some(super::LimitCause::Timeout));
+    let selected = super::unstarted_observation(
+        unstarted.clone(),
+        super::ToolError::Timeout(String::new()).in_selection(),
+    );
+    assert_eq!(selected.disposition, ToolDisposition::Limit);
+    assert_eq!(selected.limit_cause, Some(super::LimitCause::Timeout));
     let mut file = intent(ToolCall::Mkdir {
         path: "src/new".into(),
     });
@@ -494,21 +504,30 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
             },
         )
     };
-    for (error, stage, label) in [
+    for (error, stage, label, disposition, limit_cause, stops_run) in [
         (
             ToolError::Timeout(String::new()).in_selection(),
             FailureStage::SelectionTimedOut,
             "project selection timed out",
+            ToolDisposition::Limit,
+            Some(super::LimitCause::Timeout),
+            false,
         ),
         (
             ToolError::NotFound.in_selection(),
             FailureStage::SelectionInputVanished,
             "project input vanished",
+            ToolDisposition::Failed,
+            None,
+            true,
         ),
         (
             ToolError::Conflict.in_selection(),
             FailureStage::SelectionInputConflict,
             "project input conflict",
+            ToolDisposition::Failed,
+            None,
+            true,
         ),
     ] {
         assert!(matches!(
@@ -528,7 +547,10 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
             observation.guard_stage_diagnostic().as_deref(),
             Some(format!("Guard stage: {label}").as_str())
         );
-        assert!(observation.valid() && observation.stops_run());
+        assert!(observation.valid());
+        assert_eq!(observation.disposition, disposition);
+        assert_eq!(observation.limit_cause, limit_cause);
+        assert_eq!(observation.stops_run(), stops_run);
         assert!(
             observation
                 .output
@@ -556,11 +578,11 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
     ] {
         assert_eq!(super::failure_stage(&error), stage);
     }
-    for error in [
-        ToolError::Timeout(String::new()),
-        ToolError::NotFound,
-        ToolError::Conflict,
-    ] {
+    let timed_out = super::unstarted_observation(command(), ToolError::Timeout(String::new()));
+    assert_eq!(timed_out.output, "Tool runtime expired");
+    assert_eq!(timed_out.limit_cause, Some(super::LimitCause::Timeout));
+    assert!(timed_out.guard_stage.is_none());
+    for error in [ToolError::NotFound, ToolError::Conflict] {
         let observation = super::unstarted_observation(command(), error);
         assert!(
             observation
@@ -640,15 +662,7 @@ fn command_reservations_have_no_separate_selection_allowance() {
     for runtime_ms in [1_000, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS] {
         intent.limits.runtime_ms = runtime_ms;
         assert_eq!(
-            runtime.reservation_overhead(&call),
-            super::guard::RESERVATION_OVERHEAD
-        );
-        assert_eq!(
-            runtime.intent_reservation_overhead(&intent),
-            super::guard::RESERVATION_OVERHEAD
-        );
-        assert_eq!(
-            runtime.worker_reservation_overhead(&call),
+            runtime.reservation_overhead(&intent.call),
             super::guard::RESERVATION_OVERHEAD
         );
     }

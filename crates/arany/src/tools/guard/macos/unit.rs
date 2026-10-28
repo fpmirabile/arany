@@ -1627,7 +1627,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         #[cfg(any(test, feature = "test-support"))]
                         git_fault,
                     },
-                    path.parent().ok_or(ToolError::Path)?,
+                    (path.parent().ok_or(ToolError::Path)?, command_deadline),
                 )
                 .await
             }

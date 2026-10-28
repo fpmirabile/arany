@@ -1129,7 +1129,6 @@ struct WorkerOutput {
 // What the supervisor waits for before GO: the controller's signal and, for a publisher, the frame it must forward first.
 struct GoGate {
     receive_go: tokio::sync::oneshot::Receiver<()>,
-    command_deadline: Option<[u8; 8]>,
     git_stage: Option<super::GitStage>,
     git_input: Option<tokio::sync::oneshot::Receiver<(Vec<u8>, Vec<u8>)>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1230,14 +1229,14 @@ async fn execute_worker(
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     gate: GoGate,
-    root: &Path,
+    (root, command_deadline): (&Path, Option<[u8; 8]>),
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let git_stage = gate.git_stage;
     #[cfg(any(test, feature = "test-support"))]
     let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
-    task.command_deadline = gate.command_deadline;
+    task.command_deadline = command_deadline;
     task.git_stage = git_stage;
     #[cfg(any(test, feature = "test-support"))]
     {
@@ -1387,7 +1386,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(MACOS_SELECTION_CONTRACT),
-            "c9a73a9d3c9b713e75e126b87e2a86783fd4b2bbdabcdbb83aaf4ae779ec1d6b"
+            "a66a758e6b033ed1c57f64c9fcdb86ceab80ed061eb05a1937744c68ca8b5c52"
         );
         super::super::tests::assert_enforcement_prose(
             MACOS_SELECTION_CONTRACT,
