@@ -82,8 +82,9 @@ pub use provider::{
     resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
     validate_native_api_key, validate_native_model_id,
 };
+pub use provider::{ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, MAX_API_LIMIT_ROWS};
 pub use session::{
-    AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, BudgetAction,
+    AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ApiUsage, BudgetAction,
     BudgetChargeBasis, BudgetRefusal, BudgetRefusalCause, ChildGrant, CollaborationPolicy,
     CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
     DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,

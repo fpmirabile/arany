@@ -2208,3 +2208,178 @@ async fn plan_observations_settle_each_attempt_and_replay_without_dispatch_or_ba
         assert!(SessionView::replay(session, &forged).is_err());
     }
 }
+
+#[tokio::test]
+async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
+    for case in [
+        "success",
+        "failed",
+        "cancelled",
+        "retry",
+        "omitted",
+        "invalid",
+        "fallback",
+        "append failure",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let cancellation = RunCancellation::new();
+        let mut primary =
+            ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "model-a");
+        let account = Uuid::now_v7();
+        primary.identity.provenance = arany::Provenance::Native {
+            saved_api_account_id: Some(account),
+        };
+        primary
+            .rate_limits
+            .get_mut()
+            .unwrap()
+            .extend([Some(api_sample(1000)), Some(api_sample(900))]);
+        if case == "omitted" {
+            *primary.rate_limits.get_mut().unwrap().back_mut().unwrap() = None;
+        } else if case == "invalid" {
+            let sample = primary
+                .rate_limits
+                .get_mut()
+                .unwrap()
+                .back_mut()
+                .unwrap()
+                .as_mut()
+                .unwrap();
+            let row = &mut sample.api.as_mut().unwrap().rows[0];
+            row.limit = None;
+            row.remaining = None;
+            row.reset_at = None;
+            row.unavailable = Some(arany::LimitUnavailable::Invalid);
+        }
+        if case == "cancelled" {
+            primary.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
+        } else if case == "failed" {
+            primary
+                .responses
+                .get_mut()
+                .unwrap()
+                .push_front(Err(ProviderError::InvalidOutcome));
+        } else if matches!(case, "retry" | "omitted" | "invalid" | "append failure") {
+            primary
+                .responses
+                .get_mut()
+                .unwrap()
+                .push_front(Err(ProviderError::RateLimited(None)));
+        } else if case == "fallback" {
+            primary
+                .responses
+                .get_mut()
+                .unwrap()
+                .push_front(Err(ProviderError::Unavailable));
+        }
+        let primary = route(primary);
+        let replacement = route(
+            ScriptedProvider::new(vec![finish("replacement")]).with_profile("openai", "model-b"),
+        );
+        let mut bindings = routes(&primary);
+        if case == "fallback" {
+            bindings.roles.primary.push(replacement.clone());
+        }
+        let engine = open(&state);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        arany::FaultPlan::skip_retry_backoff(session);
+        if case == "append failure" {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::ProviderRetryScheduled { .. })
+            });
+        }
+        let mut request = input(&workspace);
+        request.session_id = Some(session);
+        request.title = None;
+        let outcome = run_routed(
+            &engine,
+            bindings,
+            request,
+            RunControls {
+                cancellation,
+                ..RunControls::default()
+            },
+        )
+        .await;
+        let _ = engine.close().await;
+        let (events, view) = reopen(&state, session).await;
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            if matches!(case, "retry" | "omitted" | "invalid") {
+                2
+            } else {
+                1
+            }
+        );
+        if case == "append failure" {
+            assert!(outcome.is_err());
+            assert!(view.usage.api_limits.is_empty());
+            assert!(!view.usage.pending.is_empty());
+            continue;
+        }
+        let result = outcome.unwrap();
+        assert_eq!(
+            result.run.status,
+            match case {
+                "failed" => RunStatus::Failed,
+                "cancelled" => RunStatus::Cancelled,
+                _ => RunStatus::Finished,
+            }
+        );
+        let group = &view.usage.api_limits[0];
+        assert_eq!(group.rows[0].observed_at, 1000);
+        assert_eq!(
+            group.identity.provenance,
+            arany::Provenance::Native {
+                saved_api_account_id: Some(account)
+            }
+        );
+        assert_eq!(group.role, ProviderRole::Primary);
+        assert_eq!(group.latest_unreported, case == "omitted");
+        assert_eq!(group.latest_unavailable.is_some(), case == "invalid");
+        assert_eq!(
+            replacement.requests.lock().unwrap().len(),
+            usize::from(case == "fallback")
+        );
+        assert!(view.usage.plan_limits.is_empty());
+        assert_eq!(
+            SessionView::replay(session, &events)
+                .unwrap()
+                .unwrap()
+                .usage,
+            view.usage
+        );
+        for plan in [false, true] {
+            let mut forged = events.clone();
+            let record = forged
+                .iter_mut()
+                .find_map(|event| match &mut event.event {
+                    Event::ProviderCallRecorded { record, .. } => Some(record),
+                    _ => None,
+                })
+                .unwrap();
+            if record.rate_limits.is_none() {
+                record.rate_limits = Some(api_sample(1000));
+            }
+            if plan {
+                record.rate_limits = Some(plan_sample(1000));
+            } else {
+                record
+                    .rate_limits
+                    .as_mut()
+                    .unwrap()
+                    .api
+                    .as_mut()
+                    .unwrap()
+                    .dialect = arany::ApiLimitDialect::Anthropic;
+            }
+            assert!(SessionView::replay(session, &forged).is_err());
+        }
+    }
+}

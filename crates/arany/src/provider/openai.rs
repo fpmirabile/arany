@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
+mod api_limits;
 pub(crate) mod chat;
 mod limits;
 mod responses;
@@ -203,10 +204,26 @@ impl Provider for OpenAiProvider {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        self.invoke_observed(request, None, super::RateLimitSlot::default())
+            .await
+    }
+
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<super::ResponsePreview>,
+        limits: super::RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        if let Some(preview) = preview {
+            return self.invoke_with_preview(request, preview).await;
+        }
         native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
-        let response = self.send(body).await?;
+        let response = native::post_json_observed(self.request(body)?, &self.key, |headers| {
+            api_limits::headers(headers, &self.key, &limits)
+        })
+        .await?;
         self.decode_run(&response, &request, &conversation)
     }
 
