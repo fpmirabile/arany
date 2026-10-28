@@ -1,3 +1,5 @@
+mod api;
+
 use super::escape_terminal;
 use arany::{ProviderKind, SessionView, TokenCount, UsageGroup};
 use std::collections::BTreeMap;
@@ -143,6 +145,8 @@ pub fn usage_pages_at(
                     } else {
                         "Plan windows: see account-level observations below\n"
                     }
+                } else if api::reported(view, provider, model, (inherited, latest_only)) {
+                    "API rate limits: see route observations below\n"
                 } else {
                     "API rate limits: unknown (not reported)\n"
                 },
@@ -163,6 +167,7 @@ pub fn usage_pages_at(
                 .is_none_or(|run| run.id != group.run_id || run.status != arany::RunStatus::Active);
         sections.push(plan_section(group, run_number, index + 1, historical, now));
     }
+    sections.extend(api::sections(view, now));
     if sections.is_empty() {
         header.push_str("Limits: unknown (not reported)\n");
     }
@@ -571,24 +576,36 @@ fn window_lines(text: &mut String, window: &arany::PlanWindow, now: Option<i64>)
         |p| format!("{}% used", (f64::from(p) * 10.0).round() / 10.0),
     );
     let _ = writeln!(text, "ChatGPT {label}: {percent}");
-    let source = match window.source {
+    observation_lines(
+        text,
+        (window.source, window.observed_at, window.reset_at),
+        now,
+    );
+}
+
+fn observation_lines(
+    text: &mut String,
+    (source, observed_at, reset_at): (arany::LimitSource, i64, Option<i64>),
+    now: Option<i64>,
+) {
+    let source = match source {
         arany::LimitSource::Headers => "headers",
         arany::LimitSource::Event => "event",
     };
     let _ = writeln!(
         text,
         "Last reported: {} · {source}",
-        utc_timestamp(window.observed_at)
+        utc_timestamp(observed_at)
     );
     let age = now
-        .and_then(|now| now.checked_sub(window.observed_at))
+        .and_then(|now| now.checked_sub(observed_at))
         .filter(|age| *age >= 0);
     if let Some(age) = age {
         let _ = writeln!(text, "Observation age: {}", format_duration(age));
     } else {
         text.push_str("Observation age unknown\n");
     }
-    match window.reset_at {
+    match reset_at {
         Some(reset) => {
             let _ = writeln!(text, "Reset: {}", utc_timestamp(reset));
             if age.is_some()
@@ -601,10 +618,7 @@ fn window_lines(text: &mut String, window: &arany::PlanWindow, now: Option<i64>)
         }
         None => text.push_str("Reset unknown\n"),
     }
-    if now
-        .zip(window.reset_at)
-        .is_some_and(|(now, reset)| now >= reset)
-    {
+    if now.zip(reset_at).is_some_and(|(now, reset)| now >= reset) {
         text.push_str("Stale; reset time passed, current usage unknown\n");
     } else if age.is_some_and(|age| age > MAX_FRESH_LIMIT_AGE_SECONDS) {
         text.push_str("Stale; last reported more than 15 minutes ago, current usage unknown\n");
