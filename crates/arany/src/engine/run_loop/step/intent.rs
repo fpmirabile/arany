@@ -424,7 +424,7 @@ impl RunLoop<'_> {
             return Ok(Err(SizingRefusal::ActiveTime));
         };
         if matches!(grant, Grant::Primary { .. }) {
-            intent = match self.rewrite_command(runtime, intent).await? {
+            intent = match Box::pin(self.rewrite_command(runtime, intent)).await? {
                 Ok(intent) => intent,
                 Err(refusal) => return Ok(Err(refusal)),
             };
