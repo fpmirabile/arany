@@ -1821,7 +1821,7 @@ fn command_rewrite_start(run: RunId, agent: AgentRunId) -> Event {
         agent_run_id: agent,
         hook: HookInvocation {
             command_subject: Some(uuid::Uuid::now_v7()),
-            command_tool: Some(crate::tools::CommandTool {
+            command_tool: Some(Box::new(crate::tools::CommandTool {
                 selected_path: "/programs/filter".into(),
                 executable: "/programs/filter".into(),
                 args: Vec::new(),
@@ -1831,7 +1831,7 @@ fn command_rewrite_start(run: RunId, agent: AgentRunId) -> Event {
                 sha256: "a".repeat(64),
                 enabled: true,
                 last_probe: Some(crate::tools::RewriteStage::Rewritten),
-            }),
+            })),
             event: HookEvent::CommandRewrite,
             group: 0,
             handler: 0,

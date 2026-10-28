@@ -252,7 +252,7 @@ pub struct HookInvocation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_subject: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command_tool: Option<crate::tools::CommandTool>,
+    pub command_tool: Option<Box<crate::tools::CommandTool>>,
     pub event: HookEvent,
     pub group: u8,
     pub handler: u8,

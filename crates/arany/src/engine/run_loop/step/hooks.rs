@@ -136,7 +136,7 @@ type HookPlanRefusal = (&'static str, Option<(u8, u8)>);
 
 struct HookPlan {
     command_subject: Option<uuid::Uuid>,
-    command_tool: Option<CommandTool>,
+    command_tool: Option<Box<CommandTool>>,
     group: u8,
     handler: u8,
     call: ToolCall,

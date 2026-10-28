@@ -31,7 +31,7 @@ impl Engine {
             .command_tool_probe
             .filter(|probe| probe.outcome.is_none())
         {
-            return self.recover_command_probe(session_id, probe).await;
+            return self.recover_command_probe(session_id, *probe).await;
         }
         let (runtime, intent) = self.command_probe_runtime(workspace, tool)?;
         let probe = CommandToolProbe {

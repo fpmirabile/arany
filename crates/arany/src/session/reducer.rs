@@ -1035,7 +1035,8 @@ pub struct SessionView {
     pub runs: Vec<RunView>,
     pub compactions: Vec<CompactionView>,
     pub goals: Vec<GoalView>,
-    pub command_tool_probe: Option<crate::tools::CommandToolProbe>,
+    // Boxed: every engine and server future holds a view across awaits.
+    pub command_tool_probe: Option<Box<crate::tools::CommandToolProbe>>,
     pub pending_provider_setup_edit: Option<uuid::Uuid>,
     pub provider_setup_uncertain: bool,
     pub environment_capture: Option<super::EnvironmentCaptureView>,

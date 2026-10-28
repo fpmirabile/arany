@@ -8,7 +8,15 @@ enum RewriteStep {
 }
 
 impl RunLoop<'_> {
-    pub(in crate::engine::run_loop::step) async fn rewrite_command(
+    pub(in crate::engine::run_loop::step) fn rewrite_command<'a>(
+        &'a self,
+        runtime: &'a ToolRuntime,
+        intent: EffectIntent,
+    ) -> crate::engine::run_loop::step::BoxedStep<'a, Result<EffectIntent, SizingRefusal>> {
+        Box::pin(self.rewrite_command_inner(runtime, intent))
+    }
+
+    async fn rewrite_command_inner(
         &self,
         runtime: &ToolRuntime,
         mut intent: EffectIntent,
@@ -100,7 +108,7 @@ impl RunLoop<'_> {
         };
         let plan = HookPlan {
             command_subject: Some(intent.id),
-            command_tool: Some(tool.clone()),
+            command_tool: Some(Box::new(tool.clone())),
             group: u8::try_from(index).expect("command tools are bounded"),
             handler: 0,
             call: tool.call(),

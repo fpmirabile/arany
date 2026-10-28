@@ -19,7 +19,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            current.command_tool_probe = Some((**probe).clone());
+            current.command_tool_probe = Some(probe.clone());
         }
         Event::CommandToolProbeFinished { outcome } => {
             let probe = current
