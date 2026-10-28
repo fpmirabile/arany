@@ -54,13 +54,6 @@ pub(super) fn json_request(
         .body(body)
 }
 
-pub(super) async fn post_json(
-    request: reqwest::RequestBuilder,
-    key: &str,
-) -> Result<Vec<u8>, ProviderError> {
-    post_json_observed(request, key, |_| Ok(())).await
-}
-
 pub(super) async fn post_json_observed(
     request: reqwest::RequestBuilder,
     key: &str,

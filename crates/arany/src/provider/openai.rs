@@ -154,8 +154,15 @@ impl OpenAiProvider {
         ))
     }
 
-    async fn send(&self, request: Value) -> Result<Vec<u8>, ProviderError> {
-        native::post_json(self.request(request)?, &self.key).await
+    async fn send_observed(
+        &self,
+        request: Value,
+        limits: super::RateLimitSlot,
+    ) -> Result<Vec<u8>, ProviderError> {
+        native::post_json_observed(self.request(request)?, &self.key, |headers| {
+            api_limits::headers(headers, &self.key, &limits)
+        })
+        .await
     }
 
     fn decode_run(
@@ -220,10 +227,7 @@ impl Provider for OpenAiProvider {
         native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
-        let response = native::post_json_observed(self.request(body)?, &self.key, |headers| {
-            api_limits::headers(headers, &self.key, &limits)
-        })
-        .await?;
+        let response = self.send_observed(body, limits).await?;
         self.decode_run(&response, &request, &conversation)
     }
 
@@ -270,6 +274,15 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
+        self.compact_observed(request, super::RateLimitSlot::default())
+            .await
+    }
+
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        limits: super::RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
         if request.model != self.identity.model
             || !(1..=crate::session::MAX_COMPACTION_OUTPUT_TOKENS)
                 .contains(&request.max_output_tokens)
@@ -277,7 +290,10 @@ impl Provider for OpenAiProvider {
             return Err(ProviderError::Rejected);
         }
         let response = self
-            .send(wire::compaction_body_with_effort(&request, self.effort))
+            .send_observed(
+                wire::compaction_body_with_effort(&request, self.effort),
+                limits,
+            )
             .await?;
         self.decode_compaction(&response, request.max_output_tokens)
     }

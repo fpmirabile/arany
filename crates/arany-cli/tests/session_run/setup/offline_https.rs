@@ -312,7 +312,7 @@ fn start_response_server(replies: NativeReplies) -> Server {
 }
 
 fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
-    for index in 0..2 {
+    for index in 0..3 {
         let outcome = serde_json::json!("offline answer");
         let request = chatgpt::read_request(output);
         let end = request
@@ -342,7 +342,11 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
         assert!(body.get("text").is_none());
         assert!(body.get("tool_choice").is_none() && body.get("tools").is_none());
         let context = crate::semantic::input(&body);
-        assert_eq!(context["objective"], "offline objective");
+        if index == 1 {
+            assert_eq!(context["items"][0]["user"], "offline objective");
+        } else {
+            assert_eq!(context["objective"], "offline objective");
+        }
         let response = serde_json::to_vec(&serde_json::json!({
             "id": format!("resp_native_{index}"), "status": "completed", "model": "gpt-offline-new",
             "output": arany::semantic::responses_output(&outcome),
@@ -696,8 +700,13 @@ fn isolated_stage() {
         &[
             (b"Input:\r\n", b"/model gpt-offline-new high\r"),
             (b"Notice: Model: gpt-offline-new", b"offline objective\r"),
+            (b"Answer:\r\n  offline answer", b"/compact\r"),
+            (
+                b"Notice: Compaction saved; 12 input / 8 output tokens",
+                b"/usage\r",
+            ),
         ],
-        Some(b"Answer:\r\n  offline answer"),
+        Some(b"Role: compaction"),
     );
     assert!(String::from_utf8_lossy(&output).contains("Answer:\r\n  offline answer"));
     let headless = Command::new("/usr/bin/timeout")
@@ -783,7 +792,33 @@ fn isolated_stage() {
     assert_eq!(checked.defaults.effort, Some(arany::Effort::High));
     assert_eq!(checked.defaults.account_id, Some(account_id));
     assert_eq!(checked.runs.len(), 1, "native checker is not a Run");
-    assert!(checked.usage.api_limits.is_empty());
+    assert_eq!(checked.compactions.len(), 1);
+    assert_eq!(checked.usage.api_limits.len(), 1);
+    let api = &checked.usage.api_limits[0];
+    assert_eq!(api.role, arany::ProviderRole::Compaction);
+    assert_eq!(
+        api.identity.provenance,
+        arany::Provenance::Native {
+            saved_api_account_id: Some(account_id),
+        }
+    );
+    assert_eq!(api.rows[0].limit, Some(100));
+    assert_eq!(api.rows[0].remaining, Some(0));
+    assert_eq!(
+        checked.compactions[0]
+            .record
+            .rate_limits
+            .as_ref()
+            .unwrap()
+            .api
+            .as_ref()
+            .unwrap()
+            .rows,
+        api.rows
+    );
+    assert!(
+        String::from_utf8_lossy(&output).contains("Requests\r\nLimit: 100\r\nRemaining: 0\r\n")
+    );
     let run = &checked.runs[0];
     assert_eq!(run.status, arany::RunStatus::Finished);
     assert_eq!(run.objective, "offline objective");
