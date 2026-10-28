@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
+pub(super) mod api_limits;
 pub(super) mod wire;
 
 const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
@@ -223,34 +224,15 @@ impl AnthropicProvider {
         &self,
         request: Value,
         max_request_bytes: usize,
+        limits: &super::RateLimitSlot,
     ) -> Result<wire::MessageReply, ProviderError> {
-        let mut response = self
-            .request_with_limit(request, max_request_bytes)?
-            .send()
-            .await
-            .map_err(|error| {
-                let stage = if error.is_timeout() {
-                    crate::provider::diagnostics::SubscriptionFailureStage::Deadline
-                } else {
-                    crate::provider::diagnostics::SubscriptionFailureStage::RequestTransport
-                };
-                crate::provider::diagnostics::messages_failure(
-                    stage,
-                    crate::provider::diagnostics::StreamCounts::default(),
-                );
-                super::send_failure(&error)
-            })?;
+        let mut response = send_response(
+            self.request_with_limit(request, max_request_bytes)?,
+            &self.key,
+            limits,
+        )
+        .await?;
         let status = response.status().as_u16();
-        if !response.status().is_success() {
-            crate::provider::diagnostics::messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::HttpStatus,
-                crate::provider::diagnostics::StreamCounts {
-                    http_status: Some(status),
-                    ..Default::default()
-                },
-            );
-            return Err(super::http_failure(&mut response).await);
-        }
         let bytes = super::read_identity_body(&mut response, super::MAX_RESPONSE_BYTES)
             .await
             .map_err(|error| {
@@ -374,6 +356,37 @@ impl AnthropicProvider {
         }
         Ok(response)
     }
+
+    async fn invoke_streamed(
+        &self,
+        request: ProviderRequest,
+        preview: super::ResponsePreview,
+        limits: super::RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        native::admit_request(&self.identity, &request)?;
+        let conversation = render::conversation(&request)?;
+        let mut body = wire::run_body(&request, &conversation, self.effort)?;
+        body["stream"] = Value::Bool(true);
+        let mut response = send_response(
+            self.request_with_limit(
+                body,
+                super::request_ceiling(request.input.context_window_tokens),
+            )?
+            .header(reqwest::header::ACCEPT, "text/event-stream"),
+            &self.key,
+            &limits,
+        )
+        .await?;
+        let reply = read_streamed_reply(
+            &mut response,
+            &self.key,
+            &self.identity.model,
+            Some(preview),
+            request.max_output_tokens,
+        )
+        .await?;
+        self.decode_run_with_counts(&reply.bytes, &request, &conversation, reply.counts)
+    }
 }
 
 #[async_trait::async_trait]
@@ -399,6 +412,19 @@ impl Provider for AnthropicProvider {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        self.invoke_observed(request, None, super::RateLimitSlot::default())
+            .await
+    }
+
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<super::ResponsePreview>,
+        limits: super::RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        if let Some(preview) = preview {
+            return self.invoke_streamed(request, preview, limits).await;
+        }
         native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let body = wire::run_body(&request, &conversation, self.effort)?;
@@ -406,6 +432,7 @@ impl Provider for AnthropicProvider {
             .send_with_limit(
                 body,
                 super::request_ceiling(request.input.context_window_tokens),
+                &limits,
             )
             .await?;
         self.decode_run_with_counts(&response.bytes, &request, &conversation, response.counts)
@@ -416,54 +443,22 @@ impl Provider for AnthropicProvider {
         request: ProviderRequest,
         preview: super::ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
-        native::admit_request(&self.identity, &request)?;
-        let conversation = render::conversation(&request)?;
-        let mut body = wire::run_body(&request, &conversation, self.effort)?;
-        body["stream"] = Value::Bool(true);
-        let mut response = self
-            .request_with_limit(
-                body,
-                super::request_ceiling(request.input.context_window_tokens),
-            )?
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .send()
+        self.invoke_observed(request, Some(preview), super::RateLimitSlot::default())
             .await
-            .map_err(|error| {
-                let stage = if error.is_timeout() {
-                    crate::provider::diagnostics::SubscriptionFailureStage::Deadline
-                } else {
-                    crate::provider::diagnostics::SubscriptionFailureStage::RequestTransport
-                };
-                crate::provider::diagnostics::messages_failure(
-                    stage,
-                    crate::provider::diagnostics::StreamCounts::default(),
-                );
-                super::send_failure(&error)
-            })?;
-        if !response.status().is_success() {
-            crate::provider::diagnostics::messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::HttpStatus,
-                crate::provider::diagnostics::StreamCounts {
-                    http_status: Some(response.status().as_u16()),
-                    ..Default::default()
-                },
-            );
-            return Err(super::http_failure(&mut response).await);
-        }
-        let reply = read_streamed_reply(
-            &mut response,
-            &self.key,
-            &self.identity.model,
-            Some(preview),
-            request.max_output_tokens,
-        )
-        .await?;
-        self.decode_run_with_counts(&reply.bytes, &request, &conversation, reply.counts)
     }
 
     async fn compact(
         &self,
         request: CompactionRequest,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.compact_observed(request, super::RateLimitSlot::default())
+            .await
+    }
+
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        limits: super::RateLimitSlot,
     ) -> Result<CompactionResponse, ProviderError> {
         if request.model != self.identity.model
             || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
@@ -474,6 +469,7 @@ impl Provider for AnthropicProvider {
             .send_with_limit(
                 wire::compaction_body(&request, self.effort),
                 super::MAX_PROVIDER_REQUEST_BYTES,
+                &limits,
             )
             .await?;
         self.decode_compaction_with_counts(
@@ -482,6 +478,38 @@ impl Provider for AnthropicProvider {
             response.counts,
         )
     }
+}
+
+async fn send_response(
+    request: reqwest::RequestBuilder,
+    key: &str,
+    limits: &super::RateLimitSlot,
+) -> Result<reqwest::Response, ProviderError> {
+    let mut response = request.send().await.map_err(|error| {
+        let stage = if error.is_timeout() {
+            crate::provider::diagnostics::SubscriptionFailureStage::Deadline
+        } else {
+            crate::provider::diagnostics::SubscriptionFailureStage::RequestTransport
+        };
+        crate::provider::diagnostics::messages_failure(
+            stage,
+            crate::provider::diagnostics::StreamCounts::default(),
+        );
+        super::send_failure(&error)
+    })?;
+    api_limits::headers(response.headers(), key, limits)?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        crate::provider::diagnostics::messages_failure(
+            crate::provider::diagnostics::SubscriptionFailureStage::HttpStatus,
+            crate::provider::diagnostics::StreamCounts {
+                http_status: Some(status),
+                ..Default::default()
+            },
+        );
+        return Err(super::http_failure(&mut response).await);
+    }
+    Ok(response)
 }
 
 pub(super) async fn read_streamed_reply(

@@ -2043,7 +2043,17 @@ async fn a_single_route_boundary_compaction_retries_a_transient_failure_then_sav
 
 #[tokio::test]
 async fn api_compaction_observations_reopen_only_after_committed_settlement() {
-    for case in ["success", "error", "append failure"] {
+    for (profile, case) in ["success", "error", "append failure"]
+        .into_iter()
+        .flat_map(|case| ["openai", "anthropic"].map(move |profile| (profile, case)))
+    {
+        let api_sample = |at| {
+            let mut sample = api_sample(at);
+            if profile == "anthropic" {
+                sample.api.as_mut().unwrap().dialect = arany::ApiLimitDialect::Anthropic;
+            }
+            sample
+        };
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -2059,7 +2069,7 @@ async fn api_compaction_observations_reopen_only_after_committed_settlement() {
             })
         };
         let mut provider = ScriptedProvider::new(vec![finish("done")])
-            .with_profile("openai", "model-a")
+            .with_profile(profile, "model-a")
             .with_saved_api_account(Uuid::now_v7())
             .with_compactions(vec![response]);
         provider
@@ -2307,7 +2317,7 @@ async fn plan_observations_settle_each_attempt_and_replay_without_dispatch_or_ba
 
 #[tokio::test]
 async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
-    for case in [
+    for (profile, case) in [
         "success",
         "failed",
         "unavailable",
@@ -2323,14 +2333,24 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         "append failure",
         "fallback append failure",
         "terminal append failure",
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|case| ["openai", "anthropic"].map(move |profile| (profile, case)))
+    {
+        let api_sample = |at| {
+            let mut sample = api_sample(at);
+            if profile == "anthropic" {
+                sample.api.as_mut().unwrap().dialect = arany::ApiLimitDialect::Anthropic;
+            }
+            sample
+        };
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let cancellation = RunCancellation::new();
         let mut primary =
-            ScriptedProvider::new(vec![finish("done")]).with_profile("openai", "model-a");
+            ScriptedProvider::new(vec![finish("done")]).with_profile(profile, "model-a");
         let account = Uuid::now_v7();
         primary.identity.provenance = arany::Provenance::Native {
             saved_api_account_id: Some(account),
@@ -2402,7 +2422,7 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         }
         let primary = route(primary);
         let mut replacement = ScriptedProvider::new(vec![finish("replacement")])
-            .with_profile("openai", "model-b")
+            .with_profile(profile, "model-b")
             .with_saved_api_account(Uuid::now_v7());
         replacement
             .rate_limits
@@ -2561,7 +2581,11 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                     .api
                     .as_mut()
                     .unwrap()
-                    .dialect = arany::ApiLimitDialect::Anthropic;
+                    .dialect = if profile == "openai" {
+                    arany::ApiLimitDialect::Anthropic
+                } else {
+                    arany::ApiLimitDialect::OpenAi
+                };
             }
             assert!(SessionView::replay(session, &forged).is_err());
         }
