@@ -24,7 +24,6 @@ impl ChildGuard {
         self.0.as_mut().expect("supervised child")
     }
 
-    #[cfg(target_os = "linux")]
     pub(super) fn take(&mut self) -> Child {
         self.0.take().expect("supervised child")
     }

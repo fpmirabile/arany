@@ -1,36 +1,15 @@
 use super::active_terminal::{ProductGuard, product_child_of};
-use super::loopback::wait_product;
+use super::loopback::{ChildGuard, wait_product};
 use super::*;
 use std::{
     io::{Read, Write},
     net::TcpListener,
     os::unix::fs::PermissionsExt,
-    process::{Child, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
-
-struct KillOnDrop(Option<Child>);
-
-impl KillOnDrop {
-    fn child(&mut self) -> &mut Child {
-        self.0.as_mut().expect("supervised child")
-    }
-
-    fn take(&mut self) -> Child {
-        self.0.take().expect("supervised child")
-    }
-}
-
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 enum CompactionCase {
@@ -476,7 +455,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut attached = KillOnDrop(Some(attached.spawn().expect("attached PTY process")));
+    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     assert_eq!(
