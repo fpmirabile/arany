@@ -1097,6 +1097,10 @@ pub(super) async fn run_unit(
                     break;
                 }
             }
+            if primary_command && bytes != b"SELECT_READY\n" {
+                return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
+                    .map_or(ToolError::Configuration, ToolError::GuardBootstrap));
+            }
             let command_deadline = if bytes == b"SELECT_READY\n" {
                 // The command runtime starts at selection, after storage and cache preparation.
                 let command_deadline = super::super::selection_phase::command_deadline(intent)
@@ -1422,6 +1426,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut reader = std::io::BufReader::new(&mut stream);
             super::super::read_task(&mut reader)?
         };
+        if task.command_deadline.is_some() {
+            return Err(ToolError::Configuration);
+        }
         if let Some(cache) = &task.cache {
             cache.validate(&task.intent, &task.config)?;
         }
@@ -1544,7 +1551,10 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .read_exact(&mut frame)
                         .await
                         .map_err(|_| ToolError::Operation)?;
-                    let deadline = super::super::selection_phase::decode_deadline(frame)?;
+                    let deadline = super::super::selection_phase::decode_command_deadline(
+                        frame,
+                        &intent.limits,
+                    )?;
                     let source = crate::tools::fs::open_directory(&runtime.workspace)?;
                     let resources =
                         crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
