@@ -49,6 +49,7 @@ pub(crate) struct WebSearch {
 
 impl WebSearch {
     const KEY_PREFIX: &'static str = "ARANY_WEB_SEARCH_";
+    const MAX_KEY_BYTES: usize = 64;
 
     #[cfg(target_os = "linux")]
     pub(crate) fn host(&self) -> Option<String> {
@@ -65,7 +66,7 @@ impl WebSearch {
         call.valid()
             && self.key.strip_prefix(Self::KEY_PREFIX).is_some_and(|name| {
                 !name.is_empty()
-                    && self.key.len() <= 64
+                    && self.key.len() <= Self::MAX_KEY_BYTES
                     && name.bytes().all(|byte| {
                         byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
                     })
