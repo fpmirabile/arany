@@ -2083,7 +2083,8 @@ fn run_permissions_journey(journey: PermissionsJourney) {
             "saved rule",
             &|_| file.exists(),
         );
-        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(value["permissions"]["defaultMode"], "default");
         assert_eq!(
             value["permissions"]["typedPrefixes"][0]["prefix"],
