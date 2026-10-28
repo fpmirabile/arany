@@ -294,6 +294,7 @@ pub(super) async fn manage_command_environment(
 ) -> Result<EnvironmentOutcome, SetupError> {
     let mut notice = None::<String>;
     let mut saved = false;
+    let mut last_failure = None::<String>;
     loop {
         let Ok(state) = StateRoot::open_existing(state_dir) else {
             return Ok(EnvironmentOutcome::Confirmed(
@@ -320,11 +321,10 @@ pub(super) async fn manage_command_environment(
             EnvironmentStep::Act(action) => action,
             EnvironmentStep::Again => continue,
             EnvironmentStep::Leave => {
-                return Ok(EnvironmentOutcome::Confirmed(if saved {
-                    "Command environment saved; it applies from the next Run".into()
-                } else {
-                    "Command environment unchanged".into()
-                }));
+                return Ok(EnvironmentOutcome::Confirmed(leave_notice(
+                    saved,
+                    last_failure,
+                )));
             }
         };
         let outcome = match action {
@@ -350,6 +350,7 @@ pub(super) async fn manage_command_environment(
         match settle_environment(outcome) {
             Ok(done) => {
                 saved |= done.saved;
+                last_failure = (!done.saved).then(|| done.notice.clone());
                 notice = Some(done.notice);
             }
             Err(outcome) => return Ok(outcome),
@@ -443,6 +444,18 @@ pub(super) async fn manage_network_rules(
 struct EnvironmentSettled {
     saved: bool,
     notice: String,
+}
+
+fn leave_notice(saved: bool, last_failure: Option<String>) -> String {
+    let base = if saved {
+        "Command environment saved; it applies from the next Run"
+    } else {
+        "Command environment unchanged"
+    };
+    match last_failure {
+        Some(failure) => format!("{base}. {failure}"),
+        None => base.into(),
+    }
 }
 
 fn open_environment(state: &StateRoot) -> Result<CommandEnvironment, EnvironmentOutcome> {
