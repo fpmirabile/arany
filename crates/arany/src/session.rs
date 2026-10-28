@@ -96,8 +96,8 @@ pub(crate) use reducer::worker_tests::{
     host_protocol_fixture, session_host_protocol_fixture,
 };
 pub use reducer::{
-    AgentStatus, AgentView, CompactionView, GoalView, PlanUsage, RunStatus, RunView, SessionView,
-    TokenCount, ToolView, UsageGroup, UsageView,
+    AgentStatus, AgentView, ApiUsage, CompactionView, GoalView, PlanUsage, RunStatus, RunView,
+    SessionView, TokenCount, ToolView, UsageGroup, UsageView,
 };
 pub(crate) use reducer::{
     ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,

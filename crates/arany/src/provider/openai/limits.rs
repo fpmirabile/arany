@@ -1,17 +1,12 @@
+use crate::provider::limits::headers::{
+    MAX_LIMIT_HEADER_BYTES, MAX_LIMIT_HEADER_VALUE_BYTES, MAX_LIMIT_HEADER_VALUES, observed_at,
+};
 use crate::provider::{
     LimitFailure, LimitSource, LimitUnavailable, PlanWindow, ProviderError, RateLimitSlot,
     RateLimits, UsedPercent,
 };
 use reqwest::header::HeaderMap;
 use serde_json::Value;
-
-fn observed_at() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|value| i64::try_from(value.as_secs()).ok())
-        .unwrap_or(-1)
-}
 
 pub(super) fn headers(
     headers: &HeaderMap,
@@ -43,11 +38,11 @@ pub(super) fn headers_at(headers: &HeaderMap, slot: &RateLimitSlot, clock: impl 
             for value in headers.get_all(name).iter() {
                 count += 1;
                 bytes += value.as_bytes().len();
-                if count > 32 || bytes > 4096 {
+                if count > MAX_LIMIT_HEADER_VALUES || bytes > MAX_LIMIT_HEADER_BYTES {
                     failures = [Some(LimitUnavailable::Oversized); 2];
                     break 'windows;
                 }
-                if value.as_bytes().len() > 128 {
+                if value.as_bytes().len() > MAX_LIMIT_HEADER_VALUE_BYTES {
                     failures[index] = Some(LimitUnavailable::Oversized);
                     break;
                 }

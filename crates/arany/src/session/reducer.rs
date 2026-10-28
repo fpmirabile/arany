@@ -29,7 +29,7 @@ pub(crate) use tool::{
     validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
 };
 mod usage;
-pub use usage::{PlanUsage, TokenCount, UsageGroup, UsageView};
+pub use usage::{ApiUsage, PlanUsage, TokenCount, UsageGroup, UsageView};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunStatus {

@@ -349,7 +349,7 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
             "usage": {"input_tokens": 12, "output_tokens": 8}
         }))
         .expect("native response JSON");
-        input.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).as_bytes()).expect("native response headers");
+        input.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-ratelimit-limit-requests: 100\r\nx-ratelimit-remaining-requests: 0\r\nx-ratelimit-reset-requests: 1.001s\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).as_bytes()).expect("native response headers");
         input.write_all(&response).expect("native response body");
     }
 }
@@ -736,6 +736,17 @@ fn isolated_stage() {
     assert!(headless.stdout.ends_with(b"\n"));
     let direct = session("/root/state-native-exec");
     assert_eq!(direct.runs.len(), 1);
+    let api = &direct.usage.api_limits[0];
+    assert_eq!(api.identity.profile, "openai");
+    assert_eq!(api.run_id, direct.runs[0].id);
+    assert_eq!(api.rows[0].limit, Some(100));
+    assert_eq!(api.rows[0].remaining, Some(0));
+    assert_eq!(api.rows[0].reset_at, Some(api.rows[0].observed_at + 2));
+    let sample = direct.runs[0].agents[0].provider_calls[0]
+        .rate_limits
+        .as_ref()
+        .unwrap();
+    assert_eq!(sample.api.as_ref().unwrap().rows, api.rows);
     let pinned = direct.runs[0].config.as_ref().unwrap();
     assert_eq!(pinned.model, "gpt-offline-new");
     assert_eq!(pinned.effort, Some(arany::Effort::High));
@@ -772,6 +783,7 @@ fn isolated_stage() {
     assert_eq!(checked.defaults.effort, Some(arany::Effort::High));
     assert_eq!(checked.defaults.account_id, Some(account_id));
     assert_eq!(checked.runs.len(), 1, "native checker is not a Run");
+    assert!(checked.usage.api_limits.is_empty());
     let run = &checked.runs[0];
     assert_eq!(run.status, arany::RunStatus::Finished);
     assert_eq!(run.objective, "offline objective");
