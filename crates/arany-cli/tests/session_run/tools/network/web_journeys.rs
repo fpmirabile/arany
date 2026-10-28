@@ -65,7 +65,7 @@ fn web_engine(root: &Path, case: &WebCase) -> (arany::Engine, std::path::PathBuf
     (engine, workspace)
 }
 
-async fn web_case(root: &Path, case: WebCase) -> arany::RunOutcome {
+async fn web_case(name: &'static str, root: &Path, case: WebCase) -> arany::RunOutcome {
     let _deadline = arany::test_support::engine::deadline("web journey", JOURNEY_TIMEOUT);
     let (engine, workspace) = web_engine(root, &case);
     let mut script = vec![arany::test_support::scenario::plan_outcome(
@@ -115,7 +115,7 @@ async fn web_case(root: &Path, case: WebCase) -> arany::RunOutcome {
     })
     .await
     .expect("web journey parent deadline");
-    let outcome = outcome.unwrap();
+    let outcome = outcome.unwrap_or_else(|error| web_run_failed(name, &error));
     assert_eq!(
         outcome.run.status,
         if case.cancel_on_request.is_some() {
@@ -134,6 +134,23 @@ async fn web_case(root: &Path, case: WebCase) -> arany::RunOutcome {
     engine.close().await.unwrap();
     assert_closed_web_evidence(&root.join("state"), &provider, &outcome).await;
     outcome
+}
+
+fn web_run_failed(name: &'static str, error: &arany::EngineError) -> ! {
+    let cause = match error {
+        arany::EngineError::Store(source) => {
+            format!("Store_{:?}", std::mem::discriminant(source))
+        }
+        arany::EngineError::Tool(source) => {
+            format!("Tool_{:?}", std::mem::discriminant(source))
+        }
+        _ => "None".into(),
+    };
+    crate::process::annotate_native_fixture(&format!(
+        "fixture=isolated_child_panic; case=native_account_test; scenario={name}; engine_error={:?}; cause={cause}",
+        std::mem::discriminant(error),
+    ));
+    panic!("web journey run failed");
 }
 
 async fn assert_closed_web_evidence(
@@ -237,6 +254,7 @@ fn web_policy_search_privacy_and_https() {
         );
     }
     if !output.status.success() {
+        crate::process::relay_native_fixture_annotation(&output.stdout, &output.stderr);
         crate::process::relay_native_panic_location(&output.stderr, "native_account_test");
     }
     assert!(output.status.success(), "web journey helper failed");
@@ -280,7 +298,7 @@ async fn search_journeys(root: &Path) {
         ),
     ] {
         let server = page_upstream("application/json", body);
-        let outcome = web_case(&root.join(name), WebCase::search(server.port)).await;
+        let outcome = web_case(name, &root.join(name), WebCase::search(server.port)).await;
         let result = first_result(&outcome);
         assert_eq!(
             result.disposition,
@@ -402,7 +420,7 @@ async fn fetch_policy_journeys(root: &Path) {
         }
         case.permissions = json!({"permissions":permissions});
         case.decisions = decisions;
-        let outcome = web_case(&root.join(name), case).await;
+        let outcome = web_case(name, &root.join(name), case).await;
         let web: Vec<_> = outcome
             .run
             .tools
@@ -430,7 +448,7 @@ async fn fetch_policy_journeys(root: &Path) {
     let mut case = WebCase::fetch(format!("http://127.0.0.1:{}/page", server.port));
     case.permissions =
         json!({"permissions":{"allow":["WebFetch"],"deny":["WebFetch(domain:127.0.0.1)"]}});
-    let outcome = web_case(&root.join("network-deny"), case).await;
+    let outcome = web_case("network-deny", &root.join("network-deny"), case).await;
     assert_eq!(first_result(&outcome).disposition, Denied);
     assert_eq!(server.requests.load(Ordering::SeqCst), 0);
 }
@@ -445,6 +463,7 @@ async fn redirect_failure_and_cancellation(root: &Path) {
         hold: false,
     });
     let outcome = web_case(
+        "redirect",
         &root.join("redirect"),
         WebCase::fetch(format!("http://127.0.0.1:{}/page", server.port)),
     )
@@ -464,7 +483,7 @@ async fn redirect_failure_and_cancellation(root: &Path) {
         location: String::new(),
         hold: false,
     });
-    let outcome = web_case(&root.join("failure"), WebCase::search(server.port)).await;
+    let outcome = web_case("failure", &root.join("failure"), WebCase::search(server.port)).await;
     assert_eq!(first_result(&outcome).disposition, ToolDisposition::Failed);
     assert_eq!(
         serde_json::from_str::<Value>(&first_result(&outcome).output).unwrap(),
@@ -484,7 +503,7 @@ async fn cancel_web_request(root: &Path) {
     });
     let mut case = WebCase::fetch(format!("http://127.0.0.1:{}/held", server.port));
     case.cancel_on_request = Some(server.received.clone());
-    let outcome = web_case(&root.join("cancel"), case).await;
+    let outcome = web_case("cancel", &root.join("cancel"), case).await;
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     assert_eq!(
         first_result(&outcome).disposition,
@@ -644,6 +663,7 @@ fn tls_page(root: &Path) -> TlsPage {
 async fn verified_https(root: &Path) {
     let peer = tls_page(root);
     let outcome = web_case(
+        "https",
         &root.join("https"),
         WebCase::fetch(format!("https://127.0.0.1:{}/", peer.port)),
     )
