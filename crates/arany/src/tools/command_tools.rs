@@ -211,6 +211,8 @@ impl CommandTool {
             program: TOOL_NAME.into(),
             args: self.args.clone(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         }
     }
 
@@ -410,6 +412,8 @@ pub(crate) fn result(observation: &super::ToolObservation) -> super::permissions
                 program: "sh".into(),
                 args: vec!["-c".into(), command],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
         },
         Ok(None) => HookResult::Passed,
@@ -467,10 +471,17 @@ pub(crate) fn input(call: &ToolCall) -> Result<String, ToolError> {
 pub(crate) fn rewritten(call: &ToolCall, command: String) -> ToolCall {
     let args = vec!["-c".into(), command];
     match call {
-        ToolCall::Command { cwd, .. } => ToolCall::Command {
+        ToolCall::Command {
+            cwd,
+            resource_class,
+            timeout_ms,
+            ..
+        } => ToolCall::Command {
             program: "sh".into(),
             args,
             cwd: cwd.clone(),
+            resource_class: *resource_class,
+            timeout_ms: *timeout_ms,
         },
         ToolCall::CommandUnguarded {
             cwd, justification, ..

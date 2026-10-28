@@ -125,6 +125,8 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
         program: "printf".into(),
         args: vec!["a b".into(), "it's".into(), "$(x)".into()],
         cwd: "src".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     assert_eq!(script(&original).unwrap(), "printf 'a b' 'it'\\''s' '$(x)'");
     let input: serde_json::Value = serde_json::from_str(&input(&original).unwrap()).unwrap();
@@ -146,6 +148,23 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
         assert_eq!(parse_output(Some(0), output), expected);
     }
     assert_eq!(parse_output(Some(2), "{}"), Err(RewriteStage::NonZeroExit));
+    let requested = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["test".into()],
+        cwd: "src".into(),
+        resource_class: Some(crate::tools::ToolResourceClass::Build),
+        timeout_ms: Some(600_000),
+    };
+    assert_eq!(
+        rewritten(&requested, "cargo test".into()),
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "cargo test".into()],
+            cwd: "src".into(),
+            resource_class: Some(crate::tools::ToolResourceClass::Build),
+            timeout_ms: Some(600_000),
+        }
+    );
     let host = ToolCall::CommandUnguarded {
         program: "printf".into(),
         args: vec!["original".into()],

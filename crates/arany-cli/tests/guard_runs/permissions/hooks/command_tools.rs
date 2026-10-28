@@ -84,13 +84,16 @@ impl CommandFixture {
     }
 }
 
+const REQUESTED_TIMEOUT_MS: u32 = 300_000;
+
 #[tokio::test]
 async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_replay() {
-    for (host, failure) in [
-        (false, None),
-        (true, None),
-        (false, Some(arany::RewriteStage::NonZeroExit)),
-        (false, Some(arany::RewriteStage::InvalidOutput)),
+    for (host, failure, requested) in [
+        (false, None, false),
+        (false, None, true),
+        (true, None, false),
+        (false, Some(arany::RewriteStage::NonZeroExit), false),
+        (false, Some(arany::RewriteStage::InvalidOutput), false),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let fixture = CommandFixture::new(temp.path(), failure);
@@ -108,8 +111,8 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
         } else {
             "rewritten"
         };
-        let rewritten = command(host, &format!("printf {expected_text}"));
-        let outcome = run_rewrite(&engine, &fixture, session, &rewritten).await;
+        let rewritten = command(host, requested, &format!("printf {expected_text}"));
+        let outcome = run_rewrite(&engine, &fixture, session, &rewritten, requested).await;
         assert_eq!(
             outcome.run.status,
             RunStatus::Finished,
@@ -130,6 +133,13 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
             .find(|tool| !tool.intent.rewrite.is_empty())
             .unwrap();
         assert_eq!(executed.intent.call, rewritten);
+        if requested {
+            assert_eq!(
+                executed.intent.limits.resource_class,
+                arany::ToolResourceClass::Build
+            );
+            assert_eq!(executed.intent.limits.runtime_ms, REQUESTED_TIMEOUT_MS);
+        }
         assert_eq!(
             executed.intent.rewrite[0].stage,
             failure.unwrap_or(arany::RewriteStage::Rewritten)
@@ -160,10 +170,12 @@ async fn run_rewrite(
     fixture: &CommandFixture,
     session: arany::SessionId,
     rewritten: &arany::ToolCall,
+    requested: bool,
 ) -> arany::RunOutcome {
     let host = rewritten.is_unguarded();
-    let provider = Arc::new(ScriptedProvider::new(vec![
-        plan_outcome(arany::GoalPlanContract {
+    let mut script = Vec::new();
+    if !requested {
+        script.push(plan_outcome(arany::GoalPlanContract {
             mission: "Run the configured command rewrite".into(),
             paths: Vec::new(),
             commands: vec!["sh".into()],
@@ -175,15 +187,18 @@ async fn run_rewrite(
                 call: Box::new(rewritten.clone()),
             },
             budget: arany::GoalBudget::default(),
-        }),
-        tool_outcome(command(host, "printf original")),
-        finish("Observed the command result"),
-    ]));
+        }));
+    }
+    script.push(tool_outcome(command(host, requested, "printf original")));
+    script.push(finish("Observed the command result"));
+    let provider = Arc::new(ScriptedProvider::new(script));
     let mut input = request(&fixture.workspace, "Run the command tool");
     input.session_id = Some(session);
     input.title = None;
     input.include_paths.clear();
-    input.goal.phase = Some(arany::GoalPhase::Implementation);
+    if !requested {
+        input.goal.phase = Some(arany::GoalPhase::Implementation);
+    }
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let controls = RunControls {
         tools: ToolGrant::Trusted(
@@ -249,7 +264,7 @@ async fn assert_rewrite_replay(fixture: CommandFixture, session: arany::SessionI
     );
 }
 
-fn command(host: bool, script: &str) -> arany::ToolCall {
+fn command(host: bool, requested: bool, script: &str) -> arany::ToolCall {
     if host {
         arany::ToolCall::CommandUnguarded {
             program: "sh".into(),
@@ -263,6 +278,8 @@ fn command(host: bool, script: &str) -> arany::ToolCall {
             program: "sh".into(),
             args: vec!["-c".into(), script.into()],
             cwd: String::new(),
+            resource_class: requested.then_some(arany::ToolResourceClass::Build),
+            timeout_ms: requested.then_some(REQUESTED_TIMEOUT_MS),
         }
     }
 }
