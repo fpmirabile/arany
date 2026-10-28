@@ -2,6 +2,7 @@ use super::*;
 use crate::test_process::assert_single_test_completed;
 use base64::Engine as _;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+use sha2::Digest as _;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -9,6 +10,16 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const REMOVED_CLIENT: &str = "oaiapp_removed_account";
+
+// Local: this module also compiles in the binary unit tests, which lack `crate::setup`.
+fn legacy_chatgpt_slot(client_id: &str) -> String {
+    let digest = sha2::Sha256::digest(client_id.as_bytes());
+    format!(
+        "chatgpt-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    )
+}
+
 const ROOT: &str = "ARANY_TEST_REMOVAL_ROOT";
 const PHASE: &str = "ARANY_TEST_REMOVAL_PHASE";
 const STAGE: &str = "cli::attached::setup::removal::manager_stage";
@@ -101,7 +112,7 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     let entry = |id, client| {
         serde_json::json!({
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
-            "chatgpt_account_id":null,"keyring_slot":crate::setup::legacy_chatgpt_slot(client),
+            "chatgpt_account_id":null,"keyring_slot":legacy_chatgpt_slot(client),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
             "disconnected":false,"plan_permission_missing":false,"token":null
         })
