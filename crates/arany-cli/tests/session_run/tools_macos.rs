@@ -21,6 +21,9 @@ mod repository;
 #[path = "tools_macos/shell.rs"]
 mod shell;
 
+#[path = "tools_macos/user_programs.rs"]
+mod user_programs;
+
 const MCP_SCRIPT: &str = r#"set -eu
 while IFS= read -r request; do
     case "$request" in
@@ -394,17 +397,19 @@ fn guarded_offline_rust_build_uses_selected_runtime_and_sdk() {
         "tools::native_offline_rust_build_helper",
         Some(&sysroot),
         registry.as_deref(),
+        None,
     );
 }
 
 pub(super) fn native_journey(helper: &str) {
-    native_journey_with_rust_sysroot(helper, None, None);
+    native_journey_with_rust_sysroot(helper, None, None, None);
 }
 
 fn native_journey_with_rust_sysroot(
     helper: &str,
     rust_sysroot: Option<&Path>,
     registry: Option<&Path>,
+    rustup_proxy: Option<&Path>,
 ) {
     let _gate = crate::process::NATIVE_GATE
         .lock()
@@ -455,6 +460,9 @@ fn native_journey_with_rust_sysroot(
     }
     if let Some(registry) = registry {
         command.env("ARANY_TEST_CARGO_REGISTRY", registry);
+    }
+    if let Some(proxy) = rustup_proxy {
+        user_programs::configure_proxy(&mut command, &fixture_root, proxy);
     }
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         command.bounded_output_for(

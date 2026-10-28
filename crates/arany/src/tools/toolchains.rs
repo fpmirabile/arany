@@ -130,7 +130,6 @@ impl RuntimeKind {
         }
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn is_host_mounted(self) -> bool {
         self.is_toolchain() || self.is_multi()
     }
@@ -392,7 +391,7 @@ impl RuntimeGrant {
     }
 
     fn multi_layout_matches(&self) -> bool {
-        if !cfg!(target_os = "linux") || self.version.is_some() {
+        if !cfg!(any(target_os = "linux", target_os = "macos")) || self.version.is_some() {
             return false;
         }
         match self.kind {
@@ -573,7 +572,7 @@ pub(crate) fn discover_user_environment(
     home: &Path,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Vec<Candidate>, ToolError> {
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
         discover_user_programs(home, path, &HOMEBREW_PREFIXES)
     } else {
         Ok(Vec::new())
@@ -1350,7 +1349,7 @@ fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Resul
     Ok(())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod user_environment_tests {
     use super::*;
 
@@ -1469,6 +1468,7 @@ mod user_environment_tests {
         grant.reject_overlap(&[workspace.as_path()]).unwrap();
         grant.verify_host().unwrap();
         validate_selection(std::slice::from_ref(grant)).unwrap();
+        #[cfg(target_os = "linux")]
         assert!(grant.mounts(false).unwrap().is_empty());
         assert_eq!(
             super::super::guard::runtime_path(std::slice::from_ref(grant)).unwrap(),
@@ -1639,6 +1639,35 @@ mod tests {
             kinds.iter().filter(|kind| !kind.is_multi()).count(),
             EXCLUSIVE_RUNTIME_GRANTS
         );
+    }
+
+    #[test]
+    fn user_program_discovery_offers_only_platform_enforced_grants() {
+        use super::*;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let local = home.join(".local/bin");
+        for path in [&local, &home.join(".cargo/bin"), &home.join(".rustup")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let path = std::env::join_paths([&local, &home.join(".cargo/bin")]).unwrap();
+        let candidates = discover_user_environment(home, Some(&path)).unwrap();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert_eq!(candidates.len(), 2);
+            let grants = candidates
+                .iter()
+                .map(|candidate| candidate.grant.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(grants[0].kind, RuntimeKind::UserPrograms);
+            assert_eq!(grants[1].kind, RuntimeKind::ManagerShims);
+            validate_selection(&grants).unwrap();
+            for grant in grants {
+                grant.verify_host().unwrap();
+            }
+        } else {
+            assert!(candidates.is_empty());
+        }
     }
 
     #[test]
