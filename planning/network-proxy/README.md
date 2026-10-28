@@ -50,6 +50,7 @@ New trust boundary: the proxy is a network reachability policy, not content insp
    - **S1b (macOS): open follow-up; estimated 800–1,200 changed lines.** macOS launcher with a loopback port in the unit profile, proxy lifecycle and native macOS evidence; the estimate includes tests and contract updates and must be refined before implementation. A macOS grant fails closed until it lands.
 2. **`web_fetch` and `web_search` Tools.** Two operations, bounded extraction, search backend configuration, catalog/schema rows, presentation arms. Same-PR docs: `tools.md` operations and Limits, `provider.md` none, `terminal.md` tool rows, `docs/tools.md`. ≤600.
 3. **Remote MCP with OAuth.** `url` entries, streamable-HTTP transport behind the proxy, OAuth discovery/PKCE/callback through the existing account-root token owner, token refresh and revocation. Same-PR docs: `tools.md` MCP section, `credentials.md` MCP token slot, `docs/tools.md`. ≤600.
+   - **S3 (Linux / np-s3): owner exception requested; not approved.** The implementation exceeds the original 600-line allocation and the 1,500-line slice ceiling; the new files alone exceed the ceiling. Requested rationale: one coherent remote MCP delivery includes guarded streamable HTTP, OAuth login/logout and renewal, durable token ownership, contracts and failure/replay evidence. Handoff remains blocked until the lead obtains and records an explicit S3 owner exception or authorizes coherent reslicing. The S1a exception does not apply.
 
 ## Exit criteria
 

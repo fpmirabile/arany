@@ -40,6 +40,8 @@ enum Command {
     Serve(cli::serve::ServeArgs),
     Acp(cli::acp::AcpArgs),
     Provider(ProviderArgs),
+    #[command(about = "Authorize remote MCP servers")]
+    Mcp(cli::mcp::McpArgs),
     GenerateSchema {
         #[arg(long)]
         out: Option<PathBuf>,
@@ -198,6 +200,7 @@ async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, St
         Command::Storage(args) => cli::storage::run(args).await,
         Command::Exec(args) => cli::exec::run(args, telemetry).await,
         Command::Provider(args) => cli::provider::run(args).await,
+        Command::Mcp(args) => cli::mcp::run(args).await,
         Command::GenerateSchema { out } => cli::generate_schema::run(out.as_deref()),
         Command::GenerateLimits => Ok(cli::generate_schema::run_limits()),
         Command::Show {

@@ -11,7 +11,7 @@ const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserI
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.
-const FIXTURES: [Fixture<'static>; 24] = [
+const FIXTURES: [Fixture<'static>; 25] = [
     (
         RecordKind::ToolsConfig,
         1,
@@ -82,6 +82,7 @@ const FIXTURES: [Fixture<'static>; 24] = [
         r#"{"schema":1,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","issued_client_id":null}"#,
         r#"{"schema":1,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","issued_client_id":null}"#,
     ),
+    (RecordKind::McpOauth, 1, MCP_OAUTH, MCP_OAUTH),
     (RecordKind::ProviderRoster, 1, ROSTER, ROSTER_V2),
     (RecordKind::ProviderRoster, 2, ROSTER_V2, ROSTER_V2),
     (RecordKind::ProviderRouting, 1, ROUTING, ROUTING_V2),
@@ -91,6 +92,7 @@ const COMMAND_ENVIRONMENT_V1_STABLE: &str = r#"{"version":1,"source":"process","
 const COMMAND_ENVIRONMENT_V1: &str = r#"{"version":1,"source":"process","captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"93ffd086ef94ffa935cc4ad55f5ef67a0dda50913d60bbe61c424572733c8b99"}"#;
 const COMMAND_ENVIRONMENT_V2: &str = r#"{"version":2,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"b543544f6d20cffccddb8cb997234ccb594dbeafb96c632be1bb0fe4b01207a2"}"#;
 const COMMAND_ENVIRONMENT: &str = r#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/usr/bin","/bin"],"names":[{"name":"LANG","value":"C"},{"name":"USER","value":"owner"}],"excluded":[],"sha256":"f9aa85256800d2c10b3d044c2e5005c385f5ef42a543e0182c0a1e2366c4b6b4"}"#;
+const MCP_OAUTH: &str = r#"{"schema":1,"servers":{"remote":{"url":"https://mcp.example.com/mcp","client_id":"client","token_endpoint":"https://auth.example.com/token","revocation_endpoint":null,"access_token":"token","refresh_token":null,"expires_at":null,"renewal":"ready","claim":null}}}"#;
 const PROFILES: &str = r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const PROFILES_V2: &str = r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const UI_V3: &str = r#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
