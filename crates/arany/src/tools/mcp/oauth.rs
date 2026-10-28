@@ -582,6 +582,7 @@ async fn request_token(endpoint: &str, form: &[(&str, &str)]) -> Result<Value, M
 async fn post_form(endpoint: &str, form: &[(&str, &str)]) -> Result<Vec<u8>, McpAuthError> {
     let url = Url::parse(endpoint).map_err(|_| McpAuthError::Unsupported)?;
     let client = client_for(&url).await?;
+    // Built before the await: the encoder's temporary is not Send and must not live across it.
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(form)
         .finish();
