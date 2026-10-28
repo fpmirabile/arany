@@ -173,8 +173,9 @@ The recorder classifies these calls as `Other`; the Git row checks the successfu
 disposition and durable endpoint explicitly and never uses the Read/Edit target
 or percentile classifier. No new process, fixture, retry or storage budget is added.
 
-Select exactly these three parent tests individually with `--exact --nocapture`
-in the existing native macOS debug and release CI lanes:
+Owner-run capture on macOS: select exactly these three parent tests individually
+with `--exact --nocapture` in both debug and release, so the forwarded rows are
+printed rather than captured by the broad CI suites:
 
 ```text
 tools_git::guarded_native_git_branch_creation_publishes_through_two_units_and_replays
@@ -193,8 +194,8 @@ verification and decoding, with the maximum index, aggregate replacement bytes,
 file count, ref count and admitted path lengths. Fixture construction and the
 extra equality digests stay outside the interval. Its existing round-trip and
 overflow assertions remain authoritative; the production Linux path continues
-through this codec. Run exactly that one library test in the release lane with
-`--exact --nocapture`. The reported sizes derive from the owning constants.
+through this codec. Run exactly that one library test with `--release --exact --nocapture`
+(owner-run, not a CI lane). The reported sizes derive from the owning constants.
 This codec row does not measure Git execution or filesystem publication and
 cannot be compared to the macOS receipt-to-commit rows. Real-device approval and
 Seatbelt observations remain in [NEXT_STEPS item 5](../../../../NEXT_STEPS.md#daily-use-first).
