@@ -14,8 +14,8 @@ pub(crate) use hooks::{
     stop_feedback, stop_subject,
 };
 pub use prefix::{
-    HostPrefixEdit, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
-    TypedPrefixEntry,
+    HostPrefixEdit, NetworkDomainEdit, NetworkDomainEntry, PermissionSettings, SettingsError,
+    TypedGitPrefix, TypedPrefixEdit, TypedPrefixEntry,
 };
 
 use super::catalog::Family;
@@ -187,6 +187,16 @@ impl PermissionConfig {
                 rules.push((decision, rule));
             }
         }
+        for decision in [Decision::Allow, Decision::Ask, Decision::Deny] {
+            if rules
+                .iter()
+                .filter(|(kind, rule)| *kind == decision && matches!(rule.tool, Tool::Network(_)))
+                .count()
+                > super::network::MAX_NETWORK_PATTERNS
+            {
+                return Err(ConfigError::Limit("Network domain rules per list"));
+            }
+        }
         Ok(Self {
             mode: permissions.default_mode,
             rules,
@@ -199,6 +209,27 @@ impl PermissionConfig {
 
     pub fn mode(&self) -> PermissionMode {
         self.mode
+    }
+
+    pub(crate) fn network_rules(&self) -> Vec<(Decision, String)> {
+        self.rules
+            .iter()
+            .filter_map(|(decision, rule)| match &rule.tool {
+                Tool::Network(domain) => Some((*decision, domain.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Deny and ask both remove a domain: a command cannot pause for an approval, so only a listed host connects.
+    pub(crate) fn network_domains(&self) -> (Vec<String>, Vec<String>) {
+        let (allow, restrict): (Vec<_>, Vec<_>) = self
+            .network_rules()
+            .into_iter()
+            .partition(|(decision, _)| *decision == Decision::Allow);
+        let names =
+            |rules: Vec<(Decision, String)>| rules.into_iter().map(|(_, name)| name).collect();
+        (names(allow), names(restrict))
     }
 
     // Folder rules of another Workspace never apply; the matching ones become ordinary rules.
@@ -635,6 +666,7 @@ enum Tool {
     Glob,
     Grep,
     Skill,
+    Network(String),
     Native(&'static str),
     NameGlob(Regex),
     Mcp {
@@ -680,6 +712,17 @@ impl Rule {
             "Glob" => Tool::Glob,
             "Grep" => Tool::Grep,
             "Skill" => Tool::Skill,
+            "Network" => {
+                let domain = specifier
+                    .and_then(|specifier| specifier.strip_prefix("domain:"))
+                    .filter(|domain| super::network::valid_pattern(domain))
+                    .ok_or("Network rules require a `domain:` host pattern")?;
+                return Ok(Self {
+                    tool: Tool::Network(domain.to_owned()),
+                    pattern: None,
+                    commit_prefix: None,
+                });
+            }
             name if name.starts_with("mcp__") => {
                 if specifier.is_some() {
                     return Err("MCP rules do not support specifiers");
@@ -800,6 +843,7 @@ impl Rule {
             Tool::Glob => matches!(call, ToolCall::List { .. } | ToolCall::Glob { .. }),
             Tool::Grep => matches!(call, ToolCall::Search { .. }),
             Tool::Skill => facts.family == Family::Skill,
+            Tool::Network(_) => false,
             Tool::Native(name) => facts.name == *name,
             Tool::NameGlob(pattern) => {
                 pattern.is_match(&peer_name(call)) || pattern.is_match(facts.name)

@@ -381,6 +381,7 @@ pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
 } else {
     "Explicit argv only. Private writable selected-project snapshot at /workspace without .git; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded requests a primary host command with justification and explicit human approval; no prior failure is required."
 };
+pub(crate) const NETWORK_CONTRACT: &str = "Overrides \"No network\" in the command contract: commands reach only the listed domains through a Guard proxy (HTTP_PROXY, HTTPS_PROXY and ALL_PROXY are preset; there is no other route). Domains need HTTPS; plain HTTP works only for a listed loopback address. A refused connection is recorded in the command result's network_refusals; do not retry it. Only the user adds domains, through /permissions.";
 pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp_call";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =
     "2025-11-25 stdio; catalog listing with mcp_list only";

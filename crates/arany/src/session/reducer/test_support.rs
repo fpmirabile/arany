@@ -662,6 +662,7 @@ pub(super) fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObser
         let stdout = String::from_utf8(content.to_vec()).unwrap();
         serde_json::to_string(&crate::tools::types::CommandResult {
             selection: Some(Default::default()),
+            network_refusals: Vec::new(),
             exit_code: Some(0),
             stdout_total: crate::tools::OutputTotal {
                 bytes: stdout.len() as u64,

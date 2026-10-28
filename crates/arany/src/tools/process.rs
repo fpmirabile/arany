@@ -1,24 +1,33 @@
 use super::catalog::string;
 use super::guard::{GuardContext, capture, capture_command, payload, spawn_before};
-use super::types::{CommandResult, EffectIntent, ToolCall, ToolLimits};
+use super::types::{CommandResult, EffectIntent, NetworkGrant, ToolCall, ToolLimits};
 use super::{ToolError, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
 use serde_json::{Value, json};
 
 impl ToolRuntime {
+    pub(crate) fn grant_network(&self, intent: &mut EffectIntent) {
+        if self.config.network.is_some() && matches!(intent.call, ToolCall::Command { .. }) {
+            intent.limits.network = NetworkGrant::Proxy;
+        }
+    }
+
     pub(crate) fn bind_build_jobs(&self, intent: &mut EffectIntent) -> Result<(), ToolError> {
         intent.enforcement_digest = self.build_jobs_digest(intent)?;
         Ok(())
     }
 
     pub(super) fn build_jobs_digest(&self, intent: &EffectIntent) -> Result<[u8; 32], ToolError> {
-        if intent.limits.build_jobs == ToolLimits::default().build_jobs {
+        if intent.limits.build_jobs == ToolLimits::default().build_jobs
+            && intent.limits.build_cpu_cores == ToolLimits::default().build_cpu_cores
+            && intent.limits.network == NetworkGrant::None
+        {
             return Ok(self.process_enforcement_digest);
         }
         super::guard::intent_enforcement_digest(
             true,
             &self.config.runtime_grants,
-            intent.limits.build_jobs,
+            &intent.limits,
             #[cfg(target_os = "macos")]
             self.system_programs.as_deref(),
         )
@@ -27,8 +36,6 @@ impl ToolRuntime {
 
 pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
 pub(super) const MAX_COMMAND_ARGS: usize = 64;
-
-const WORKER_CAPTURE_RESULT_BYTES: usize = 512;
 
 #[derive(Clone, Copy)]
 pub(super) enum Truncation {
@@ -243,38 +250,12 @@ fn command_output(
     changeset: super::types::CommandChangeset,
     selection: super::types::CommandSelectionSummary,
 ) -> Result<String, ToolError> {
-    let budget = site.intent.limits.result_bytes as usize;
+    let budget = site.intent.limits.command_result_budget();
     let truncation = if site.hook_stdin.is_some() {
         Truncation::Refuse
     } else {
         Truncation::Allow
     };
-    if matches!(
-        site.intent.target,
-        crate::session::worker::EffectTarget::WorkerView { .. }
-    ) {
-        let output = super::output::fit_streams(
-            &out,
-            &err,
-            budget.saturating_sub(WORKER_CAPTURE_RESULT_BYTES),
-            |stdout, stderr| {
-                serde_json::to_string(&crate::session::worker::WorkerCommandResult {
-                    exit_code,
-                    stdout: stdout.into(),
-                    stderr: stderr.into(),
-                    stdout_total: out.total(),
-                    stderr_total: err.total(),
-                    private_capture: crate::session::worker::PrivateCapture::None {},
-                })
-                .map_err(|_| ToolError::Operation)
-            },
-        )?;
-        return if timed_out {
-            Err(ToolError::Timeout(output))
-        } else {
-            Ok(output)
-        };
-    }
     if site.hook_stdin.is_none() {
         *site.captured.lock().map_err(|_| ToolError::Operation)? =
             Some(super::spill::streams(&out, &err));
@@ -342,6 +323,7 @@ pub(super) fn fit_selected_command(
     let render = |out: &str, err: &str| {
         serde_json::to_string(&CommandResult {
             selection: Some(selection),
+            network_refusals: Vec::new(),
             exit_code,
             stdout: out.into(),
             stderr: err.into(),
@@ -410,6 +392,15 @@ mod tests {
             runtime.pinned_root(&forged),
             Err(ToolError::Configuration)
         ));
+        assert!(runtime.pinned_root(&intent).is_ok());
+        let jobs_digest = intent.enforcement_digest;
+        intent.limits.build_cpu_cores = 8;
+        assert!(matches!(
+            runtime.pinned_root(&intent),
+            Err(ToolError::Configuration)
+        ));
+        runtime.bind_build_jobs(&mut intent).unwrap();
+        assert_ne!(intent.enforcement_digest, jobs_digest);
         assert!(runtime.pinned_root(&intent).is_ok());
     }
 

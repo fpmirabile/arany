@@ -2,6 +2,7 @@ use crate::presentation::{escape_terminal, escaped_terminal_bytes, escaped_termi
 mod blocks;
 mod inline;
 mod links;
+mod lists;
 mod tables;
 use blocks::BlockLine;
 use ratatui::style::Modifier;
@@ -18,9 +19,35 @@ pub(super) const MAX_MARKDOWN_TABLE_COLUMNS: usize = 16;
 pub(super) const MAX_MARKDOWN_TABLE_ROWS: usize = 128;
 pub(super) const LIMIT_CUE: &str = "Markdown formatting limit; showing source";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Fragment {
+    #[default]
+    Label,
+    Separator,
+    Destination,
+    Marker,
+    Rail,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Coordinate {
+    pub(super) site: usize,
+    pub(super) fragment: Fragment,
+    pub(super) offset: usize,
+}
+impl Coordinate {
+    pub(super) fn source(site: usize) -> Self {
+        Self {
+            site,
+            ..Self::default()
+        }
+    }
+}
 #[derive(Clone)]
 pub(super) struct Cell {
     pub(super) byte: usize,
+    pub(super) coordinate: Coordinate,
+    pub(super) envelope: Option<Range<usize>>,
+    pub(super) definition: Option<Range<usize>>,
     pub(super) source: Range<usize>,
     pub(super) text: String,
     pub(super) style: Modifier,
@@ -58,12 +85,44 @@ fn layout(
         let line = projection.map(|lines| &lines[index]);
         if !line.is_some_and(|line| line.hidden) {
             let content = line.map_or(text, |line| &source[line.content.clone()]);
+            let decoration = line.map(|line| &line.decoration);
+            let inner_width =
+                width.saturating_sub(decoration.map_or(0, |prefix| prefix.width(width)));
+            let mut previous = None;
+            let mut record_line = |cells: &mut Vec<Cell>, byte, bytes| {
+                let (row_index, line) = projection.map_or((index, None), |lines| {
+                    let (index, line) =
+                        lists::row_line(lines, (index, previous.unwrap_or(index)), byte);
+                    (index, Some(line))
+                });
+                let first = previous != Some(row_index);
+                previous = Some(row_index);
+                let empty = cells.is_empty();
+                let extra = line.map_or(0, |line| {
+                    line.decoration
+                        .decorate(cells, (first, capture), (byte, width))
+                });
+                if empty
+                    && first
+                    && let Some(line) = line
+                    && line.flow.is_none()
+                {
+                    inline::envelope(cells, line.envelope.clone());
+                }
+                record(cells, byte, bytes + extra)
+            };
             if let Some(table) = line.and_then(|line| line.table.as_ref()) {
-                tables::layout(table, width, capture, &mut record)?;
+                tables::layout(table, inner_width, capture, &mut record_line)?;
             } else if let Some(lines) = line.and_then(|line| line.flow.as_ref()) {
-                inline::layout(lines, width, capture, &mut record)?;
+                inline::layout(lines, inner_width, capture, &mut record_line)?;
             } else {
-                layout_line((start, content), line, width, capture, &mut record)?;
+                layout_line(
+                    (start, content),
+                    line,
+                    inner_width,
+                    capture,
+                    &mut record_line,
+                )?;
             }
         }
         start += text.len() + 1;
@@ -112,6 +171,9 @@ fn layout_line(
         if capture {
             cells.push(Cell {
                 byte,
+                coordinate: Coordinate::source(byte),
+                envelope: None,
+                definition: None,
                 source: source_range(line, origin),
                 text: if let Some(value) = replacement {
                     value.to_owned()
@@ -163,6 +225,12 @@ fn decorate(
         .graphemes(true)
         .map(|text| Cell {
             byte: source.start,
+            coordinate: Coordinate {
+                fragment: Fragment::Rail,
+                ..Coordinate::source(byte)
+            },
+            envelope: None,
+            definition: None,
             source: source.clone(),
             text: text.to_owned(),
             style: Modifier::empty(),
@@ -188,16 +256,29 @@ fn projected(source: &str, width: usize) -> Option<Vec<BlockLine>> {
     layout(source, width, false, Some(&lines)).ok()?;
     Some(lines)
 }
-pub(super) fn visible_line(source: &str, byte: usize, width: usize) -> Option<Vec<Cell>> {
+pub(super) fn visible_line(
+    source: &str,
+    coordinate: Coordinate,
+    width: usize,
+) -> Option<Vec<Cell>> {
     projected(source, width)?
         .iter()
-        .find_map(|line| line.flow.as_ref()?.line_at(byte))
+        .find_map(|line| {
+            line.flow
+                .as_ref()
+                .and_then(|flow| flow.line_at(coordinate))
+                .or_else(|| line.table.as_ref()?.link_line_at(coordinate))
+        })
         .map(<[Cell]>::to_vec)
 }
-pub(super) fn content_at(source: &str, byte: usize, width: usize) -> Option<Range<usize>> {
+pub(super) fn content_at(
+    source: &str,
+    coordinate: Coordinate,
+    width: usize,
+) -> Option<Range<usize>> {
     projected(source, width)?
         .iter()
-        .find(|line| !line.hidden && line.content.contains(&byte))
+        .find(|line| !line.hidden && line.content.contains(&coordinate.site))
         .map(|line| line.content.clone())
 }
 pub(super) fn project(source: &str, width: usize, capture: bool) -> (Layout, Option<&'static str>) {

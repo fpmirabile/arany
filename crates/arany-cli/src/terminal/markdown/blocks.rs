@@ -8,6 +8,8 @@ pub(super) struct BlockLine {
     pub(super) envelope: Range<usize>,
     pub(super) content: Range<usize>,
     pub(super) padding: usize,
+    pub(super) column: usize,
+    pub(super) decoration: super::lists::Decoration,
     pub(super) style: Modifier,
     pub(super) hidden: bool,
     pub(super) table: Option<super::tables::Table>,
@@ -22,66 +24,190 @@ pub(super) fn project(source: &str) -> Result<Vec<BlockLine>, ()> {
     if source.split("\r\n").any(|part| part.contains('\r')) {
         return Ok(lines);
     }
-    let (mut depth, mut code, mut table) = (0, None, None::<super::tables::Table>);
-    let mut flow = None::<Flow>;
-    for (index, (event, range)) in Parser::new_ext(source, Options::ENABLE_TABLES)
-        .into_offset_iter()
-        .enumerate()
-    {
+    let mut projection = Projection::default();
+    let parser = Parser::new_ext(source, Options::ENABLE_TABLES);
+    for (_, definition) in parser.reference_definitions().iter() {
+        let span = definition.span.clone();
+        let covered_lines = covered(&mut lines, span.clone());
+        // Definitions nested in quotes or list items keep their visible marker line.
+        let starts_line = covered_lines.first().is_some_and(|line| {
+            source
+                .get(line.original.start..span.start)
+                .is_some_and(|prefix| prefix.trim_ascii().is_empty())
+        });
+        if starts_line {
+            for line in covered_lines {
+                line.hidden = true;
+            }
+        }
+    }
+    let mut expanded = 0usize;
+    let mut events = parser.into_offset_iter();
+    for index in 0..=MAX_MARKDOWN_EVENTS {
+        let Some((event, range)) = events.next() else {
+            break;
+        };
         if index >= MAX_MARKDOWN_EVENTS {
             return Err(());
         }
-        if matches!(event, Event::Start(_)) && depth == MAX_MARKDOWN_DEPTH {
+        if matches!(event, Event::Start(_)) && projection.depth == MAX_MARKDOWN_DEPTH {
             return Err(());
         }
-        if let Some(table) = &mut table {
-            table.event(source, &event, range.clone())?;
+        let definition = super::links::definition(&event, events.reference_definitions());
+        super::links::charge(&event, &mut expanded)?;
+        projection.event(source, &mut lines, (event, range), definition)?;
+    }
+    Ok(lines)
+}
+
+#[derive(Default)]
+struct Projection {
+    depth: usize,
+    code: Option<Range<usize>>,
+    table: Option<super::tables::Table>,
+    flow: Option<Flow>,
+    tight: Option<Range<usize>>,
+    lists: Vec<Option<u64>>,
+    items: Vec<usize>,
+}
+
+impl Projection {
+    fn event(
+        &mut self,
+        source: &str,
+        lines: &mut [BlockLine],
+        (event, range): (Event<'_>, Range<usize>),
+        definition: Option<Range<usize>>,
+    ) -> Result<(), ()> {
+        if matches!(
+            event,
+            Event::Start(
+                Tag::List(_)
+                    | Tag::Item
+                    | Tag::BlockQuote
+                    | Tag::CodeBlock(_)
+                    | Tag::Paragraph
+                    | Tag::Heading { .. }
+                    | Tag::Table(_)
+                    | Tag::HtmlBlock
+            ) | Event::End(TagEnd::Item | TagEnd::List(_) | TagEnd::BlockQuote)
+                | Event::Rule
+        ) {
+            self.finish_tight(source, lines);
         }
-        if let Some(flow) = &mut flow {
-            flow.event(source, &event, range.clone())?;
+        if self.code.is_none()
+            && self.table.is_none()
+            && self.flow.is_none()
+            && self.items.last() == Some(&self.depth)
+            && matches!(
+                event,
+                Event::Text(_)
+                    | Event::Code(_)
+                    | Event::InlineHtml(_)
+                    | Event::Start(
+                        Tag::Emphasis | Tag::Strong | Tag::Link { .. } | Tag::Image { .. }
+                    )
+            )
+        {
+            self.flow = Some(Flow::new(Modifier::empty()));
+            self.tight = Some(range.clone());
+        }
+        if let Some(tight) = &mut self.tight {
+            tight.end = tight.end.max(range.end);
+        }
+        if let Some(table) = &mut self.table {
+            table.event(source, &event, range.clone(), definition.clone())?;
+        }
+        if let Some(flow) = &mut self.flow {
+            flow.event(source, &event, range.clone(), definition)?;
         }
         match event {
             Event::Start(tag) => {
-                match tag {
-                    Tag::Table(columns) if depth == 0 => {
-                        table = Some(super::tables::Table::new(range, columns.len())?);
-                    }
-                    Tag::CodeBlock(kind) if depth == 0 => {
-                        code_block(source, &mut lines, range.clone(), kind);
-                        code = Some(range);
-                    }
-                    tag @ (Tag::Paragraph | Tag::Heading { .. }) if depth == 0 => {
-                        flow = open_flow(source, &mut lines, &tag, range);
-                    }
-                    _ => {}
-                }
-                depth += 1;
+                self.start(source, lines, tag, range)?;
+                self.depth += 1;
             }
             Event::End(tag) => {
-                depth = depth.checked_sub(1).ok_or(())?;
-                if tag == TagEnd::CodeBlock
-                    && let Some(range) = code.take()
-                {
-                    finish_code(&mut lines, range);
-                }
-                if matches!(tag, TagEnd::Paragraph | TagEnd::Heading(_))
-                    && let Some(flow) = flow.take()
-                {
-                    finish_flow(source, &mut lines, flow, range);
-                }
-                if tag == TagEnd::Table
-                    && let Some(table) = table.take()
-                {
-                    finish_table(&mut lines, table);
+                self.depth = self.depth.checked_sub(1).ok_or(())?;
+                self.end(source, lines, tag, range);
+            }
+            Event::Text(text) if self.code.is_some() => {
+                code_text(source, lines, range, &text);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn start(
+        &mut self,
+        source: &str,
+        lines: &mut [BlockLine],
+        tag: Tag<'_>,
+        range: Range<usize>,
+    ) -> Result<(), ()> {
+        match tag {
+            Tag::List(number) => self.lists.push(number),
+            Tag::Item => {
+                self.items.push(self.depth + 1);
+                let number = self
+                    .lists
+                    .last_mut()
+                    .expect("parser item belongs to a list");
+                super::lists::item(source, covered(lines, range), *number);
+                if let Some(number) = number {
+                    *number += 1;
                 }
             }
-            Event::Text(text) if code.is_some() => {
-                code_text(source, &mut lines, range, &text);
+            Tag::BlockQuote => super::lists::quote(source, covered(lines, range)),
+            Tag::Table(columns) if self.depth == 0 => {
+                self.table = Some(super::tables::Table::new(range, columns.len())?);
+            }
+            Tag::CodeBlock(kind) => {
+                code_block(source, lines, range.clone(), kind)?;
+                self.code = Some(range);
+            }
+            tag @ (Tag::Paragraph | Tag::Heading { .. }) if self.table.is_none() => {
+                self.flow = open_flow(source, lines, &tag, range);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn end(&mut self, source: &str, lines: &mut [BlockLine], tag: TagEnd, range: Range<usize>) {
+        match tag {
+            TagEnd::List(_) => {
+                self.lists.pop();
+            }
+            TagEnd::Item => {
+                self.items.pop();
+            }
+            TagEnd::CodeBlock => {
+                if let Some(range) = self.code.take() {
+                    finish_code(lines, range);
+                }
+            }
+            TagEnd::Paragraph | TagEnd::Heading(_) => {
+                if let Some(flow) = self.flow.take() {
+                    finish_flow(source, lines, flow, range);
+                }
+            }
+            TagEnd::Table => {
+                if let Some(table) = self.table.take() {
+                    finish_table(lines, table);
+                }
             }
             _ => {}
         }
     }
-    Ok(lines)
+
+    fn finish_tight(&mut self, source: &str, lines: &mut [BlockLine]) {
+        if let Some(range) = self.tight.take()
+            && let Some(flow) = self.flow.take()
+        {
+            finish_flow(source, lines, flow, range);
+        }
+    }
 }
 
 fn source_lines(source: &str) -> Result<Vec<BlockLine>, ()> {
@@ -97,6 +223,8 @@ fn source_lines(source: &str) -> Result<Vec<BlockLine>, ()> {
             envelope: start..end,
             content: start..end,
             padding: 0,
+            column: 0,
+            decoration: super::lists::Decoration::default(),
             style: Modifier::empty(),
             hidden: false,
             table: None,
@@ -147,6 +275,7 @@ fn open_flow(
 fn finish_flow(source: &str, lines: &mut [BlockLine], mut flow: Flow, range: Range<usize>) {
     let lines = covered(lines, range.clone());
     let end = range.start + source[range].trim_end_matches(['\r', '\n']).len();
+    lines[0].envelope.end = end;
     lines[0].flow = Some(flow.finish(lines[0].original.start..end));
     for line in lines.iter_mut() {
         line.hidden = true;
@@ -171,7 +300,12 @@ fn heading(source: &str, lines: &mut [BlockLine], range: Range<usize>) {
     line.style = Modifier::BOLD;
 }
 
-fn code_block(source: &str, lines: &mut [BlockLine], range: Range<usize>, kind: CodeBlockKind<'_>) {
+fn code_block(
+    source: &str,
+    lines: &mut [BlockLine],
+    range: Range<usize>,
+    kind: CodeBlockKind<'_>,
+) -> Result<(), ()> {
     let lines = covered(lines, range.clone());
     for line in lines.iter_mut() {
         line.padding = 0;
@@ -190,11 +324,29 @@ fn code_block(source: &str, lines: &mut [BlockLine], range: Range<usize>, kind: 
         line.content = start..start + info.len();
         line.padding = 0;
         line.style = Modifier::BOLD;
+        line.flow = Some(Lines::label(
+            source,
+            &language,
+            line.content.clone(),
+            line.envelope.clone(),
+        )?);
     }
+    Ok(())
 }
 
 fn finish_code(lines: &mut [BlockLine], range: Range<usize>) {
     let lines = covered(lines, range.clone());
+    if lines.iter().all(|line| line.hidden) && lines[0].decoration.width(usize::MAX) > 0 {
+        lines[0].hidden = false;
+        lines[0].content = range.start..range.start;
+    }
+    let decoration = lines[0].decoration.clone();
+    if lines[0].hidden
+        && decoration.has_marker()
+        && let Some(first) = lines.iter_mut().find(|line| !line.hidden)
+    {
+        first.decoration = decoration;
+    }
     let start = lines[0].original.start;
     if lines[0].hidden
         && let Some(first) = lines.iter_mut().find(|line| !line.hidden)
@@ -203,6 +355,9 @@ fn finish_code(lines: &mut [BlockLine], range: Range<usize>) {
     }
     if let Some(last) = lines.iter_mut().rev().find(|line| !line.hidden) {
         last.envelope.end = range.end;
+        if let Some(flow) = &mut last.flow {
+            flow.enclose(last.envelope.clone());
+        }
     }
 }
 
@@ -213,7 +368,7 @@ fn code_text(source: &str, lines: &mut [BlockLine], range: Range<usize>, text: &
             line.content = range.clone();
             continue;
         }
-        let start = line.original.start.max(range.start);
+        let start = line.content.start.max(range.start);
         let end = line.original.end.min(range.end);
         if start > end {
             continue;

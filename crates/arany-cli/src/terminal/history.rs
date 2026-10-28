@@ -1,9 +1,13 @@
+mod projection;
+
 use super::clipboard::{COPY_TOO_LARGE, MAX_COPY_BYTES, display_bytes, display_text};
+use super::markdown::Coordinate;
 use crate::presentation::{
     escape_terminal, escaped_terminal_bytes, escaped_terminal_width, image_message_text,
     safe_truncate,
 };
 use arany::{RunId, RunView, SessionId, SessionView};
+use projection::{row_coordinate, row_of_coordinate, selected_cells, source_matches};
 use ratatui::text::Span;
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -89,8 +93,7 @@ struct TextPoint {
     byte: usize,
     // A boundary sits between graphemes; otherwise the grapheme starting at `byte` is selected.
     boundary: bool,
-    // The rendered row and cell, so cells sharing one source range (an entity) stay distinct drag endpoints.
-    slot: (usize, usize),
+    coordinate: Coordinate,
 }
 
 #[derive(Clone, Copy)]
@@ -129,7 +132,7 @@ pub(super) struct History {
     find_failed: bool,
     last_find: Option<String>,
     matched_row: Option<usize>,
-    matched_source: Option<(MessageSource, usize)>,
+    matched_source: Option<(MessageSource, Coordinate)>,
     notices: VecDeque<Notice>,
     next_notice: u64,
     sequence: u64,
@@ -175,7 +178,7 @@ impl History {
                         &message_text(view, message, &self.notices),
                         self.width,
                     );
-                    (message.source, rows[offset].source_byte, offset == 0)
+                    (message.source, row_coordinate(&rows[offset]), offset == 0)
                 })
             })
         } else {
@@ -391,7 +394,7 @@ impl History {
             if !self.follow_tail && self.total_rows > previous_rows {
                 self.unseen_new_content = true;
             }
-            if let Some((source, byte, heading)) = anchor
+            if let Some((source, coordinate, heading)) = anchor
                 && let Some(message) = self
                     .messages
                     .iter()
@@ -402,16 +405,20 @@ impl History {
                     &message_text(view, message, &self.notices),
                     width,
                 );
-                let offset = if heading { 0 } else { row_of_byte(&rows, byte) };
+                let offset = if heading {
+                    0
+                } else {
+                    row_of_coordinate(&rows, coordinate)
+                };
                 self.top = message.start + offset;
             }
         }
         if rebuild && self.matched_row.is_some() {
-            self.matched_row = self.matched_source.and_then(|(source, byte)| {
+            self.matched_row = self.matched_source.and_then(|(source, coordinate)| {
                 let message = self.messages.iter().find(|entry| entry.source == source)?;
                 let text = message_text(view, message, &self.notices);
                 let rows = message_rows(message.kind, &text, width);
-                Some(message.start + row_of_byte(&rows, byte))
+                Some(message.start + row_of_coordinate(&rows, coordinate))
             });
         }
         self.height = height;
@@ -750,7 +757,7 @@ impl History {
             source: message.source,
             byte,
             boundary: true,
-            slot: (0, 0),
+            coordinate: Coordinate::source(byte),
         };
         let offset = row - message.start;
         if offset == 0 && has_heading(message.kind) {
@@ -760,9 +767,11 @@ impl History {
         if let Some(cells) = &rows[offset].cells {
             let mut at = row_indent(message.kind);
             if column < at {
-                return Some(boundary(rows[offset].source_byte));
+                let mut point = boundary(rows[offset].source_byte);
+                point.coordinate = row_coordinate(&rows[offset]);
+                return Some(point);
             }
-            for (index, cell) in cells.iter().enumerate() {
+            for cell in cells {
                 at += cell.text.width();
                 if column < at {
                     return Some(TextPoint {
@@ -770,15 +779,23 @@ impl History {
                         source: message.source,
                         byte: cell.byte,
                         boundary: false,
-                        slot: (row, index),
+                        coordinate: cell.coordinate,
                     });
                 }
             }
-            return Some(boundary(
+            let mut point = boundary(
                 cells
                     .last()
                     .map_or(rows[offset].source_byte, |cell| cell.source.end),
-            ));
+            );
+            point.coordinate = cells.last().map_or_else(
+                || row_coordinate(&rows[offset]),
+                |cell| Coordinate {
+                    offset: cell.coordinate.offset + 1,
+                    ..cell.coordinate
+                },
+            );
+            return Some(point);
         }
         let Some((start, end)) = row_span(&text, &rows, offset) else {
             return Some(boundary(text.len()));
@@ -795,7 +812,7 @@ impl History {
                     source: message.source,
                     byte,
                     boundary: false,
-                    slot: (0, 0),
+                    coordinate: Coordinate::source(byte),
                 }),
         )
     }
@@ -814,12 +831,12 @@ impl History {
             .min(MAX_ROW_CELLS)
             .saturating_sub(row_indent(message.kind));
         let visible = formats_markdown(message.kind)
-            .then(|| super::markdown::visible_line(&text, point.byte, width))
+            .then(|| super::markdown::visible_line(&text, point.coordinate, width))
             .flatten();
         let (mut line_start, mut line_end) = line_bounds(&text, point.byte);
         if visible.is_none()
             && formats_markdown(message.kind)
-            && let Some(content) = super::markdown::content_at(&text, point.byte, width)
+            && let Some(content) = super::markdown::content_at(&text, point.coordinate, width)
         {
             line_start = line_start.max(content.start);
             line_end = line_end.min(content.end);
@@ -834,41 +851,25 @@ impl History {
                 .map(|(byte, grapheme)| (line_start + byte, grapheme))
                 .collect::<Vec<_>>(),
         };
-        let at = graphemes.iter().position(|(byte, _)| *byte == point.byte)?;
+        let at = if let Some(cells) = &visible {
+            cells
+                .iter()
+                .position(|cell| cell.coordinate == point.coordinate)?
+        } else {
+            graphemes.iter().position(|(byte, _)| *byte == point.byte)?
+        };
         let at_index = |index: usize| TextPoint {
             mapped: visible
                 .as_ref()
                 .map(|cells| (cells[index].source.start, cells[index].source.end)),
             byte: graphemes[index].0,
+            coordinate: visible.as_ref().map_or_else(
+                || Coordinate::source(graphemes[index].0),
+                |cells| cells[index].coordinate,
+            ),
             ..point
         };
-        if let Some((first, last)) = url_span(&graphemes, at) {
-            return Some(Selection {
-                anchor: at_index(first),
-                head: at_index(last),
-                shown: true,
-            });
-        }
-        let word = |grapheme: &str| {
-            grapheme
-                .chars()
-                .all(|character| character.is_alphanumeric() || "_-./~".contains(character))
-        };
-        let (first, last) = if word(graphemes[at].1) {
-            (
-                graphemes[..at]
-                    .iter()
-                    .rposition(|(_, grapheme)| !word(grapheme))
-                    .map_or(0, |index| index + 1),
-                graphemes[at..]
-                    .iter()
-                    .position(|(_, grapheme)| !word(grapheme))
-                    .map_or(graphemes.len(), |index| at + index)
-                    - 1,
-            )
-        } else {
-            (at, at)
-        };
+        let (first, last) = projection::word_span(&graphemes, at);
         Some(Selection {
             anchor: at_index(first),
             head: at_index(last),
@@ -881,13 +882,16 @@ impl History {
             .messages
             .iter()
             .find(|message| message.source == point.source)?;
-        let (start, end) = line_bounds(&message_text(view, message, &self.notices), point.byte);
+        let (start, end) = line_bounds(
+            &message_text(view, message, &self.notices),
+            point.coordinate.site,
+        );
         let boundary = |byte| TextPoint {
             mapped: None,
             source: point.source,
             byte,
             boundary: true,
-            slot: (0, 0),
+            coordinate: Coordinate::source(byte),
         };
         Some(Selection {
             anchor: boundary(start),
@@ -898,32 +902,53 @@ impl History {
 
     // Message indices and source bytes of the selection, ordered, with an exclusive end.
     fn selection_range(&self, view: &SessionView) -> Option<((usize, usize), (usize, usize))> {
-        let selection = self.selection.filter(|selection| selection.shown)?;
-        let locate = |point: TextPoint| {
-            self.messages
-                .iter()
-                .position(|message| message.source == point.source)
-                .map(|index| (index, point))
-        };
-        let mut low = locate(selection.anchor)?;
-        let mut high = locate(selection.head)?;
-        let order = |(index, point): (usize, TextPoint)| (index, point.byte, !point.boundary);
-        if order(high) < order(low) {
-            std::mem::swap(&mut low, &mut high);
+        let (low, high) = self.selection_points()?;
+        let mut start = low.1.mapped.map_or(low.1.byte, |(start, _)| start);
+        let source = message_source(view, &self.messages[high.0], &self.notices);
+        let mut end = high.1.mapped.map_or_else(
+            || {
+                if high.1.boundary {
+                    high.1.byte
+                } else {
+                    source
+                        .grapheme_at(source.floor(high.1.byte))
+                        .filter(|g| *g != "\n")
+                        .map_or(high.1.byte, |g| high.1.byte + g.len())
+                }
+            },
+            |(_, end)| end,
+        );
+        // Raw word endpoints already identify the exact source span.
+        if low.1.mapped.is_none() && high.1.mapped.is_none() && !low.1.boundary && !high.1.boundary
+        {
+            return Some(((low.0, start), (high.0, end)));
         }
-        let start = low.1.mapped.map_or(low.1.byte, |(start, _)| start);
-        let end = if let Some((_, end)) = high.1.mapped {
-            end
-        } else if high.1.boundary {
-            high.1.byte
+        let endpoints: &[usize] = if low.0 == high.0 {
+            &[low.0]
         } else {
-            let source = message_source(view, &self.messages[high.0], &self.notices);
-            let byte = source.floor(high.1.byte);
-            source
-                .grapheme_at(byte)
-                .filter(|grapheme| *grapheme != "\n")
-                .map_or(byte, |grapheme| byte + grapheme.len())
+            &[low.0, high.0]
         };
+        for &index in endpoints {
+            let message = &self.messages[index];
+            let text = message_text(view, message, &self.notices);
+            let rows = message_rows(message.kind, &text, self.width);
+            for cell in rows.iter().filter_map(|row| row.cells.as_ref()).flatten() {
+                if projection::contains(index, cell.coordinate, (low, high)) {
+                    let mut from = cell.source.start;
+                    let mut to = cell.source.end;
+                    for range in cell.envelope.iter().chain(&cell.definition) {
+                        from = from.min(range.start);
+                        to = to.max(range.end);
+                    }
+                    if index == low.0 {
+                        start = start.min(from);
+                    }
+                    if index == high.0 {
+                        end = end.max(to);
+                    }
+                }
+            }
+        }
         Some(((low.0, start), (high.0, end)))
     }
 
@@ -933,17 +958,20 @@ impl History {
         }
         for message in self.messages.iter().rev() {
             let text = message_text(view, message, &self.notices);
-            if let Some(byte) = text.find(query) {
-                let rows = message_rows(message.kind, &text, self.width);
-                let offset = row_of_byte(&rows, byte);
-                self.show_match(message.start + offset, (message.source, byte));
+            if !text.contains(query) {
+                continue;
+            }
+            let rows = message_rows(message.kind, &text, self.width);
+            if let Some((offset, coordinate)) = source_matches(&text, &rows, query).first().copied()
+            {
+                self.show_match(message.start + offset, (message.source, coordinate));
                 return true;
             }
         }
         false
     }
 
-    fn show_match(&mut self, row: usize, source: (MessageSource, usize)) {
+    fn show_match(&mut self, row: usize, source: (MessageSource, Coordinate)) {
         self.matched_source = Some(source);
         self.top = row.saturating_sub(1).min(self.tail());
         self.follow_tail = false;
@@ -958,37 +986,40 @@ impl History {
         let Some(current) = self.matched_row else {
             return self.search(view, &query);
         };
+        let coordinate = self
+            .matched_source
+            .map_or(Coordinate::default(), |(_, coordinate)| coordinate);
         let rows = |message: &MessageIndex| {
             let text = message_text(view, message, &self.notices);
             if !text.contains(query.as_str()) {
                 return Vec::new();
             }
             let rows = message_rows(message.kind, &text, self.width);
-            text.match_indices(query.as_str())
-                .map(|(byte, _)| {
-                    (
-                        message.start + row_of_byte(&rows, byte),
-                        (message.source, byte),
-                    )
-                })
+            source_matches(&text, &rows, &query)
+                .into_iter()
+                .map(|(row, coordinate)| (message.start + row, (message.source, coordinate)))
                 .collect::<Vec<_>>()
         };
         let found = if older {
             self.messages
                 .iter()
                 .rev()
-                .filter(|message| message.start < current)
+                .filter(|message| message.start <= current)
                 .find_map(|message| {
                     rows(message)
                         .into_iter()
                         .rev()
-                        .find(|(row, _)| *row < current)
+                        .find(|(row, (_, key))| (*row, *key) < (current, coordinate))
                 })
         } else {
             self.messages
                 .iter()
-                .filter(|message| message.start + message.rows > current + 1)
-                .find_map(|message| rows(message).into_iter().find(|(row, _)| *row > current))
+                .filter(|message| message.start + message.rows > current)
+                .find_map(|message| {
+                    rows(message)
+                        .into_iter()
+                        .find(|(row, (_, key))| (*row, *key) > (current, coordinate))
+                })
         };
         found
             .inspect(|(row, source)| self.show_match(*row, *source))
@@ -1110,7 +1141,7 @@ impl History {
     pub(super) fn visible(&self, view: &SessionView) -> Vec<HistoryRow> {
         let mut visible = Vec::with_capacity(self.height);
         let end = self.top.saturating_add(self.height);
-        let range = self.selection_range(view);
+        let range = self.selection_points();
         for (index, message) in self.messages.iter().enumerate() {
             if message.start + message.rows <= self.top {
                 continue;
@@ -1134,7 +1165,12 @@ impl History {
                 let row = message.start + offset;
                 if row >= self.top && row < end {
                     let selected = range.and_then(|range| {
-                        selected_cells(message.kind, &text, &rows, &chrome, offset, index, range)
+                        selected_cells(
+                            (message.kind, &text, &chrome),
+                            &rows,
+                            (offset, index),
+                            range,
+                        )
                     });
                     let mut displayed =
                         display_row(message.kind, &rows[offset], offset, slash, self.width);
@@ -1720,43 +1756,6 @@ fn row_cells(
         })
 }
 
-fn selected_cells(
-    kind: MessageKind,
-    text: &str,
-    rows: &[MessageRow],
-    chrome: &[Range<usize>],
-    offset: usize,
-    index: usize,
-    ((first, start), (last, end)): ((usize, usize), (usize, usize)),
-) -> Option<(usize, usize)> {
-    if index < first || index > last || (offset == 0 && has_heading(kind)) {
-        return None;
-    }
-    if let Some(cells) = &rows[offset].cells {
-        let mut at = row_indent(kind);
-        let mut selected = None;
-        for cell in cells {
-            let next = at + cell.text.width();
-            if (index != first || cell.source.end > start)
-                && (index != last || cell.source.start < end)
-            {
-                selected = Some((selected.map_or(at, |(from, _)| from), next));
-            }
-            at = next;
-        }
-        return selected;
-    }
-    let (row_start, row_end) = row_span(text, rows, offset)?;
-    let from = if index == first { start } else { 0 };
-    let to = if index == last { end } else { usize::MAX };
-    let mut cells = row_cells(text, row_start, row_end, row_indent(kind)).filter(|(byte, _, _)| {
-        (from..to).contains(byte) && !chrome.iter().any(|cut| cut.contains(byte))
-    });
-    let first = cells.next()?;
-    let last = cells.last().unwrap_or(first);
-    Some((first.1, last.1 + last.2))
-}
-
 pub(super) fn native_marker(kind: MessageKind, heading: bool) -> &'static str {
     match (kind, heading) {
         (MessageKind::User | MessageKind::Assignment, true) => "› ",
@@ -2063,14 +2062,14 @@ mod tests {
                 source: MessageSource::User(0),
                 byte: 0,
                 boundary: true,
-                slot: (0, 0),
+                coordinate: Coordinate::source(0),
             },
             head: TextPoint {
                 mapped: None,
                 source: MessageSource::User(0),
                 byte: text.len(),
                 boundary: true,
-                slot: (0, 0),
+                coordinate: Coordinate::source(text.len()),
             },
             shown: true,
         });
@@ -3478,3 +3477,12 @@ mod inline_tests;
 
 #[cfg(test)]
 mod link_tests;
+
+#[cfg(test)]
+mod reference_tests;
+
+#[cfg(test)]
+mod fence_tests;
+
+#[cfg(test)]
+mod list_tests;

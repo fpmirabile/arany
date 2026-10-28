@@ -31,6 +31,8 @@ pub(crate) struct Config {
     pub locale: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<super::network::Network>,
 }
 
 // Author and committer of typed Git commits; never read from repository configuration.
@@ -126,7 +128,7 @@ impl Config {
         Self::parse(&bytes)
     }
 
-    fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
+    pub(super) fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
         let value =
             super::skills::parse_json(bytes, 64 * 1024).map_err(|_| ToolError::Configuration)?;
         let config: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
@@ -134,6 +136,10 @@ impl Config {
         if !config.runtime_grants.is_empty()
             || !config.locale.is_empty()
             || config.environment_sha256.is_some()
+            || config.network.as_ref().is_some_and(|network| {
+                !network.deny.is_empty()
+                    || network.allow.len() > super::network::MAX_NETWORK_PATTERNS
+            })
         {
             return Err(ToolError::Configuration);
         }
@@ -167,6 +173,10 @@ impl Config {
                 .environment_sha256
                 .as_deref()
                 .is_some_and(|digest| !valid_digest(digest))
+            || self
+                .network
+                .as_ref()
+                .is_some_and(|network| cfg!(not(target_os = "linux")) || !network.valid())
         {
             return Err(ToolError::Configuration);
         }
@@ -381,7 +391,13 @@ impl Config {
             | ToolCall::GitBranch { .. }
             | ToolCall::GitSwitch { .. } => {
                 return self.git_available()
-                    && (!call.mutates() || super::guard::git_writes_available());
+                    && match call {
+                        ToolCall::GitBranch { name: Some(_), .. } => {
+                            super::guard::git_branch_creation_available()
+                        }
+                        ToolCall::GitCommit { .. } => super::guard::git_commit_available(),
+                        _ => !call.mutates() || super::guard::git_writes_available(),
+                    };
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self

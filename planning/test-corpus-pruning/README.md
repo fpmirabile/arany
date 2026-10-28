@@ -96,6 +96,6 @@ Each row is one PR under [slice delivery](../PLANNING.md#slice-delivery), includ
 
 ## Gates
 
-The remaining worker/Tool/Event moves T3a, T3b and T6a open after [shared-workspace-editors](../shared-workspace-editors/README.md#vertical-slices) **S2b2**, without waiting for its private-target/native retirement. Re-inventory the surviving files and their assertions after the cutover; never recreate tests that S1 replaced at focused live-workspace owners. Other table gates remain unchanged.
+The remaining worker/Tool/Event moves T3a, T3b and T6a open after shared-workspace-editors **S2b2** ([worker vocabulary retirement](../../docs/specs/execution.md#journal-migration)), without waiting for its private-target/native retirement. Re-inventory the surviving files and their assertions after the cutover; never recreate tests that S1 replaced at focused live-workspace owners. Other table gates remain unchanged.
 
 Optional early T3a: shared-editor S0b may bring the pure move forward after S0a and before S1 if useful for review. That PR records both IDs and the same pure-move/count evidence; T3a is then delivered and no duplicate later move is scheduled. If S0b is skipped, T3a keeps the default S2b2 gate. S0b changes no fixture or behavior; S1 separately owns all required fixture rewrites and protocol-test dispositions.

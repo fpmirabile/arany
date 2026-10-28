@@ -3,11 +3,18 @@ use super::*;
 const RETIRED_EVENTS: &str = include_str!("retired-worker-events.json");
 
 fn current_source(kind: &str) -> (i64, &'static str) {
+    let version = match kind {
+        "ToolProposed" => 2,
+        "ToolStarted" => 24,
+        "ToolFinished" => 30,
+        "HookStarted" => 13,
+        "HookFinished" => 19,
+        _ => payload_version(kind).unwrap() - 1,
+    };
     EVENT_FIXTURES
         .iter()
         .find_map(|(name, from, source, _)| {
-            (*name == kind && *from + 1 == payload_version(kind).unwrap())
-                .then_some((*from, *source))
+            (*name == kind && *from == version).then_some((*from, *source))
         })
         .unwrap()
 }
@@ -227,7 +234,7 @@ fn enclosing_payloads_refuse_removed_calls_attestations_and_supervisor_subjects(
         assert!(
             Event::decode(
                 kind,
-                from + 1,
+                payload_version(kind).unwrap(),
                 &value.to_string(),
                 Some(scope.0),
                 Some(scope.1)
@@ -267,7 +274,7 @@ fn live_editor_history_migrates_and_reopens_without_changing_effects_or_receipts
                 "GoalPlanContractRecorded",
             ]
             .contains(&kind)
-                && payload_version(kind) == Some(from + 1)
+                && from == current_source(kind).0
             {
                 changed += connection
                     .execute(
@@ -299,4 +306,110 @@ fn live_editor_history_migrates_and_reopens_without_changing_effects_or_receipts
                 .is_none()
         );
     }
+}
+
+fn private_target() -> Value {
+    serde_json::json!({
+        "kind":"worker_view",
+        "assignment_id":"01900000-0000-7000-8000-000000000002",
+        "base_digest":vec![1_u8; 32],
+        "revision":0,
+        "cache_generation":null
+    })
+}
+
+#[test]
+fn enclosing_payloads_refuse_the_removed_private_target_and_cache_outcome() {
+    for kind in [
+        "ToolProposed",
+        "ToolStarted",
+        "ToolFinished",
+        "HookStarted",
+        "HookFinished",
+    ] {
+        let (from, source) = current_source(kind);
+        let observation = if kind == "HookFinished" {
+            "/observation"
+        } else {
+            ""
+        };
+        let mut cases = Vec::new();
+        let mut target: Value = serde_json::from_str(source).unwrap();
+        *target
+            .pointer_mut(&format!("{observation}/intent/target"))
+            .unwrap() = private_target();
+        cases.push(target);
+        if matches!(kind, "ToolFinished" | "HookFinished") {
+            let mut cache: Value = serde_json::from_str(source).unwrap();
+            *cache
+                .pointer_mut(&format!("{observation}/cache_update"))
+                .unwrap() = "discarded".into();
+            cases.push(cache);
+        }
+        let step = REGISTRY.event_step(kind, from).unwrap();
+        for value in cases {
+            assert!((step.canonical)(&value.to_string()).is_none(), "{kind}");
+            assert!((step.transform)(value.clone()).is_none(), "{kind}");
+            let scope = intent_scope(&value).unwrap();
+            assert!(
+                Event::decode(
+                    kind,
+                    payload_version(kind).unwrap(),
+                    &value.to_string(),
+                    Some(scope.0),
+                    Some(scope.1)
+                )
+                .is_err(),
+                "{kind}"
+            );
+            assert_archived(kind, from, &value.to_string());
+        }
+    }
+}
+
+#[test]
+fn run_started_worker_allowance_is_dropped_by_the_current_policy_step() {
+    use crate::session::worker::WORKER_DATA_BYTES;
+    let step = REGISTRY.event_step("RunStarted", 24).unwrap();
+    let fixture = include_str!("runstarted-v24.json");
+    assert_eq!((step.canonical)(fixture).as_deref(), Some(fixture));
+    let null_policy: Value = serde_json::from_str(fixture).unwrap();
+    assert_eq!(
+        (step.transform)(null_policy.clone()),
+        Some(null_policy.clone())
+    );
+    let policy = |allowance: Value| {
+        let mut source = null_policy.clone();
+        source["config"]["worker_policy"] = serde_json::json!({
+            "parent_grant":{"read_paths":["src"],"write_paths":["src"],"tools":["edit"],"skills":[],"mcp_servers":[],"commands":[],"permission_mode":null},
+            "concurrency":1,"max_turns":4,"max_tools":3,"data_bytes":allowance
+        });
+        source
+    };
+    let source = policy(1024.into());
+    let canonical = (step.canonical)(&source.to_string()).unwrap();
+    assert!(canonical.contains(r#""max_tools":3,"data_bytes":1024}"#));
+    let current = (step.transform)(source).unwrap();
+    assert!(current["config"]["worker_policy"]["data_bytes"].is_null());
+    assert!(
+        serde_json::from_value::<crate::session::worker::WorkerPolicy>(
+            current["config"]["worker_policy"].clone()
+        )
+        .is_ok()
+    );
+    for forged in [
+        policy(0.into()),
+        policy((WORKER_DATA_BYTES as u64 + 1).into()),
+        policy("1024".into()),
+    ] {
+        assert!((step.canonical)(&forged.to_string()).is_none());
+        assert!((step.transform)(forged).is_none());
+    }
+    let mut missing = policy(1024.into());
+    missing["config"]["worker_policy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("data_bytes");
+    assert!((step.canonical)(&missing.to_string()).is_none());
+    assert!((step.transform)(missing).is_none());
 }

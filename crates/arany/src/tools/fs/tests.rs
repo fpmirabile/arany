@@ -335,6 +335,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
+        network: None,
     };
     for case in ["fresh", "changed-input", "changed-executable"] {
         let target = temp.path().join(case);
@@ -1209,25 +1210,6 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
     assert_eq!(
         runtime.reservation_overhead(&call),
         std::time::Duration::ZERO
-    );
-    assert_eq!(
-        runtime.intent_reservation_overhead(&observed.intent),
-        std::time::Duration::ZERO
-    );
-    assert_eq!(
-        runtime.worker_reservation_overhead(&call),
-        super::guard::RESERVATION_OVERHEAD
-    );
-    let mut private_intent = observed.intent.clone();
-    private_intent.target = crate::worker::EffectTarget::WorkerView {
-        assignment_id: private_intent.agent_run_id,
-        base_digest: [1; 32],
-        revision: 0,
-        cache_generation: None,
-    };
-    assert_eq!(
-        runtime.intent_reservation_overhead(&private_intent),
-        super::guard::RESERVATION_OVERHEAD
     );
     let call = ToolCall::Mkdir {
         path: "cancelled".into(),

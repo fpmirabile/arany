@@ -20,7 +20,8 @@ use crate::{
     },
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
-        FRAME_BYTES,
+        FRAME_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
+        NETWORK_IDLE_MS, WRITE_FRAME_BYTES,
         permissions::MAX_CONFIG_BYTES,
         toolchains::MAX_RUNTIME_GRANTS,
         types::{
@@ -520,10 +521,40 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/mcp.rs",
         },
         Limit {
+            name: "WRITE_FRAME_BYTES",
+            value: WRITE_FRAME_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/git.rs",
+        },
+        Limit {
             name: "MCP_TIMEOUT_MS",
             value: MCP_TIMEOUT_MS as u64,
             unit: "ms",
             owner: "crates/arany/src/tools/types.rs",
+        },
+        Limit {
+            name: "MAX_NETWORK_PATTERNS",
+            value: MAX_NETWORK_PATTERNS as u64,
+            unit: "domain patterns per source",
+            owner: "crates/arany/src/tools/network.rs",
+        },
+        Limit {
+            name: "MAX_NETWORK_CONNECTIONS",
+            value: MAX_NETWORK_CONNECTIONS as u64,
+            unit: "connections",
+            owner: "crates/arany/src/tools/network.rs",
+        },
+        Limit {
+            name: "MAX_NETWORK_BYTES",
+            value: MAX_NETWORK_BYTES,
+            unit: "bytes per direction",
+            owner: "crates/arany/src/tools/network.rs",
+        },
+        Limit {
+            name: "NETWORK_IDLE_MS",
+            value: NETWORK_IDLE_MS,
+            unit: "ms",
+            owner: "crates/arany/src/tools/network.rs",
         },
     ],
 };

@@ -478,18 +478,25 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
-    if registry.is_some() {
-        for line in String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| line.starts_with("repository "))
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.starts_with("offline Cargo ")
+            || (registry.is_some() && line.starts_with("repository "))
         {
             println!("{line}");
         }
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if registry.is_none() && rust_sysroot.is_some() {
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.starts_with("offline Cargo ")),
+            "offline Cargo journey must report its timing lines on stdout"
+        );
+    }
     assert!(
         output.stderr.is_empty(),
-        "native journey stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
+        "native journey stderr: {stderr:?}"
     );
 }
 
@@ -2686,7 +2693,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
         let mut task_value = json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
-            "intent":intent,"definition":null,"worker":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
+            "intent":intent,"definition":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
         if case == "unknown_task_field" {
             task_value["unexpected"] = json!(false);
         }
