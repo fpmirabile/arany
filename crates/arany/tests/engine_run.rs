@@ -1631,10 +1631,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         run_request.policy = CollaborationPolicy::Team {
                             max_active_children: 1,
                         };
-                        responses.push_back(Ok(ProviderOutcome::Delegate(Delegate {
-                            agent: None,
-                            children: vec![arany::ChildAssignment { editor: None, objective: "A".into(), profile: None }],
-                        })));
+                        responses.push_back(Ok(delegate(&[("A", None)])));
                         responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: "Child result".into() })));
                         vec![
                             AgentPhase::RootPlan,
@@ -1825,14 +1822,7 @@ async fn streamed_text_before_a_call_is_journaled_as_commentary_and_the_run_cont
     let state = temp.path().join("state");
     let text = format!("STREAMED_BEFORE_CALL:{}", "x".repeat(3 * 1024));
     let mut provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "A".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("A", None)]),
         ProviderOutcome::Answer(Answer {
             text: "child result".into(),
         }),

@@ -34,7 +34,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             engine.close().await.unwrap();
             pad_capacity_history(&path, id, i64::from(prefix), branch);
             let responses = if matches!(policy, CollaborationPolicy::Team { .. }) {
-                vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Child".into(), profile: None }] }), finish(), finish()]
+                vec![delegate(&[("Child", None)]), finish(), finish()]
             } else { vec![finish()] };
             let provider = ScriptedProvider::new(responses);
             let requests = provider.requests.clone();
@@ -141,7 +141,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             transaction.commit().unwrap();
             drop(connection);
             let provider = ScriptedProvider::new(vec![
-                ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Child one".into(), profile: None }, arany::ChildAssignment { editor: None, objective: "Child two".into(), profile: None }] }),
+                delegate(&[("Child one", None), ("Child two", None)]),
                 finish(),
                 finish(),
                 finish(),
@@ -486,14 +486,7 @@ fn bounded_answer_output_must_fit_canonical_json() {
             let result = "\0".repeat(bytes);
             let mut responses = Vec::new();
             if child {
-                responses.push(ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Child".into(),
-                        profile: None,
-                    }],
-                }));
+                responses.push(delegate(&[("Child", None)]));
             }
             let attempts = if accepted || child { 1 } else { 3 };
             for _ in 0..attempts {

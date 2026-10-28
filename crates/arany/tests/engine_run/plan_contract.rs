@@ -285,14 +285,7 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
             offset: 0,
             limit: 100,
         }),
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect notes".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect notes", None)]),
         crate::tool_outcome(facts_read()),
         crate::tool_outcome(arany::ToolCall::Read {
             path: "notes/other.txt".into(),

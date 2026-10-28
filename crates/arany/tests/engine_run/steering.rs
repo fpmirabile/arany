@@ -123,14 +123,7 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         finish_with("child result"),
         finish_with("synthesized"),
     ])
@@ -176,16 +169,7 @@ async fn child_note_reaches_only_the_next_target_boundary() {
         let state_path = temp.path().join("state");
         let steering = RunSteering::new();
         let mut provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: ["target", "sibling"]
-                    .map(|objective| arany::ChildAssignment {
-                        editor: None,
-                        objective: objective.into(),
-                        profile: None,
-                    })
-                    .to_vec(),
-            }),
+            delegate(&[("target", None), ("sibling", None)]),
             crate::tool_outcome(facts_read()),
             finish_with("sibling result"),
             crate::tool_outcome(facts_read()),
@@ -327,16 +311,7 @@ async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation()
         let steering = RunSteering::new();
         let cancel = RunCancellation::new();
         let mut provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: ["first", "second"]
-                    .map(|objective| arany::ChildAssignment {
-                        editor: None,
-                        objective: objective.into(),
-                        profile: None,
-                    })
-                    .to_vec(),
-            }),
+            delegate(&[("first", None), ("second", None)]),
             finish_with("first result"),
             finish_with("second result"),
             finish_with("synthesis"),
@@ -469,14 +444,7 @@ async fn child_note_is_retained_when_no_boundary_remains() {
         let steering = RunSteering::new();
         let cancel = RunCancellation::new();
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "target".into(),
-                    profile: None,
-                }],
-            }),
+            delegate(&[("target", None)]),
             finish_with("target result"),
             finish_with("synthesis"),
         ]);
@@ -795,14 +763,7 @@ async fn pause_at_the_delegate_boundary_spawns_no_child() {
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         finish_with("never reached"),
     ])
     .with_before_call(0, move || assert!(pause.pause(), "first pause"));
@@ -855,14 +816,7 @@ async fn pause_before_synthesis_starts_no_synthesis_call() {
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         finish_with("child result"),
         finish_with("never synthesized"),
     ])
@@ -976,14 +930,7 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
@@ -1022,21 +969,7 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
     let steering = RunSteering::new();
     let pause = steering.clone();
     let mut provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![
-                arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect facts".into(),
-                    profile: None,
-                },
-                arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect facts again".into(),
-                    profile: None,
-                },
-            ],
-        }),
+        delegate(&[("Inspect facts", None), ("Inspect facts again", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])

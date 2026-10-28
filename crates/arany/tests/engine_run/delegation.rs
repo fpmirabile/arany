@@ -13,16 +13,7 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(
             (0..3)
-                .map(|_| {
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "unauthorized child".into(),
-                            profile: None,
-                        }],
-                    })
-                })
+                .map(|_| delegate(&[("unauthorized child", None)]))
                 .collect(),
         );
         let requests = provider.requests.clone();
@@ -169,14 +160,7 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
     });
     let provider = Arc::new(ScriptedProvider::new(vec![
         finish.clone(),
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                objective: "Inspect".into(),
-                profile: None,
-                editor: None,
-            }],
-        }),
+        delegate(&[("Inspect", None)]),
         finish.clone(),
         finish.clone(),
         finish,
@@ -244,14 +228,7 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Check fact".into(),
-                    profile: None,
-                }],
-            }),
+            delegate(&[("Check fact", None)]),
             ProviderOutcome::Answer(Answer {
                 text: "Fact is true".into(),
             }),
@@ -771,14 +748,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
                 bound,
                 cap,
                 vec![
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "Inspect".into(),
-                            profile: None,
-                        }],
-                    }),
+                    delegate(&[("Inspect", None)]),
                     ProviderOutcome::Answer(Answer {
                         text: "Child answer".into(),
                     }),
@@ -1014,29 +984,13 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(
             vec![
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Check fact".into(),
-                        profile: None,
-                    }],
-                }),
+                delegate(&[("Check fact", None)]),
                 ProviderOutcome::Answer(Answer {
                     text: "Fact is true".into(),
                 }),
             ]
             .into_iter()
-            .chain((0..3).map(|_| {
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Second round".into(),
-                        profile: None,
-                    }],
-                })
-            }))
+            .chain((0..3).map(|_| delegate(&[("Second round", None)])))
             .collect::<Vec<_>>(),
         );
         let requests = provider.requests.clone();

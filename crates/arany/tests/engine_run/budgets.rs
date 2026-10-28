@@ -976,26 +976,11 @@ impl Provider for FiniteTokenTeam {
             .push(request);
         let (outcome, input_tokens, output_tokens) = match phase {
             AgentPhase::RootPlan => (
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Review one".into(),
-                            profile: None,
-                        },
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Review two".into(),
-                            profile: None,
-                        },
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Review three".into(),
-                            profile: None,
-                        },
-                    ],
-                }),
+                delegate(&[
+                    ("Review one", None),
+                    ("Review two", None),
+                    ("Review three", None),
+                ]),
                 0,
                 1,
             ),
@@ -1761,16 +1746,8 @@ async fn two_child_research_delegation_admission_covers_its_spawns() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
-    let assignment = |objective: &str| arany::ChildAssignment {
-        editor: None,
-        objective: objective.into(),
-        profile: None,
-    };
     let provider = Arc::new(ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![assignment("Inspect facts"), assignment("Inspect notes")],
-        }),
+        delegate(&[("Inspect facts", None), ("Inspect notes", None)]),
         finish_with("first child"),
         finish_with("second child"),
         finish_with("synthesized"),
@@ -1813,14 +1790,7 @@ async fn child_tool_sizing_does_not_exhaust_unspent_goal_time() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("unexpected continuation"),
     ])
@@ -1874,14 +1844,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
@@ -1936,14 +1899,7 @@ async fn near_deadline_child_tool_journals_limit_without_dispatch() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ]);

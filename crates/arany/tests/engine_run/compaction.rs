@@ -870,30 +870,18 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
-        let provider = ScriptedProvider::new(
-            (0..3)
-                .map(|_| {
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "not allowed".into(),
-                            profile: None,
-                        }],
-                    })
-                })
-                .collect(),
-        )
-        .with_compactions(vec![Ok(CompactionResponse {
-            summary: "Question remains unresolved".into(),
-            response_id: None,
-            usage: arany::Usage {
-                input_tokens: None,
-                output_tokens: Some(8),
-                ..Default::default()
-            },
-            wire_provenance: None,
-        })]);
+        let provider =
+            ScriptedProvider::new((0..3).map(|_| delegate(&[("not allowed", None)])).collect())
+                .with_compactions(vec![Ok(CompactionResponse {
+                    summary: "Question remains unresolved".into(),
+                    response_id: None,
+                    usage: arany::Usage {
+                        input_tokens: None,
+                        output_tokens: Some(8),
+                        ..Default::default()
+                    },
+                    wire_provenance: None,
+                })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
