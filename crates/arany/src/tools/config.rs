@@ -179,7 +179,7 @@ impl Config {
         if self
             .network
             .as_ref()
-            .is_some_and(|network| cfg!(not(target_os = "linux")) || !network.valid())
+            .is_some_and(|network| !network.valid())
         {
             return Err(ToolError::Configuration);
         }
