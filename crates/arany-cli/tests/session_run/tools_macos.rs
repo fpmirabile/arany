@@ -2684,7 +2684,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
-        let mut task_value = json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
+        let mut task_value = json!({"command_deadline":null,"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
             "intent":intent,"definition":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
         if case == "unknown_task_field" {
             task_value["unexpected"] = json!(false);

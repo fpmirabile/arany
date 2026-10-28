@@ -67,7 +67,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 const LINUX_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling";
 
-const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
+const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-guard-v26:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
@@ -252,6 +252,16 @@ struct Unit {
 }
 
 impl Unit {
+    fn new(id: uuid::Uuid, limits: &ToolLimits) -> Self {
+        Self {
+            name: format!("arany-tool-{id}.service"),
+            invocation: None,
+            group: None,
+            kill: None,
+            limits: Some(limits.clone()),
+        }
+    }
+
     async fn properties(&self) -> Result<serde_json::Value, ToolError> {
         let mut command = manager_command("/usr/bin/systemctl");
         command.args(["--user", "--no-ask-password", "show", &self.name,
@@ -640,6 +650,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
 }
 
 struct UnitFilesystem<'a> {
+    command_deadline: Option<tokio::time::Instant>,
     launch: (supervisor::Launch, std::fs::File),
     seed_path: &'a Path,
     seed_dir: &'a cap_std::fs::Dir,
@@ -656,6 +667,7 @@ fn unit_command(
     filesystem: UnitFilesystem<'_>,
 ) -> Result<(Command, std::fs::File), ToolError> {
     let UnitFilesystem {
+        command_deadline,
         launch: (mut launch, executable),
         seed_path,
         seed_dir,
@@ -669,7 +681,11 @@ fn unit_command(
     let cpu_quota = cpu::quota_property(phase_limits);
     let cpu_period = cpu::period_property();
     if overlay::selected(intent, &runtime.config) {
-        launch.overlay = Some(overlay::Grant::new(runtime, intent)?);
+        launch.overlay = Some(overlay::Grant::new(
+            runtime,
+            intent,
+            command_deadline.ok_or(ToolError::Configuration)?,
+        )?);
     }
     let cache_view = launch.cache.as_ref().map(overlay::cache::Grant::merged);
     let executable_path = supervisor::executable_path(&executable);
@@ -834,13 +850,14 @@ fn action_deadlines(
     tokio::time::Instant,
 ) {
     let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-    let selection_time = if primary_command(intent) {
-        crate::tools::selection::PHASE_TIME
-    } else {
-        Duration::ZERO
-    };
     let preparation_deadline = active_window.map_or(
-        capacity_started + RESERVATION_OVERHEAD + selection_time,
+        capacity_started
+            + RESERVATION_OVERHEAD
+            + if primary_command(intent) {
+                Duration::from_millis(u64::from(intent.limits.runtime_ms))
+            } else {
+                Duration::ZERO
+            },
         |window| window.preparation_deadline,
     );
     let bulk = super::transfer::transfer_time(intent);
@@ -857,7 +874,6 @@ fn action_deadlines(
         || {
             capacity_started
                 + Duration::from_secs(15)
-                + selection_time
                 + cache_transfer.saturating_mul(2)
                 + super::transfer::transfer_time(intent)
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
@@ -963,8 +979,12 @@ fn task_bytes(
     intent: &EffectIntent,
     cache: Option<super::BuildCacheTransfer>,
     parent_namespaces: profile::Namespaces,
+    command_deadline: Option<tokio::time::Instant>,
 ) -> Result<Vec<u8>, ToolError> {
     encode_task(&Task {
+        command_deadline: command_deadline
+            .map(super::selection_phase::encode_deadline)
+            .transpose()?,
         definition: runtime.definitions.payload(&intent.call)?,
         handover: runtime
             .handover
@@ -991,7 +1011,8 @@ pub(super) async fn execute_inner(
         permit = super::admit_operation(runtime, intent) => permit?,
     };
     let capacity_started = tokio::time::Instant::now();
-    let active_window = runtime.begin_active_action(capacity_started).await?;
+    let active_window =
+        super::selection_phase::begin_action(runtime, intent, capacity_started).await?;
     let (preparation_deadline, go_deadline, deadline) =
         action_deadlines(active_window, intent, capacity_started);
     crate::tools::fs::validate_workspace(runtime)?;
@@ -1006,17 +1027,13 @@ pub(super) async fn execute_inner(
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let (mut cache, launch) =
         overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
+    let command_deadline = super::selection_phase::command_deadline(intent);
     let preparation_deadline =
-        preparation_deadline.min(tokio::time::Instant::now() + RESERVATION_OVERHEAD);
-    let mut unit = Unit {
-        name: format!("arany-tool-{}.service", permit.id),
-        invocation: None,
-        group: None,
-        kill: None,
-        limits: Some(intent.limits.clone()),
-    };
+        super::selection_phase::preparation_deadline(preparation_deadline, command_deadline);
+    let mut unit = Unit::new(permit.id, &intent.limits);
     let proxy = proxy_for(runtime, intent, permit.id)?;
     let filesystem = UnitFilesystem {
+        command_deadline,
         launch,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
@@ -1050,14 +1067,19 @@ pub(super) async fn execute_inner(
             cache.as_ref(),
             &seed_dir,
             (&mut stdin, &mut stdout),
-            (preparation_deadline, go_deadline),
+            (preparation_deadline, go_deadline, command_deadline),
             parent_namespaces.clone(),
         )
         .await?;
         admit_ready(&mut unit, &ready_bytes, intent, &parent_namespaces).await?;
-        runtime
-            .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
-            .await?;
+        super::selection_phase::before_dispatch(
+            runtime,
+            intent,
+            active_window,
+            command_deadline,
+            &go_cancellation,
+        )
+        .await?;
         *dispatched = true;
         stdin
             .write_all(b"GO\n")
@@ -1724,11 +1746,21 @@ async fn prepare_ready(
         &mut (impl tokio::io::AsyncWrite + Unpin),
         &mut (impl tokio::io::AsyncBufRead + Unpin),
     ),
-    (preparation_deadline, go_deadline): (tokio::time::Instant, tokio::time::Instant),
+    (preparation_deadline, go_deadline, command_deadline): (
+        tokio::time::Instant,
+        tokio::time::Instant,
+        Option<tokio::time::Instant>,
+    ),
     parent_namespaces: profile::Namespaces,
 ) -> Result<Vec<u8>, ToolError> {
     let cache_transfer = cache.map(|session| session.transfer.clone());
-    let task = task_bytes(runtime, intent, cache_transfer, parent_namespaces)?;
+    let task = task_bytes(
+        runtime,
+        intent,
+        cache_transfer,
+        parent_namespaces,
+        command_deadline,
+    )?;
     let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {
         stdin
             .write_all(&task)
@@ -1782,7 +1814,7 @@ mod tests {
         );
         assert_eq!(
             hex_digest(LINUX_SELECTION_CONTRACT),
-            "35f1aa2d4c41ec3e4703f055ab4a9921d8aa39d6daffd3c9d670ec73582e74d5"
+            "ac6ba2cdae3e03d83caaf69c0b224079af11bfc05ef3e5ce6da5577ae0edb03a"
         );
         super::super::tests::assert_enforcement_prose(
             LINUX_SELECTION_CONTRACT,
@@ -2074,6 +2106,7 @@ mod tests {
             "arany-discovery-profile",
             "/usr/bin:/bin",
             UnitFilesystem {
+                command_deadline: super::super::selection_phase::command_deadline(&intent),
                 launch: supervisor::Launch::new(&runtime.guard_executable, fixture.path(), &intent)
                     .unwrap(),
                 seed_path: fixture.path(),
