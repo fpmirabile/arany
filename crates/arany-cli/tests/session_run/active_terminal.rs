@@ -199,6 +199,26 @@ pub(super) fn transcript_field<'a>(text: &'a str, label: &str) -> &'a str {
         })
 }
 
+pub(crate) fn collect_nonblocking(
+    reader: &mut impl Read,
+    bytes: &mut Vec<u8>,
+    limit: usize,
+) -> bool {
+    loop {
+        let mut chunk = [0; 4096];
+        match reader.read(&mut chunk) {
+            Ok(0) => return true,
+            Ok(count) => {
+                assert!(bytes.len() + count <= limit, "bounded PTY transcript");
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => panic!("PTY read failed: {error}"),
+        }
+    }
+}
+
 fn redacted_tail(output: &[u8]) -> String {
     String::from_utf8_lossy(output)
         .replace("test-key", "[redacted]")

@@ -20,18 +20,8 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let primary = route(
-            ScriptedProvider::new(vec![
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Inspect".into(),
-                        profile: None,
-                    }],
-                }),
-                finish("done"),
-            ])
-            .with_profile("openai", "primary-model"),
+            ScriptedProvider::new(vec![delegate(&[("Inspect", None)]), finish("done")])
+                .with_profile("openai", "primary-model"),
         );
         primary
             .rate_limits
@@ -269,21 +259,7 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let state = temp.path().join("state");
     let primary = route(
         ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![
-                    arany::ChildAssignment {
-                        editor: None,
-                        objective: "Inspect".into(),
-                        profile: None,
-                    },
-                    arany::ChildAssignment {
-                        editor: None,
-                        objective: "Compare".into(),
-                        profile: None,
-                    },
-                ],
-            }),
+            delegate(&[("Inspect", None), ("Compare", None)]),
             finish("done"),
         ])
         .with_profile("openai", "primary"),
@@ -1062,26 +1038,7 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
     let state = temp.path().join("state");
     let primary = route(
         ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![
-                    arany::ChildAssignment {
-                        editor: None,
-                        objective: "A".into(),
-                        profile: None,
-                    },
-                    arany::ChildAssignment {
-                        editor: None,
-                        objective: "B".into(),
-                        profile: Some("spare".into()),
-                    },
-                    arany::ChildAssignment {
-                        editor: None,
-                        objective: "C".into(),
-                        profile: Some("spare".into()),
-                    },
-                ],
-            }),
+            delegate(&[("A", None), ("B", Some("spare")), ("C", Some("spare"))]),
             finish("done"),
         ])
         .with_profile("openai", "primary"),
@@ -1457,14 +1414,7 @@ async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() 
         std::fs::create_dir(&workspace).unwrap();
         let primary = route(
             ScriptedProvider::new(vec![
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Inspect".into(),
-                        profile: Some("spare".into()),
-                    }],
-                }),
+                delegate(&[("Inspect", Some("spare"))]),
                 finish("done"),
             ])
             .with_profile("openai", "primary"),
@@ -1509,21 +1459,7 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
     let state = temp.path().join("state");
     let mut primary = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![
-                arany::ChildAssignment {
-                    editor: None,
-                    objective: "A".into(),
-                    profile: None,
-                },
-                arany::ChildAssignment {
-                    editor: None,
-                    objective: "B".into(),
-                    profile: Some("spare".into()),
-                },
-            ],
-        }),
+        delegate(&[("A", None), ("B", Some("spare"))]),
         finish("done"),
     ])
     .with_profile("openai", "primary");
@@ -1980,14 +1916,7 @@ async fn a_pause_in_the_retry_backoff_starts_no_further_reservation_or_dispatch(
         let primary = if child {
             route(
                 ScriptedProvider::new(vec![
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "Inspect".into(),
-                            profile: None,
-                        }],
-                    }),
+                    delegate(&[("Inspect", None)]),
                     finish("never synthesized"),
                 ])
                 .with_profile("openai", "primary"),

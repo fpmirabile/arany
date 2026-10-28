@@ -564,13 +564,6 @@ fn request_for_resume(
     input.goal = arany::GoalRequest::resume(goal, true);
     input
 }
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 #[tokio::test]
 async fn guarded_rewind_success_drift_choices_and_undo() {
     for name in [

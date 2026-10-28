@@ -26,20 +26,6 @@ fn gated(
     })
 }
 
-fn delegate(children: &[(&str, Option<&str>)]) -> ProviderOutcome {
-    ProviderOutcome::Delegate(Delegate {
-        agent: None,
-        children: children
-            .iter()
-            .map(|(objective, profile)| arany::ChildAssignment {
-                editor: None,
-                objective: (*objective).into(),
-                profile: profile.map(Into::into),
-            })
-            .collect(),
-    })
-}
-
 fn unavailable(model: &str, failures: usize) -> Arc<ScriptedProvider> {
     let mut provider = ScriptedProvider::new(vec![]).with_profile("openai", model);
     provider.identity.limits.concurrency = 1;

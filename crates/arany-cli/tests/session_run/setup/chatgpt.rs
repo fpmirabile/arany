@@ -129,20 +129,19 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
             .write_all(format!("{choice}\r").as_bytes())
             .expect("choose selected account action");
         // Failed setup returns to the unconfigured composer; empty Ctrl+D then exits.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !transcript[chosen_at..]
-            .split(|byte| *byte == b'\n')
-            .skip_while(|line| !line.starts_with(b"Notice: "))
-            .any(|line| line.starts_with(b"Input:"))
-        {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "failed setup notice missing: {}",
-                tail(&transcript)
-            );
-            thread::yield_now();
-        }
+        crate::session_picker::pump_until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "failed setup notice missing",
+            |transcript| {
+                transcript[chosen_at..]
+                    .split(|byte| *byte == b'\n')
+                    .skip_while(|line| !line.starts_with(b"Notice: "))
+                    .any(|line| line.starts_with(b"Input:"))
+            },
+        );
         input.write_all(b"\x04").expect("exit unconfigured chat");
         let result = wait_product(child.take());
         pump(&mut output, &mut input, &mut transcript, &mut answered);
