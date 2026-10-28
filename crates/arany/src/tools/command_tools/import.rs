@@ -172,7 +172,7 @@ fn literal_words(command: &str) -> Option<Vec<String>> {
                 Quote::Double
             };
             started = true;
-        } else if quote == Quote::None && ch.is_whitespace() {
+        } else if quote == Quote::None && ch == ' ' {
             if started {
                 words.push(std::mem::take(&mut word));
                 started = false;
