@@ -24,34 +24,19 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Repeatable development procedures | [Project skills](../agents/skills/README.md) |
 | Domain vocabulary | [CONTEXT.md](../CONTEXT.md) |
 
-Specs state the agreed contract. Source and tests establish implementation and evidence; a mismatch must be reported and resolved rather than silently redefining the contract. Research recommendations and old passing checks do not grant runtime authority or establish current release support.
+Specs state the agreed contract; source and tests establish implementation and evidence. Report and resolve a mismatch rather than silently redefining the contract or choosing the newer document. Research recommendations and old passing checks do not grant runtime authority or establish current release support.
 
 ## Find the owner for a task
 
-| Task | Read first | Related boundary |
-|---|---|---|
-| `acp`, editor protocol or ACP capabilities | [ACP spec](./specs/acp.md) | Serve, Session and security contracts |
-| `serve --stdio`, JSON-RPC protocol or schema export | [Serve spec](./specs/serve.md) | Session, execution, Goals and Tool contracts; [security rules](../agents/security.md) |
-| Terminal interaction, draft retention, selectors, accessibility or output | [Terminal spec](./specs/terminal.md) | Session and Tool specs for cross-boundary changes; [security rules](../agents/security.md) for untrusted rendering |
-| Goal lifecycle, task budgets, plan contracts or recovery | [Goals spec](./specs/goals.md) | [Execution spec](./specs/execution.md), [Session spec](./specs/session.md); Provider and Tools for cross-boundary changes |
-| Run coordination, teams, context or compaction | [Execution spec](./specs/execution.md), [Session spec](./specs/session.md) | Provider and terminal for cross-boundary changes |
-| Provider, model or billing route | [Provider spec](./specs/provider.md) | [Credential spec](./specs/credentials.md), [ChatGPT spec](./specs/chatgpt.md), [security rules](../agents/security.md) |
-| Saved accounts, OS-store authorization, storage or recovery | [Credential spec](./specs/credentials.md) | [ChatGPT spec](./specs/chatgpt.md), [Execution spec](./specs/execution.md#admission-persistence-and-recovery), [Terminal spec](./specs/terminal.md), [security rules](../agents/security.md) |
-| Model-driven Tools, commands, Skills, MCP, Guard, folder trust or build cache | [Tool spec](./specs/tools.md), [tool guide](./tools.md) | Engine, Provider, Session, Execution and security |
-| Trace export or local diagnostics | [Telemetry spec](./specs/telemetry.md), [Diagnostics spec](./specs/diagnostics.md) | Security and CLI admission |
-| Behavior change, defect fix or release claim | The owning spec and [testing rules](../agents/testing.md) | Existing evidence owner and current handoff |
-| Architecture or ownership change | [System overview](./architecture/system-overview.md) | Relevant domain specs and [planning workflow](../planning/PLANNING.md) |
-| Development instructions or skill setup | [AGENTS.md](../AGENTS.md), [project skills](../agents/skills/README.md) | [Development commands](./development.md), [planning workflow](../planning/PLANNING.md); runtime Skill behavior remains in the Tool contract |
-
-Follow relevant cross-boundary links before editing. A harmless prose correction does not require loading every contract. A linked file must actually be opened when its trigger applies; Markdown links and `@` text are not portable automatic imports.
+[AGENTS.md](../AGENTS.md#rules-to-load-before-editing) maps each task or boundary to its owning spec and editing rules; [where each fact belongs](#where-each-fact-belongs) maps each kind of material to its home.
 
 ## Read for the task
 
-Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then the implementation and its evidence owner. Open research or decision records only for rationale, checking their scope and date before reusing time-sensitive claims; consult a plan only for the initiative being continued. User guides explain actions, specs define outcomes, rules constrain edits and Skills describe repeatable procedures; link between them instead of copying. Spec requirements, implementation state and completed verification are distinct: report disagreements rather than choosing the newer document.
+Open research or decision records only for rationale, checking their scope and date before reusing time-sensitive claims; consult a plan only for the initiative being continued. User guides explain actions, specs define outcomes, rules constrain edits and Skills describe repeatable procedures; link between them instead of copying.
 
-## Current milestone and evidence
+## Current milestone
 
-The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [focused plans](../planning/README.md#active-plans) own proposed implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
+The current milestone is a development beta on Linux and macOS. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [focused plans](../planning/README.md#active-plans) own proposed implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
 Runtime instruction discovery belongs to the [Session contract](./specs/session.md#workspace-admission-and-authority);
 documentation routing grants no authority or outbound-content expansion.

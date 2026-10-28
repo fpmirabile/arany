@@ -6,8 +6,7 @@ This contract owns the channel Server and `arany serve --stdio`: their JSON-RPC 
 transport, thread and turn projection, and JSON Schema export. The server runs
 `initialize` / `initialized`, `thread/start|resume|fork|unsubscribe|list`, `turn/start|interrupt|steer`,
 `thread/settings/update`, `thread/rewind/preview`, `thread/rewind`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
-The server sends one-use human approval requests and negotiates exact-session scope for eligible primary host commands. The remaining work belongs to
-[NEXT_STEPS conditional crate extraction](../../NEXT_STEPS.md#pursue-in-order).
+The server sends one-use human approval requests and negotiates exact-session scope for eligible primary host commands. Linux and macOS use the same loop; native evidence and remaining work are in [NEXT_STEPS](../../NEXT_STEPS.md#pursue-in-order).
 
 [Session](./session.md) owns durable Session identity and replay,
 [execution](./execution.md) owns committed Runs and Events,
@@ -16,16 +15,16 @@ authority and approval scopes. [Terminal](./terminal.md) owns `exec` and
 `show` output. Protocol serialization adds no authority or Engine policy.
 
 The in-process transport uses bounded channels without newline framing and
-runs the same Server connection loop as stdio and ACP. Following
+runs the same Server connection loop as stdio and ACP. As in
 [Codex's embedded app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/src/in_process.rs),
-the attached terminal supplies its local admission configuration at connection
+the attached terminal supplies its admission configuration at connection
 startup: the exact saved-account selection, reviewed Workspace grant, full Run
 request (including Skill, launch directory, images and Goal continuation) and
 live approval mode. These typed inputs are internal to the binary; JSON-RPC,
-repository content and child agents cannot construct them or acquire terminal
+repository content and child agents cannot construct them or gain terminal
 approval authority. Provider and Tool admission still fail closed before a Run.
 
-Headless `exec` uses this same connection with its admitted Provider bundle and full Run request, including a request for a new Session. The Engine creates that Session during ordinary admission; the client never creates it ahead of a refusal. Headless startup supplies no human approval channel or provisional display hints, and receives canonical Events and the original typed settlement without the terminal's intermediate wire projections. It retains the [headless host policy](./tools.md#primary-host-commands).
+Headless `exec` uses the same connection with its admitted Provider bundle and full Run request, including a request for a new Session, which the Engine creates during ordinary admission, never ahead of a refusal. It has no human approval channel or provisional display, receives canonical Events and the typed settlement without the terminal's wire projections, and follows the [headless host policy](./tools.md#primary-host-commands).
 
 The terminal submits through the Server's turn-start flow. Its controls use
 request/reply messages on the connection's inbound channel, including before
@@ -34,10 +33,11 @@ targeted child notes, withdrawal of an untaken note, delivery counts and a
 strictly reduced open Session snapshot. A successful offer acknowledges only
 waiting; committed Events acknowledge recording. Withdrawal distinguishes an
 untaken note from an unknown child outcome. The Server forwards canonical
-Events in sequence and the original typed settlement; the terminal reconciles
-a sequence gap or resync through the snapshot request. A lost connection is a
-fatal presentation boundary, never a fabricated receipt or retry grant. The
-wire `receipt/get` remains the Goal-only receipt described below.
+Events in sequence and the original typed settlement; before the settlement it
+forwards every unread committed sequence or an explicit resync, even under
+backpressure. The terminal reconciles a sequence gap or resync through the
+snapshot request. A lost connection is a fatal presentation boundary, never a
+fabricated receipt or retry grant. The wire `receipt/get` is the Goal-only receipt below.
 
 Canonical Event delivery and control replies wait within the existing channel
 bounds; only provisional display notifications may drop under backpressure.
@@ -48,14 +48,13 @@ committed Events in the terminal's [bounded bursts](./terminal.md#conversation-p
 before polling input again. Provisional display uses the terminal output queue directly and drops when it is full.
 Control requests remain serviceable while output waits. Shutdown drains queued
 notifications under the shared shutdown grace, then cancels remaining tasks.
-The attached Session retains its Engine for idle operations and compaction;
-the Server owns its Run tasks and connection controls. The caller owns
-connection shutdown and the human approval channel. Terminal approval requests
-retain the existing rendered lines and choice identities, and abandoned
-requests retire through a reliable local cancellation notification without a
-human verdict. The [Server requests](#server-requests) section owns
-channel-specific approval backpressure. The library has no protocol dependency.
-Stdio and ACP retain their existing wire vocabulary and approval restrictions.
+The attached Session keeps its Engine for idle operations and compaction; the
+Server owns Run tasks and connection controls, and the caller owns connection
+shutdown and the human approval channel. Terminal approval requests keep the
+rendered lines and choice identities; abandoned requests retire through a
+reliable local cancellation notification without a human verdict.
+[Server requests](#server-requests) owns channel-specific approval backpressure.
+The library has no protocol dependency.
 
 ## Framing and envelope
 
@@ -81,7 +80,6 @@ for a reply to the client's own request.
 Protocol fields use camelCase. Embedded journal vocabulary (`EventLine`, Event
 payloads, Tool calls and intents) retains its existing snake_case bytes; receipt
 budgets, usage and reports use camelCase.
-The closed Event kind schema excludes retired worker transfer, handover, integration and discard kinds; [journal migration](./execution.md#journal-migration) owns historical archival.
 
 `EventLine.payload` is an open object: exporting a schema does not redefine the
 journal format. JSON is data; clients must render untrusted content inertly.
@@ -104,11 +102,13 @@ refuses `turn/start`, `goal/resume` and `thread/resume` with `-32000` and
 The refusal appends no Events and makes no Provider calls. Inspect the saved
 setup state and start a new Session before submitting more work.
 
+`goalIncludesUnavailable` reports a continuation or resume whose admitted include list is unknown ([Goals](./goals.md#budget-continuation) owns the rule). `goalInputTooLarge` reports an objective plus includes exceeding the serialized Goal admission envelope, before any Event or Provider call. Raw Event subscriptions expose the required nullable `GoalStarted.include_paths` field and its payload version, as [Execution](./execution.md#admission-persistence-and-recovery) defines.
+
 Engine errors use their compiled Display message. A failed accepted turn is
 represented by `turn/completed` with status `failed` and compiled recovery
 guidance in `error.message`, never a JSON-RPC error. Cancellation is
-`interrupted`. An unknown Tool effect remains `uncertain`, never successful or
-merely failed, preserving the honest-uncertainty guarantee. If an Engine error
+`interrupted`. An unknown Tool effect is [Uncertain](./execution.md#effect-outcomes)
+and projects `uncertain`, never succeeded or failed. If an Engine error
 leaves an accepted submission without a committed terminal Run, the process
 exits unsuccessfully with Session-history recovery guidance rather than
 inventing a completion.
@@ -146,24 +146,23 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `goal/resume` | `{threadId,goalId,input?:[{type:"text",text}]}` → `{turn}` | Starts a submission like `turn/start` (same `busy`, `threadNotLoaded`, admission, approval and steering behavior) with `GoalRequest::resume(goalId, true)`, exactly as the terminal's `/goal resume` does. Only the thread's most recent resumable Interrupted Goal (paused or interrupted) resumes; any other Goal is `-32000 goalUnavailable` before a Run. Absent input runs the pinned objective. Text is a superset of the terminal (as in `exec --resume-goal ID PROMPT`): when the Goal has no accepted Run yet, text different from the pinned objective is `goalUnavailable`; otherwise it becomes the resumed Run's user message while the Goal objective stays pinned. No images. Budget, phase and resource settings stay pinned. An exhausted Interrupted Goal closes Failed and returns `-32000 goalBudgetExhausted` with no Run, `GoalResumed` or `turn/started`. |
 
 Lifecycle method names, unsubscribe status and list pagination envelopes follow
-[Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/thread.rs).
-One connection owns all loaded threads, so `notSubscribed` cannot occur. Arany
-cancels and releases immediately after durable completion rather than keeping
-an idle thread alive on a peer grace timer. Discovery deliberately narrows the
-peer's global listing to one Workspace to avoid disclosing other Workspace or
-State paths. The list row is a metadata-only subset: timestamps are UTC ISO 8601
-strings (or `Unknown` when Store cannot represent the timestamp), rather than
-Codex's epoch seconds, to reuse the Session metadata owner without replaying
-full histories. No stored defaults, include paths, provider configuration,
-State paths or journal content are returned. Titles are untrusted plain text;
-JSON escaping does not make them instructions or trusted markup. Clients must
-render every metadata field inertly.
+[Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/thread.rs),
+with three divergences. One connection owns all loaded threads, so `notSubscribed`
+cannot occur, and Arany releases a thread right after durable completion instead
+of on a peer grace timer. Discovery lists one Workspace instead of the peer's
+global listing, so no other Workspace or State path is disclosed. List timestamps
+are UTC ISO 8601 strings (or `Unknown` when Store cannot represent one) instead of
+epoch seconds, reusing the Session metadata owner without replaying full histories.
+Rows return no stored defaults, include paths, Provider configuration, State paths
+or journal content. Titles are untrusted plain text; clients render every metadata
+field inertly.
 
 Cursors are opaque, at most 128 UTF-8 bytes, and bind a Session ID and its last
 committed sequence to the selected Workspace. They confer no access authority.
 If the anchor changes, restart discovery without a cursor; new activity before
-the anchor is visible on a fresh first page. A page is not a retained snapshot.
-Listing resolves Workspace membership from each Session's first Event only, then replays just the requested Workspace's returned Sessions (with their fork sources) newest first. A page stops early, with a cursor, once the replayed Events reach the [Session discovery bound](./execution.md#persistence-bounds) (the first Session is always returned), so pages may hold fewer than `limit` entries; `nextCursor:null` alone ends the list. A listing never holds a read lock across decode or replay: it reads one global Event watermark, then every statement is an index seek or range (`events_by_session`, at most 256 raw rows) at or below it, with no table scan or SQLite sort (the per-Session Event count is an index range bounded by the [Session Event cap](./execution.md#persistence-bounds)): heads are walked one `session_id > ?` seek at a time and fork lineages are merged per Session lane in Rust. Each statement waits at most 2 seconds for a committing writer's lock on a read connection; writers keep 250 ms. On `SQLITE_BUSY`, watermark capture, head discovery and each page read independently allow at most three retries after releasing all statements and discarding incomplete results. Discovery and page retries retain the captured watermark and the same Event and memory bounds; each phase performs at most four attempts, with no retries of appends or other effects. Exhaustion fails the listing with the retryable `store` error "history is busy with a committing write; retry the listing", never a partial page. Each statement finishes before its rows are decoded, so Engine appends are never blocked, Sessions and their fork sources are read at the same watermark, and returned `updatedAt`/cursors match it. Raw bytes in memory are bounded by one 256-row chunk per open lineage lane, and total work by the Event budget. Head discovery costs index seeks plus one bounded count per Session head per page, bounded by the [discovery head limit](./execution.md#persistence-bounds) (`tooManySessions` beyond). Other Workspaces' history is never replayed.
+the anchor appears on a fresh first page. A page is not a retained snapshot.
+
+Listing resolves Workspace membership from each Session's first Event only, then replays only that Workspace's returned Sessions (with their fork sources), newest first; other Workspaces' history is never replayed. A page stops early, with a cursor, once replayed Events reach the [Session discovery bound](./execution.md#persistence-bounds) (the first Session is always returned), so a page may hold fewer than `limit` entries; only `nextCursor:null` ends the list. Discovery beyond the [discovery head limit](./execution.md#persistence-bounds) fails `tooManySessions`. A listing reads one global Event watermark and every later statement at or below it, using only index seeks and ranges of at most 256 raw rows, without a table scan or SQLite sort. No read lock is held across decode or replay, so Engine appends are never blocked, Sessions and fork sources are read at one watermark, and `updatedAt` and cursors match it. Memory holds at most one 256-row chunk per open lineage lane. Each read statement waits at most 2 seconds for a committing writer's lock; writers keep 250 ms. On `SQLITE_BUSY`, watermark capture, head discovery and each page read each allow at most three retries (four attempts) after releasing all statements and discarding incomplete results, keeping the captured watermark and bounds; appends and other effects are never retried. Exhaustion fails the listing with the retryable `store` error "history is busy with a committing write; retry the listing", never a partial page.
 A result that cannot fit the line cap fails `contextTooLarge` without
 partial output. Unsupported sorting, filtering and archival options refuse as
 unknown parameters.
@@ -175,7 +174,8 @@ limits. Permission modes use Claude Code spellings `default`, `acceptEdits`
 and `auto`; `plan`, `dontAsk` and bypass spellings are rejected on this wire surface. Tools default
 to disabled; enabled Tools use the same private configured grant as `exec`.
 Absolute `includePaths` must lie under `cwd` and are translated to
-Workspace-relative include paths before Engine admission. Goal and resource
+Workspace-relative include paths before Engine admission. Initialization needs
+no credentials; a missing credential fails Provider selection. Goal and resource
 settings come from the existing private settings owner and are pinned per
 loaded thread. Absent settings use the shared [Goal defaults](./goals.md#lifecycle-budgets-and-recovery); resume retains the Goal's committed budget. Plain input starts a new Goal; `goal.autonomous:true` uses the
 Engine's existing autonomous lifecycle. `resumeGoalId` is reserved and rejected;
@@ -187,7 +187,8 @@ Receipt `usage` contains `runs`, `providerCalls`, `activeMs`, `uncertainActiveMs
 it adds no elapsed wall time or inferred Provider usage. `budget` is the pinned
 Goal budget. Optional `budgetRefusal` is the canonical closed [Goal refusal record](./goals.md#budget-refusal-feedback), with its snake_case inner field names and labels, present only when committed. `report` is the exact committed Goal report, including its cache
 counter and uncertainty facts. Objective and report text remain journal data.
-Unknown threads on all three methods return `threadNotLoaded`.
+Unknown threads on all three methods return `threadNotLoaded`. An oversized
+receipt refusal leaves the connection open.
 
 ## Rewind
 
@@ -233,27 +234,25 @@ honored.
 
 `turn/display` follows the provisional streaming pattern of
 [Codex app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server),
-with an explicit opt-in to preserve existing clients. `update` is either
+behind an explicit opt-in so existing clients are unaffected. `update` is either
 `{type:"preview",preview:{agentRunId,callIndex,answer,commentary,commentaryLimited,tentative}|null}`
 or `{type:"waiting",intentId:UUID|null}`. Preview fields copy the bounded Engine
-hint exactly; null withdraws a preview or capacity wait. Clients must render
-these untrusted display values inertly and clear them when the turn settles.
-The notifications carry no authority, are not themselves journaled or replayed,
-and never become receipt facts. Opting in enables the Engine's existing
-[durable display checkpoints](./terminal.md#terminal-continuity-and-provisional-text):
+hint exactly; null withdraws a preview or capacity wait. Clients render these
+untrusted values inertly and clear them when the turn settles. The notifications
+carry no authority, are not journaled or replayed, and never become receipt facts.
+Opting in enables the Engine's [durable display checkpoints](./terminal.md#terminal-continuity-and-provisional-text):
 chunk-sized non-tentative answer text, public commentary and eligible published
-completion/cancellation tails append canonical `AssistantDisplayRecorded`
-Events. Those checkpoints survive strict replay independently of notification
-delivery; incomplete text stays qualified and never becomes an accepted Message,
-Provider history or compaction input. Unpublished transport-buffer tails remain
-subject to the [Provider cancellation rule](./provider.md#streaming-and-provisional-text).
-This follows [Codex's rollout persistence policy](https://github.com/openai/codex/blob/rust-v0.114.0/codex-rs/core/src/rollout/policy.rs),
-which omits streaming deltas while retaining canonical message/reasoning items.
-Arany additionally preserves its existing bounded intermediate checkpoints for
-crash and cancellation recovery. Latest preview and wait values coalesce
-independently. Delivery attempts once without waiting; a full queue or an update
-above the encoded line bound drops that update. Notification opt-out suppresses
-both hint collection and delivery. Committed Events retain their existing
+completion or cancellation tails append canonical `AssistantDisplayRecorded`
+Events, which survive strict replay regardless of notification delivery.
+Incomplete text stays qualified and never becomes an accepted Message, Provider
+history or compaction input. Unpublished transport-buffer tails follow the
+[Provider cancellation rule](./provider.md#streaming-and-provisional-text).
+Like [Codex's rollout policy](https://github.com/openai/codex/blob/rust-v0.114.0/codex-rs/core/src/rollout/policy.rs),
+streaming deltas are not persisted; Arany additionally keeps bounded intermediate
+checkpoints for crash and cancellation recovery. Latest preview and wait values
+coalesce independently. Delivery is attempted once without waiting; a full queue
+or an update above the line bound drops that update. Notification opt-out
+suppresses hint collection and delivery. Committed Events keep their
 reconciliation path regardless of provisional loss.
 
 `goal.stopped` is the closed stop that one Engine projection
@@ -287,13 +286,13 @@ omit both.
 
 Raw Event delivery and turn/item projection use separate subscriptions, so
 `events/committed` may precede or follow the matching `item/*` notification.
-Replaying a page neither executes effects nor repeats Provider calls. A partial
+Replaying a page executes nothing. A partial
 page disables live forwarding until the backlog is drained, preventing a live
 cursor from skipping unreturned history. Slow clients never hold Journal appends.
 An individual Event that cannot fit a live line emits `events/resync` with
 `missed:1` and disables that subscription; replay refuses it with `contextTooLarge`.
 
-Raw subscription pages and `events/committed` forward canonical journal Events of every kind unchanged to the attached local client. This includes the canonical, privacy-reduced `SupervisorVerdictRecorded` payload with its `features` and `evidence`: counts, sequences and closed enums, never paths or content. Unlike the further-reduced fixed vocabulary used by the [terminal](./terminal.md#conversation-progress-and-history) and [OTLP](./telemetry.md#spans), serve retains those canonical fields. `generate-schema` includes its kind in the closed Event vocabulary. Its payload remains the journal's open object on this wire surface, with the [execution format and bounds](./execution.md#persistence-bounds) enforced by strict replay. It creates no item or approval request. Existing pagination, line-size refusal and tap-loss/resync behavior apply; observers neither recompute verdicts nor change Run control.
+Raw subscription pages and `events/committed` forward canonical journal Events of every kind unchanged. This includes `SupervisorVerdictRecorded` with its `features` and `evidence` (counts, sequences and closed enums, never paths or content), unlike the further-reduced [terminal](./terminal.md#conversation-progress-and-history) and [OTLP](./telemetry.md#spans) projections. Its kind is in the closed Event vocabulary; its payload is the journal's open object, bounded by the [execution format](./execution.md#persistence-bounds). It creates no item or approval request, and observers neither recompute verdicts nor change Run control.
 
 Times are committed Event timestamps, never a presentation clock. Item IDs are
 `<runId>:user`, `<runId>:answer`, or the immutable Tool intent UUID.
@@ -312,8 +311,7 @@ Tool item status maps `succeeded` to `completed`, `denied` to `declined`,
 A Tool with `cache_update:uncertain` is also uncertain even if its disposition
 is succeeded. Unfinished historical intents are uncertain with no invented
 observation or disposition. Output is the bounded journaled observation.
-The additional uncertain status diverges from Codex to preserve an unknown
-effect outcome.
+The `uncertain` status diverges from Codex to report an unknown effect outcome.
 
 A recoverable primary denial or known Tool failure, including explicit approval
 decline or unavailable approval, completes its item with the mapped Tool status
@@ -337,7 +335,7 @@ never reused across turns. Requests go only to the client owning the turn.
 All carry `{threadId,turnId,itemId,startedAtMs,intent,lines}`.
 `intent` is the exact journaled immutable EffectIntent; `itemId` is its UUID,
 `turnId` its Run, `startedAtMs` the matching committed `ToolProposed` timestamp,
-and there is no expiry field. The proposal commits before approval; `ToolStarted` follows the decision and carries its verdict. A proposal that never starts is omitted from historical Tool items. `lines` uses the terminal's sanitized human
+and there is no expiry field. The proposal commits before approval; `ToolStarted` follows the decision and carries its verdict. A proposal that never starts is omitted from historical Tool items and leaves the Session resumable. `lines` uses the terminal's sanitized human
 approval renderer, including its full unguarded warning when applicable.
 Failure to recover the matching committed intent, or a request above the
 message size limit, records unavailable approval without sending a request.
@@ -399,11 +397,10 @@ refuse an excess ask without evicting or renewing the first; the Terminal
 channel retains it in the bounded inbox until the open dialog resolves.
 
 This client is the human approval channel. Hook asks require an explicit human
-client decision. Primary host commands require that decision unless an eligible
-existing session or user-owned prefix grant already authorizes them under the
-Tools contract. This transport adds no AI approval. Engine permission
-composition, pin revalidation, cancellation, Policy, one-use grants and Guard
-admission still apply. Hook execution remains owned by the Tools contract.
+decision, and so do primary host commands unless an eligible session or
+user-owned prefix grant already authorizes them under the Tools contract. This
+transport adds no AI approval; Engine permission composition, pin revalidation,
+cancellation, Policy, one-use grants and Guard admission still apply.
 
 ## Limits and compatibility
 
@@ -429,16 +426,13 @@ Paths from clients are absolute; schema validation never replaces Workspace
 admission, Provider selection or Guard enforcement.
 
 The OS user's parent process is the principal. State path, Guard executable and
-telemetry configuration are fixed before stdin is consumed. Client text/images,
+telemetry configuration are fixed before stdin is consumed. Client text and images,
 repository content and Tool output are untrusted data. Client configuration can
-only narrow the existing Tool grant; repository or model text never grants
-trust. Credentials, account records and native keys are absent from the wire.
-Existing Goal budgets and per-action/storage bounds apply unchanged; no child
-gets broader authority. Startup, path admission, permission asks and inert JSON
-encoding form the security pass for this local transport. No socket listener,
-authentication, multi-user isolation, encryption, live Provider compatibility or
-native platform-support claim is introduced. Linux and macOS use the same loop;
-native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
+only narrow the Tool grant; repository or model text never grants trust.
+Credentials, account records and native keys never cross the wire. Goal budgets
+and per-action and storage bounds apply unchanged; no child gets broader authority.
+Serve adds no socket listener, authentication, multi-user isolation, encryption,
+live Provider compatibility or native platform-support claim.
 
 The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
@@ -449,27 +443,3 @@ capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats follow the [journal migration contract](./execution.md#journal-migration).
 `events_subscribe_v2` identifies the current raw Event vocabulary for backlog
 pages and committed notifications, following the [committed Event contract](./execution.md#committed-event-stream).
-
-## Acceptance scenarios and evidence owners
-
-| Scenario | Required observation | Evidence owner |
-|---|---|---|
-| Stable schema contract | Byte-identical pretty JSON and final newline; intentional golden changes only; canonical Supervisor verdicts validate in raw pages and notifications | [Protocol tests](../../crates/arany-cli/src/protocol/tests.rs), [schema golden](../../crates/arany-cli/tests/fixtures/serve/schema.json) |
-| Rewind preview and human confirmation | Tokens bind thread/head/observed states and consume once; they remain valid while unchanged and refuse after state or token invalidation. Default drift refuses, keep restores only the others, overwrite needs separate human confirmation and saves current content; unknown effects block code, bounds refuse before mutation, conversation forks preserve source and budgets, partial receipts stay honest | [Serve rewind corpus](../../crates/arany-cli/tests/serve/rewind.rs), [protocol conformance and bounds](../../crates/arany-cli/src/protocol/tests.rs), [Guard rewind corpus](../../crates/arany-cli/tests/guard_runs/rewind.rs) |
-| Envelope conformance and bounds | Both version forms accepted; malformed, ambiguous and oversized lines rejected; exact 1 MiB<!-- unrelated-bound: protocol line boundary scenario --> boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
-| Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas; every projected stop has one closed `goal.stopped` value and free text is refused | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs), [stop mapping](../../crates/arany-cli/src/cli/serve/items.rs), [projection table](../../crates/arany/src/session/stop.rs) |
-| CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
-| Provisional display | Opt-in and opt-out, withdrawn tentative text is absent, full-queue Journal settlement; strict reopened history retains canonical non-tentative chunks, public commentary and completion/cancellation tails; display waiting and clearing shapes validate against the schema | [Serve display corpus](../../crates/arany-cli/tests/serve/display.rs), [protocol conformance](../../crates/arany-cli/src/protocol/tests.rs) |
-| Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items; an embedded settlement forwards every unread committed sequence or an explicit resync before Finished, including under backpressure | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run/persistence.rs), [embedded settlement corpus](../../crates/arany-cli/src/cli/serve/server/serve_loop/tests.rs) |
-| Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve transport corpus](../../crates/arany-cli/tests/serve/transport.rs), [thread capacity](../../crates/arany-cli/tests/serve/lifecycle.rs) |
-| Provider setup blocks continuation | Pending and Uncertain setup edits refuse ordinary/autonomous turns, Goal resume and thread reload with `providerSetupBlocked`; Events remain unchanged and inference/compaction Provider calls stay at zero | [`setup_edits_block_loaded_thread_prompts_without_events_or_provider_calls`](../../crates/arany-cli/tests/serve/lifecycle.rs) |
-| Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve lifecycle corpus](../../crates/arany-cli/tests/serve/lifecycle.rs) |
-| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; proposal-only death is resumable without a Tool effect; approval payload equals the committed proposal intent and timestamp; late accept to a live primary request dispatches once; decline denies; invalid result, EOF or failed delivery are unavailable; cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion; terminal queue pressure waits for capacity and a human response, or withdraws on lifecycle end, without inventing a verdict | [Serve Tool history corpus](../../crates/arany-cli/tests/serve/tool_history.rs), [Serve approval corpus](../../crates/arany-cli/tests/serve/approvals.rs), [approval capacity corpus](../../crates/arany-cli/src/cli/serve/approvals.rs) |
-| Session lifecycle | Close frees a slot after 64 loaded threads, retains durable history and cancels an active submission before releasing it; list pages include only admitted Workspace metadata, enforce page/line/cursor bounds, reject foreign and invalid cursors and never execute | [Serve lifecycle corpus](../../crates/arany-cli/tests/serve/lifecycle.rs) |
-| Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve lifecycle corpus](../../crates/arany-cli/tests/serve/lifecycle.rs), [ACP modes](../../crates/arany-cli/tests/acp/modes.rs), [ACP permission journeys](../../crates/arany-cli/tests/acp/permissions.rs) |
-| Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over [8 KiB](./limits.md#max_steering_note_bytes), over the Run budget or over [64 KiB](./limits.md#max_user_message_bytes); steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |
-| Replay, receipts and forks | Exclusive `since`, count/byte pagination, live Event order and JSONL identity; tap overflow recovery; unknown threads/Goals and future cursors refused; receipt equals committed GoalFinished and oversized receipt refuses without closing the connection; fork lineage and Workspace identity preserved, busy and nonterminal sources refused | [History protocol corpus](../../crates/arany-cli/tests/serve/history.rs) |
-| Host scopes and client failures | Once/session round trips, exact reuse across turns, fresh epoch on resume, unsupported scopes and stdio remembered scopes refused; attached in-process prefix save retains its human verdict; stale/forged replies, EOF, cancellation and backpressure dispatch nothing unauthorized; closed replay retains host receipts | [Serve approval corpus](../../crates/arany-cli/tests/serve/approvals.rs) |
-| Shipped process | Cleared credentials: initialize succeeds, Provider selection fails, EOF exits 0, schema-valid stdout and empty stderr; argument/TTY admission exits 2 before State | [Session process tests](../../crates/arany-cli/tests/session_run.rs) |
-
-The compiled error reason `goalIncludesUnavailable` represents continuation or resume whose original admitted include list is unknown; [Goals](./goals.md#budget-continuation) owns that admission rule. The compiled reason `goalInputTooLarge` reports an objective plus includes exceeding the serialized Goal admission envelope before any Event or Provider call. Raw Event subscriptions expose the current required nullable `GoalStarted.include_paths` field and its payload version, as [Execution](./execution.md#admission-persistence-and-recovery) defines.

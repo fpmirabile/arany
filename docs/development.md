@@ -45,8 +45,7 @@ runs the complete workspace suite in release and the unit, binary and
 suites and release-script tests. Debug retains development diagnostics, account
 fixtures, Keychain and terminal journeys that release excludes or exercises
 differently, plus unit assertions. The same [test action](../.github/actions/ci-tests/action.yml)
-owns standard and focused lanes. Watch the complete CI run and fix a red result
-before handoff. A new integration target with debug-only coverage must also be
+owns standard and focused lanes. A new integration target with debug-only coverage must also be
 included in the debug selection.
 
 Both native debug lanes run production-only Clippy in debug and release without
@@ -123,5 +122,6 @@ invocations; the ordinary temporary-path aliases fail private-state admission.
 
 [Native test and CI reproduction notes](../agents/references/testing-details.md#local-verification-and-ci)
 explain additional prerequisites, fixture isolation and activation of checks
-ignored locally. A targeted or default local run is not the complete native or release suite; it does not establish platform support. Live Provider checks require separate deliberate usage
-authorization; an ignored check is not passing evidence.
+ignored locally. [Testing rules](../agents/testing.md#evidence-lanes) define what a
+local run establishes. Live Provider checks require separate deliberate usage
+authorization.

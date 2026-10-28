@@ -130,56 +130,6 @@ invalidation hint, not a durable revision. [Next steps](../../NEXT_STEPS.md#beta
 owns the remaining quota-scale measurements; existing smaller workloads do not
 establish performance at every admission boundary.
 
-### Proposed policy, not accepted behavior
-
-Keep the current fail-closed limits. Do not automatically prune Events or
-archive individual Sessions: a fork's source Events and prefix digest remain
-necessary to replay it, while per-Session deletion cannot reclaim the one
-shared database safely. The `--state-dir` option
-([setup guide](../setup.md#storage-and-recovery)) can select an independent
-StateRoot for future work, but that only starts a separate journal. The old
-root must be retained to inspect or resume its Sessions; a Session in the new
-root cannot fork a source stored only in the old root. Moving the complete
-closed StateRoot to user-managed archive storage and selecting a new root would
-reduce active root growth only after the user deliberately makes that change.
-It does not erase the archived bytes. Each root has separate `tools.json`
-configuration; an explicitly configured grant stays with its root and is not
-copied to a new root ([Tools contract](../specs/tools.md#private-grants)).
-
-The proposed pre-quota choice is therefore split: a fresh ordinary Session
-avoids inheriting a source lineage when Event-count pressure is high; shared
-byte pressure requires a separate StateRoot, since starting a Session inside
-the full root cannot make `StorageFull` recoverable. Selecting another
-`--state-dir` changes Session-root configuration, including its `tools.json`,
-but it does not change the fixed OS-user account root. Remembered trust for the
-same folder and its generated default Tool grant, saved accounts and saved
-account/model preferences remain available across StateRoots; changing roots is
-not an implicit trust revocation or account-isolation boundary. The user can
-revisit folder trust through `/permissions`. The [Workspace trust loader](../../crates/arany/src/tools/workspace.rs)
-and [Tools contract](../specs/tools.md#folder-trust-and-approvals) own folder
-trust; the [account scope contract](../specs/credentials.md#account-scope-and-identity)
-owns saved account and preference scope. The UI thresholds and recovery wording
-remain unaccepted until measured and specified.
-
-If an archive/switch workflow is later accepted, archive the complete
-StateRoot and keep it independently readable; do not delete canonical Events
-or promise cross-root lineage. Prefer quiescing all Store workers and writers,
-waiting for in-flight appends, releasing active Session and Workspace claims,
-and closing all Store handles before making a checked, user-managed whole-root
-copy. Any switch requires that quiesced state and a checked acknowledged-commit
-cutoff: the archive must include every Event acknowledged by the old Store
-through that cutoff and preserve all fork references. If copying while the
-source remains writable, reconcile the final incremental prefix and global
-sequence through the cutoff after quiescence, then reopen and strictly validate
-the archived journal and fork lineages before switching. SQLite's Online
-Backup API can make a consistent snapshot, but snapshot validity alone does not
-prove it contains every commit acknowledged by the old root through cutover;
-validating a snapshot cannot recover a later acknowledged Event omitted from it.
-[SQLite Online Backup API](https://www.sqlite.org/backup.html) Any early warning threshold,
-archive lifecycle or user-facing recovery choice needs a separate accepted
-contract and measured trigger. No new threshold, snapshot schema, migration,
-automatic archive, or cutover behavior is proposed as current behavior.
-
 ## Primary sources
 
 - OpenAI: [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [compaction](https://developers.openai.com/api/docs/guides/compaction), [conversation state](https://developers.openai.com/api/docs/guides/conversation-state), [data controls](https://developers.openai.com/api/docs/guides/your-data)
