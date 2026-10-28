@@ -1,10 +1,8 @@
-#[cfg(target_os = "linux")]
 mod proxy;
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-#[cfg(target_os = "linux")]
 pub(crate) use proxy::{Proxy, annotate};
 
 pub(crate) const MAX_NETWORK_PATTERNS: usize = 32;
@@ -14,7 +12,6 @@ pub(crate) const NETWORK_IDLE_MS: u64 = 120_000;
 pub(crate) const NETWORK_REFUSAL_ENTRIES: usize = 8;
 pub(crate) const NETWORK_REFUSAL_RESERVE_BYTES: usize = 4 * 1024;
 // Open connections, including ones still sending a header, before accept-time refusal.
-#[cfg(target_os = "linux")]
 pub(crate) const OPEN_CONNECTIONS: usize = 2 * MAX_NETWORK_CONNECTIONS as usize;
 // Sent by the bridge when its own relay bound is reached, so the proxy still records the overflow.
 #[cfg(target_os = "linux")]
@@ -25,6 +22,10 @@ pub(crate) const WEB_CA_TARGET: &str = "/arany-ca.pem";
 pub(crate) const PROXY_ENDPOINT: &str = "http://127.0.0.1:3128";
 #[cfg(target_os = "linux")]
 pub(crate) const PROXY_SOCKET_TARGET: &str = "/arany-egress.sock";
+#[cfg(target_os = "macos")]
+pub(crate) fn proxy_endpoint(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
 // Follows a capture refusal's plain text so the rows stay machine-readable.
 pub(crate) const REFUSAL_MARKER: &str = "\nnetwork_refusals: ";
 pub(crate) const MAX_HOST_BYTES: usize = 253;

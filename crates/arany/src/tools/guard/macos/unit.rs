@@ -1015,6 +1015,7 @@ pub(super) async fn run_unit(
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let active_window = super::super::selection_phase::command_window(intent, active_window);
+    let proxy = proxy_for(runtime, intent)?;
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
     let go_cancellation = cancellation.clone();
@@ -1039,6 +1040,7 @@ pub(super) async fn run_unit(
         let phases = async {
             let mut task = Task::new(runtime, intent, cache_transfer)?;
             task.git_stage = git_stage;
+            task.proxy_port = proxy.as_ref().map(crate::tools::network::Proxy::port);
             #[cfg(any(test, feature = "test-support"))]
             {
                 task.git_fault = crate::fault::git_write::take_mode(
@@ -1346,10 +1348,13 @@ pub(super) async fn run_unit(
             result = tokio::time::timeout_at(completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
         }
     };
-    tokio::time::timeout_at(completion_deadline, unit.stop())
+    let stopped = tokio::time::timeout_at(completion_deadline, unit.stop())
         .await
-        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?
-        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
+        .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
+        .and_then(|stopped| {
+            stopped.map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
+        });
+    let refusals = crate::tools::network::Proxy::settle(proxy, stopped).await?;
     #[cfg(any(test, feature = "test-support"))]
     crate::fault::git_write::storage_finished(&unit.root, intent.id)
         .map_err(|_| ToolError::Operation)?;
@@ -1360,6 +1365,7 @@ pub(super) async fn run_unit(
     }
     match result {
         Ok((mut observation, candidate)) => {
+            crate::tools::network::annotate(&mut observation, refusals)?;
             super::super::publish_cache_candidate(
                 &mut observation,
                 candidate,
@@ -1371,6 +1377,21 @@ pub(super) async fn run_unit(
         }
         Err(error) => Err(error),
     }
+}
+
+fn proxy_for(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<Option<crate::tools::network::Proxy>, ToolError> {
+    if intent.limits.network != crate::tools::types::NetworkGrant::Proxy {
+        return Ok(None);
+    }
+    let grant = runtime
+        .config
+        .network
+        .clone()
+        .ok_or(ToolError::Configuration)?;
+    crate::tools::network::Proxy::start(grant).map(Some)
 }
 
 fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolError> {
@@ -1454,6 +1475,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         } else {
             None
         };
+        let proxy_port = task.proxy_port;
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
@@ -1636,7 +1658,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         #[cfg(any(test, feature = "test-support"))]
                         git_fault,
                     },
-                    (path.parent().ok_or(ToolError::Path)?, command_deadline),
+                    (
+                        path.parent().ok_or(ToolError::Path)?,
+                        command_deadline,
+                        proxy_port,
+                    ),
                 )
                 .await
             }
@@ -4134,6 +4160,7 @@ int main(int argc, char **argv) {
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
                     git_stage: None,
+                    proxy_port: None,
                     git_fault: None,
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();

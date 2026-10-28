@@ -1,7 +1,7 @@
 use super::*;
 use crate::tools::network::NETWORK_REFUSAL_RESERVE_BYTES;
 use std::os::unix::fs::PermissionsExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UnixStream};
 
 fn grant(allow: &[&str]) -> Network {
     Network {

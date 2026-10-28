@@ -25,7 +25,7 @@ Follow the [executable and input pin format](./specs/tools.md#commands). Pin res
 
 ## Network access
 
-Commands are offline unless `tools.json` has a [`network` grant](./specs/tools.md#network-grants-and-egress-proxy) (Linux only). Commands then reach the listed HTTPS domains through a Guard proxy; `cargo` and `npm` honor the preset proxy variables, and a tool that ignores them cannot connect. Refused connections appear in the command result. Add a refused domain in `/permissions` > Network domains; it applies from the next Run. Allowed hosts can still receive any data a command sends them.
+Commands are offline unless `tools.json` has a [`network` grant](./specs/tools.md#network-grants-and-egress-proxy). Commands then reach the listed HTTPS domains through a Guard proxy; `cargo` and `npm` honor the preset proxy variables, and a tool that ignores them cannot connect. Refused connections appear in the command result. Add a refused domain in `/permissions` > Network domains; it applies from the next Run. Allowed hosts can still receive any data a command sends them.
 
 ## Portable Skills
 
