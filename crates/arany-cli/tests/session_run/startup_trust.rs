@@ -1573,9 +1573,98 @@ fn consent_selects_several_user_directories_independently_and_remembers_their_or
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
+fn consent_probe(
+    root: &std::path::Path,
+    search: &str,
+    expect_prompt: bool,
+    choice: Option<&[u8]>,
+) -> String {
     use rustix::process::{Pid, Signal, kill_process};
     use std::io::Write;
+    let workspace = root.join("workspace");
+    let state = root.join("state");
+    let (master, slave) = crate::process::cloexec_pty(None);
+    let mut input = master.try_clone().unwrap();
+    // The helper creates its passwd file exclusively, so each launch needs a fresh one.
+    let _ = std::fs::remove_file(root.join("passwd"));
+    let mut command = crate::isolation::native_account_isolated_test_command_with_timeout(
+        root,
+        std::path::Path::new("/usr/bin/env"),
+        std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
+        60,
+    );
+    command
+        .arg(if choice.is_some() {
+            "PATH=/usr/bin:/bin"
+        } else {
+            search
+        })
+        .arg("TERM=dumb")
+        .arg(env!("CARGO_BIN_EXE_arany"))
+        .args(["--screen-reader", "--no-color", "--workspace"])
+        .arg(&workspace)
+        .arg("--state-dir")
+        .arg(&state)
+        .arg("--setup")
+        .env_clear()
+        .current_dir(&workspace)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+    drop(command);
+    let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
+    let mut consent_seen = false;
+    let mut stopped = false;
+    let mut transcript = String::new();
+    process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(30),
+        64 * 1024,
+        |bytes| {
+            let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+            if !consent_seen && text.contains(crate::process::READ_ONLY_CONSENT_PROMPT) {
+                assert!(expect_prompt, "remembered trust must skip consent");
+                consent_seen = true;
+                transcript = text.clone();
+                match choice {
+                    Some(choice) => input.write_all(choice).unwrap(),
+                    None => {
+                        kill_process(pid, Signal::INT).unwrap();
+                        stopped = true;
+                    }
+                }
+            }
+            if !stopped && text.contains("Setup: Provider setup\n") && text.ends_with("Input:\n") {
+                assert_eq!(consent_seen, expect_prompt);
+                kill_process(pid, Signal::INT).unwrap();
+                stopped = true;
+            }
+        },
+    );
+    assert!(stopped, "expected startup boundary was not reached");
+    transcript
+}
+
+#[cfg(target_os = "linux")]
+fn seed_command_environment(state: &std::path::Path, path: Vec<String>) {
+    let canonical = serde_json::to_vec(&serde_json::json!([1, "process", path, [], []])).unwrap();
+    StateRoot::admit(state)
+        .unwrap()
+        .record(arany::RecordKind::CommandEnvironment)
+        .replace(
+            &serde_json::to_vec(&serde_json::json!({
+                "version": 1, "source": "process", "captured_at": 0, "path": path,
+                "names": [], "excluded": [], "sha256": hash(&canonical)
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
     use std::os::unix::fs::DirBuilderExt;
     for name in ["account-home", "home", "workspace"] {
         std::fs::DirBuilder::new()
@@ -1583,7 +1672,6 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
             .create(root.join(name))
             .unwrap();
     }
-    let workspace = root.join("workspace");
     let state = root.join("state");
     let home = root.join("home");
     let local = home.join(".local/bin");
@@ -1604,75 +1692,7 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
         local.display(),
         pyenv.display()
     );
-    let probe = |expect_prompt: bool, choice: Option<&[u8]>| {
-        let (master, slave) = crate::process::cloexec_pty(None);
-        let mut input = master.try_clone().unwrap();
-        // The helper creates its passwd file exclusively, so each launch needs a fresh one.
-        let _ = std::fs::remove_file(root.join("passwd"));
-        let mut command = crate::isolation::native_account_isolated_test_command_with_timeout(
-            root,
-            std::path::Path::new("/usr/bin/env"),
-            std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
-            60,
-        );
-        command
-            .arg(if choice.is_some() {
-                "PATH=/usr/bin:/bin"
-            } else {
-                &search
-            })
-            .arg("TERM=dumb")
-            .arg(env!("CARGO_BIN_EXE_arany"))
-            .args(["--screen-reader", "--no-color", "--workspace"])
-            .arg(&workspace)
-            .arg("--state-dir")
-            .arg(&state)
-            .arg("--setup")
-            .env_clear()
-            .current_dir(&workspace)
-            .stdin(Stdio::from(slave.try_clone().unwrap()))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(slave));
-        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
-        drop(command);
-        let pid = Pid::from_raw(child.child().id().try_into().unwrap()).unwrap();
-        let mut consent_seen = false;
-        let mut stopped = false;
-        let mut transcript = String::new();
-        process::capture_terminal(
-            child.child(),
-            master,
-            Duration::from_secs(30),
-            64 * 1024,
-            |bytes| {
-                let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
-                if !consent_seen && text.contains(crate::process::READ_ONLY_CONSENT_PROMPT) {
-                    assert!(expect_prompt, "remembered trust must skip consent");
-                    consent_seen = true;
-                    transcript = text.clone();
-                    match choice {
-                        Some(choice) => input.write_all(choice).unwrap(),
-                        None => {
-                            kill_process(pid, Signal::INT).unwrap();
-                            stopped = true;
-                        }
-                    }
-                }
-                if !stopped
-                    && text.contains("Setup: Provider setup\n")
-                    && text.ends_with("Input:\n")
-                {
-                    assert_eq!(consent_seen, expect_prompt);
-                    kill_process(pid, Signal::INT).unwrap();
-                    stopped = true;
-                }
-            },
-        );
-        assert!(stopped, "expected startup boundary was not reached");
-        transcript
-    };
-
-    let transcript = probe(true, None);
+    let transcript = consent_probe(root, &search, true, None);
     assert!(!record_path.exists(), "Ctrl+C must save no choice");
     assert!(!state.exists(), "cancelled consent must create no State");
     for row in ["3. ", "4. ", "5. "] {
@@ -1683,19 +1703,10 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
     let path = std::env::split_paths(search.strip_prefix("PATH=").unwrap())
         .map(|entry| entry.to_str().unwrap().to_owned())
         .collect::<Vec<_>>();
-    let canonical = serde_json::to_vec(&serde_json::json!([1, "process", path, [], []])).unwrap();
-    StateRoot::admit(&state)
-        .unwrap()
-        .record(arany::RecordKind::CommandEnvironment)
-        .replace(
-            &serde_json::to_vec(&serde_json::json!({
-                "version": 1, "source": "process", "captured_at": 0, "path": path,
-                "names": [], "excluded": [], "sha256": hash(&canonical)
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    probe(
+    seed_command_environment(&state, path);
+    consent_probe(
+        root,
+        &search,
         true,
         Some(if homebrew {
             b"trust 3 4 5 6 7\n"
@@ -1720,7 +1731,7 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
     assert_eq!(selected, expected);
     assert_eq!(trusted["version"], 2);
     let remembered = std::fs::read(&record_path).unwrap();
-    probe(false, None);
+    consent_probe(root, &search, false, None);
     assert_eq!(std::fs::read(&record_path).unwrap(), remembered);
 }
 
