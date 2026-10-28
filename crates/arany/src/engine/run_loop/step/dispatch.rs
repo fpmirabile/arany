@@ -795,6 +795,7 @@ pub(super) fn undispatched(
 #[cfg(test)]
 mod tests {
     use super::super::hooks::HookStop;
+    use super::super::permission::reuse_tests::{allow, asks, deny};
     use super::*;
 
     #[test]
@@ -946,30 +947,6 @@ mod tests {
             (false, false, None, StopCause::ToolStopped),
         ] {
             assert_eq!(refusal_cause(paused, cancelled, deadline), expected);
-        }
-    }
-
-    fn allow(basis: PermissionSource) -> Permission {
-        Permission {
-            decision: Decision::Allow,
-            basis,
-            approval: None,
-        }
-    }
-
-    fn asks(mode: ApprovalMode) -> Permission {
-        Permission {
-            decision: Decision::Ask,
-            basis: PermissionSource::Rule,
-            approval: Some(mode),
-        }
-    }
-
-    fn deny(basis: PermissionSource) -> Permission {
-        Permission {
-            decision: Decision::Deny,
-            basis,
-            approval: None,
         }
     }
 
