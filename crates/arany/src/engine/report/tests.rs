@@ -243,6 +243,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         goals: vec![goal.clone()],
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
+        environment_capture: None,
     };
 
     let report = goal_report(&view, &run, &goal);
@@ -1109,6 +1110,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         goals: vec![goal.clone()],
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
+        environment_capture: None,
     };
     let report = goal_report(&view, &run, &goal);
     assert!(

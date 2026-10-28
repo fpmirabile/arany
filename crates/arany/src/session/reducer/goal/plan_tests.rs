@@ -261,6 +261,7 @@ fn plan_contract_counts_a_pre_plan_read_matching_its_digest() {
         }],
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
+        environment_capture: None,
     };
     let mut build = contract.clone();
     build.resource_class = crate::tools::ToolResourceClass::Build;
@@ -488,6 +489,7 @@ fn plan_contract_counts_a_write_from_an_earlier_run() {
         }],
         pending_provider_setup_edit: None,
         provider_setup_uncertain: false,
+        environment_capture: None,
     };
     view.apply_committed(&EventEnvelope {
         sequence: 3,

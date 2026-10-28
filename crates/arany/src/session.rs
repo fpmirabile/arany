@@ -2,6 +2,11 @@ pub(crate) mod checkpoint;
 pub use checkpoint::{Checkpoint, CheckpointReason, CheckpointStatus};
 mod compaction;
 mod context;
+pub(crate) mod environment;
+pub use environment::{
+    EnvironmentCaptureEvent, EnvironmentCaptureIntent, EnvironmentCapturePhase,
+    EnvironmentCaptureStage, EnvironmentCaptureView, LoginShellIdentity,
+};
 mod events;
 pub(crate) mod input;
 mod lineage;

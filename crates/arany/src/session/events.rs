@@ -144,7 +144,8 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
+    ("HostEnvironmentCapture", 1),
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -235,6 +236,9 @@ impl FromStr for AgentRunId {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
+    HostEnvironmentCapture {
+        record: super::EnvironmentCaptureEvent,
+    },
     WorkspaceRewindStarted {
         record: Box<super::rewind::RewindStarted>,
     },
@@ -853,6 +857,7 @@ impl Event {
 
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::HostEnvironmentCapture { .. } => "HostEnvironmentCapture",
             Self::WorkspaceRewindStarted { .. } => "WorkspaceRewindStarted",
             Self::WorkspaceRewindFinished { .. } => "WorkspaceRewindFinished",
             Self::SessionStarted { .. } => "SessionStarted",
@@ -899,6 +904,7 @@ impl Event {
 
     pub(crate) fn scope(&self) -> (Option<RunId>, Option<AgentRunId>) {
         match self {
+            Self::HostEnvironmentCapture { .. } => (None, None),
             Self::WorkspaceRewindStarted { .. }
             | Self::WorkspaceRewindFinished { .. }
             | Self::SessionStarted { .. }
@@ -1022,6 +1028,7 @@ impl Event {
     pub fn payload(&self) -> Result<String, ReplayError> {
         self.validate()?;
         match self {
+            Self::HostEnvironmentCapture { record } => serialize(record),
             Self::SupervisorVerdictRecorded { verdict, .. } => serialize(verdict),
             Self::ToolPreflightRefused { record, .. } => serialize(record),
             Self::WorkspaceRewindStarted { record } => serialize(record),
@@ -1288,6 +1295,11 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         let event = match kind {
+            "HostEnvironmentCapture" if run_id.is_none() && agent_run_id.is_none() => {
+                Self::HostEnvironmentCapture {
+                    record: parse(payload)?,
+                }
+            }
             "WorkspaceRewindStarted"
                 if run_id.is_none()
                     && agent_run_id.is_none()
