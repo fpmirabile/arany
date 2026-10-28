@@ -17,7 +17,7 @@ pub(crate) const MAX_SESSION_SEARCHES: usize = 200;
 pub(crate) const WEB_DOWNLOAD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CA_BUNDLE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ENTITY_BYTES: usize = 10;
-const MAX_SEARCH_FIELD_CHARS: usize = 512;
+pub(crate) const MAX_SEARCH_FIELD_CHARS: usize = 512;
 #[cfg(target_os = "linux")]
 const MAX_KEY_BYTES: usize = 512;
 const TRUNCATION_MARKER: &str = "\n[web_fetch truncated]";
@@ -142,7 +142,11 @@ impl Config {
             ToolCall::WebFetch { .. } => host(call).is_some_and(|host| {
                 super::network::Network {
                     allow: vec![host.clone()],
-                    deny: self.network.as_ref().map(|n| n.deny.clone()).unwrap_or_default(),
+                    deny: self
+                        .network
+                        .as_ref()
+                        .map(|n| n.deny.clone())
+                        .unwrap_or_default(),
                 }
                 .lists(&host)
             }),

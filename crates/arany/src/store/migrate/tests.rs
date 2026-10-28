@@ -453,17 +453,14 @@ const EVENT_FIXTURES: [EventFixture<'static>; 98] = [
 
 #[test]
 fn web_operations_never_appear_in_source_version_rows() {
-    for (kind, from, input) in [
-        ("ToolProposed", 4, include_str!("toolproposed-v1.json")),
-        ("ToolStarted", 26, include_str!("toolstarted-v23.json")),
-        ("ToolFinished", 33, SELECTION_TOOLFINISHED),
-        (
-            "HookStarted",
-            15,
-            include_str!("hookstarted-without-expiry.json"),
-        ),
-        ("HookFinished", 22, SELECTION_HOOKFINISHED),
+    for (kind, input) in [
+        ("ToolProposed", include_str!("toolproposed-v1.json")),
+        ("ToolStarted", include_str!("toolstarted-v23.json")),
+        ("ToolFinished", SELECTION_TOOLFINISHED),
+        ("HookStarted", include_str!("hookstarted-without-expiry.json")),
+        ("HookFinished", SELECTION_HOOKFINISHED),
     ] {
+        let from = crate::test_support::payload_version(kind) - 1;
         let value: Value = serde_json::from_str(input).unwrap();
         let pointer = ["/intent/call", "/observation/intent/call"]
             .into_iter()

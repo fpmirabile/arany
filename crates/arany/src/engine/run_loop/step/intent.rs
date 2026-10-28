@@ -162,12 +162,12 @@ impl RunLoop<'_> {
         child: &ChildWork,
         call: ToolCall,
         deadline: Instant,
-    ) -> Option<EffectIntent> {
+    ) -> Result<Option<EffectIntent>, EngineError> {
         let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
         if intent.call.is_web() {
-            runtime.bind_egress(&mut intent).ok()?;
+            runtime.bind_egress(&mut intent)?;
         }
-        self.limit_child_intent(runtime, intent, deadline)
+        Ok(self.limit_child_intent(runtime, intent, deadline))
     }
 
     fn limit_child_intent(
@@ -404,7 +404,7 @@ impl RunLoop<'_> {
                         .await?
                         .and_then(|intent| self.limit_child_intent(runtime, intent, deadline))
                 } else {
-                    self.researcher_intent(runtime, child, call, deadline)
+                    self.researcher_intent(runtime, child, call, deadline)?
                 };
                 let Some(intent) = intent else {
                     return Ok(Err(deadline_refusal));

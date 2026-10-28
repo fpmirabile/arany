@@ -977,4 +977,21 @@ mod tests {
                 .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
         );
     }
+
+    #[test]
+    fn web_descriptions_state_their_owned_limits() {
+        use crate::tools::{WEB_FETCH_CHARS, WEB_SEARCH_RESULTS};
+        let fetch = by_name("web_fetch").unwrap().description;
+        let search = by_name("web_search").unwrap().description;
+        let grouped = WEB_FETCH_CHARS
+            .to_string()
+            .as_bytes()
+            .rchunks(3)
+            .rev()
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(fetch.contains(&format!("{grouped} characters")));
+        assert!(search.contains(&format!("up to {WEB_SEARCH_RESULTS} results")));
+    }
 }

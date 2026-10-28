@@ -22,8 +22,8 @@ use crate::{
     tools::{
         FRAME_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_MCP_RESPONSE_BYTES, MAX_METADATA_BYTES,
         MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, MAX_QUERY_BYTES,
-        MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS,
-        WEB_SEARCH_RESULTS, WRITE_FRAME_BYTES,
+        MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS,
+        WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS, WRITE_FRAME_BYTES,
         permissions::MAX_CONFIG_BYTES,
         toolchains::MAX_RUNTIME_GRANTS,
         types::{
@@ -592,6 +592,12 @@ pub const LIMITS: LimitsTable = LimitsTable {
             name: "MAX_QUERY_BYTES",
             value: MAX_QUERY_BYTES as u64,
             unit: "bytes",
+            owner: "crates/arany/src/tools/web.rs",
+        },
+        Limit {
+            name: "MAX_SEARCH_FIELD_CHARS",
+            value: MAX_SEARCH_FIELD_CHARS as u64,
+            unit: "characters per search result field",
             owner: "crates/arany/src/tools/web.rs",
         },
         Limit {

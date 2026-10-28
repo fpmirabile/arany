@@ -29,12 +29,13 @@ fn old_worker_policies_and_assignments_cannot_acquire_web_tools() {
         .unwrap()
         .unwrap();
     assert_eq!(serde_json::from_str::<Value>(&migrated).unwrap(), source);
-    let step = REGISTRY.event_step("RunStarted", 25).unwrap();
+    let current = crate::test_support::payload_version("RunStarted");
+    let step = REGISTRY.event_step("RunStarted", current - 1).unwrap();
     let upgraded = (step.transform)(source.clone()).unwrap();
     assert_eq!(upgraded, source);
     let event = Event::decode(
         "RunStarted",
-        payload_version("RunStarted").unwrap(),
+        current,
         &upgraded.to_string(),
         Some(RunId::new()),
         None,
@@ -57,8 +58,12 @@ fn old_worker_policies_and_assignments_cannot_acquire_web_tools() {
             "grant":grant,"policy_digest":vec![1; 32],"permissions_digest":null
         }
     });
-    let spawn = REGISTRY.event_step("AgentSpawned", 17).unwrap();
-    assert_eq!((spawn.transform)(assignment.clone()), Some(assignment.clone()));
+    let current = crate::test_support::payload_version("AgentSpawned");
+    let spawn = REGISTRY.event_step("AgentSpawned", current - 1).unwrap();
+    assert_eq!(
+        (spawn.transform)(assignment.clone()),
+        Some(assignment.clone())
+    );
     for operation in ["web_fetch", "web_search"] {
         let mut widened = source.clone();
         widened["config"]["worker_policy"]["parent_grant"]["tools"] =

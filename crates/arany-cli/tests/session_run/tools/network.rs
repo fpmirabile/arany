@@ -490,7 +490,10 @@ fn serve_page(
             }
             let head = format!(
                 "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n",
-                reply.status, reply.content_type, reply.body.len(), reply.location,
+                reply.status,
+                reply.content_type,
+                reply.body.len(),
+                reply.location,
             );
             let _ = stream.write_all(head.as_bytes());
             let _ = stream.write_all(&reply.body);
@@ -538,7 +541,8 @@ async fn fetch_page(content_type: &'static str, body: Vec<u8>) -> (Value, bool) 
     let observation = outcome.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(observation.disposition, ToolDisposition::Succeeded);
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
-    let (events, replay) = arany::test_support::goals::replayed(&state_path, outcome.session_id).await;
+    let (events, replay) =
+        arany::test_support::goals::replayed(&state_path, outcome.session_id).await;
     assert_eq!(replay.runs[0], outcome.run);
     assert!(!events.is_empty());
     if large {
