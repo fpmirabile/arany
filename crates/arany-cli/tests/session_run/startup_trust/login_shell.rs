@@ -98,7 +98,9 @@ pub(super) fn review_login_shell_capture(
     for bytes in [
         captured_bytes.as_slice(),
         transcript.as_slice(),
-        std::fs::read(state.join("events.sqlite3")).unwrap().as_slice(),
+        std::fs::read(state.join("events.sqlite3"))
+            .unwrap()
+            .as_slice(),
     ] {
         assert!(
             !bytes
