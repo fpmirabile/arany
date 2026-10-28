@@ -89,6 +89,7 @@ pub fn pin_roster(bindings: &mut AdmittedProviders, spare: Option<Vec<Arc<dyn Pr
 
 pub fn plan_sample(observed_at: i64) -> crate::RateLimits {
     crate::RateLimits {
+        api: None,
         primary: Some(crate::PlanWindow {
             source: crate::LimitSource::Headers,
             observed_at,
@@ -104,5 +105,24 @@ pub fn plan_sample(observed_at: i64) -> crate::RateLimits {
             reset_at: None,
         }),
         unavailable: None,
+    }
+}
+
+pub fn api_sample(observed_at: i64) -> crate::RateLimits {
+    crate::RateLimits {
+        api: Some(crate::ApiLimits {
+            dialect: crate::ApiLimitDialect::OpenAi,
+            rows: vec![crate::ApiLimit {
+                dimension: crate::ApiLimitDimension::Requests,
+                source: crate::LimitSource::Headers,
+                observed_at,
+                limit: Some(100),
+                remaining: Some(0),
+                reset_at: Some(observed_at + 60),
+                unavailable: None,
+            }],
+            unavailable: None,
+        }),
+        ..crate::RateLimits::default()
     }
 }
