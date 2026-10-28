@@ -13,6 +13,12 @@ use tokio::{
 
 const NOW: u64 = 1_800_000_000;
 
+fn random_value() -> String {
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).expect("test random value");
+    URL_SAFE_NO_PAD.encode(random)
+}
+
 fn key_parts(pair: &RsaKeyPair) -> (Vec<u8>, Vec<u8>) {
     fn value<'a>(cursor: &mut &'a [u8], tag: u8) -> &'a [u8] {
         assert_eq!(cursor[0], tag);
@@ -97,10 +103,11 @@ fn jwks(pair: &RsaKeyPair) -> Vec<u8> {
 #[test]
 fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     let pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("test RSA key");
+    let nonce = random_value();
     let keys = jwks(&pair);
-    let good = signed_token(&pair, &claims(NOW, "expected-nonce"));
+    let good = signed_token(&pair, &claims(NOW, &nonce));
     assert_eq!(
-        identity::verify(&good, &keys, super::super::CLIENT_ID, "expected-nonce", NOW),
+        identity::verify(&good, &keys, super::super::CLIENT_ID, &nonce, NOW),
         Ok(identity::VerifiedIdentity {
             subject: "synthetic-subject".into(),
             account_id: "account-one".into(),
@@ -115,27 +122,27 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         json!({"chatgpt_account_id": "account\n"}),
         json!({"chatgpt_account_id": 42}),
     ] {
-        let mut rejected = claims(NOW, "expected-nonce");
+        let mut rejected = claims(NOW, &nonce);
         rejected["https://api.openai.com/auth"] = account;
         assert!(
             identity::verify(
                 &signed_token(&pair, &rejected),
                 &keys,
                 super::super::CLIENT_ID,
-                "expected-nonce",
+                &nonce,
                 NOW,
             )
             .is_err()
         );
     }
-    let mut singleton = claims(NOW, "expected-nonce");
+    let mut singleton = claims(NOW, &nonce);
     singleton["aud"] = json!([super::super::CLIENT_ID]);
     assert_eq!(
         identity::verify(
             &signed_token(&pair, &singleton),
             &keys,
             super::super::CLIENT_ID,
-            "expected-nonce",
+            &nonce,
             NOW
         ),
         Ok(identity::VerifiedIdentity {
@@ -148,7 +155,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         json!(super::super::CLIENT_ID),
         json!([super::super::CLIENT_ID]),
     ] {
-        let mut bound_party = claims(NOW, "expected-nonce");
+        let mut bound_party = claims(NOW, &nonce);
         bound_party["aud"] = audience;
         bound_party["azp"] = json!(super::super::CLIENT_ID);
         assert_eq!(
@@ -156,7 +163,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
                 &signed_token(&pair, &bound_party),
                 &keys,
                 super::super::CLIENT_ID,
-                "expected-nonce",
+                &nonce,
                 NOW
             ),
             Ok(identity::VerifiedIdentity {
@@ -171,7 +178,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
                 &signed_token(&pair, &bound_party),
                 &keys,
                 super::super::CLIENT_ID,
-                "expected-nonce",
+                &nonce,
                 NOW
             ),
             Err(AuthorizationError::IdentityRejected(
@@ -235,21 +242,23 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         ),
         ("azp", json!(true), identity::IdentityFailure::ClaimsFormat),
     ] {
-        let mut rejected = claims(NOW, "expected-nonce");
+        let mut rejected = claims(NOW, &nonce);
         rejected[field] = replacement;
         assert_eq!(
             identity::verify(
                 &signed_token(&pair, &rejected),
                 &keys,
                 super::super::CLIENT_ID,
-                "expected-nonce",
+                &nonce,
                 NOW
             ),
             Err(AuthorizationError::IdentityRejected(failure)),
             "rejected {field} fixture"
         );
     }
-    let mut altered = claims(NOW, "expected-nonce");
+    let mismatched_nonce = random_value();
+    assert_ne!(nonce, mismatched_nonce);
+    let mut altered = claims(NOW, &nonce);
     for (field, replacement, failure) in [
         (
             "iss",
@@ -263,7 +272,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         ),
         (
             "nonce",
-            json!("wrong-nonce"),
+            json!(&mismatched_nonce),
             identity::IdentityFailure::Nonce,
         ),
         ("sub", json!(""), identity::IdentityFailure::Subject),
@@ -275,27 +284,15 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         altered[field] = replacement;
         let token = signed_token(&pair, &altered);
         assert_eq!(
-            identity::verify(
-                &token,
-                &keys,
-                super::super::CLIENT_ID,
-                "expected-nonce",
-                NOW
-            ),
+            identity::verify(&token, &keys, super::super::CLIENT_ID, &nonce, NOW),
             Err(AuthorizationError::IdentityRejected(failure)),
             "{field}"
         );
         if field == "nonce" {
-            let error = identity::verify(
-                &token,
-                &keys,
-                super::super::CLIENT_ID,
-                "expected-nonce",
-                NOW,
-            )
-            .expect_err("mismatched nonce");
+            let error = identity::verify(&token, &keys, super::super::CLIENT_ID, &nonce, NOW)
+                .expect_err("mismatched nonce");
             assert!(error.to_string().contains("nonce mismatch"), "{error}");
-            assert!(!error.to_string().contains("wrong-nonce"));
+            assert!(!error.to_string().contains(&mismatched_nonce));
         }
         altered[field] = original;
     }
@@ -304,13 +301,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     signature[0] ^= 1;
     let tampered = format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature));
     assert_eq!(
-        identity::verify(
-            &tampered,
-            &keys,
-            super::super::CLIENT_ID,
-            "expected-nonce",
-            NOW
-        ),
+        identity::verify(&tampered, &keys, super::super::CLIENT_ID, &nonce, NOW),
         Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::Signature
         ))
@@ -333,15 +324,9 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
             identity::IdentityFailure::HeaderFormat,
         ),
     ] {
-        let token = signed_token_with_header(&pair, &claims(NOW, "expected-nonce"), &header);
+        let token = signed_token_with_header(&pair, &claims(NOW, &nonce), &header);
         assert_eq!(
-            identity::verify(
-                &token,
-                &keys,
-                super::super::CLIENT_ID,
-                "expected-nonce",
-                NOW
-            ),
+            identity::verify(&token, &keys, super::super::CLIENT_ID, &nonce, NOW),
             Err(AuthorizationError::IdentityRejected(failure)),
             "{header}"
         );
@@ -352,13 +337,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     ]}))
     .expect("duplicate JWKS");
     assert_eq!(
-        identity::verify(
-            &good,
-            &duplicate,
-            super::super::CLIENT_ID,
-            "expected-nonce",
-            NOW
-        ),
+        identity::verify(&good, &duplicate, super::super::CLIENT_ID, &nonce, NOW),
         Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::KeyId
         ))
@@ -369,7 +348,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
             &good,
             &jwks(&wrong_key),
             super::super::CLIENT_ID,
-            "expected-nonce",
+            &nonce,
             NOW
         ),
         Err(AuthorizationError::IdentityRejected(
@@ -381,13 +360,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     }))
     .expect("oversized JWKS");
     assert_eq!(
-        identity::verify(
-            &good,
-            &too_many,
-            super::super::CLIENT_ID,
-            "expected-nonce",
-            NOW
-        ),
+        identity::verify(&good, &too_many, super::super::CLIENT_ID, &nonce, NOW),
         Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::KeySet
         ))
@@ -485,13 +458,13 @@ async fn issuer(replies: Vec<Reply>) -> (Endpoints, tokio::task::JoinHandle<Vec<
     (endpoints, task)
 }
 
-fn exchange() -> CodeExchange {
+fn exchange(nonce: &str) -> CodeExchange {
     CodeExchange {
         code: "synthetic-code".into(),
         client_id: super::super::CLIENT_ID.into(),
         redirect_uri: "http://127.0.0.1:1455/auth/callback".into(),
-        verifier: "synthetic-verifier".into(),
-        nonce: "synthetic-nonce".into(),
+        verifier: random_value(),
+        nonce: nonce.into(),
         host_id: uuid::Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
         expected_subject: None,
         expected_account_id: None,
@@ -513,11 +486,12 @@ fn token_reply(id_token: &str, scope: &str) -> Vec<u8> {
 #[tokio::test]
 async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
     let pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("test RSA key");
+    let nonce = random_value();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("test clock")
         .as_secs();
-    let mut identity = claims(now, "synthetic-nonce");
+    let mut identity = claims(now, &nonce);
     identity["aud"] = serde_json::json!([super::super::CLIENT_ID]);
     identity["azp"] = serde_json::json!(super::super::CLIENT_ID);
     let id_token = signed_token(&pair, &identity);
@@ -538,8 +512,9 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
         },
     ];
     let (endpoints, task) = issuer(replies).await;
-    let attempt = exchange();
+    let attempt = exchange(&nonce);
     let host_id = attempt.host_id;
+    let verifier = attempt.verifier.clone();
     let verified = redeem_at(attempt, endpoints).await.expect("verified grant");
     assert_eq!(verified.client_id, super::super::CLIENT_ID);
     assert_eq!(verified.host_id, host_id);
@@ -566,7 +541,7 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
             ("grant_type".into(), "authorization_code".into()),
             ("client_id".into(), super::super::CLIENT_ID.into()),
             ("code".into(), "synthetic-code".into()),
-            ("code_verifier".into(), "synthetic-verifier".into()),
+            ("code_verifier".into(), verifier),
             (
                 "redirect_uri".into(),
                 "http://127.0.0.1:1455/auth/callback".into()
@@ -583,11 +558,12 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
 #[tokio::test]
 async fn returning_redemption_rejects_a_signed_but_different_account() {
     let pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("test RSA key");
+    let nonce = random_value();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("test clock")
         .as_secs();
-    let id_token = signed_token(&pair, &claims(now, "synthetic-nonce"));
+    let id_token = signed_token(&pair, &claims(now, &nonce));
     for scope in ["openid profile email offline_access", "openid"] {
         for (expected_subject, expected_account, failure) in [
             ("synthetic-subject", "account-one", None),
@@ -619,7 +595,7 @@ async fn returning_redemption_rejects_a_signed_but_different_account() {
                 },
             ];
             let (endpoints, task) = issuer(replies).await;
-            let mut selected = exchange();
+            let mut selected = exchange(&nonce);
             selected.expected_subject = Some(expected_subject.into());
             selected.expected_account_id = Some(expected_account.into());
             let result = redeem_at(selected, endpoints).await;
@@ -647,28 +623,31 @@ async fn returning_redemption_rejects_a_signed_but_different_account() {
 #[tokio::test]
 async fn redemption_rejects_invalid_identity_and_failed_responses() {
     let pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("test RSA key");
+    let nonce = random_value();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("test clock")
         .as_secs();
-    let id_token = signed_token(&pair, &claims(now, "synthetic-nonce"));
+    let id_token = signed_token(&pair, &claims(now, &nonce));
     let other_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("different signing key");
+    let mismatched_nonce = random_value();
+    assert_ne!(nonce, mismatched_nonce);
     for (name, identity, signer, expected) in [
         (
             "nonce mismatch",
-            claims(now, "different-nonce"),
+            claims(now, &mismatched_nonce),
             &pair,
             identity::IdentityFailure::Nonce,
         ),
         (
             "expired identity",
-            claims(now - 7200, "synthetic-nonce"),
+            claims(now - 7200, &nonce),
             &pair,
             identity::IdentityFailure::Lifetime,
         ),
         (
             "signature mismatch",
-            claims(now, "synthetic-nonce"),
+            claims(now, &nonce),
             &other_pair,
             identity::IdentityFailure::Signature,
         ),
@@ -691,7 +670,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
         ])
         .await;
         assert!(
-            matches!(redeem_at(exchange(), endpoints).await,
+            matches!(redeem_at(exchange(&nonce), endpoints).await,
             Err(AuthorizationError::IdentityRejected(failure)) if failure == expected),
             "{name}"
         );
@@ -874,7 +853,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
     });
     for (name, token_reply, expected) in scenarios.into_iter().chain(missing_fields) {
         let (endpoints, task) = issuer(vec![token_reply]).await;
-        let result = redeem_at(exchange(), endpoints).await;
+        let result = redeem_at(exchange(&nonce), endpoints).await;
         assert!(matches!(result, Err(error) if error == expected), "{name}");
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
@@ -886,11 +865,12 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
 #[tokio::test]
 async fn redemption_rejects_untrusted_jwks_transport_before_identity_use() {
     let pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("test RSA key");
+    let nonce = random_value();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("test clock")
         .as_secs();
-    let id_token = signed_token(&pair, &claims(now, "synthetic-nonce"));
+    let id_token = signed_token(&pair, &claims(now, &nonce));
     let scope = "openid profile email offline_access";
     let scenarios = [
         (
@@ -961,7 +941,7 @@ async fn redemption_rejects_untrusted_jwks_transport_before_identity_use() {
             key_reply,
         ];
         let (endpoints, task) = issuer(replies).await;
-        let result = redeem_at(exchange(), endpoints).await;
+        let result = redeem_at(exchange(&nonce), endpoints).await;
         assert!(
             matches!(result, Err(AuthorizationError::IdentityRejected(failure)) if failure == expected),
             "{name}"
