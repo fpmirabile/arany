@@ -411,7 +411,7 @@ async fn issuer(replies: Vec<Reply>) -> (Endpoints, tokio::task::JoinHandle<Vec<
         listener.local_addr().expect("test issuer addr")
     );
     let endpoints = Endpoints {
-        token: Url::parse(&format!("{origin}/api/accounts/oauth/token")).expect("test token URL"),
+        token: Url::parse(&format!("{origin}/oauth/token")).expect("test token URL"),
         jwks: Url::parse(&format!("{origin}/.well-known/jwks.json")).expect("test JWKS URL"),
         https_only: false,
     };

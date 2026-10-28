@@ -2500,13 +2500,14 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
     assert!(outcome.remote_confirmed && outcome.local_cleared);
     let index = AccountIndex::read(&state).unwrap();
     assert_eq!(index.selected, Some(second_id));
-    assert!(
-        index
-            .accounts
-            .iter()
-            .find(|entry| entry.id == first_id)
+    assert_eq!(index.accounts.len(), 1);
+    assert_eq!(index.accounts[0].id, second_id);
+    assert!(!index.accounts[0].disconnected);
+    assert_eq!(
+        load_selected_private_file_at(&state, second_id)
             .unwrap()
-            .disconnected
+            .refresh_token,
+        second.refresh_token
     );
 
     let stale = state
@@ -2518,7 +2519,7 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
     let changed_id = Uuid::now_v7();
     let mut changed = index;
     changed.selected = Some(changed_id);
-    changed.accounts[1].id = changed_id;
+    changed.accounts[0].id = changed_id;
     changed.write(&state).unwrap();
     assert!(matches!(
         sign_out_target_at_with(
@@ -2539,7 +2540,7 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
 }
 
 #[test]
-fn local_account_removal_disconnects_without_remote_revocation() {
+fn local_account_removal_forgets_identity_without_remote_revocation() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -2574,7 +2575,10 @@ fn local_account_removal_disconnects_without_remote_revocation() {
     .unwrap();
     assert!(!outcome.remote_confirmed);
     assert!(outcome.local_cleared);
-    assert!(AccountIndex::read(&state).unwrap().accounts[0].disconnected);
+    let index = AccountIndex::read(&state).unwrap();
+    assert!(index.accounts.is_empty());
+    assert!(index.selected.is_none());
+    assert!(index.model_checks.is_empty());
 }
 
 #[test]
@@ -3040,10 +3044,12 @@ fn account_index_migration_clears_only_valid_optional_checks_and_preserves_crede
         .unwrap();
     let migrated = AccountIndex::read(&state).unwrap();
     let actual = serde_json::to_value(&migrated).unwrap();
-    assert_eq!(actual["schema"], 3);
+    assert_eq!(actual["schema"], CHATGPT_ACCOUNTS.current);
     let mut downgraded = actual.clone();
     to_version_two_shape(&mut downgraded);
-    assert_eq!(downgraded["accounts"], legacy["accounts"]);
+    let mut expected_accounts = legacy["accounts"].clone();
+    expected_accounts[0]["disconnected"] = true.into();
+    assert_eq!(downgraded["accounts"], expected_accounts);
     assert_eq!(actual["selected"], legacy["selected"]);
     assert!(migrated.model_checks.is_empty());
     assert!(
