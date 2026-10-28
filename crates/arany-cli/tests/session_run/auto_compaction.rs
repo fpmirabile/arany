@@ -32,41 +32,6 @@ impl Drop for KillOnDrop {
     }
 }
 
-fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("HTTP request deadline");
-    let mut request = Vec::new();
-    loop {
-        let mut chunk = [0; 8192];
-        let count = stream.read(&mut chunk).expect("HTTP request bytes");
-        assert!(count > 0 && request.len() + count <= 512 * 1024);
-        request.extend_from_slice(&chunk[..count]);
-        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-            let header_end = end + 4;
-            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
-            );
-            let body_len = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("Content-Length");
-            assert!(body_len <= 512 * 1024);
-            if request.len() >= header_end + body_len {
-                return request[header_end..header_end + body_len].to_vec();
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum CompactionCase {
     Success,
@@ -140,7 +105,12 @@ fn synthetic_server(
                 Err(error) => panic!("accept failed: {error}"),
             }
         };
-        let body = read_http_request(&mut stream);
+        let body = crate::loopback::read_request_within(
+            &mut stream,
+            "/v1/responses",
+            "authorization: bearer test-key",
+            512 * 1024,
+        );
         assert!(
             !body
                 .windows(b"OMITTED_CANARY".len())
