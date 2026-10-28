@@ -223,10 +223,12 @@ const PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/Sys
 ";
 
 // The loader opens /, so this grants root metadata only, nothing beneath it.
+// System LibreSSL exits when its denied openssl.cnf open returns EPERM, so its public TLS configuration stays readable.
 const COMMAND_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
 (allow file-read-metadata (literal \"/System/Cryptexes\") (literal \"/System/Cryptexes/OS\") (literal \"/var\") (literal \"/etc\") (literal \"/private/var\") (literal \"/private/var/select\") (literal \"/private/var/select/sh\"))
 (allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
 (allow file-read* (literal \"/\") (literal \"/bin\") (literal \"/usr/bin\") (literal \"/dev/random\") (literal \"/dev/urandom\"))
+(allow file-read* (subpath \"/private/etc/ssl\"))
 (allow file-read* file-write* (literal \"/dev/null\"))
 (allow process-fork)
 (deny process-fork (require-entitlement \"com.apple.private.coalition-spawn\") (require-entitlement \"com.apple.private.persona-mgmt\"))
@@ -287,6 +289,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(MACOS_REWIND_CONTRACT);
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
+    bytes.extend_from_slice(b";user-programs-v1:selected-subtrees-and-homebrew-prefixes-and-manager-roots-read-map-exec-without-system-catalogue-checks;pinned-roots-mount-topology-before-seatbelt-and-ready-go");
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
     bytes.extend_from_slice(super::DISCOVERY_DONE);
     bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
@@ -453,6 +456,36 @@ impl SeatbeltProfile {
             self.rule("allow file-read-metadata", "literal", directory)?;
         }
         self.rule(operations, filter, path)
+    }
+
+    fn runtime_grant(
+        &mut self,
+        grant: &crate::tools::toolchains::RuntimeGrant,
+    ) -> Result<(), ToolError> {
+        use crate::tools::toolchains::RuntimeKind;
+
+        grant.verify_host()?;
+        if grant.kind == RuntimeKind::AppleCompiler {
+            self.grant(
+                "allow file-read* file-map-executable",
+                "subpath",
+                &grant.path,
+            )?;
+            for executable in grant.apple_compiler_executables()? {
+                self.grant("allow process-exec", "literal", &executable)?;
+            }
+        } else {
+            let operations = if grant.kind.is_host_mounted() {
+                "allow file-read* file-map-executable process-exec"
+            } else {
+                "allow file-read*"
+            };
+            self.grant(operations, "subpath", &grant.path)?;
+            if let Some(root) = &grant.root {
+                self.grant(operations, "subpath", &root.path)?;
+            }
+        }
+        Ok(())
     }
 
     fn protect_guard(&mut self, executable: &Path) -> Result<(), ToolError> {
@@ -676,24 +709,7 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
         )?;
     }
     for grant in &task.config.runtime_grants {
-        grant.verify_host()?;
-        if grant.kind == crate::tools::toolchains::RuntimeKind::AppleCompiler {
-            profile.grant(
-                "allow file-read* file-map-executable",
-                "subpath",
-                &grant.path,
-            )?;
-            for executable in grant.apple_compiler_executables()? {
-                profile.grant("allow process-exec", "literal", &executable)?;
-            }
-        } else {
-            let operations = if grant.kind.is_toolchain() {
-                "allow file-read* file-map-executable process-exec"
-            } else {
-                "allow file-read*"
-            };
-            profile.grant(operations, "subpath", &grant.path)?;
-        }
+        profile.runtime_grant(grant)?;
     }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
@@ -785,21 +801,21 @@ fn install_git_publish(
 pub(super) fn verify_runtime_mounts(
     grants: &[crate::tools::toolchains::RuntimeGrant],
 ) -> Result<(), ToolError> {
-    let roots = grants
-        .iter()
-        .map(|grant| {
-            grant.verify_host()?;
-            if grant.kind == crate::tools::toolchains::RuntimeKind::AppleCompiler {
-                let [_, clang, ld] = grant.apple_compiler_executables()?;
-                for executable in [clang, ld] {
-                    if ffi::unentitled_code(&executable)? != Some(true) {
-                        return Err(ToolError::ProtectionUnavailable);
-                    }
+    let mut roots = Vec::new();
+    for grant in grants {
+        grant.verify_host()?;
+        if grant.kind == crate::tools::toolchains::RuntimeKind::AppleCompiler {
+            let [_, clang, ld] = grant.apple_compiler_executables()?;
+            for executable in [clang, ld] {
+                if ffi::unentitled_code(&executable)? != Some(true) {
+                    return Err(ToolError::ProtectionUnavailable);
                 }
             }
-            std::fs::canonicalize(&grant.path).map_err(|_| ToolError::ProtectionUnavailable)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        }
+        for path in std::iter::once(&grant.path).chain(grant.root.iter().map(|root| &root.path)) {
+            roots.push(std::fs::canonicalize(path).map_err(|_| ToolError::ProtectionUnavailable)?);
+        }
+    }
     let mounts = ffi::mounts()?;
     if mounts.iter().any(|(_, target)| {
         !target.is_absolute()
@@ -1583,6 +1599,112 @@ mod tests {
                 .text
                 .contains("process-exec")
         );
+    }
+
+    fn runtime_fixture(
+        home: &Path,
+        kind: crate::tools::toolchains::RuntimeKind,
+        manager: crate::tools::toolchains::RuntimeManager,
+        directory: &str,
+        root: Option<&str>,
+    ) -> crate::tools::toolchains::RuntimeGrant {
+        use crate::tools::toolchains::{GrantRoot, RuntimeGrant};
+
+        let identity = |path: &Path| {
+            std::fs::create_dir_all(path).unwrap();
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(path).unwrap()).unwrap()
+        };
+        let path = home.join(directory);
+        let (device, inode) = identity(&path);
+        RuntimeGrant {
+            kind,
+            manager,
+            version: None,
+            path,
+            device,
+            inode,
+            root: root.map(|suffix| {
+                let path = home.join(suffix);
+                let (device, inode) = identity(&path);
+                GrantRoot {
+                    path,
+                    device,
+                    inode,
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn user_program_profiles_grant_only_selected_subtrees_and_reject_root_replacement() {
+        use crate::tools::toolchains::{RuntimeKind, RuntimeManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        for (kind, manager, directory, root, operations) in [
+            (
+                RuntimeKind::UserPrograms,
+                RuntimeManager::UserDirectory,
+                ".local/bin",
+                None,
+                "allow file-read* file-map-executable process-exec",
+            ),
+            (
+                RuntimeKind::UserPrograms,
+                RuntimeManager::UserDirectory,
+                "brew/bin",
+                Some("brew"),
+                "allow file-read* file-map-executable process-exec",
+            ),
+            (
+                RuntimeKind::ManagerShims,
+                RuntimeManager::Rustup,
+                ".cargo/bin",
+                Some(".rustup"),
+                "allow file-read* file-map-executable process-exec",
+            ),
+            (
+                RuntimeKind::CargoCache,
+                RuntimeManager::HostCache,
+                ".cargo/registry/cache",
+                None,
+                "allow file-read*",
+            ),
+        ] {
+            let grant = runtime_fixture(home, kind, manager, directory, root);
+            let path = &grant.path;
+            let mut profile = SeatbeltProfile::new(ProfileKind::Command);
+            let start = profile.text.len();
+            profile.runtime_grant(&grant).unwrap();
+            let actual = profile.text[start..]
+                .lines()
+                .filter(|line| !line.starts_with("(allow file-read-metadata "))
+                .collect::<Vec<_>>();
+            let mut expected = vec![format!(
+                "({operations} (subpath {}))",
+                quoted(path).unwrap()
+            )];
+            if let Some(root) = &grant.root {
+                expected.push(format!(
+                    "({operations} (subpath {}))",
+                    quoted(&root.path).unwrap()
+                ));
+            }
+            assert_eq!(actual, expected, "{directory}");
+            verify_runtime_mounts(std::slice::from_ref(&grant)).unwrap();
+            if let Some(root) = &grant.root {
+                std::fs::rename(&root.path, root.path.with_extension("old")).unwrap();
+                std::fs::create_dir(&root.path).unwrap();
+                assert!(matches!(
+                    profile.runtime_grant(&grant),
+                    Err(ToolError::ChangedInput)
+                ));
+                assert!(matches!(
+                    verify_runtime_mounts(&[grant]),
+                    Err(ToolError::ChangedInput)
+                ));
+            }
+        }
     }
 
     #[test]
