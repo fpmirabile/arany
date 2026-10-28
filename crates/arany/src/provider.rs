@@ -20,8 +20,9 @@ mod limits;
 mod native;
 mod native_check;
 pub use limits::{
-    LimitFailure, LimitSource, LimitUnavailable, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES,
-    PlanWindow, RateLimitSlot, RateLimits, UsedPercent,
+    ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, LimitFailure, LimitSource,
+    LimitUnavailable, MAX_API_LIMIT_ROWS, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES, PlanWindow,
+    RateLimitSlot, RateLimits, UsedPercent,
 };
 mod openai;
 pub(crate) mod prompts;

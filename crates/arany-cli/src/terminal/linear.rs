@@ -1926,6 +1926,23 @@ mod usage_tests {
         group.input = known(999);
         view.usage.groups.push(group);
         view.usage.pending.push((view.id, run_id, None));
+        let mut identity =
+            arany::ProviderIdentity::new("openai", "model-00", arany::Provenance::native());
+        identity.effort = Some(arany::Effort::High);
+        view.usage.api_limits.push(arany::ApiUsage {
+            session_id: view.id,
+            run_id,
+            actor: None,
+            role: arany::ProviderRole::Primary,
+            identity,
+            dialect: arany::ApiLimitDialect::OpenAi,
+            rows: arany::test_support::routing::api_sample(1000)
+                .api
+                .unwrap()
+                .rows,
+            latest_unavailable: None,
+            latest_omitted: None,
+        });
         let pages = crate::presentation::usage::usage_pages(&view, false, None);
         assert!(pages.len() > 2);
         for page in &pages {
@@ -1946,6 +1963,7 @@ mod usage_tests {
             expected.push_str(page);
         }
         assert_eq!(text, expected);
+        assert!(text.contains("Requests\nLimit: 100\nRemaining: 0\nLast reported: 1970-01-01T00:16:40Z · headers\nObservation age unknown\nReset: 1970-01-01T00:17:40Z\n"));
         assert!(text.contains("Output: 8 known; some calls unreported"));
         assert!(text.contains("Cache read (included in input): 0 known; some calls unreported"));
         assert!(text.contains("Cache write (included in input): unknown (not reported)"));
