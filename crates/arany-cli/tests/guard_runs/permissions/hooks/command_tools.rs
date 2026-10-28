@@ -1,3 +1,4 @@
+#[path = "command_tools/prefix.rs"]
 mod prefix;
 
 use super::*;
