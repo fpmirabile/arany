@@ -1601,6 +1601,8 @@ mod rewrite_summary_tests {
             program: "sh".into(),
             args: vec!["-c".into(), "ls".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let fact = |stage| arany::CommandRewrite {
             hook_intent_id: None,

@@ -1832,6 +1832,8 @@ fn command_rewrite_start(run: RunId, agent: AgentRunId) -> Event {
             program: "command-tool".into(),
             args: Vec::new(),
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     Event::HookStarted {
@@ -1924,6 +1926,8 @@ fn unknown_command_rewrite_stops_the_primary_and_never_reuses_the_hook() {
             program: "sh".into(),
             args: vec!["-c".into(), "printf payload".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     assert!(rejected(&view, tool_proposed(run, agent, &payload)));
