@@ -15,12 +15,13 @@ use crate::engine_support::run_with;
 #[cfg(any(debug_assertions, arany_ci))]
 use crate::git::{host_git, tree_snapshot};
 #[cfg(any(debug_assertions, arany_ci))]
+use crate::git_journey::GitJourney;
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::{hash, private_file};
 #[cfg(any(debug_assertions, arany_ci))]
 use arany::{
-    Answer, CollaborationPolicy, CompactionRequest, CompactionResponse, Provider, ProviderError,
-    ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView,
-    StateRoot, Store, ToolCall, ToolDisposition,
+    CollaborationPolicy, RunRequest, RunStatus, SessionView, StateRoot, Store, ToolCall,
+    ToolDisposition,
 };
 #[cfg(any(debug_assertions, arany_ci))]
 use arany::{EngineConfig, RunControls, ToolGrant};
@@ -35,98 +36,6 @@ use std::time::Duration;
 
 #[cfg(any(debug_assertions, arany_ci))]
 const CLT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
-
-#[cfg(any(debug_assertions, arany_ci))]
-struct GitJourney {
-    requests: Arc<Mutex<Vec<ProviderRequest>>>,
-}
-
-#[cfg(any(debug_assertions, arany_ci))]
-#[async_trait::async_trait]
-impl Provider for GitJourney {
-    fn identity(&self) -> &arany::ProviderIdentity {
-        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("openai", "tool-model", arany::Provenance::native())
-            });
-        &IDENTITY
-    }
-
-    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let mut requests = self.requests.lock().unwrap();
-        let step = requests.len();
-        requests.push(request);
-        let outcome = match step {
-            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }),
-            1 => crate::tool_outcome(ToolCall::GitDiff {
-                path: ".".into(),
-                base: None,
-                head: None,
-                staged: false,
-            }),
-            2 => crate::tool_outcome(ToolCall::GitLog {
-                path: ".".into(),
-                revision: None,
-                max_count: 5,
-            }),
-            3 => crate::tool_outcome(ToolCall::GitLog {
-                path: ".".into(),
-                revision: Some("missing-branch".into()),
-                max_count: 1,
-            }),
-            4 => crate::tool_outcome(ToolCall::GitBranch {
-                name: None,
-                start_point: None,
-                scope: Some("all".into()),
-                base: Some("HEAD~1".into()),
-                max_count: Some(16),
-            }),
-            5 => crate::tool_outcome(ToolCall::GitLog {
-                path: ".".into(),
-                revision: Some("HEAD~1..protected".into()),
-                max_count: 5,
-            }),
-            6 => crate::tool_outcome(ToolCall::GitDiff {
-                path: ".".into(),
-                base: Some("HEAD~1".into()),
-                head: Some("HEAD".into()),
-                staged: false,
-            }),
-            7 => crate::tool_outcome(ToolCall::GitLog {
-                path: "denied/history.txt".into(),
-                revision: Some("HEAD~1..protected".into()),
-                max_count: 5,
-            }),
-            8 => crate::tool_outcome(ToolCall::GitLog {
-                path: ".".into(),
-                revision: Some("missing-endpoint..HEAD".into()),
-                max_count: 5,
-            }),
-            9 => ProviderOutcome::Answer(Answer {
-                text: "Git state observed".into(),
-            }),
-            _ => return Err(ProviderError::InvalidOutcome),
-        };
-        Ok(ProviderResponse {
-            outcome,
-            turn: arany::ProviderTurn::scripted(),
-            response_id: None,
-            usage: arany::Usage {
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                ..Default::default()
-            },
-            wire_provenance: None,
-        })
-    }
-
-    async fn compact(
-        &self,
-        _request: CompactionRequest,
-    ) -> Result<CompactionResponse, ProviderError> {
-        Err(ProviderError::InvalidOutcome)
-    }
-}
 
 #[test]
 #[cfg_attr(

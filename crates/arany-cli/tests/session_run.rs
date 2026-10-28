@@ -645,6 +645,13 @@ mod tools_researcher;
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
 
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", any(debug_assertions, arany_ci))
+))]
+#[path = "session_run/tools/git_journey.rs"]
+mod git_journey;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/supervisor.rs"]
 mod supervisor;
