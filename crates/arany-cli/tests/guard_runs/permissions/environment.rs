@@ -64,7 +64,8 @@ async fn login_capture_decline_is_journaled_and_each_capture_needs_a_fresh_human
         .unwrap();
     assert_eq!(stage, EnvironmentCaptureStage::ApprovalUnavailable);
     assert_eq!(std::fs::read(&file).unwrap(), before);
-    let (events, view) = fixture.reopen(session).await;
+    fixture.engine.close().await.unwrap();
+    let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
     let phases: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.event {
