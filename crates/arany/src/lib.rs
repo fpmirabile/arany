@@ -113,18 +113,19 @@ pub use store::{
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalCause, ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate,
-    CommandChangeset, CommandEnvironment, CommandEnvironmentError, DEFAULT_PR_LIMIT,
-    DefinitionFilePin, DefinitionRegistryPin, DisplayFacts, EffectIntent, EnforcementCause,
-    FailureStage, FileChange, FileReceipt, FileSuggestionSource, FileVersion, GuardReceipt,
-    GuardStageFact, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, McpAuthError,
-    NetworkGrant, OutputSpill, OutputTotal, PrState, ProjectSkills, RuntimeProfileOption,
+    CommandChangeset, CommandEnvironment, CommandEnvironmentError, CommandRewrite, CommandTool,
+    CommandToolProbe, CommandToolRole, CommandTools, DEFAULT_PR_LIMIT, DefinitionFilePin,
+    DefinitionRegistryPin, DisplayFacts, EffectIntent, EnforcementCause, FailureStage, FileChange,
+    FileReceipt, FileSuggestionSource, FileVersion, GuardReceipt, GuardStageFact, HostIntent,
+    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, McpAuthError, NetworkGrant, OutputSpill,
+    OutputTotal, PROBE_COMMAND, PrState, ProjectSkills, RewriteStage, RuntimeProfileOption,
     SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex, ToolApproval, ToolApprovals,
     ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits, ToolObservation,
     ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
     ToolStep, TrustRecordError, TrustReset, UnguardedGrant, UnguardedPrompt, UnguardedReceipt,
-    WorkspacePermissions, configured_skill_names, mcp_login, mcp_logout, mention_paths,
-    native_protection_supported, now_ms, project_skills, recover_build_cache, runtime_skill_names,
-    tool_guard_main, tool_host_main,
+    WorkspacePermissions, command_tool_candidates, configured_skill_names, mcp_login, mcp_logout,
+    mention_paths, native_protection_supported, now_ms, project_skills, recover_build_cache,
+    runtime_skill_names, tool_guard_main, tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

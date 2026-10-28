@@ -81,10 +81,7 @@ impl CustomTransport {
         stream: bool,
         preview: Option<crate::provider::ResponsePreview>,
     ) -> Result<ProviderResponse, TransportError> {
-        if request.input.tools.is_some()
-            || !request.input.images.is_empty()
-            || request.validate_scope().is_err()
-        {
+        if !request.input.images.is_empty() || request.validate_scope().is_err() {
             return Err(TransportError::Rejected);
         }
         if !(1..=super::CUSTOM_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {

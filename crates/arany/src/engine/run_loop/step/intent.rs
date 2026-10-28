@@ -328,6 +328,7 @@ impl RunLoop<'_> {
             }
             Err(refusal @ SizingRefusal::Cancelled) => Ok(Err(refusal.into())),
             Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
+            Err(refusal @ SizingRefusal::Uncertain) => Ok(Err(refusal.into())),
         }
     }
 
@@ -422,6 +423,12 @@ impl RunLoop<'_> {
         let Some(mut intent) = intent else {
             return Ok(Err(SizingRefusal::ActiveTime));
         };
+        if matches!(grant, Grant::Primary { .. }) {
+            intent = match self.rewrite_command(runtime, intent).await? {
+                Ok(intent) => intent,
+                Err(refusal) => return Ok(Err(refusal)),
+            };
+        }
         let integration = (matches!(intent.call, ToolCall::Command { .. })
             && matches!(intent.target, crate::worker::EffectTarget::Workspace))
         .then(|| ToolCall::ApplyChangeset {

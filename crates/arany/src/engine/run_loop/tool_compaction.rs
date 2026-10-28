@@ -228,6 +228,9 @@ impl RunLoop<'_> {
             Ok(Err(SizingRefusal::ActiveTime)) => {
                 return Ok(PrimaryContext::Stop(StopCause::Budget));
             }
+            Ok(Err(SizingRefusal::Uncertain)) => {
+                return Ok(PrimaryContext::Stop(StopCause::Uncertain));
+            }
             Ok(Err(SizingRefusal::Cancelled)) => {
                 return Ok(PrimaryContext::Stop(StopCause::Cancelled));
             }

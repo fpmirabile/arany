@@ -30,7 +30,7 @@ fn old_worker_policies_and_assignments_cannot_acquire_web_tools() {
         .unwrap();
     assert_eq!(serde_json::from_str::<Value>(&migrated).unwrap(), source);
     let current = crate::test_support::payload_version("RunStarted");
-    let step = REGISTRY.event_step("RunStarted", current - 1).unwrap();
+    let step = REGISTRY.event_step("RunStarted", 25).unwrap();
     let upgraded = (step.transform)(source.clone()).unwrap();
     assert_eq!(upgraded, source);
     let event = Event::decode(

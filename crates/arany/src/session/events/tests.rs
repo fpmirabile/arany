@@ -46,6 +46,7 @@ fn decode_accepts_the_current_version_and_rejects_its_neighbours() {
 pub(super) fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
     let intent = crate::tools::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),

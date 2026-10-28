@@ -1494,6 +1494,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
         spill: None,
         intent: crate::tools::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
@@ -2419,12 +2420,13 @@ fn host_git_modes_and_prefixes_never_replace_human_approval() {
     }
 }
 
-fn host_intent() -> crate::tools::EffectIntent {
+pub(super) fn host_intent() -> crate::tools::EffectIntent {
     let mut pin = crate::tools::types::test_host_pin();
     pin.executable = "/usr/bin/printf".into();
     pin.permissions_digest = Some([7; 32]);
     crate::tools::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: Some(pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),

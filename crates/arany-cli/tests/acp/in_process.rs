@@ -478,6 +478,7 @@ impl Adapter {
 
     fn intent(&self, call: arany::ToolCall) -> arany::EffectIntent {
         arany::EffectIntent {
+            rewrite: Vec::new(),
             host_command: None,
             host: None,
             id: uuid::Uuid::now_v7(),

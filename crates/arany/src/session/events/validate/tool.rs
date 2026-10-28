@@ -73,7 +73,13 @@ impl Event {
                 agent_run_id,
                 hook,
             } => {
-                if hook.group < 64
+                if (hook.command_tool.is_some()
+                    == (hook.event == crate::tools::permissions::HookEvent::CommandRewrite))
+                    && (hook.command_subject.is_some() == hook.command_tool.is_some())
+                    && hook
+                        .command_subject
+                        .is_none_or(|id| id.get_version() == Some(uuid::Version::SortRand))
+                    && hook.group < 64
                     && hook.handler < 128
                     && hook.intent.valid()
                     && matches!(hook.intent.call, crate::tools::ToolCall::Command { .. })

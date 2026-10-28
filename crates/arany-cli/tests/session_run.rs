@@ -910,6 +910,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     last_sequence: 0,
                     lineage: None,
                     goals: Vec::new(),
+                    command_tool_probe: None,
                     pending_provider_setup_edit: None,
                     provider_setup_uncertain: false,
                     environment_capture: None,

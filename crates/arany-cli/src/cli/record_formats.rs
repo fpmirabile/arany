@@ -11,7 +11,7 @@ const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserI
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.
-const FIXTURES: [Fixture<'static>; 25] = [
+const FIXTURES: [Fixture<'static>; 26] = [
     (
         RecordKind::ToolsConfig,
         1,
@@ -47,6 +47,12 @@ const FIXTURES: [Fixture<'static>; 25] = [
         3,
         COMMAND_ENVIRONMENT,
         COMMAND_ENVIRONMENT,
+    ),
+    (
+        RecordKind::CommandTools,
+        1,
+        r#"{"version":1,"tools":[]}"#,
+        r#"{"version":1,"tools":[]}"#,
     ),
     (RecordKind::ProviderProfiles, 1, PROFILES, PROFILES_V2),
     (RecordKind::ProviderProfiles, 2, PROFILES_V2, PROFILES_V2),

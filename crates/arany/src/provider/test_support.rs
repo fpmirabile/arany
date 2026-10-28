@@ -115,6 +115,7 @@ pub(crate) fn goal_plan_contract() -> GoalPlanContract {
 fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
     crate::tools::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),

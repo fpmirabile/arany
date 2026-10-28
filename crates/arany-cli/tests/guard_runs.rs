@@ -50,11 +50,21 @@ fn tool_report(observation: Option<&arany::ToolObservation>) -> String {
     observation.map_or_else(
         || "no observation".to_owned(),
         |observation| {
-            let failure = arany::test_support::recorded_tool_failure(observation.intent.id)
-                .unwrap_or_else(|| "no recorded failure".to_owned());
+            let output = serde_json::from_str::<serde_json::Value>(&observation.output).ok();
+            let exit_code = output.as_ref().and_then(|value| value["exit_code"].as_i64());
+            let stdout_bytes = output
+                .as_ref()
+                .and_then(|value| value["stdout"].as_str())
+                .map(str::len);
+            let stderr_bytes = output
+                .as_ref()
+                .and_then(|value| value["stderr"].as_str())
+                .map(str::len);
             format!(
-                "{:?} {:?} [{failure}]",
-                observation.disposition, observation.output
+                "disposition={:?} stage={:?} exit_code={exit_code:?} output_bytes={} stdout_bytes={stdout_bytes:?} stderr_bytes={stderr_bytes:?}",
+                observation.disposition,
+                observation.guard_stage.map(|fact| fact.stage),
+                observation.output.len()
             )
         },
     )
