@@ -1015,10 +1015,6 @@ pub(super) async fn run_unit(
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let active_window = super::super::selection_phase::command_window(intent, active_window);
-    let command_deadline = super::super::selection_phase::command_deadline(intent);
-    let command_frame = command_deadline
-        .map(super::super::selection_phase::encode_deadline)
-        .transpose()?;
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
     let go_cancellation = cancellation.clone();
@@ -1042,7 +1038,6 @@ pub(super) async fn run_unit(
         )?);
         let phases = async {
             let mut task = Task::new(runtime, intent, cache_transfer)?;
-            task.command_deadline = command_frame;
             task.git_stage = git_stage;
             #[cfg(any(test, feature = "test-support"))]
             {
@@ -1062,33 +1057,6 @@ pub(super) async fn run_unit(
             })
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
-            if bytes == b"SELECT_READY\n" {
-                selecting.store(true, Ordering::Release);
-                stream
-                    .get_mut()
-                    .write_all(b"SELECT\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                let deadline = command_deadline
-                    .ok_or(ToolError::Configuration)?
-                    .min(preparation_deadline);
-                stream
-                    .get_mut()
-                    .write_all(&command_frame.ok_or(ToolError::Configuration)?)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                let mut selection_cancel = go_cancellation.clone();
-                super::super::selection_phase::wait(
-                    deadline,
-                    &mut selection_cancel,
-                    super::super::selection_phase::receive(&mut stream, deadline),
-                )
-                .await?;
-                selecting.store(false, Ordering::Release);
-                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-            }
             let mut cache_sent = false;
             let mut image_sent = false;
             for _ in 0..2 {
@@ -1129,6 +1097,37 @@ pub(super) async fn run_unit(
                     break;
                 }
             }
+            let command_deadline = if bytes == b"SELECT_READY\n" {
+                // The command runtime starts at selection, after storage and cache preparation.
+                let command_deadline = super::super::selection_phase::command_deadline(intent)
+                    .ok_or(ToolError::Configuration)?;
+                selecting.store(true, Ordering::Release);
+                stream
+                    .get_mut()
+                    .write_all(b"SELECT\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                stream
+                    .get_mut()
+                    .write_all(&super::super::selection_phase::encode_deadline(command_deadline)?)
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                let deadline = command_deadline.min(preparation_deadline);
+                let mut selection_cancel = go_cancellation.clone();
+                super::super::selection_phase::wait(
+                    deadline,
+                    &mut selection_cancel,
+                    super::super::selection_phase::receive(&mut stream, deadline),
+                )
+                .await?;
+                selecting.store(false, Ordering::Release);
+                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+                    .await
+                    .map_err(|_| ToolError::Limit)??;
+                Some(command_deadline)
+            } else {
+                None
+            };
             if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
                 return Err(ToolError::GuardBootstrap(failure));
             }
@@ -1446,7 +1445,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         } else {
             None
         };
-        let command_deadline = task.command_deadline;
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
@@ -1497,49 +1495,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 } else {
                     None
                 };
-                if primary_command(&intent) {
-                    output
-                        .write_all(b"SELECT_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let mut select = [0; 7];
-                    input
-                        .read_exact(&mut select)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    if select != *b"SELECT\n" {
-                        return Err(ToolError::Configuration);
-                    }
-                    let mut frame = [0; 8];
-                    input
-                        .read_exact(&mut frame)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    if Some(frame) != command_deadline {
-                        return Err(ToolError::Configuration);
-                    }
-                    let deadline = super::super::selection_phase::decode_deadline(frame)?;
-                    let source = crate::tools::fs::open_directory(&runtime.workspace)?;
-                    let resources =
-                        crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
-                    let target = storage
-                        .as_ref()
-                        .and_then(|volumes| volumes.first())
-                        .ok_or(ToolError::Operation)?;
-                    let selected = crate::tools::fs::prepare_command(
-                        &source,
-                        target,
-                        &resources,
-                        &runtime.config,
-                        deadline,
-                    );
-                    let message = super::super::selection_phase::response(&selected);
-                    output
-                        .write_all(message)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    selected?;
-                }
                 if let Some(cache) = &cache {
                     output
                         .write_all(b"CACHE_READY\n")
@@ -1569,6 +1524,49 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         drop(archive);
                     }
                 }
+                let command_deadline = if primary_command(&intent) {
+                    output
+                        .write_all(b"SELECT_READY\n")
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    let mut select = [0; 7];
+                    input
+                        .read_exact(&mut select)
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    if select != *b"SELECT\n" {
+                        return Err(ToolError::Configuration);
+                    }
+                    let mut frame = [0; 8];
+                    input
+                        .read_exact(&mut frame)
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    let deadline = super::super::selection_phase::decode_deadline(frame)?;
+                    let source = crate::tools::fs::open_directory(&runtime.workspace)?;
+                    let resources =
+                        crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
+                    let target = storage
+                        .as_ref()
+                        .and_then(|volumes| volumes.first())
+                        .ok_or(ToolError::Operation)?;
+                    let selected = crate::tools::fs::prepare_command(
+                        &source,
+                        target,
+                        &resources,
+                        &runtime.config,
+                        deadline,
+                    );
+                    let message = super::super::selection_phase::response(&selected);
+                    output
+                        .write_all(message)
+                        .await
+                        .map_err(|_| ToolError::Operation)?;
+                    selected?;
+                    Some(frame)
+                } else {
+                    None
+                };
                 let (go, receive_go) = tokio::sync::oneshot::channel();
                 let watched = cancellation.clone();
                 reader = Some(tokio::spawn(async move {
