@@ -2061,6 +2061,8 @@ fn parser_config(config: &Config) -> Config {
         mcp: Vec::new(),
         git: None,
         git_identity: None,
+        locale: Default::default(),
+        environment_sha256: None,
         network: None,
         runtime_grants: Vec::new(),
         ..config.clone()
@@ -3405,6 +3407,8 @@ mod tests {
             runtime_grants,
             git: None,
             git_identity: None,
+            locale: Default::default(),
+            environment_sha256: None,
             network: None,
         }
     }

@@ -183,6 +183,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::HostPrefixConflict { .. }
             | ToolError::InactiveHostArchiveUnconfirmed
             | ToolError::InactiveHostArchiveConflict
+            | ToolError::CommandEnvironmentUnconfirmed
             | ToolError::AccountBusy
             | ToolError::ProtectionUnavailable
             | ToolError::QueueFull

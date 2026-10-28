@@ -209,6 +209,7 @@ pub(super) async fn execute(
         cache_enabled,
         &super::types::ToolLimits::default(),
     )?;
+    command.envs(&config.locale);
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;
     let writer = child.stdin.take().ok_or(ToolError::Operation)?;

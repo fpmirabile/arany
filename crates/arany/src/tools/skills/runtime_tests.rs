@@ -35,6 +35,8 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         runtime_grants: Vec::new(),
         git: None,
         git_identity: None,
+        locale: Default::default(),
+        environment_sha256: None,
         network: None,
     };
     let runtime = ToolRuntime {
@@ -50,6 +52,9 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
+        command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
+            "/usr/bin:/bin",
+        )),
         spill_access: None,
         config,
         workspace: PathBuf::new(),

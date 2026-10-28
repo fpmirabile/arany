@@ -2028,3 +2028,68 @@ async fn a_host_write_to_settings_creates_no_new_authority_and_blocks_reuse() {
     assert_eq!(view.runs[0].unguarded_tools(), 1);
     assert_eq!(events.iter().filter(|event| matches!(&event.event, Event::ToolStarted { verdict: Some(verdict), .. } if verdict.approved)).count(), 1);
 }
+
+#[tokio::test]
+async fn environment_record_changes_alter_the_journaled_policy_and_replay_never_reads_it() {
+    const FIRST: &str = "canary-environment-value-one";
+    const SECOND: &str = "canary-environment-value-two";
+    let base = ["/usr/bin", "/bin"];
+    let longer = ["/usr/bin", "/bin", "/usr/local/bin"];
+    let mut digests = Vec::new();
+    for (path, value) in [
+        (&base[..], FIRST),
+        (&base[..], FIRST),
+        (&longer[..], FIRST),
+        (&base[..], SECOND),
+    ] {
+        let host = Host::new(None);
+        let file = host.state.join("command-environment.json");
+        let names = json!([{"name": "EDITOR_NOTE", "value": value}]);
+        let canonical = serde_json::to_string(&json!([1, "process", path, names, []])).unwrap();
+        private_file(
+            &file,
+            &serde_json::to_vec(&json!({
+                "version": 1, "source": "process", "captured_at": 0, "path": path,
+                "names": names, "excluded": [], "sha256": hash(canonical.as_bytes())
+            }))
+            .unwrap(),
+        );
+        let call = guarded("exit 0");
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    arany::test_support::scenario::plan_outcome(plan(&call)),
+                    tool_outcome(call),
+                    finish("done"),
+                ],
+                Some(ApprovalMode::Request),
+                vec![],
+            )
+            .await;
+        assert_eq!(seen.unconsumed, 0);
+        std::fs::remove_file(&file).unwrap();
+        let session = seen.outcome.session_id;
+        let (events, view) = host.reopen(session).await;
+        assert!(
+            !file.exists(),
+            "replay must not load or recreate the record"
+        );
+        assert_eq!(view.runs[0].unguarded_tools(), 0);
+        assert!(!view.runs[0].tools.is_empty());
+        for envelope in &events {
+            let payload = envelope.event.payload().unwrap();
+            assert!(!payload.contains(FIRST) && !payload.contains(SECOND));
+        }
+        let policy = view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .tool_policy
+            .as_ref()
+            .unwrap();
+        digests.push(policy.config_digest);
+    }
+    assert_eq!(digests[0], digests[1]);
+    assert!(digests[2] != digests[0] && digests[3] != digests[0] && digests[2] != digests[3]);
+}
