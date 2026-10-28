@@ -33,10 +33,20 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
             ])
             .with_profile("openai", "primary-model"),
         );
+        primary
+            .rate_limits
+            .lock()
+            .unwrap()
+            .extend([Some(api_sample(1000)), Some(api_sample(1001))]);
         let child = route(
             ScriptedProvider::new(vec![finish("child report")])
                 .with_profile("openai", "child-model"),
         );
+        child
+            .rate_limits
+            .lock()
+            .unwrap()
+            .push_back(Some(api_sample(1002)));
         let compact = route(
             ScriptedProvider::new(vec![])
                 .with_profile("openai", "compact-model")
@@ -47,6 +57,11 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
                     wire_provenance: None,
                 })]),
         );
+        compact
+            .compact_rate_limits
+            .lock()
+            .unwrap()
+            .push_back(Some(api_sample(1003)));
         let mut bindings = routes(&primary);
         bindings.roles.child = vec![child.clone()];
         bindings.roles.compaction = vec![compact.clone()];
@@ -70,6 +85,22 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
         assert_eq!(record.model, "compact-model");
         engine.close().await.unwrap();
         let (events, view) = reopen(&state, result.session_id).await;
+        assert_eq!(view.usage.api_limits.len(), 3);
+        for (role, provider, at) in [
+            (ProviderRole::Primary, &primary, 1001),
+            (ProviderRole::Child, &child, 1002),
+            (ProviderRole::Compaction, &compact, 1003),
+        ] {
+            let group = view
+                .usage
+                .api_limits
+                .iter()
+                .find(|group| group.role == role)
+                .unwrap();
+            assert_eq!(group.run_id, result.run.id);
+            assert_eq!(group.identity, *provider.identity());
+            assert_eq!(group.rows, api_sample(at).api.unwrap().rows);
+        }
         let mut models: Vec<_> = view
             .usage
             .groups
@@ -1756,13 +1787,18 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
 
 #[tokio::test]
 async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_further_call() {
-    for lost in [true, false] {
+    for (lost, api) in [(true, false), (false, false), (true, true), (false, true)] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
-        let mut primary = ScriptedProvider::new(vec![finish("never")])
-            .with_chatgpt_account(Uuid::now_v7(), [1; 32]);
+        let mut primary = ScriptedProvider::new(vec![finish("never")]);
+        let sample = if api {
+            api_sample(1000)
+        } else {
+            primary = primary.with_chatgpt_account(Uuid::now_v7(), [1; 32]);
+            plan_sample(1000)
+        };
         primary
             .responses
             .get_mut()
@@ -1772,7 +1808,7 @@ async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_fur
             .rate_limits
             .get_mut()
             .unwrap()
-            .push_back(Some(plan_sample(1000)));
+            .push_back(Some(sample.clone()));
         let primary = route(primary);
         let engine = open(&state);
         let session = engine
@@ -1815,10 +1851,15 @@ async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_fur
         let (events, view) = reopen(&state, session).await;
         let run = &view.runs[0];
         assert_eq!(run.provider_retries.len(), 1, "lost {lost}");
-        assert_eq!(
-            run.provider_retries[0].1.rate_limits,
-            Some(plan_sample(1000))
-        );
+        assert_eq!(run.provider_retries[0].1.rate_limits, Some(sample));
+        if api {
+            assert_eq!(view.usage.api_limits.len(), 1);
+            assert_eq!(
+                view.usage.api_limits[0].rows,
+                api_sample(1000).api.unwrap().rows
+            );
+            assert_eq!(view.usage.api_limits[0].identity, *primary.identity());
+        }
         assert!(
             run.agents[0]
                 .provider_calls
@@ -2286,11 +2327,16 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         "unavailable",
         "cancelled",
         "retry",
+        "stream cut",
+        "body loss",
+        "deadline",
         "omitted",
         "invalid",
         "fallback",
         "fallback after retries",
         "append failure",
+        "fallback append failure",
+        "terminal append failure",
     ] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -2333,13 +2379,20 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                 .get_mut()
                 .unwrap()
                 .push_front(Err(ProviderError::InvalidOutcome));
+        } else if matches!(case, "stream cut" | "body loss" | "deadline") {
+            let error = match case {
+                "stream cut" => ProviderError::StreamEnded,
+                "body loss" => ProviderError::PartialTransport,
+                _ => ProviderError::CallTimedOut,
+            };
+            primary.responses.get_mut().unwrap().push_front(Err(error));
         } else if matches!(case, "retry" | "omitted" | "invalid" | "append failure") {
             primary
                 .responses
                 .get_mut()
                 .unwrap()
                 .push_front(Err(ProviderError::RateLimited(None)));
-        } else if case == "fallback" {
+        } else if matches!(case, "fallback" | "fallback append failure") {
             // A pre-admission 5xx switches without retrying when Retry-After exceeds the cap.
             let retry_after = Some(Duration::MAX);
             primary
@@ -2362,11 +2415,20 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
                 .resize(usize::from(MAX_PROVIDER_RETRIES) + 1, Some(api_sample(900)));
         }
         let primary = route(primary);
-        let replacement = route(
-            ScriptedProvider::new(vec![finish("replacement")]).with_profile("openai", "model-b"),
-        );
+        let mut replacement = ScriptedProvider::new(vec![finish("replacement")])
+            .with_profile("openai", "model-b")
+            .with_saved_api_account(Uuid::now_v7());
+        replacement
+            .rate_limits
+            .get_mut()
+            .unwrap()
+            .push_back(Some(api_sample(1100)));
+        let replacement = route(replacement);
         let mut bindings = routes(&primary);
-        let fallback = matches!(case, "fallback" | "fallback after retries");
+        let fallback = matches!(
+            case,
+            "fallback" | "fallback after retries" | "fallback append failure"
+        );
         if fallback || case == "unavailable" {
             bindings.roles.primary.push(replacement.clone());
         }
@@ -2376,9 +2438,11 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
             .await
             .unwrap();
         arany::FaultPlan::skip_retry_backoff(session);
-        if case == "append failure" {
-            arany::FaultPlan::fail_goal_append(session, |event| {
-                matches!(event, Event::ProviderRetryScheduled { .. })
+        if case.ends_with("append failure") {
+            arany::FaultPlan::fail_goal_append(session, move |event| match case {
+                "fallback append failure" => matches!(event, Event::ProviderFallbackUsed { .. }),
+                "terminal append failure" => matches!(event, Event::ProviderCallRecorded { .. }),
+                _ => matches!(event, Event::ProviderRetryScheduled { .. }),
             });
         }
         let mut request = input(&workspace);
@@ -2390,6 +2454,7 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
             request,
             RunControls {
                 cancellation,
+                hints: Some(RunHints::with_previews()),
                 ..RunControls::default()
             },
         )
@@ -2399,23 +2464,24 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         assert_eq!(
             primary.requests.lock().unwrap().len(),
             match case {
-                "retry" | "omitted" | "invalid" => 2,
+                "retry" | "omitted" | "invalid" | "stream cut" | "body loss" => 2,
                 "fallback after retries" => usize::from(MAX_PROVIDER_RETRIES) + 1,
                 _ => 1,
             },
             "case {case}"
         );
-        if case == "append failure" {
+        if case.ends_with("append failure") {
             assert!(outcome.is_err());
             assert!(view.usage.api_limits.is_empty());
             assert!(!view.usage.pending.is_empty());
+            assert!(replacement.requests.lock().unwrap().is_empty());
             continue;
         }
         let result = outcome.unwrap();
         assert_eq!(
             result.run.status,
             match case {
-                "failed" | "unavailable" => RunStatus::Failed,
+                "failed" | "unavailable" | "deadline" => RunStatus::Failed,
                 "cancelled" => RunStatus::Cancelled,
                 _ => RunStatus::Finished,
             },
@@ -2426,15 +2492,30 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
             usize::from(fallback),
             "case {case}"
         );
-        if case == "fallback" {
+        let retries = &view.runs[0].provider_retries;
+        assert_eq!(
+            retries.len(),
+            match case {
+                "retry" | "omitted" | "invalid" | "stream cut" | "body loss" => 1,
+                "fallback after retries" => usize::from(MAX_PROVIDER_RETRIES),
+                _ => 0,
+            },
+            "case {case}"
+        );
+        for (index, (_, retry)) in retries.iter().enumerate() {
+            assert_eq!(
+                retry.rate_limits,
+                Some(api_sample(if index == 0 { 1000 } else { 900 }))
+            );
+        }
+        if fallback {
             assert_eq!(
                 view.runs[0].provider_fallbacks[0].1.rate_limits,
-                Some(api_sample(1000))
+                Some(api_sample(if case == "fallback" { 1000 } else { 900 }))
             );
-            assert!(
-                view.runs[0].agents[0].provider_calls[0]
-                    .rate_limits
-                    .is_none()
+            assert_eq!(
+                view.runs[0].agents[0].provider_calls[0].rate_limits,
+                Some(api_sample(1100))
             );
         }
         let group = &view.usage.api_limits[0];
@@ -2448,6 +2529,13 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
         assert_eq!(group.role, ProviderRole::Primary);
         assert_eq!(group.latest_omitted.is_some(), case == "omitted");
         assert_eq!(group.latest_unavailable.is_some(), case == "invalid");
+        assert_eq!(view.usage.api_limits.len(), if fallback { 2 } else { 1 });
+        if fallback {
+            let incoming = &view.usage.api_limits[1];
+            assert_eq!(incoming.identity, *replacement.identity());
+            assert_eq!(incoming.rows, api_sample(1100).api.unwrap().rows);
+            assert_eq!(incoming.run_id, group.run_id);
+        }
         assert_eq!(
             replacement.requests.lock().unwrap().len(),
             usize::from(fallback)
