@@ -1739,23 +1739,51 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
     ignore = "native Linux PTY typed Git rule editing through /permissions"
 )]
 fn typed_prefix_permissions_edit_remove_and_restart() {
+    run_permissions_journey(PermissionsJourney::TypedRules);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux PTY login-shell capture through /permissions"
+)]
+fn login_shell_capture_requires_review_and_preserves_private_values() {
+    run_permissions_journey(PermissionsJourney::LoginShellCapture);
+}
+
+#[cfg(target_os = "linux")]
+enum PermissionsJourney {
+    TypedRules,
+    LoginShellCapture,
+}
+
+#[cfg(target_os = "linux")]
+fn run_permissions_journey(journey: PermissionsJourney) {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::{io::Write, os::unix::fs::PermissionsExt};
 
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("project");
     std::fs::create_dir(&workspace).unwrap();
     let account_home = temp.path().join("account-home");
     std::fs::create_dir(&account_home).unwrap();
     std::fs::set_permissions(&account_home, std::fs::Permissions::from_mode(0o700)).unwrap();
-    for profile in [".profile", ".bash_profile", ".zprofile"] {
-        std::fs::write(account_home.join(profile), "export PATH=/bin:/usr/bin\nexport LANG=C\nexport CAPTURE_TOKEN=CAPTURE_SECRET_CANARY\n").unwrap();
+    if matches!(journey, PermissionsJourney::LoginShellCapture) {
+        for profile in [".profile", ".bash_profile", ".zprofile"] {
+            std::fs::write(account_home.join(profile), "export PATH=/bin:/usr/bin\nexport LANG=C\nexport CAPTURE_TOKEN=CAPTURE_SECRET_CANARY\n").unwrap();
+        }
     }
     let account = account_home.join(".local/state/arany");
     super::isolation::remember_workspace_trust(&account, &workspace, &workspace);
     let state = temp.path().join("state");
-    let root = StateRoot::admit(&state).unwrap();
-    root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"1ae964a6a4911a76405b9484671bd5f5c24650a712f4c6c829698c8ad9128c2b"}"#).unwrap();
+    if matches!(journey, PermissionsJourney::LoginShellCapture) {
+        let root = StateRoot::admit(&state).unwrap();
+        root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"1ae964a6a4911a76405b9484671bd5f5c24650a712f4c6c829698c8ad9128c2b"}"#).unwrap();
+    }
     let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
     let mut command = super::isolation::isolated_script(temp.path());
     command
@@ -1808,46 +1836,50 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "composer",
         &shows("Ask a question, or type / for commands"),
     );
-    assert!(
-        super::session_picker::screen_rows(&transcript, 80, 24)
-            .join(" ")
-            .contains("Process PATH differs from the pinned")
-    );
-    input.write_all(b"/permissions\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "area menu",
-        &shows("Network domains"),
-    );
-    assert!(!file.exists());
-    input.write_all(b"\x1b[B\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "host rules first-save policy warning",
-        &shows("which also governs other Tools."),
-    );
-    assert!(super::session_picker::screen_contains(
-        &transcript,
-        80,
-        24,
-        "The first save creates permissions.json with the default mode,"
-    ));
-    input.write_all(b"\x1b").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "host rules first-save cancellation",
-        &shows("Host command rules unchanged"),
-    );
-    assert!(!file.exists());
+    if matches!(journey, PermissionsJourney::LoginShellCapture) {
+        assert!(
+            super::session_picker::screen_rows(&transcript, 80, 24)
+                .join(" ")
+                .contains("Process PATH differs from the pinned")
+        );
+    }
+    if matches!(journey, PermissionsJourney::TypedRules) {
+        input.write_all(b"/permissions\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "area menu",
+            &shows("Network domains"),
+        );
+        assert!(!file.exists());
+        input.write_all(b"\x1b[B\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "host rules first-save policy warning",
+            &shows("which also governs other Tools."),
+        );
+        assert!(super::session_picker::screen_contains(
+            &transcript,
+            80,
+            24,
+            "The first save creates permissions.json with the default mode,"
+        ));
+        input.write_all(b"\x1b").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "host rules first-save cancellation",
+            &shows("Host command rules unchanged"),
+        );
+        assert!(!file.exists());
+    }
     input.write_all(b"/permissions\r").unwrap();
     until(
         &mut output,
@@ -1866,119 +1898,121 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "command environment page",
         &shows("Select a name from the Arany process"),
     );
-    macro_rules! review_capture {
-        () => {
-            loop {
-                until(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "capture approval review",
-                    &|screen| shows("Read all pages")(screen) || shows("Tab/Enter")(screen),
-                );
-                if shows("Tab/Enter")(&transcript) {
-                    break;
+    if matches!(journey, PermissionsJourney::LoginShellCapture) {
+        macro_rules! review_capture {
+            () => {
+                loop {
+                    until(
+                        &mut output,
+                        &mut input,
+                        &mut transcript,
+                        &mut answered,
+                        "capture approval review",
+                        &|screen| shows("Read all pages")(screen) || shows("Tab/Enter")(screen),
+                    );
+                    if shows("Tab/Enter")(&transcript) {
+                        break;
+                    }
+                    let page = super::session_picker::screen_rows(&transcript, 80, 24)
+                        .into_iter()
+                        .find(|line| line.contains("PgDn/Enter"));
+                    input.write_all(b"\r").unwrap();
+                    until(
+                        &mut output,
+                        &mut input,
+                        &mut transcript,
+                        &mut answered,
+                        "next capture review page",
+                        &|screen| {
+                            shows("Tab/Enter")(screen)
+                                || (shows("Read all pages")(screen)
+                                    && super::session_picker::screen_rows(screen, 80, 24)
+                                        .into_iter()
+                                        .find(|line| line.contains("PgDn/Enter"))
+                                        != page)
+                        },
+                    );
                 }
-                let page = super::session_picker::screen_rows(&transcript, 80, 24)
-                    .into_iter()
-                    .find(|line| line.contains("PgDn/Enter"));
-                input.write_all(b"\r").unwrap();
-                until(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "next capture review page",
-                    &|screen| {
-                        shows("Tab/Enter")(screen)
-                            || (shows("Read all pages")(screen)
-                                && super::session_picker::screen_rows(screen, 80, 24)
-                                    .into_iter()
-                                    .find(|line| line.contains("PgDn/Enter"))
-                                    != page)
-                    },
-                );
-            }
-        };
-    }
-    let environment_file = state.join("command-environment.json");
-    let previous = std::fs::read(&environment_file).unwrap();
-    input.write_all(b"\x1b[B\r").unwrap();
-    review_capture!();
-    input.write_all(b"\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "capture declined",
-        &shows("Login-shell capture declined"),
-    );
-    assert_eq!(std::fs::read(&environment_file).unwrap(), previous);
-    input.write_all(b"/permissions\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "capture area",
-        &shows("Network domains"),
-    );
-    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "capture page",
-        &shows("Select a name from the Arany process"),
-    );
-    input.write_all(b"\x1b[B\r").unwrap();
-    review_capture!();
-    input.write_all(b"\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "capture saved",
-        &shows("Login-shell environment captured"),
-    );
-    let captured_bytes = std::fs::read(&environment_file).unwrap();
-    let captured: serde_json::Value = serde_json::from_slice(&captured_bytes).unwrap();
-    assert_eq!(captured["source"], "login-shell");
-    assert_eq!(captured["path"], serde_json::json!(["/bin", "/usr/bin"]));
-    assert!(captured["shell"]["sha256"].as_str().is_some());
-    for bytes in [
-        &captured_bytes,
-        &transcript,
-        &std::fs::read(state.join("events.sqlite3")).unwrap(),
-    ] {
-        assert!(
-            !bytes
-                .windows(b"CAPTURE_SECRET_CANARY".len())
-                .any(|part| part == b"CAPTURE_SECRET_CANARY")
+            };
+        }
+        let environment_file = state.join("command-environment.json");
+        let previous = std::fs::read(&environment_file).unwrap();
+        input.write_all(b"\x1b[B\r").unwrap();
+        review_capture!();
+        input.write_all(b"\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "capture declined",
+            &shows("Login-shell capture declined"),
+        );
+        assert_eq!(std::fs::read(&environment_file).unwrap(), previous);
+        input.write_all(b"/permissions\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "capture area",
+            &shows("Network domains"),
+        );
+        input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "capture page",
+            &shows("Select a name from the Arany process"),
+        );
+        input.write_all(b"\x1b[B\r").unwrap();
+        review_capture!();
+        input.write_all(b"\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "capture saved",
+            &shows("Login-shell environment captured"),
+        );
+        let captured_bytes = std::fs::read(&environment_file).unwrap();
+        let captured: serde_json::Value = serde_json::from_slice(&captured_bytes).unwrap();
+        assert_eq!(captured["source"], "login-shell");
+        assert_eq!(captured["path"], serde_json::json!(["/bin", "/usr/bin"]));
+        assert!(captured["shell"]["sha256"].as_str().is_some());
+        for bytes in [
+            &captured_bytes,
+            &transcript,
+            &std::fs::read(state.join("events.sqlite3")).unwrap(),
+        ] {
+            assert!(
+                !bytes
+                    .windows(b"CAPTURE_SECRET_CANARY".len())
+                    .any(|part| part == b"CAPTURE_SECRET_CANARY")
+            );
+        }
+        input.write_all(b"/permissions\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "environment cancellation area",
+            &shows("Network domains"),
+        );
+        input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "command environment page",
+            &shows("Select a name from the Arany process"),
         );
     }
-    input.write_all(b"/permissions\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "environment cancellation area",
-        &shows("Network domains"),
-    );
-    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "command environment page",
-        &shows("Select a name from the Arany process"),
-    );
     input.write_all(b"\x1b").unwrap();
     until(
         &mut output,
@@ -1988,201 +2022,203 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "command environment cancellation",
         &shows("Command environment unchanged"),
     );
-    input.write_all(b"/permissions\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "typed area menu",
-        &shows("Network domains"),
-    );
-    input.write_all(b"\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "rules list with the settings creation note",
-        &shows("creates permissions.json"),
-    );
-    input.write_all(b"\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "verb menu",
-        &shows("gh pr create (host; human approval required)"),
-    );
-    assert!(super::session_picker::screen_contains(
-        &transcript,
-        80,
-        24,
-        "host; human approval required"
-    ));
-    input.write_all(b"\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "decision menu",
-        &shows("Rule decision"),
-    );
-    input.write_all(b"\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "scope menu",
-        &shows("Rule scope"),
-    );
-    input.write_all(b"\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "saved rule",
-        &|_| file.exists(),
-    );
-    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    assert_eq!(value["permissions"]["defaultMode"], "default");
-    assert_eq!(
-        value["permissions"]["typedPrefixes"][0]["prefix"],
-        serde_json::json!(["git", "commit"])
-    );
-    assert_eq!(
-        value["permissions"]["typedPrefixes"][0]["decision"],
-        "allow"
-    );
-    assert_eq!(
-        value["permissions"]["typedPrefixes"][0]["workspace"]["path"],
-        workspace.to_str().unwrap()
-    );
-    assert_eq!(
-        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "listed rule",
-        &shows("allow git commit"),
-    );
-    input.write_all(b"\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "rule menu",
-        &shows("Remove rule"),
-    );
-    // Change the decision to ask before removing the rule.
-    input.write_all(b"\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "changed rule",
-        &|_| {
-            std::fs::read_to_string(&file)
-                .unwrap()
-                .contains(r#""decision":"ask""#)
-        },
-    );
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "listed changed rule",
-        &shows("ask git commit"),
-    );
-    input.write_all(b"\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "second rule menu",
-        &shows("Remove rule"),
-    );
-    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "removed rule",
-        &|_| {
-            !std::fs::read_to_string(&file)
-                .unwrap()
-                .contains("typedPrefixes")
-        },
-    );
-    input.write_all(b"\x1b").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "saved notice",
-        &shows("Typed Git rules saved"),
-    );
-    let before_host_editor = std::fs::read(&file).unwrap();
-    input.write_all(b"/permissions\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "host area menu",
-        &shows("Network domains"),
-    );
-    input.write_all(b"\x1b[B\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "host rules editor",
-        &shows("Add from a recent eligible host command"),
-    );
-    input.write_all(b"\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "recent host command picker",
-        &shows("No command runs here"),
-    );
-    input.write_all(b"\x1b").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "host rules return",
-        &shows("Add from a recent eligible host command"),
-    );
-    input.write_all(b"\x1b").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "host rules notice",
-        &shows("Host command rules unchanged"),
-    );
-    assert_eq!(std::fs::read(&file).unwrap(), before_host_editor);
+    if matches!(journey, PermissionsJourney::TypedRules) {
+        input.write_all(b"/permissions\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "typed area menu",
+            &shows("Network domains"),
+        );
+        input.write_all(b"\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "rules list with the settings creation note",
+            &shows("creates permissions.json"),
+        );
+        input.write_all(b"\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "verb menu",
+            &shows("gh pr create (host; human approval required)"),
+        );
+        assert!(super::session_picker::screen_contains(
+            &transcript,
+            80,
+            24,
+            "host; human approval required"
+        ));
+        input.write_all(b"\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "decision menu",
+            &shows("Rule decision"),
+        );
+        input.write_all(b"\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "scope menu",
+            &shows("Rule scope"),
+        );
+        input.write_all(b"\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "saved rule",
+            &|_| file.exists(),
+        );
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(value["permissions"]["defaultMode"], "default");
+        assert_eq!(
+            value["permissions"]["typedPrefixes"][0]["prefix"],
+            serde_json::json!(["git", "commit"])
+        );
+        assert_eq!(
+            value["permissions"]["typedPrefixes"][0]["decision"],
+            "allow"
+        );
+        assert_eq!(
+            value["permissions"]["typedPrefixes"][0]["workspace"]["path"],
+            workspace.to_str().unwrap()
+        );
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "listed rule",
+            &shows("allow git commit"),
+        );
+        input.write_all(b"\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "rule menu",
+            &shows("Remove rule"),
+        );
+        // Change the decision to ask before removing the rule.
+        input.write_all(b"\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "changed rule",
+            &|_| {
+                std::fs::read_to_string(&file)
+                    .unwrap()
+                    .contains(r#""decision":"ask""#)
+            },
+        );
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "listed changed rule",
+            &shows("ask git commit"),
+        );
+        input.write_all(b"\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "second rule menu",
+            &shows("Remove rule"),
+        );
+        input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "removed rule",
+            &|_| {
+                !std::fs::read_to_string(&file)
+                    .unwrap()
+                    .contains("typedPrefixes")
+            },
+        );
+        input.write_all(b"\x1b").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "saved notice",
+            &shows("Typed Git rules saved"),
+        );
+        let before_host_editor = std::fs::read(&file).unwrap();
+        input.write_all(b"/permissions\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "host area menu",
+            &shows("Network domains"),
+        );
+        input.write_all(b"\x1b[B\x1b[B\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "host rules editor",
+            &shows("Add from a recent eligible host command"),
+        );
+        input.write_all(b"\r").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "recent host command picker",
+            &shows("No command runs here"),
+        );
+        input.write_all(b"\x1b").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "host rules return",
+            &shows("Add from a recent eligible host command"),
+        );
+        input.write_all(b"\x1b").unwrap();
+        until(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            "host rules notice",
+            &shows("Host command rules unchanged"),
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), before_host_editor);
+    }
     input.write_all(b"\x03").unwrap();
     until(
         &mut output,
@@ -2203,11 +2239,13 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         thread::yield_now();
     };
     assert!(status.success());
-    let reopened = arany::StateRoot::open_existing(&state).unwrap();
-    assert!(
-        arany::permissions::PermissionSettings::load(&reopened, &workspace)
-            .unwrap()
-            .typed_prefixes()
-            .is_empty()
-    );
+    if matches!(journey, PermissionsJourney::TypedRules) {
+        let reopened = arany::StateRoot::open_existing(&state).unwrap();
+        assert!(
+            arany::permissions::PermissionSettings::load(&reopened, &workspace)
+                .unwrap()
+                .typed_prefixes()
+                .is_empty()
+        );
+    }
 }
