@@ -59,7 +59,7 @@ fn headers_at(headers: &HeaderMap, slot: &RateLimitSlot, clock: impl FnOnce() ->
                 ApiLimitDimension::ProjectTokens,
             ]
             .into_iter()
-            .zip(fields.chunks_exact(3))
+            .zip(fields.as_chunks::<3>().0)
             {
                 if values.iter().all(|value| *value == Ok(None)) {
                     continue;
