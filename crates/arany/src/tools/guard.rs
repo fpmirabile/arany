@@ -2248,10 +2248,6 @@ pub(super) fn payload(
                 .env("CARGO_NET_OFFLINE", "true")
                 .env("CARGO_BUILD_JOBS", limits.build_jobs.to_string());
         }
-        // Cargo's libcurl otherwise initializes LibreSSL, which reads /private/etc/ssl and fails under Seatbelt.
-        if cfg!(target_os = "macos") {
-            command.env("CURL_SSL_BACKEND", "Secure-Transport");
-        }
     }
     if cfg!(target_os = "macos")
         && let Some(sdk) = runtime_grants
