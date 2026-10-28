@@ -2987,6 +2987,10 @@ impl RunLoop<'_> {
                             .is_ok_and(|g| g.allows(&request.call))
                     } else {
                         request.call.is_child_research()
+                            && (!request.call.is_web()
+                                || self.controls.tools.is_some_and(|runtime| {
+                                    runtime.allows_research_web(&request.call)
+                                }))
                             && child
                                 .definition
                                 .as_ref()

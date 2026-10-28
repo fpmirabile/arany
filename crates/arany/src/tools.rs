@@ -24,10 +24,15 @@ pub use guard::recover_build_cache;
 pub(crate) use guard::transfer::{recover_private, transfer_time};
 mod mcp;
 mod network;
+mod web;
 pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
 pub(crate) use network::{
     MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, NETWORK_IDLE_MS,
+};
+pub(crate) use web::{
+    MAX_QUERY_BYTES, MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES,
+    WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
 };
 mod output;
 pub(crate) mod spill;
@@ -1346,13 +1351,10 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.guard_available && self.config.git_available() {
-                let write = self.config.write
-                    && (self.git_writes_available || guard::git_branch_creation_available());
+                let write = self.config.write && self.git_writes_available;
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
-                        "git_commit" => self.git_writes_available || cfg!(target_os = "macos"),
-                        "git_switch" => self.git_writes_available,
                         "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
                             .is_some_and(|auth| auth.offers(name)),
                         "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
@@ -1376,6 +1378,13 @@ impl ToolRuntime {
                 "allow": network.allow,
                 "deny": network.deny,
                 "contract": catalog::NETWORK_CONTRACT,
+            });
+        }
+        if self.guard_available && cfg!(target_os = "linux") {
+            catalog["web"] = serde_json::json!({
+                "web_fetch": true,
+                "web_search": self.config.web_search.is_some(),
+                "contract": catalog::WEB_CONTRACT,
             });
         }
         let context = ToolContext::new(catalog);
@@ -1402,7 +1411,7 @@ impl ToolRuntime {
                     },
                     read_paths: self.config.workspace_paths.clone(),
                     write_paths: self.config.workspace_paths.clone(),
-                    tools: vec![
+                    tools: [
                         WorkerTool::List,
                         WorkerTool::Read,
                         WorkerTool::Search,
@@ -1416,7 +1425,10 @@ impl ToolRuntime {
                         WorkerTool::Skill,
                         WorkerTool::McpList,
                         WorkerTool::Command,
-                    ],
+                    ]
+                    .into_iter()
+                    .chain(self.config.worker_web_tools())
+                    .collect(),
                     skills: self.config.skills.iter().map(|s| s.name.clone()).collect(),
                     mcp_servers: self
                         .config
@@ -1447,6 +1459,7 @@ impl ToolRuntime {
         let mut context = self.research_context(remaining)?;
         let mut catalog: serde_json::Value =
             serde_json::from_str(context.catalog()).map_err(|_| ToolError::Configuration)?;
+        catalog.as_object_mut().expect("catalog").remove("web");
         catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
         catalog["write"] = serde_json::json!(self.guard_available);
         catalog["skills"] = serde_json::json!([]);
@@ -1480,7 +1493,7 @@ impl ToolRuntime {
         &self,
         tool_calls_remaining: usize,
     ) -> Result<ToolContext, ToolError> {
-        let catalog = serde_json::json!({
+        let mut catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
@@ -1490,6 +1503,13 @@ impl ToolRuntime {
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
             "tool_calls_remaining": tool_calls_remaining,
         });
+        if self.config.child_web && self.guard_available && cfg!(target_os = "linux") {
+            catalog["web"] = serde_json::json!({
+                "web_fetch": self.config.network.is_some(),
+                "web_search": self.config.web_search.is_some(),
+                "contract": catalog::WEB_CONTRACT,
+            });
+        }
         let context = ToolContext::new(catalog);
         if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
@@ -1897,6 +1917,8 @@ impl ToolRuntime {
                     FileReceipt::enforcement_digest()
                 } else if intent.call.is_process() {
                     self.build_jobs_digest(intent)?
+                } else if intent.call.facts().family == catalog::Family::Web {
+                    self.web_digest(intent)?
                 } else {
                     self.enforcement_digest
                 }

@@ -150,3 +150,52 @@ cargo test -p arany --lib --release --locked --offline tools::read_tests::in_pro
 Cold disk, long history, large snapshots, concurrent load, live Provider latency
 and macOS latency are outside this corpus. Linux measurements cannot establish
 those claims.
+
+## Git write rows
+
+The Git corpora emit separate `Git write latency ` JSON lines. These are single
+diagnostic samples, without warm-ups, percentiles, objectives or timing assertions;
+they do not join the four-row Linux report above. Retain the complete successful
+test output with the exact revision, toolchain, OS, debug/release profile, device
+and load. A partial or failed journey is invalid evidence, even if it printed a row.
+
+On macOS the existing branch, commit and switch journeys emit six rows: one
+branch creation, paths and staged commits, a switch, its same-branch no-op and
+the return switch. They use the same opt-in receipt-to-durable-commit recorder
+described above. The interval includes both unit envelopes, view preparation,
+Git, bounded frame relay, executor teardown, publication and publisher cleanup;
+the no-op row still traverses both units. It also includes the fixture's immediate
+one-use approval response, with no human interaction or Provider inference.
+Each sample is matched to its single Tool and audited against Events reopened
+after Engine closure, beside the existing receipt, unchanged staging and
+replay assertions. Unit/volume cleanup is checked outside the timed interval too.
+The recorder classifies these calls as `Other`; the Git row checks the successful
+disposition and durable endpoint explicitly and never uses the Read/Edit target
+or percentile classifier. No new process, fixture, retry or storage budget is added.
+
+Owner-run capture on macOS: select exactly these three parent tests individually
+with `--exact --nocapture` in both debug and release, so the forwarded rows are
+printed rather than captured by the broad CI suites:
+
+```text
+tools_git::guarded_native_git_branch_creation_publishes_through_two_units_and_replays
+tools_git::guarded_native_git_commit_publishes_through_two_units_and_replays
+tools_git::guarded_native_git_switch_publishes_through_two_units_and_replays
+```
+
+Each selection must complete one parent and its existing supervised helper.
+Release uses CI's disposable account; a debug account override is never release
+evidence. These rows measure the small journey fixtures, not the maximum switch.
+
+On Linux, `tools::git::write::frame::tests::largest_switch_and_long_paths_fit_the_derived_frame_bound`
+adds a `largest_switch_frame` row to its existing boundary scenario. It measures
+only the framed write/read round-trip, including encoding, chunk hashing,
+verification and decoding, with the maximum index, aggregate replacement bytes,
+file count, ref count and admitted path lengths. Fixture construction and the
+extra equality digests stay outside the interval. Its existing round-trip and
+overflow assertions remain authoritative; the production Linux path continues
+through this codec. Run exactly that one library test with `--release --exact --nocapture`
+(owner-run, not a CI lane). The reported sizes derive from the owning constants.
+This codec row does not measure Git execution or filesystem publication and
+cannot be compared to the macOS receipt-to-commit rows. Real-device approval and
+Seatbelt observations remain in [NEXT_STEPS item 5](../../../../NEXT_STEPS.md#daily-use-first).

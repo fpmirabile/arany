@@ -1305,7 +1305,10 @@ printf cache-changed
                 assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
             }
         } else {
-            let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+            let result: serde_json::Value = serde_json::from_str(&observation.output)
+                .unwrap_or_else(|error| {
+                    panic!("{case}: {error}; Cargo output: {}", observation.output)
+                });
             assert_eq!(result["exit_code"] == 0, success, "{case}: {result}");
             if !success {
                 let fragments: &[&str] = match case {

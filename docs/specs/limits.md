@@ -69,6 +69,9 @@
 | <a id="command_path_metadata_bytes"></a>[`COMMAND_PATH_METADATA_BYTES`](#command_path_metadata_bytes) | 16777216 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_runtime_bytes"></a>[`MAX_RUNTIME_BYTES`](#max_runtime_bytes) | 100663296 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_runtime_grants"></a>[`MAX_RUNTIME_GRANTS`](#max_runtime_grants) | 23 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_user_program_grants"></a>[`MAX_USER_PROGRAM_GRANTS`](#max_user_program_grants) | 8 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_manager_shim_grants"></a>[`MAX_MANAGER_SHIM_GRANTS`](#max_manager_shim_grants) | 4 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_discovery_path_entries"></a>[`MAX_DISCOVERY_PATH_ENTRIES`](#max_discovery_path_entries) | 32 | entries | `crates/arany/src/tools/toolchains.rs` |
 | <a id="scratch_bytes"></a>[`SCRATCH_BYTES`](#scratch_bytes) | 67108864 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="memory_bytes"></a>[`MEMORY_BYTES`](#memory_bytes) | 536870912 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_processes_or_threads"></a>[`MAX_PROCESSES_OR_THREADS`](#max_processes_or_threads) | 64 | processes or threads | `crates/arany/src/tools/types.rs` |
@@ -87,6 +90,13 @@
 | <a id="max_network_connections"></a>[`MAX_NETWORK_CONNECTIONS`](#max_network_connections) | 64 | connections | `crates/arany/src/tools/network.rs` |
 | <a id="max_network_bytes"></a>[`MAX_NETWORK_BYTES`](#max_network_bytes) | 33554432 | bytes per direction | `crates/arany/src/tools/network.rs` |
 | <a id="network_idle_ms"></a>[`NETWORK_IDLE_MS`](#network_idle_ms) | 120000 | ms | `crates/arany/src/tools/network.rs` |
+| <a id="web_fetch_chars"></a>[`WEB_FETCH_CHARS`](#web_fetch_chars) | 100000 | characters | `crates/arany/src/tools/web.rs` |
+| <a id="web_download_bytes"></a>[`WEB_DOWNLOAD_BYTES`](#web_download_bytes) | 2097152 | bytes | `crates/arany/src/tools/web.rs` |
+| <a id="web_search_results"></a>[`WEB_SEARCH_RESULTS`](#web_search_results) | 8 | results | `crates/arany/src/tools/web.rs` |
+| <a id="max_session_searches"></a>[`MAX_SESSION_SEARCHES`](#max_session_searches) | 200 | web_search calls per Session | `crates/arany/src/tools/web.rs` |
+| <a id="max_url_bytes"></a>[`MAX_URL_BYTES`](#max_url_bytes) | 2048 | bytes | `crates/arany/src/tools/web.rs` |
+| <a id="max_query_bytes"></a>[`MAX_QUERY_BYTES`](#max_query_bytes) | 512 | bytes | `crates/arany/src/tools/web.rs` |
+| <a id="max_search_field_chars"></a>[`MAX_SEARCH_FIELD_CHARS`](#max_search_field_chars) | 512 | characters per search result field | `crates/arany/src/tools/web.rs` |
 | <a id="max_markdown_parse_bytes"></a>[`MAX_MARKDOWN_PARSE_BYTES`](#max_markdown_parse_bytes) | 32768 | bytes | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_depth"></a>[`MAX_MARKDOWN_DEPTH`](#max_markdown_depth) | 32 | containers | `crates/arany-cli/src/terminal/markdown.rs` |
 | <a id="max_markdown_events"></a>[`MAX_MARKDOWN_EVENTS`](#max_markdown_events) | 65536 | events | `crates/arany-cli/src/terminal/markdown.rs` |

@@ -75,7 +75,7 @@ const FIXTURES: [Fixture<'static>; 22] = [
     (RecordKind::ProviderRouting, 1, ROUTING, ROUTING_V2),
     (RecordKind::ProviderRouting, 2, ROUTING_V2, ROUTING_V2),
 ];
-const COMMAND_ENVIRONMENT: &str = r#"{"version":1,"source":"process","captured_at":0,"path":[],"names":[],"excluded":[],"sha256":"e1b7f73a68b4cc8e60c4ed7be316f7b4e241133a883f4766487033e267e3ff83"}"#;
+const COMMAND_ENVIRONMENT: &str = r#"{"version":1,"source":"process","captured_at":0,"path":[],"names":[],"excluded":[],"sha256":"5fb8d18f216b305631b7e04584e2db972974baaa85b6448a9120c4e899730833"}"#;
 const PROFILES: &str = r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const PROFILES_V2: &str = r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
 const UI_V3: &str = r#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;

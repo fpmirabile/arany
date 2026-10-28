@@ -48,7 +48,6 @@ pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
 };
-#[cfg(target_os = "linux")]
 pub(crate) use custom::resolve_admitted;
 pub use custom::{
     CustomCheckStatus, CustomProfile, CustomProfileCheck, CustomProfileDraft, CustomProfileError,
@@ -192,7 +191,7 @@ impl ProviderRecord {
     }
 }
 
-fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
+pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
         .no_proxy()

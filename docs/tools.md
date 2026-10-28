@@ -25,7 +25,7 @@ Follow the [executable and input pin format](./specs/tools.md#commands). Pin res
 
 ## Network access
 
-Commands are offline unless `tools.json` has a [`network` grant](./specs/tools.md#network-grants-and-egress-proxy) (Linux only). Commands then reach the listed HTTPS domains through a Guard proxy; `cargo` and `npm` honor the preset proxy variables, and a tool that ignores them cannot connect. Refused connections appear in the command result. Add a refused domain in `/permissions` > Network domains; it applies from the next Run. Allowed hosts can still receive any data a command sends them.
+Commands are offline unless `tools.json` has a [`network` grant](./specs/tools.md#network-grants-and-egress-proxy). Commands then reach the listed HTTPS domains through a Guard proxy; `cargo` and `npm` honor the preset proxy variables, and a tool that ignores them cannot connect. Refused connections appear in the command result. Add a refused domain in `/permissions` > Network domains; it applies from the next Run. Allowed hosts can still receive any data a command sends them.
 
 ## Portable Skills
 
@@ -85,3 +85,7 @@ association or authorize deletion.
    secure media erasure.
 
 Remaining host cleanup is tracked in [next steps](../NEXT_STEPS.md#account-recovery-and-native-guard-follow-ups).
+
+## Web fetch and search
+
+The model may call `web_fetch` for one URL: a host on the [`network` grant](./specs/tools.md#network-grants-and-egress-proxy) runs directly and any other host asks you to approve it for that call. It returns text (HTML is reduced to text, never executed), cut at [`WEB_FETCH_CHARS`](./specs/limits.md#web_fetch_chars) characters and marked when cut. Redirects are refused. To add `web_search`, put `"web_search": {"endpoint": "https://api.search.brave.com/res/v1/web/search", "key": "ARANY_WEB_SEARCH_KEY"}` in `tools.json` and export that variable; it is read only when a search starts and is never stored. Both are Linux only and their results are untrusted data. To offer them to read-only researchers, set `"child_web": true`; researcher fetches remain inside the parent's listed domains and cannot request additional hosts. Details are in the [Tools contract](./specs/tools.md#web-fetch-and-web-search).

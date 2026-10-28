@@ -105,6 +105,12 @@ macro_rules! gh_pr_view_step {
     };
 }
 
+macro_rules! web_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_web_payload)
+    };
+}
+
 macro_rules! expiry_step {
     ($kind:literal, $from:literal) => {
         EventStep {
@@ -171,6 +177,15 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        web_step!("RunStarted", 25),
+        web_step!("AgentSpawned", 17),
+        web_step!("ToolProposed", 4),
+        web_step!("ToolStarted", 26),
+        web_step!("ToolFinished", 33),
+        web_step!("HookStarted", 15),
+        web_step!("HookFinished", 22),
+        web_step!("GoalPlanContractRecorded", 14),
+        web_step!("ProviderCallRecorded", 25),
         EventStep {
             kind: "ToolFinished",
             from: 32,

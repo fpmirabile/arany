@@ -164,6 +164,10 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
             path: path(),
             limit: 1,
         },
+        ToolCall::WebFetch {
+            url: "https://example.com/".into(),
+        },
+        ToolCall::WebSearch { query: "q".into() },
     ];
 
     let expected = [
@@ -196,6 +200,8 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
         ("PR view", "github.com/o/r", vec![]),
         ("Rewind publication", "", vec![]),
         ("Glob", "**/*.rs", vec!["src"]),
+        ("Fetch", "https://example.com/", vec![]),
+        ("Web search", "q", vec![]),
     ];
     assert_eq!(calls.len(), expected.len());
     let mut operations = std::collections::BTreeSet::new();
@@ -435,7 +441,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
             base: None,
             max_count: None,
         }),
-        super::guard::git_branch_creation_available()
+        super::guard::git_writes_available()
     );
     assert_eq!(
         config.allows(&ToolCall::GitCommit {
@@ -443,7 +449,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
             paths: vec![".".into()],
             staged: false,
         }),
-        super::guard::git_commit_available()
+        super::guard::git_writes_available()
     );
     assert_eq!(
         config.allows(&ToolCall::GitSwitch {
@@ -452,7 +458,6 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         super::guard::git_writes_available()
     );
     for git_writes in [false, true] {
-        let creation = git_writes || super::guard::git_branch_creation_available();
         let operations = if git_writes {
             vec![
                 "git_status",
@@ -462,25 +467,17 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
                 "git_branch",
                 "git_switch",
             ]
-        } else if cfg!(target_os = "macos") {
-            vec![
-                "git_status",
-                "git_diff",
-                "git_log",
-                "git_commit",
-                "git_branch",
-            ]
         } else {
             vec!["git_status", "git_diff", "git_log", "git_branch"]
         };
         let catalog = catalog(config.clone(), git_writes);
-        assert_eq!(catalog["git"]["write"], creation);
+        assert_eq!(catalog["git"]["write"], git_writes);
         assert_eq!(catalog["git"]["operations"], json!(operations));
         let branch = catalog_call_schemas(&catalog)
             .into_iter()
             .find(|call| call["properties"]["operation"]["enum"][0] == "git_branch")
             .unwrap();
-        let expected = if creation {
+        let expected = if git_writes {
             json!(["string", "null"])
         } else {
             json!("null")
