@@ -270,6 +270,8 @@ fn proposal_pre_hook_events(
             handler: 0,
             subject_digest: intent.digest(),
             intent: hook_intent.clone(),
+            command_subject: None,
+            command_tool: None,
             input_digest: [9; 32],
         },
     });

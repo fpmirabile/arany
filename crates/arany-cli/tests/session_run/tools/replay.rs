@@ -31,6 +31,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     const INTEGRATED_NEXT_CALL_RESERVED: usize = TOOL_STARTED + 4;
     let policy = arany::ToolPolicyReceipt {
         host_epoch: None,
+        command_tools_digest: None,
         host_prefixes: Vec::new(),
         permissions_digest: None,
         contract_version: 1,
@@ -78,6 +79,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     };
     let intent = arany::EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),

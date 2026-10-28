@@ -55,7 +55,10 @@ fn hook_start_preserves_event_specific_cancellation() {
         (true, true, false, true, PostToolUse, true),
     ];
     for (stops, cancelled, exhausted, parent_cancelled, event, starts) in rows {
+        let intent_id = uuid::Uuid::now_v7();
         let run = || HookRun {
+            intent_id,
+            disposition: ToolDisposition::Succeeded,
             result: HookResult::Passed,
             stops,
             cancelled,

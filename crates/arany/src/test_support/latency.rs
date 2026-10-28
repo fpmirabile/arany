@@ -531,6 +531,7 @@ mod tests {
         let (session, run, agent) = (SessionId::new(), RunId::new(), AgentRunId::new());
         let reads = ["src/main.rs", "src/lib.rs"].map(|path| crate::EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),

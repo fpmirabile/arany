@@ -179,9 +179,9 @@ Persist only SQLite schema 7, compaction compiler version 3 and one current payl
 
 | Event kind | Current payload version |
 |---|---|
-| `RunStarted` | 26; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 34 |
-| `ToolStarted` | 27; required nullable `verdict`, with the configured or host permission verdict before dispatch |
+| `RunStarted` | 27; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
+| `ToolFinished` | 35 |
+| `ToolStarted` | 28; required nullable `verdict`, with the configured or host permission verdict before dispatch |
 | `ToolActiveTimeReserved` | 1 |
 | `AgentSpawned` | 18 |
 | `AgentFinished` | 12 |
@@ -189,20 +189,21 @@ Persist only SQLite schema 7, compaction compiler version 3 and one current payl
 | `RunFinished` | 9 |
 | `ProviderSetupEditStarted` | 3 |
 | `ProviderSetupEditFinished` | 1 |
+| `CommandToolProbeStarted`, `CommandToolProbeFinished` | 1; idle, intent-bound Guard probe and outcome; [Command tools](./tools.md#hook-execution) owns confirmation and interruption |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalPlanContractRecorded` | 15 |
 | `GoalStarted` | 8 |
 | `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
 | `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolProposed` | 5 |
+| `ToolProposed` | 6 |
 | `ToolPreflightRefused` | 1 |
 | `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerStopObserved`, `WorkerVerificationRecorded` | 1 |
 | `WorkspaceRewindStarted` | 2; no preview expiry |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded`, `HostEnvironmentCapture` | 1 |
 | `SupervisorVerdictRecorded` | 2 |
 | `WorkerLeaseReleased` | 2 |
-| `HookStarted` | 16 |
-| `HookFinished` | 23 |
+| `HookStarted` | 17 |
+| `HookFinished` | 24 |
 | All other supported Event kinds | 6 |
 
 An additive optional field omitted at its default keeps the payload version without a migration step: existing records keep their bytes and digests, and an older binary rejects a record carrying a non-default value as incompatible history. A field that changes an existing record's meaning or bytes needs a version bump and migration. A new enum variant (a Tool call, worker Tool label, network class, receipt or target kind) is not additive: each enclosing kind advances one version with an identity step that refuses a source row already naming the variant. Fields using the additive rule include Goal resource settings and `ToolLimits.build_jobs` (historical default **1**; missing jobs never mean current cores, new Goal admission records resolved jobs with null meaning Build unavailable, and replay reads neither cores nor preferences), Search's `regex`, `include`, `case_sensitive`, `offset` and `limit`, `CompactionRecord.recent_files` (omitted when empty; at most eight `{path, digest}` entries within 4 KiB<!-- unrelated-bound: compaction recent-file metadata --> serialized), the command `prefix_rule`, the host-prefix policy snapshot, `ToolFinished.spill`, `rate_limits` and `ToolCall::GitBranch` `scope`, `base` and `max_count`.
@@ -291,6 +292,8 @@ The lifecycle has a 240-second ceiling; requests end at least five seconds earli
 ### Journal migration
 
 Only the current format runs. Older history upgrades through registered migration steps or is archived; runtime decoders and the reducer never read an older format.
+
+Command-tool identity migrations for `RunStarted`, `ToolProposed`, `ToolStarted`, `ToolFinished`, `HookStarted` and `HookFinished` preserve existing web facts and refuse source rows already carrying command-tool pins, subjects, record digests or rewrite facts.
 
 The floors are SQLite schema 4 and, per Event kind, the payload version shipped with schema 5, except `ToolStarted` (floor 23) and kinds added later (floor 1). Every version above its floor has a registered step and canonical fixture for each adjacent edge ([AGENTS rule 5](../../AGENTS.md#global-rules)). A step adds a field only with a value the old payload proves, or explicit null where the old payload recorded nothing (unknown approval cause, timing, budget refusal, include paths, instruction file name); otherwise it refuses. A step refuses a source row that already names its new field or variant. Migration never adds authority, grants or trust, never invents an Event or effect, and turns a pending intent into interrupted history rather than a live approval. A migrated null `GoalStarted.include_paths` refuses new continuation of that Goal ([Goals](./goals.md#lifecycle-budgets-and-recovery)). Converted command results are refitted within their pinned result budget with explicit omission markers, keeping totals, exit status, changesets and hook verdicts; a result that cannot fit refuses. Schema steps clear derived Provider evidence that no journaled check or catalog metadata proves, without fabricating check Events.
 

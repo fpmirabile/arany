@@ -17,6 +17,7 @@ fn matches_success<'a>(
 fn observation(call: ToolCall, disposition: ToolDisposition, output: String) -> ToolObservation {
     let intent = EffectIntent {
         host: None,
+        rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),

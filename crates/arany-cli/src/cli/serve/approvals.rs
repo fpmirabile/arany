@@ -345,6 +345,7 @@ mod tests {
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),

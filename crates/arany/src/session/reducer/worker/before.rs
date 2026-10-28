@@ -388,6 +388,8 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::ContextCompacted { .. }
         | Event::SessionRenamed { .. }
         | Event::HostEnvironmentCapture { .. }
+        | Event::CommandToolProbeStarted { .. }
+        | Event::CommandToolProbeFinished { .. }
         | Event::ProviderSetupEditStarted { .. }
         | Event::ProviderSetupEditFinished { .. }
         | Event::GoalStarted { .. }

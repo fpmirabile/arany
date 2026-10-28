@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 mod command_environment;
+mod command_tools;
 mod compaction;
 mod hints;
 mod ledger;
