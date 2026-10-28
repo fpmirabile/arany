@@ -1843,9 +1843,6 @@ impl Engine {
         leases: &mut SubmissionLeases,
     ) -> Result<AdmittedTurn, EngineError> {
         self.validate_request(request)?;
-        if submission.tools.is_some() && identity.custom_provenance().is_some() {
-            return Err(EngineError::InvalidRequest);
-        }
         if identity.custom_provenance().is_some() && !request.images.is_empty() {
             return Err(EngineError::ImagesNotAdmitted);
         }
@@ -2439,15 +2436,6 @@ fn validate_turn_providers(
         })
     {
         return Err(EngineError::IncompatibleProviderChain);
-    }
-    if submission.tools.is_some()
-        && providers.agent_chains().iter().any(|chain| {
-            chain
-                .iter()
-                .any(|candidate| candidate.identity().custom_provenance().is_some())
-        })
-    {
-        return Err(EngineError::InvalidRequest);
     }
     Ok(())
 }
