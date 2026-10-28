@@ -737,7 +737,7 @@ impl GoalLedger {
         EngineError,
     > {
         self.read(|goal, _| {
-            crate::session::events::requested_command_resources(
+            crate::session::requested_command_resources(
                 call,
                 goal.plan_contract.as_ref(),
                 goal.resource_settings,

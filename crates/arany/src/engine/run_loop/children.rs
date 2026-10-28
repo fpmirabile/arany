@@ -2982,7 +2982,7 @@ impl RunLoop<'_> {
             && child.turns_remaining > 0
             && requests.iter().all(|request| {
                 request.call.valid()
-                    && crate::session::events::requested_command_resources(
+                    && crate::session::requested_command_resources(
                         &request.call,
                         contract,
                         settings,

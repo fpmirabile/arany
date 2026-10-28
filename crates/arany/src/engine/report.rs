@@ -625,7 +625,7 @@ fn push_unresolved_tool_facts(
                 crate::tools::ToolDisposition::Limit => {
                     let timeout_limit = match call {
                         crate::tools::ToolCall::Command { .. } => {
-                            crate::session::events::requested_command_resources(
+                            crate::session::requested_command_resources(
                                 call,
                                 goal.plan_contract.as_ref(),
                                 goal.resource_settings,
