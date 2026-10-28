@@ -67,7 +67,8 @@ pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
             };
             if line.len() > MAX_FIXTURE_ANNOTATION_BYTES
                 || !message.is_ascii()
-                || !(message.starts_with(b"fixture=shipped_exec;")
+                || !(message.starts_with(b"fixture=isolated_child_panic;")
+                    || message.starts_with(b"fixture=shipped_exec;")
                     || message.starts_with(b"fixture=direct_cancellation;")
                     || message.starts_with(b"fixture=command_overlay;")
                     || message.starts_with(b"fixture=tool_group;")
@@ -779,6 +780,17 @@ mod tests {
             Ok("complete") => {}
             _ => panic!("bounded capture child requires its parent"),
         }
+    }
+
+    #[test]
+    fn native_fixture_relay_admits_only_listed_fixtures() {
+        let panic_annotation = b"::error title=Arany native fixture::fixture=isolated_child_panic; case=native_account_test; scenario=web; engine_error=x; cause=y\n";
+        assert!(super::relay_native_fixture_annotation(
+            panic_annotation,
+            b""
+        ));
+        let unknown = b"::error title=Arany native fixture::fixture=unlisted; case=x\n";
+        assert!(!super::relay_native_fixture_annotation(b"", unknown));
     }
 
     #[test]

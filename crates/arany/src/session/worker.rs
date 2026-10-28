@@ -14,6 +14,7 @@ pub const WORKER_CONTENT_BYTES: usize = 32 * 1024 * 1024;
 pub const WORKER_FILES: usize = 2048;
 pub(crate) const MAX_EDITOR_CONTINUATIONS: u8 = 3;
 pub(crate) const MAX_WORKER_EVIDENCE: usize = 8;
+const MAX_WORKER_TOOLS: usize = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +40,8 @@ pub enum WorkerTool {
     Skill,
     McpList,
     Command,
+    WebFetch,
+    WebSearch,
 }
 
 impl WorkerTool {
@@ -57,6 +60,8 @@ impl WorkerTool {
             Self::Skill => "skill",
             Self::McpList => "mcp_list",
             Self::Command => "command",
+            Self::WebFetch => "web_fetch",
+            Self::WebSearch => "web_search",
         }
     }
 
@@ -75,6 +80,8 @@ impl WorkerTool {
             ToolCall::Skill { .. } => Self::Skill,
             ToolCall::McpList { .. } => Self::McpList,
             ToolCall::Command { .. } => Self::Command,
+            ToolCall::WebFetch { .. } => Self::WebFetch,
+            ToolCall::WebSearch { .. } => Self::WebSearch,
             _ => return None,
         })
     }
@@ -105,7 +112,7 @@ impl WorkerGrant {
                 .all(|p| crate::validate::valid_relative(p, true))
             && (self.write_paths == ["."] || valid_leases(&self.write_paths))
             && !self.tools.is_empty()
-            && self.tools.len() <= 13
+            && self.tools.len() <= MAX_WORKER_TOOLS
             && self
                 .tools
                 .iter()
@@ -160,7 +167,13 @@ impl WorkerGrant {
         self.read_paths = request.lease.clone();
         self.write_paths = request.lease.clone();
         self.tools.retain(|tool| {
-            !matches!(tool, WorkerTool::Skill | WorkerTool::McpList) && allows_tool(*tool)
+            !matches!(
+                tool,
+                WorkerTool::Skill
+                    | WorkerTool::McpList
+                    | WorkerTool::WebFetch
+                    | WorkerTool::WebSearch
+            ) && allows_tool(*tool)
         });
         self.commands.retain(|c| {
             request.commands.contains(c)

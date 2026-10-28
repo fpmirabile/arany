@@ -6,7 +6,7 @@ pub(super) fn call_lines(call: &ToolCall) -> Vec<String> {
     match call.family() {
         Family::File => file(call),
         Family::Process => process(call),
-        Family::Skill => fallback(call),
+        Family::Skill | Family::Web => fallback(call),
         Family::Mcp => mcp(call),
         Family::Git => match call.site() {
             Site::Host => host(call),
