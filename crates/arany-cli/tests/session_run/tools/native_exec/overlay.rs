@@ -405,6 +405,8 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
         program: "bash".into(),
         args: vec!["-c".into(), script.into()],
         cwd: "".into(),
+        resource_class: None,
+        timeout_ms: None,
     }
 }
 

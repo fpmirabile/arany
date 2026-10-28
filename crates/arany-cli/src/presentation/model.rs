@@ -605,6 +605,8 @@ mod tests {
             program: "cargo".into(),
             args: vec!["check".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let guard = arany::GuardReceipt {
             contract_version: 1,

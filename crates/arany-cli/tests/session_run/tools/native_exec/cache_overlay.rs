@@ -76,6 +76,8 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
             program: "bash".into(),
             args: vec!["-c".into(), (*script).into()],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         })
         .collect::<Vec<_>>();
     let mut steps = calls
@@ -336,6 +338,8 @@ async fn completion_loss(class: arany::ToolResourceClass) {
             "mkdir -p /cache/target; printf discarded > /cache/target/partial".into(),
         ],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut steps = vec![crate::tool_outcome(command.clone())];
     add_build_plan(&mut steps, class, command.clone());

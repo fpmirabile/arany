@@ -87,6 +87,8 @@ async fn late_approval_keeps_file_and_executable_preconditions() {
                 program: "sh".into(),
                 args: vec!["-c".into(), "printf approved > notes/ran.txt".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             }
         };
         let provider = Arc::new(ScriptedProvider::new(vec![

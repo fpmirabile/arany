@@ -796,6 +796,8 @@ mod tests {
                 program: "cargo".into(),
                 args: vec!["git".into()],
                 cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
             r#"{"exit_code":128,"stderr":"fatal: not a git repository"}"#,
         );

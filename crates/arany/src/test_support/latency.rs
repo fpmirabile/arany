@@ -678,6 +678,8 @@ mod tests {
                 program: "noop".into(),
                 args: Vec::new(),
                 cwd: "src".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         ] {
             for disposition in [

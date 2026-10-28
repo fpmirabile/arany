@@ -727,6 +727,7 @@ impl GoalLedger {
 
     pub(super) fn requested_command_resources(
         &self,
+        call: &crate::tools::ToolCall,
     ) -> Result<
         (
             crate::tools::ToolResourceClass,
@@ -736,17 +737,20 @@ impl GoalLedger {
         EngineError,
     > {
         self.read(|goal, _| {
-            let contract = goal.plan_contract.as_ref();
-            (
-                contract.map_or(crate::tools::ToolResourceClass::Default, |plan| {
-                    plan.resource_class
-                }),
-                contract
-                    .and_then(|plan| plan.command_timeout_ms)
-                    .unwrap_or(goal.resource_settings.default_command_timeout_ms),
+            crate::session::requested_command_resources(
+                call,
+                goal.plan_contract.as_ref(),
                 goal.resource_settings,
             )
-        })
+            .map(|(class, timeout)| (class, timeout, goal.resource_settings))
+        })?
+        .map_err(|_| EngineError::InvalidHistory)
+    }
+
+    pub(super) fn resource_settings(
+        &self,
+    ) -> Result<crate::tools::ToolResourceSettings, EngineError> {
+        self.read(|goal, _| goal.resource_settings)
     }
 
     pub(super) fn command_timeout_limit(
@@ -756,7 +760,7 @@ impl GoalLedger {
         if !matches!(call, crate::tools::ToolCall::Command { .. }) {
             return Ok(None);
         }
-        let (_, requested, settings) = self.requested_command_resources()?;
+        let (_, requested, settings) = self.requested_command_resources(call)?;
         let maximum = settings.max_command_timeout_ms;
         Ok((requested > maximum).then_some((requested, maximum)))
     }

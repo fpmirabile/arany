@@ -69,7 +69,7 @@ pub use events::{
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
     MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS,
-    goal_finished_v7_payload, goal_finished_v7_to_v8, payload_version,
+    goal_finished_v7_payload, goal_finished_v7_to_v8, payload_version, requested_command_resources,
 };
 pub(crate) use events::{
     add_command_selection, add_selection_timing, expiring_intent_text, expiring_payload,

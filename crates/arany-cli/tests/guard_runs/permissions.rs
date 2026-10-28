@@ -39,6 +39,8 @@ fn call(kind: &str) -> arany::ToolCall {
             program: "sh".into(),
             args: vec!["-c".into(), "printf done".into()],
             cwd: "".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         "mcp" => arany::ToolCall::McpCall {
             server: "server".into(),

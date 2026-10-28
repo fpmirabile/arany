@@ -501,6 +501,8 @@ pub fn uncertain_hook_fixture() -> crate::ToolView {
         program: "sh".into(),
         args: Vec::new(),
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     observation.disposition = crate::ToolDisposition::Uncertain;
     observation.cache_update = crate::CacheUpdate::NotAttempted;
