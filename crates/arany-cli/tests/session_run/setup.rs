@@ -1737,18 +1737,6 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         } else {
             PathBuf::from("/arany")
         };
-        let defaults = if replaced {
-            let account_id = prepare_selected_chatgpt_account_at(&account_path);
-            SessionDefaults {
-                provider: Some("chatgpt".into()),
-                model: Some("gpt-6.1-sol".into()),
-                effort: Some(arany::Effort::Low),
-                account_id: Some(account_id),
-                policy: Default::default(),
-            }
-        } else {
-            defaults.clone()
-        };
         runtime
             .block_on(set_session_defaults(
                 StateRoot::open_existing(&state).expect("resume State"),
