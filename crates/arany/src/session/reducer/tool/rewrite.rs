@@ -71,10 +71,10 @@ fn subject_admitted(run: &RunView, hook: &crate::tools::permissions::HookInvocat
     }
     let mut subjects = std::collections::BTreeSet::new();
     for recorded in &run.lifecycle_hooks {
-        if let Some(id) = recorded.invocation.command_subject {
-            if !run.tools.iter().any(|tool| tool.intent.id == id) {
-                subjects.insert(id);
-            }
+        if let Some(id) = recorded.invocation.command_subject
+            && !run.tools.iter().any(|tool| tool.intent.id == id)
+        {
+            subjects.insert(id);
         }
     }
     subjects.insert(subject);

@@ -80,7 +80,7 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
         let temp = tempfile::tempdir().unwrap();
         let fixture = CommandFixture::new(temp.path(), failure);
         let engine = engine_support::open(
-            fixture.state.try_clone().unwrap(),
+            StateRoot::open_existing(fixture.state.path()).unwrap(),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
                 ..Default::default()
@@ -95,7 +95,7 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
         };
         let rewritten = command(host, &format!("printf {expected_text}"));
         let outcome = run_rewrite(&engine, &fixture, session, &rewritten).await;
-        assert_eq!(outcome.run.status, RunStatus::Succeeded);
+        assert_eq!(outcome.run.status, RunStatus::Finished);
         let executed = outcome
             .run
             .tools
@@ -197,11 +197,8 @@ async fn assert_rewrite_replay(fixture: CommandFixture, session: arany::SessionI
     let events = store.load_session(session).await.unwrap();
     let view = store.load_view(session).await.unwrap().unwrap();
     store.close().await.unwrap();
-    assert_eq!(view.runs[0].status, RunStatus::Succeeded);
-    assert_eq!(
-        SessionView::replay(session, &events).unwrap().unwrap(),
-        view
-    );
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(SessionView::replay(session, &events).unwrap().unwrap(), view);
     let rewrite = events
         .iter()
         .position(|event| {
