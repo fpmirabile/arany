@@ -26,9 +26,10 @@ Percentiles are nearest-rank (`ceil(p*n)-1`) over measured successes in attempt
 order. Only the single-Read and Edit rows carry the provisional target verdict;
 the four-Read and Command rows report null objective and verdict, and the Command
 objective is compared under the [owner procedure](#owner-procedure). Denial,
-failure, cancellation, uncertainty or a missing acknowledgement is never a
-sample: the invocation stops without retry and emits no percentile or verdict. A
-missed target requires diagnosis, not a higher threshold. [The decision register](../../../../docs/research/next-step-decision-register.md#d-23--tool-latency-measures-durable-acknowledgement)
+failure, cancellation or uncertainty is retained as a non-success sample: the
+invocation stops without retry and contributes no duration, percentile or verdict.
+A missing acknowledgement is retained as an incomplete sample and likewise
+contributes nothing. A missed target requires diagnosis, not a higher threshold. [The decision register](../../../../docs/research/next-step-decision-register.md#d-23--tool-latency-measures-durable-acknowledgement)
 owns the rationale and peer comparison.
 
 ## Bounds and retained evidence

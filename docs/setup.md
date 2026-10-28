@@ -163,12 +163,8 @@ other vendors' keys and other clients' OAuth identities never supply its
 credentials, and Arany always identifies itself as `arany/<version>`. Existing
 valid version-1 Responses profiles migrate automatically and need a fresh check.
 
-Every route must pass its exact text-compaction conformance check before use. The
-check sends only synthetic data and may be billable; a failure leaves the route
-unadmitted, and each model needs its own check. A passing check establishes
-bounded protocol behavior, not live vendor compatibility, Tool-call fidelity or
-summary accuracy. Custom primary and child routes receive the same Workspace
-Tools as native routes but no images.
+Every route must pass its exact [text-compaction conformance check](./specs/provider.md#custom-destinations-and-routing)
+before use; each model needs its own check.
 If AI Tool review is needed, select a native review route in
 [provider-routing.json](./specs/provider.md#per-role-selection-and-fallback);
 text compaction does not attest a strict review verdict.
