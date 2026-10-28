@@ -71,7 +71,6 @@ async fn reopened_api_report_keeps_exact_rows_omissions_age_and_run_scope() {
     assert!(pages.contains("Remaining: 0\n"));
     assert!(pages.contains("Stale; reset time passed, current usage unknown"));
     assert!(pages.contains("Latest call did not report limits\n"));
-    group.latest_omitted = Some(vec![arany::ApiLimitDimension::Requests]);
     changed.usage.api_limits[0].latest_omitted = Some(vec![arany::ApiLimitDimension::Requests]);
     let partial = super::super::usage_pages_at(&changed, false, None, Some(1060)).concat();
     assert!(partial.contains("Latest call did not report limits for: Requests\n"));

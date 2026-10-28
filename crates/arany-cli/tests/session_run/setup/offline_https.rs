@@ -796,7 +796,12 @@ fn isolated_stage() {
     assert_eq!(checked.usage.api_limits.len(), 1);
     let api = &checked.usage.api_limits[0];
     assert_eq!(api.role, arany::ProviderRole::Compaction);
-    assert_eq!(api.identity.saved_api_account_id(), Some(account_id));
+    assert_eq!(
+        api.identity.provenance,
+        arany::Provenance::Native {
+            saved_api_account_id: Some(account_id),
+        }
+    );
     assert_eq!(api.rows[0].limit, Some(100));
     assert_eq!(api.rows[0].remaining, Some(0));
     assert_eq!(
