@@ -110,7 +110,19 @@ async fn selected_rewrite_is_probed_before_enable_and_binds_guard_host_and_repla
         };
         let rewritten = command(host, &format!("printf {expected_text}"));
         let outcome = run_rewrite(&engine, &fixture, session, &rewritten).await;
-        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(
+            outcome.run.status,
+            RunStatus::Finished,
+            "host={host} failure={failure:?}: {:?}; {}",
+            outcome.run.failure,
+            tool_report(
+                outcome
+                    .run
+                    .tools
+                    .last()
+                    .and_then(|tool| tool.observation.as_ref())
+            )
+        );
         let executed = outcome
             .run
             .tools
@@ -149,7 +161,7 @@ async fn run_rewrite(
     session: arany::SessionId,
     rewritten: &arany::ToolCall,
 ) -> arany::RunOutcome {
-    let host = rewritten.is_host();
+    let host = rewritten.is_unguarded();
     let provider = Arc::new(ScriptedProvider::new(vec![
         plan_outcome(arany::GoalPlanContract {
             mission: "Run the configured command rewrite".into(),
