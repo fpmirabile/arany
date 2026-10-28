@@ -2439,11 +2439,16 @@ async fn api_observations_reopen_per_attempt_without_backfill_or_redispatch() {
             .unwrap();
         arany::FaultPlan::skip_retry_backoff(session);
         if case.ends_with("append failure") {
-            arany::FaultPlan::fail_goal_append(session, move |event| match case {
-                "fallback append failure" => matches!(event, Event::ProviderFallbackUsed { .. }),
-                "terminal append failure" => matches!(event, Event::ProviderCallRecorded { .. }),
-                _ => matches!(event, Event::ProviderRetryScheduled { .. }),
-            });
+            let admits: fn(&Event) -> bool = match case {
+                "fallback append failure" => {
+                    |event| matches!(event, Event::ProviderFallbackUsed { .. })
+                }
+                "terminal append failure" => {
+                    |event| matches!(event, Event::ProviderCallRecorded { .. })
+                }
+                _ => |event| matches!(event, Event::ProviderRetryScheduled { .. }),
+            };
+            arany::FaultPlan::fail_goal_append(session, admits);
         }
         let mut request = input(&workspace);
         request.session_id = Some(session);
