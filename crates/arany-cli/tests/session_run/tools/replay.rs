@@ -81,6 +81,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     };
     let intent = arany::EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: arany::worker::EffectTarget::Workspace,

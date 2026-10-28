@@ -461,7 +461,7 @@ impl GoalPlanContract {
                     *pending_integration = None;
                     return;
                 }
-                if observation.intent.call == **call {
+                if observation.intent.scoped_call() == call.as_ref() {
                     if observation.disposition != ToolDisposition::Succeeded
                         || !observation.attested_for(&observation.intent)
                     {

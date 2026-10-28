@@ -1191,6 +1191,7 @@ mod enforcement_tests {
     fn tool_summary_preserves_the_guards_protected_path_diagnostic() {
         let intent = arany::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,
@@ -1281,6 +1282,7 @@ mod unguarded_tests {
     fn intent(args: &[&str], cwd: &str) -> EffectIntent {
         EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,

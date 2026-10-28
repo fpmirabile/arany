@@ -14,6 +14,7 @@ pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> Session
     let run_id = RunId::new();
     let intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -606,6 +607,7 @@ pub(super) fn child_intent(
 ) -> EffectIntent {
     EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,

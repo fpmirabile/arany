@@ -542,6 +542,7 @@ fn host_admission_tool(
 ) -> crate::ToolView {
     let intent = crate::EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::worker::EffectTarget::Workspace,

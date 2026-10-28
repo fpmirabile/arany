@@ -1556,6 +1556,7 @@ mod goal_status_tests {
 pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolView {
     let intent = arany::EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: arany::worker::EffectTarget::Workspace,

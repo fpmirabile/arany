@@ -229,11 +229,15 @@ pub(crate) fn prohibited(program: &str, args: &[String]) -> bool {
                 .filter_map(|arg| basename(arg))
                 .any(|name| privileged(name, administrator))
         || (interpreter(program) || wrapper || args.iter().any(|arg| inline_option(arg)))
-            && args
-                .iter()
-                .flat_map(|arg| lexical_tokens(arg))
-                .filter_map(basename)
-                .any(|name| privileged(name, administrator))
+            && inline_privilege(args)
+}
+
+fn inline_privilege(args: &[String]) -> bool {
+    let administrator = administrator(args);
+    args.iter()
+        .flat_map(|arg| lexical_tokens(arg))
+        .filter_map(basename)
+        .any(|name| privileged(name, administrator))
 }
 
 pub(crate) fn prohibited_intent(intent: &super::EffectIntent) -> bool {
@@ -244,21 +248,29 @@ pub(crate) fn prohibited_intent(intent: &super::EffectIntent) -> bool {
         return false;
     };
     prohibited(program, args)
+        || intent.wrap.as_ref().is_some_and(|wrap| {
+            inline_privilege(args)
+                || match &wrap.original {
+                    super::ToolCall::CommandUnguarded { program, args, .. } => {
+                        prohibited(program, args)
+                    }
+                    _ => true,
+                }
+        })
         || intent.host_command.as_ref().is_some_and(|pin| {
             let cwd = Path::new(&pin.workspace).join(cwd);
             live_prohibited(program, args, &cwd, &pin.path)
                 || live_prohibited(&pin.executable, args, &cwd, &pin.path)
+                || intent.wrap.is_some() && live_wrapper_prohibited(args, &cwd, &pin.path)
         })
 }
 
 fn live_prohibited(program: &str, args: &[String], cwd: &Path, path: &str) -> bool {
+    prohibited(program, args) || wrapper(program) && live_wrapper_prohibited(args, cwd, path)
+}
+
+fn live_wrapper_prohibited(args: &[String], cwd: &Path, path: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
-    if prohibited(program, args) {
-        return true;
-    }
-    if !basename(program).is_some_and(|name| WRAPPERS.contains(&name)) {
-        return false;
-    }
     let mut identities = Vec::new();
     for arg in args
         .iter()
@@ -410,7 +422,9 @@ pub(crate) fn same_approval(prior: &super::EffectIntent, next: &super::EffectInt
     };
     let left = &prior.limits;
     let right = &next.limits;
-    p == program
+    prior.wrap.is_none()
+        && next.wrap.is_none()
+        && p == program
         && a == args
         && c == cwd
         && prior.host_command.is_some()
@@ -963,6 +977,7 @@ mod tests {
         host.executable = "/usr/bin/env".into();
         let mut intent = crate::tools::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: Some(host),
             target: crate::worker::EffectTarget::Workspace,

@@ -18,6 +18,8 @@ impl EffectTarget {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolIntentRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<Box<crate::tools::CommandWrap>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewrite: Vec<crate::tools::CommandRewrite>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,9 +39,16 @@ pub struct ToolIntentRecord {
     pub use_count: u8,
 }
 
+impl ToolIntentRecord {
+    pub(crate) fn scoped_call(&self) -> &ToolCall {
+        self.wrap.as_ref().map_or(&self.call, |wrap| &wrap.original)
+    }
+}
+
 impl From<EffectIntent> for ToolIntentRecord {
     fn from(intent: EffectIntent) -> Self {
         Self {
+            wrap: intent.wrap,
             host: intent.host,
             rewrite: intent.rewrite,
             host_command: intent.host_command,
@@ -61,6 +70,7 @@ impl From<EffectIntent> for ToolIntentRecord {
 impl From<ToolIntentRecord> for EffectIntent {
     fn from(intent: ToolIntentRecord) -> Self {
         Self {
+            wrap: intent.wrap,
             host: intent.host,
             rewrite: intent.rewrite,
             host_command: intent.host_command,

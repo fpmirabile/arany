@@ -90,6 +90,11 @@ mod cache_recovery;
 pub use cache_recovery::recover_build_cache;
 pub(super) mod selection_phase;
 mod shell;
+pub(in crate::tools) use shell::script as shell_script;
+mod command_prefix;
+pub(super) use command_prefix::PayloadProgram;
+#[cfg(any(target_os = "macos", test))]
+use command_prefix::prefix_runtime_compat_script;
 pub(super) mod transfer;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
@@ -1823,6 +1828,9 @@ impl GuardContext<'_> {
 
 fn validate_task(task: &Task) -> Result<(), ToolError> {
     task.config.validate()?;
+    if let Some(wrap) = &task.intent.wrap {
+        wrap.verify(&task.config.runtime_grants, &task.intent.call)?;
+    }
     if task.command_deadline.is_some() && !selection_phase::primary_command(&task.intent) {
         return Err(ToolError::Configuration);
     }
@@ -1846,7 +1854,8 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         || !(task.intent.call.facts().site == Site::Guard
             || super::discovery::possible(&task.intent.call))
         || task.intent.policy_digest != task.config.digest()
-        || !(task.config.allows(&task.intent.call) || task.handover.is_some() && task.config.write)
+        || !(super::command_tools::prefix::allowed(&task.config, &task.intent)
+            || task.handover.is_some() && task.config.write)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
         || task.hook_stdin.as_ref().is_some_and(|stdin| {
@@ -2149,17 +2158,12 @@ fn prefix_shell_runtime_compat(
     if !args.first().is_some_and(|arg| arg == "-c") {
         return Ok(());
     }
-    let text = shell::script(args)?;
-    args[1] = format!(
-        "export DYLD_INSERT_LIBRARIES='{}'\n{text}",
-        path.replace('\'', "'\\''"),
-    )
-    .into();
-    Ok(())
+    shell::script(args)?;
+    prefix_runtime_compat_script(&mut args[1], path)
 }
 
-pub(super) fn payload(
-    program: &super::config::Program,
+pub(super) fn payload<'a>(
+    source: impl Into<PayloadProgram<'a>>,
     args: &[String],
     cwd: &str,
     root: &Path,
@@ -2167,6 +2171,8 @@ pub(super) fn payload(
     cache_enabled: bool,
     limits: &ToolLimits,
 ) -> Result<Command, ToolError> {
+    let source = source.into();
+    let program = source.definition();
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
     } else {
@@ -2176,11 +2182,7 @@ pub(super) fn payload(
     let scratch = root.join("scratch");
     let cache = root.join("cache");
     let cache_base = if cache_enabled { &cache } else { &scratch };
-    let executable = if native_system_program(&program.executable)? {
-        Path::new(&program.executable).to_owned()
-    } else {
-        resources.join("programs").join(&program.name)
-    };
+    let executable = source.executable(&resources)?;
     let bytes = super::fs::read_regular(
         super::fs::open_absolute(executable.to_str().ok_or(ToolError::Path)?)?,
         MAX_SNAPSHOT_BYTES,
@@ -2231,7 +2233,7 @@ pub(super) fn payload(
     #[cfg(target_os = "macos")]
     let payload_args = {
         let mut args = payload_args;
-        macos::configure_runtime_compat(&mut command, program, &mut args, &resources)?;
+        macos::configure_runtime_compat(&mut command, source, &mut args, &resources)?;
         args
     };
     command.args(payload_args);
@@ -3453,6 +3455,7 @@ mod tests {
     pub(super) fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
@@ -4346,6 +4349,7 @@ mod tests {
                 config: config.clone(),
                 intent: EffectIntent {
                     host: None,
+                    wrap: None,
                     rewrite: Vec::new(),
                     host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,

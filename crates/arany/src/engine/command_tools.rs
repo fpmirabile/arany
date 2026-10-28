@@ -59,6 +59,9 @@ impl Engine {
         workspace: &std::path::Path,
         tool: &CommandTool,
     ) -> Result<(ToolRuntime, crate::tools::EffectIntent), EngineError> {
+        if !tool.valid() || tool.enabled {
+            return Err(crate::tools::ToolError::Configuration.into());
+        }
         let config = WorkspacePermissions::load(workspace, &self.state)
             .map_err(|_| crate::tools::ToolError::Configuration)?
             .config(workspace)?;
@@ -80,8 +83,15 @@ impl Engine {
             resource_class: None,
             timeout_ms: None,
         };
-        let runtime = runtime.command_tool_runtime(tool, &command_tools::input(&sample)?)?;
+        let stdin = match tool.role {
+            command_tools::CommandToolRole::Rewrite => command_tools::input(&sample)?,
+            command_tools::CommandToolRole::Prefix => String::new(),
+        };
+        let runtime = runtime.command_tool_runtime(tool, &stdin)?;
         let mut intent = runtime.intent(RunId::new(), AgentRunId::new(), tool.call());
+        if tool.role == command_tools::CommandToolRole::Prefix {
+            intent.wrap = Some(Box::new(command_tools::prefix::probe_wrap(tool)));
+        }
         intent.limits.runtime_ms = command_tools::TIMEOUT_MS;
         intent.limits.result_bytes = crate::tools::permissions::HOOK_RESULT_BYTES;
         intent.limits.cache_requested_bytes = 0;

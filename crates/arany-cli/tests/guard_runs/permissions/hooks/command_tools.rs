@@ -1,3 +1,6 @@
+#[path = "command_tools/prefix.rs"]
+mod prefix;
+
 use super::*;
 use arany::permissions::HookResult;
 use arany::test_support::process::BoundedOutput;
@@ -270,8 +273,12 @@ fn command(host: bool, script: &str) -> arany::ToolCall {
 }
 
 fn compile_hook(root: &Path, executable: &Path, failure: Option<arany::RewriteStage>) {
+    compile_source(root, executable, &hook_source(failure));
+}
+
+fn compile_source(root: &Path, executable: &Path, text: &str) {
     let source = root.join("filter.c");
-    std::fs::write(&source, hook_source(failure)).unwrap();
+    std::fs::write(&source, text).unwrap();
     #[cfg(target_os = "macos")]
     let mut compiler = {
         let mut command = std::process::Command::new("/usr/bin/xcrun");

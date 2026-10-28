@@ -284,6 +284,7 @@ mod tests {
     fn tool(observed: Option<(ToolDisposition, CacheUpdate)>) -> crate::session::ToolView {
         let intent = crate::tools::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,

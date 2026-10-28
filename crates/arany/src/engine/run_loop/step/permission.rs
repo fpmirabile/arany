@@ -54,7 +54,7 @@ impl HostPermission {
             HostPrefixDecision::Offer => true,
             HostPrefixDecision::NoReuse => false,
         };
-        let reuse = if rule.is_some() {
+        let reuse = if rule.is_some() || intent.wrap.is_some() {
             HostReuse::OnceOnly
         } else {
             decide_host_reuse(facts)
