@@ -301,7 +301,7 @@
       "type": "function"
     },
     {
-      "description": "List an admitted local MCP server's bounded tool catalog.",
+      "description": "List an admitted MCP server's bounded tool catalog.",
       "name": "arany_mcp_list",
       "parameters": {
         "additionalProperties": false,
@@ -435,7 +435,7 @@
       "type": "function"
     },
     {
-      "description": "Invoke an admitted MCP tool in the disposable offline snapshot.",
+      "description": "Invoke an admitted MCP tool: a local server runs in the disposable offline snapshot, a remote server is reached over HTTPS through the egress proxy.",
       "name": "arany_mcp_call",
       "parameters": {
         "additionalProperties": false,
@@ -1787,7 +1787,7 @@
       "type": "function"
     },
     {
-      "description": "List an admitted local MCP server's bounded tool catalog.",
+      "description": "List an admitted MCP server's bounded tool catalog.",
       "name": "arany_mcp_list",
       "parameters": {
         "additionalProperties": false,

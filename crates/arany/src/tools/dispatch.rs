@@ -1,6 +1,8 @@
 use super::catalog::Family;
 use super::guard::GuardContext;
-use super::types::{EffectIntent, EnforcementCause, LimitCause, ToolCall, ToolDisposition};
+use super::types::{
+    EffectIntent, EnforcementCause, LimitCause, NetworkGrant, ToolCall, ToolDisposition,
+};
 use super::{ToolError, fs, git, mcp, process};
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
@@ -11,17 +13,33 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         Family::File => Err(ToolError::Configuration),
         Family::Process => process::run(site).await,
         Family::Skill => Err(ToolError::Configuration),
-        Family::Mcp => {
-            mcp::execute(
-                call,
-                site.config,
-                site.root,
-                site.intent.limits.cache_bytes > 0,
-                site.intent.limits.result_bytes as usize,
-                &site.captured,
-            )
-            .await
-        }
+        Family::Mcp => match site.config.remote_server(call) {
+            Some(_) if site.secret.as_deref() == Some(mcp::RENEWAL_UNCONFIRMED) => {
+                Err(ToolError::Uncertain)
+            }
+            Some(server) if site.intent.limits.network == NetworkGrant::Proxy => {
+                mcp::execute_remote(
+                    call,
+                    server,
+                    site.secret.as_deref(),
+                    site.intent.limits.result_bytes as usize,
+                    &site.captured,
+                )
+                .await
+            }
+            Some(_) => Err(ToolError::Configuration),
+            None => {
+                mcp::execute(
+                    call,
+                    site.config,
+                    site.root,
+                    site.intent.limits.cache_bytes > 0,
+                    site.intent.limits.result_bytes as usize,
+                    &site.captured,
+                )
+                .await
+            }
+        },
         Family::Git => git::run(site).await,
         Family::Web => super::web::run(site, site.secret.as_deref()).await,
         Family::Preparation => {
@@ -36,7 +54,9 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
         ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
             value().map_or(true, |value| value["exit_code"] != 0)
         }
-        ToolCall::McpCall { .. } => value().map_or(true, |value| value["is_error"] == true),
+        ToolCall::McpList { .. } | ToolCall::McpCall { .. } => value().map_or(true, |value| {
+            value["is_error"] == true || value.get("error").is_some()
+        }),
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => {
             value().map_or(true, |value| value.get("error").is_some())
         }
@@ -135,6 +155,11 @@ pub(super) fn outcome(
         Err(ToolError::Cancelled) => (
             ToolDisposition::Cancelled,
             "File operation cancelled; nothing in the Workspace changed".into(),
+        ),
+        Err(ToolError::Uncertain) if intent.call.is_mcp() => (
+            ToolDisposition::Uncertain,
+            "The outcome of this remote MCP effect is unknown: its token renewal or the server's reply was lost or invalid. Check the server's state and authorization before another attempt"
+                .into(),
         ),
         Err(ToolError::Uncertain) => (
             ToolDisposition::Uncertain,

@@ -2991,6 +2991,10 @@ impl RunLoop<'_> {
                                 || self.controls.tools.is_some_and(|runtime| {
                                     runtime.allows_research_web(&request.call)
                                 }))
+                            && !self
+                                .controls
+                                .tools
+                                .is_some_and(|runtime| runtime.is_remote_mcp(&request.call))
                             && child
                                 .definition
                                 .as_ref()
