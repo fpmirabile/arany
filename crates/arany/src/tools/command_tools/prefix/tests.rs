@@ -31,6 +31,8 @@ fn prefix_preserves_script_and_cwd_and_dispatch_drift_never_degrades() {
         program: "sh".into(),
         args: vec!["-c".into(), "printf 'a b' | head".into()],
         cwd: "src".into(),
+        resource_class: Some(crate::tools::ToolResourceClass::Build),
+        timeout_ms: Some(crate::tools::types::DEFAULT_COMMAND_TIMEOUT_MS),
     };
     let intent =
         runtime.wrap_command(runtime.intent(RunId::new(), AgentRunId::new(), original.clone()));
@@ -40,6 +42,8 @@ fn prefix_preserves_script_and_cwd_and_dispatch_drift_never_degrades() {
             program: executable.clone(),
             args: vec!["--prefix".into(), "printf 'a b' | head".into()],
             cwd: "src".into(),
+            resource_class: Some(crate::tools::ToolResourceClass::Build),
+            timeout_ms: Some(crate::tools::types::DEFAULT_COMMAND_TIMEOUT_MS),
         }
     );
     assert!(runtime.verify_wrap(&intent).is_ok());
@@ -95,6 +99,8 @@ fn prefix_payload_and_replay_facts_refuse_a_different_final_command() {
         program: "sh".into(),
         args: vec!["-c".into(), "printf payload".into()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut other = tool.clone();
     other.executable = "/programs/other".into();
@@ -115,6 +121,8 @@ fn prefix_payload_and_replay_facts_refuse_a_different_final_command() {
         program: "/programs/wrapper".into(),
         args: vec!["printf changed".into()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     assert!(!wrap.valid(&forged));
 }

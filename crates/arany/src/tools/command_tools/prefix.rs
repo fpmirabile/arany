@@ -81,10 +81,17 @@ fn wrapped(call: &ToolCall, tool: &CommandTool) -> ToolCall {
             .into(),
     );
     match call {
-        ToolCall::Command { cwd, .. } => ToolCall::Command {
+        ToolCall::Command {
+            cwd,
+            resource_class,
+            timeout_ms,
+            ..
+        } => ToolCall::Command {
             program: tool.executable.clone(),
             args,
             cwd: cwd.clone(),
+            resource_class: *resource_class,
+            timeout_ms: *timeout_ms,
         },
         ToolCall::CommandUnguarded {
             cwd, justification, ..
@@ -224,6 +231,8 @@ fn sample() -> ToolCall {
         program: "sh".into(),
         args: vec!["-c".into(), PROBE_COMMAND.into()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     }
 }
 
