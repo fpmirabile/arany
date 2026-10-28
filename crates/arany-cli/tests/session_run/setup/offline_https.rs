@@ -339,6 +339,7 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["store"], false);
         assert_eq!(body["max_output_tokens"], 4096);
+        assert_eq!(body["stream"].as_bool().unwrap_or(false), index == 0);
         assert!(body.get("text").is_none());
         assert!(body.get("tool_choice").is_none() && body.get("tools").is_none());
         let context = crate::semantic::input(&body);
@@ -347,13 +348,21 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
         } else {
             assert_eq!(context["objective"], "offline objective");
         }
-        let response = serde_json::to_vec(&serde_json::json!({
+        let response = serde_json::json!({
             "id": format!("resp_native_{index}"), "status": "completed", "model": "gpt-offline-new",
             "output": arany::semantic::responses_output(&outcome),
             "usage": {"input_tokens": 12, "output_tokens": 8}
-        }))
-        .expect("native response JSON");
-        input.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-ratelimit-limit-requests: 100\r\nx-ratelimit-remaining-requests: 0\r\nx-ratelimit-reset-requests: 1.001s\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).as_bytes()).expect("native response headers");
+        });
+        let (content_type, response) = if index == 0 {
+            let event = serde_json::json!({"type": "response.completed", "response": response});
+            (
+                "text/event-stream",
+                format!("data: {event}\n\n").into_bytes(),
+            )
+        } else {
+            ("application/json", serde_json::to_vec(&response).unwrap())
+        };
+        input.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nx-ratelimit-limit-requests: 100\r\nx-ratelimit-remaining-requests: 0\r\nx-ratelimit-reset-requests: 1.001s\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).as_bytes()).expect("native response headers");
         input.write_all(&response).expect("native response body");
     }
 }
@@ -694,6 +703,22 @@ fn isolated_stage() {
         Some(arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
 
+    let routing = serde_json::to_vec(&serde_json::json!({
+        "version": 2,
+        "providers": {
+            "primary": [
+                {"provider": {"kind": "openai", "custom_name": null}, "model": "gpt-offline-new", "effort": "high", "account_id": account_id},
+                {"provider": {"kind": "openai", "custom_name": null}, "model": "gpt-5.4", "effort": "low", "account_id": account_id}
+            ],
+            "child": null, "review": null, "compaction": null
+        }
+    }))
+    .unwrap();
+    StateRoot::admit(Path::new("/root/state-four"))
+        .unwrap()
+        .record(RecordKind::ProviderRouting)
+        .replace(&routing)
+        .unwrap();
     let mut server = start_response_server(NativeReplies::Unreviewed);
     let output = run_pty(
         CHECK_SHELL,
@@ -793,8 +818,26 @@ fn isolated_stage() {
     assert_eq!(checked.defaults.account_id, Some(account_id));
     assert_eq!(checked.runs.len(), 1, "native checker is not a Run");
     assert_eq!(checked.compactions.len(), 1);
-    assert_eq!(checked.usage.api_limits.len(), 1);
-    let api = &checked.usage.api_limits[0];
+    assert_eq!(checked.usage.api_limits.len(), 2);
+    let invocation = &checked.usage.api_limits[0];
+    assert_eq!(invocation.role, arany::ProviderRole::Primary);
+    assert_eq!(invocation.identity.model, "gpt-offline-new");
+    assert_eq!(invocation.run_id, checked.runs[0].id);
+    assert_eq!(
+        checked.runs[0].agents[0].provider_calls[0]
+            .rate_limits
+            .as_ref()
+            .unwrap()
+            .api
+            .as_ref()
+            .unwrap()
+            .rows,
+        invocation.rows
+    );
+    let api = &checked.usage.api_limits[1];
+    assert_eq!(invocation.identity.provenance, api.identity.provenance);
+    assert_eq!(invocation.rows[0].limit, Some(100));
+    assert_eq!(invocation.rows[0].remaining, Some(0));
     assert_eq!(api.role, arany::ProviderRole::Compaction);
     assert_eq!(
         api.identity.provenance,

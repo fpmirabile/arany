@@ -138,9 +138,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Synthetic fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Synthetic fact");
         let state_path = temp.path().join("state");
         let account_id = Uuid::now_v7();
         let fingerprint = [7; 32];
@@ -200,9 +198,7 @@ fn a_tampered_compaction_reference_fails_load() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Answer(Answer {
@@ -289,9 +285,7 @@ fn a_fork_before_the_snapshot_event_recompiles_from_canonical_history() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Answer(Answer {
@@ -381,9 +375,7 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
             CompactionFault::CompilerVersion,
         ] {
             let temp = tempfile::tempdir().expect("temporary root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-            std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+            let workspace = facts_workspace(temp.path(), "Fact");
             let state_path = temp.path().join("state");
             let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
                 text: "Source answer".into(),
@@ -509,9 +501,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Answer(Answer {
@@ -752,9 +742,7 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Answer(Answer {
@@ -866,34 +854,20 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
-        let provider = ScriptedProvider::new(
-            (0..3)
-                .map(|_| {
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "not allowed".into(),
-                            profile: None,
-                        }],
-                    })
-                })
-                .collect(),
-        )
-        .with_compactions(vec![Ok(CompactionResponse {
-            summary: "Question remains unresolved".into(),
-            response_id: None,
-            usage: arany::Usage {
-                input_tokens: None,
-                output_tokens: Some(8),
-                ..Default::default()
-            },
-            wire_provenance: None,
-        })]);
+        let provider =
+            ScriptedProvider::new((0..3).map(|_| delegate(&[("not allowed", None)])).collect())
+                .with_compactions(vec![Ok(CompactionResponse {
+                    summary: "Question remains unresolved".into(),
+                    response_id: None,
+                    usage: arany::Usage {
+                        input_tokens: None,
+                        output_tokens: Some(8),
+                        ..Default::default()
+                    },
+                    wire_provenance: None,
+                })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
@@ -939,9 +913,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let session_id = arany::create_session(
             StateRoot::admit(&state_path).expect("private state"),
@@ -1093,9 +1065,7 @@ fn compaction_timeout_drops_the_call_and_records_failure() {
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(AtomicUsize::new(0));
@@ -1201,9 +1171,7 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
         .expect("runtime");
     runtime.block_on(async {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let workspace = facts_workspace(temp.path(), "Fact");
         let state_path = temp.path().join("state");
         let provider =
             ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "ok".into() })]);

@@ -976,26 +976,11 @@ impl Provider for FiniteTokenTeam {
             .push(request);
         let (outcome, input_tokens, output_tokens) = match phase {
             AgentPhase::RootPlan => (
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Review one".into(),
-                            profile: None,
-                        },
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Review two".into(),
-                            profile: None,
-                        },
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Review three".into(),
-                            profile: None,
-                        },
-                    ],
-                }),
+                delegate(&[
+                    ("Review one", None),
+                    ("Review two", None),
+                    ("Review three", None),
+                ]),
                 0,
                 1,
             ),
@@ -1397,46 +1382,6 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
 }
 
-struct MeteredProvider {
-    tokens: u32,
-    responses: std::sync::Mutex<VecDeque<ProviderOutcome>>,
-}
-
-#[async_trait::async_trait]
-impl Provider for MeteredProvider {
-    fn identity(&self) -> &arany::ProviderIdentity {
-        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::new("openai", "metered-model", arany::Provenance::native())
-            });
-        &IDENTITY
-    }
-
-    async fn invoke(&self, _request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let outcome = self
-            .responses
-            .lock()
-            .expect("responses lock")
-            .pop_front()
-            .ok_or(ProviderError::InvalidOutcome)?;
-        Ok(ProviderResponse {
-            turn: arany::ProviderTurn::scripted(),
-            outcome,
-            response_id: None,
-            usage: arany::Usage {
-                input_tokens: Some(self.tokens),
-                output_tokens: Some(0),
-                ..Default::default()
-            },
-            wire_provenance: None,
-        })
-    }
-
-    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
-        Err(ProviderError::InvalidOutcome)
-    }
-}
-
 #[tokio::test]
 async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -1449,15 +1394,17 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     // Five input tokens per call: Plan, Read and Answer reach the 15-token cap exactly.
-    let provider = MeteredProvider {
-        tokens: 5,
-        responses: std::sync::Mutex::new(VecDeque::from([
-            arany::test_support::scenario::plan_outcome(plan),
-            crate::tool_outcome(facts_read()),
-            finish_with("first pass"),
-            finish_with("never requested"),
-        ])),
-    };
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
+        finish_with("first pass"),
+        finish_with("never requested"),
+    ])
+    .with_reported_usage(arany::Usage {
+        input_tokens: Some(5),
+        output_tokens: Some(0),
+        ..Default::default()
+    });
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
@@ -1761,16 +1708,8 @@ async fn two_child_research_delegation_admission_covers_its_spawns() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
-    let assignment = |objective: &str| arany::ChildAssignment {
-        editor: None,
-        objective: objective.into(),
-        profile: None,
-    };
     let provider = Arc::new(ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![assignment("Inspect facts"), assignment("Inspect notes")],
-        }),
+        delegate(&[("Inspect facts", None), ("Inspect notes", None)]),
         finish_with("first child"),
         finish_with("second child"),
         finish_with("synthesized"),
@@ -1813,14 +1752,7 @@ async fn child_tool_sizing_does_not_exhaust_unspent_goal_time() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("unexpected continuation"),
     ])
@@ -1828,11 +1760,7 @@ async fn child_tool_sizing_does_not_exhaust_unspent_goal_time() {
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     input.goal.budget = Some(arany::GoalBudget {
         max_active_ms: Some(GOAL_ACTIVE_MS),
         ..arany::GoalBudget::default()
@@ -1874,14 +1802,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
@@ -1889,11 +1810,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     // The primary call spends 8 tokens; the child's call spends the last 8 and exhausts the budget.
     input.goal.budget = Some(arany::GoalBudget {
         max_tokens: Some(16),
@@ -1936,25 +1853,14 @@ async fn near_deadline_child_tool_journals_limit_without_dispatch() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Delegate(Delegate {
-            agent: None,
-            children: vec![arany::ChildAssignment {
-                editor: None,
-                objective: "Inspect facts".into(),
-                profile: None,
-            }],
-        }),
+        delegate(&[("Inspect facts", None)]),
         crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ]);
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, "Check the facts");
-    input.include_paths.clear();
-    input.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
+    let mut input = team_request(&workspace, "Check the facts");
     input.goal.budget = Some(arany::GoalBudget {
         max_active_ms: Some(15_000),
         ..arany::GoalBudget::default()

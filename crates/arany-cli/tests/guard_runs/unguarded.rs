@@ -1,27 +1,14 @@
 use super::*;
 use arany::permissions::{Decision, PermissionSource};
-use arany::test_support::goals::assert_action_bounds;
 use arany::{ApprovalMode, ApprovalReply, ToolCall, UnguardedPrompt};
 use arany_cli::presentation::{
     ToolApprovalChoice, ToolApprovalPrompt, tool_approval_choices, unguarded_approval_lines,
 };
 use serde_json::{Value, json};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 const SCRIPT: &str = "if [ -n \"$ARANY_UNGUARDED\" ]; then echo ran > ran.txt; exit 0; fi; exit 7";
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
 
 fn guarded(script: &str) -> ToolCall {
     ToolCall::Command {
@@ -40,31 +27,6 @@ fn unguarded(script: &str) -> ToolCall {
         cwd: String::new(),
         justification: "The sandbox may have blocked it".into(),
         prefix_rule: None,
-    }
-}
-
-fn plan(call: &ToolCall) -> arany::GoalPlanContract {
-    arany::GoalPlanContract {
-        mission: "Complete the bounded Tool action".into(),
-        paths: vec!["notes".into()],
-        commands: vec!["sh".into()],
-        resource_class: arany::ToolResourceClass::Default,
-        command_timeout_ms: None,
-        skills: vec![],
-        mcp_tools: vec![],
-        success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-            call: Box::new(call.clone()),
-        },
-        budget: budget(),
-    }
-}
-
-fn budget() -> arany::GoalBudget {
-    arany::GoalBudget {
-        max_provider_calls: Some(16),
-        max_tokens: None,
-        max_active_ms: Some(30 * 60 * 1000),
-        max_runs: 1,
     }
 }
 
@@ -268,13 +230,7 @@ impl Host {
     }
 
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {
-        self.engine.close().await.unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&self.state).unwrap()).unwrap();
-        let events = store.load_session(session).await.unwrap();
-        let view = SessionView::replay(session, &events).unwrap().unwrap();
-        assert_action_bounds(&events, false, false);
-        store.close().await.unwrap();
-        (events, view)
+        reopen_closed(self.engine, &self.state, session).await
     }
 }
 

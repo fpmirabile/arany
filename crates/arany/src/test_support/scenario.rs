@@ -30,6 +30,20 @@ pub fn plan_outcome(contract: crate::GoalPlanContract) -> crate::ProviderOutcome
     }))
 }
 
+pub fn delegate(children: &[(&str, Option<&str>)]) -> ProviderOutcome {
+    ProviderOutcome::Delegate(Delegate {
+        agent: None,
+        children: children
+            .iter()
+            .map(|(objective, profile)| crate::ChildAssignment {
+                editor: None,
+                objective: (*objective).into(),
+                profile: profile.map(Into::into),
+            })
+            .collect(),
+    })
+}
+
 pub struct ScriptedProvider {
     pub rate_limits: Mutex<VecDeque<Option<crate::RateLimits>>>,
     pub compact_rate_limits: Mutex<VecDeque<Option<crate::RateLimits>>>,
@@ -463,6 +477,16 @@ pub fn request(workspace: &Path, objective: &str) -> RunRequest {
         include_paths: vec!["notes/facts.txt".into()],
         policy: CollaborationPolicy::Single,
         goal: crate::GoalRequest::default(),
+    }
+}
+
+pub fn team_request(workspace: &Path, objective: &str) -> RunRequest {
+    RunRequest {
+        include_paths: Vec::new(),
+        policy: CollaborationPolicy::Auto {
+            max_active_children: 1,
+        },
+        ..request(workspace, objective)
     }
 }
 

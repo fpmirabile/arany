@@ -4,7 +4,7 @@ use super::active_terminal::{ProductGuard, product_child_of_executable};
 use super::active_terminal::{product_child_of, tty_settings, wait_stopped};
 use super::loopback::{ChildGuard, wait_product};
 use super::process::BoundedOutput;
-use super::session_picker::{pump, tail};
+use super::session_picker::{pump, tail, wait_for, wait_for_after};
 use arany::{RecordKind, SessionView, StateRoot, Store};
 #[cfg(any(debug_assertions, target_os = "linux"))]
 use arany::{SessionDefaults, create_session, set_session_defaults};
@@ -114,51 +114,6 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
         .replace(&serde_json::to_vec(&registration).expect("registration"))
         .expect("test ChatGPT registration");
     account_id
-}
-
-fn wait_for(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    needle: &[u8],
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(transcript, needle)
-        .next()
-        .is_none()
-    {
-        pump(output, input, transcript, answered);
-        assert!(
-            Instant::now() < deadline,
-            "setup PTY stage missing: {}",
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
-}
-
-fn wait_for_after(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    start: usize,
-    needle: &[u8],
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(&transcript[start..], needle)
-        .next()
-        .is_none()
-    {
-        pump(output, input, transcript, answered);
-        assert!(
-            Instant::now() < deadline,
-            "setup PTY stage missing: {}",
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
 }
 
 #[cfg(debug_assertions)]
