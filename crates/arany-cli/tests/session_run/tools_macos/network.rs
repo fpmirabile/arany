@@ -81,6 +81,8 @@ async fn native_network_proxy_helper() {
                 program: "bash".into(),
                 args: vec!["src/egress.sh".into(), target.clone(), direct.to_string()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             }],
             linked_file: None,
         });

@@ -324,6 +324,8 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         program: "sh".into(),
         args: vec!["-c".into(), "echo example".into()],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     });
     for (call, kind) in [
         (intent.call.clone(), "execute"),
@@ -399,6 +401,8 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         program: "sh".into(),
         args: vec!["x".repeat(MAX_RPC_LINE_BYTES)],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     adapter.permission(&big, 100).await;
     let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =

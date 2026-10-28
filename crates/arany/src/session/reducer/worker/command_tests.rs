@@ -61,6 +61,8 @@ fn command_criterion() -> GoalSuccessCriterion {
             program: "build".into(),
             args: vec![],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         }),
     }
 }
@@ -78,6 +80,8 @@ fn command(f: &mut Fixture, paths: &[&str]) -> EffectIntent {
             program: "build".into(),
             args: vec![],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         EffectTarget::Workspace,
     );
@@ -161,6 +165,8 @@ fn editor_commands_never_start_with_the_egress_proxy() {
             program: "build".into(),
             args: vec![],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         },
         EffectTarget::Workspace,
     );
@@ -489,6 +495,8 @@ fn background_lease_admission_is_symmetric_with_sibling_and_primary_writes() {
         program: "build".into(),
         args: vec![],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     for (actor, allowed) in [(f.primary, false), (f.child, true), (other, true)] {
         assert_eq!(

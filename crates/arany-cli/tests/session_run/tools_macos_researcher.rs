@@ -208,6 +208,8 @@ done
                     program: "shell".into(),
                     args: vec!["-c".into(), "printf changed > src/facts.txt".into()],
                     cwd: "".into(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
             ),
             (

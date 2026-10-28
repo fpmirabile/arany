@@ -258,6 +258,8 @@ fn proposal_pre_hook_events(
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         },
     );
     events.push(Event::HookStarted {

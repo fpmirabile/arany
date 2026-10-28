@@ -290,6 +290,8 @@ fn supervisor_editor_command_outcomes_ignore_sequences_and_keep_the_exit_class()
             program: "sh".into(),
             args: vec!["-c".into(), "true".into()],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         observation.attestation = None;
         observation.disposition = ToolDisposition::Succeeded;

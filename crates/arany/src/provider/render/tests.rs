@@ -554,6 +554,8 @@ fn results_pair_with_request_ids_and_integrations_are_labelled_data() {
         program: "cargo".into(),
         args: vec!["fmt".into()],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     command_step.observations = vec![
         observation(command_step.requests[0].call.clone(), "{}"),
@@ -589,6 +591,8 @@ fn command_step(exit_code: Option<i32>, stdout: &str, stderr: &str) -> ToolStep 
         program: "cargo".into(),
         args: vec!["git".into()],
         cwd: ".".into(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let output = json!({
         "selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": exit_code, "stdout": stdout, "stderr": stderr,

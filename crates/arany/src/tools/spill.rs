@@ -252,6 +252,8 @@ mod tests {
                 program: "shell".into(),
                 args: vec![],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
         );
         let mut stdout = super::super::output::Window::capturing(4096);

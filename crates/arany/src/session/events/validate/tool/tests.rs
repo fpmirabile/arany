@@ -255,6 +255,8 @@ fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
             program: "cargo".into(),
             args: vec!["build".into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = 2;
@@ -372,4 +374,83 @@ fn tool_preflight_refusal_payload_is_closed_and_keeps_its_fixed_reason() {
             "{case}"
         );
     }
+}
+
+#[test]
+fn command_resource_fields_preserve_omitted_event_bytes_and_intent_digests() {
+    let (run, agent) = (RunId::new(), AgentRunId::new());
+    let mut intent = read_observation(run, agent).intent;
+    intent.call = crate::tools::ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["test".into()],
+        cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
+    };
+    let event = Event::ToolProposed {
+        run_id: run,
+        agent_run_id: agent,
+        intent: intent.clone().into(),
+        active_ceiling_ms: 1,
+    };
+    let historical = event.payload().unwrap();
+    assert!(
+        historical.contains(
+            r#""call":{"operation":"command","program":"cargo","args":["test"],"cwd":""}"#
+        )
+    );
+    let explicit_null = historical.replace(
+        r#""cwd":""}"#,
+        r#""cwd":"","resource_class":null,"timeout_ms":null}"#,
+    );
+    let decoded = Event::decode(
+        event.kind(),
+        event.version(),
+        &explicit_null,
+        Some(run),
+        Some(agent),
+    )
+    .unwrap();
+    assert_eq!(decoded.payload().unwrap(), historical);
+    let Event::ToolProposed {
+        intent: decoded, ..
+    } = decoded
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        crate::tools::EffectIntent::from(decoded).digest(),
+        intent.digest()
+    );
+    if let crate::tools::ToolCall::Command {
+        resource_class,
+        timeout_ms,
+        ..
+    } = &mut intent.call
+    {
+        *resource_class = Some(crate::tools::ToolResourceClass::Build);
+        *timeout_ms = Some(crate::tools::types::MAX_COMMAND_TIMEOUT_MS);
+    }
+    intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
+    intent.limits.cache_bytes = 0;
+    intent.limits.cache_candidate_bytes = 0;
+    let selected = Event::ToolProposed {
+        run_id: run,
+        agent_run_id: agent,
+        intent: intent.into(),
+        active_ceiling_ms: 1,
+    };
+    let bytes = selected.payload().unwrap();
+    assert_ne!(bytes, historical);
+    assert_eq!(
+        Event::decode(
+            selected.kind(),
+            selected.version(),
+            &bytes,
+            Some(run),
+            Some(agent),
+        )
+        .unwrap(),
+        selected
+    );
 }

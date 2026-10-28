@@ -397,6 +397,8 @@ mod tests {
                 program: "echo".into(),
                 args: Vec::new(),
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,

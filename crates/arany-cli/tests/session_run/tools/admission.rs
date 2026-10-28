@@ -2,6 +2,7 @@ use super::*;
 
 struct OverTimeoutCommand {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    planned: bool,
 }
 #[async_trait::async_trait]
 impl Provider for OverTimeoutCommand {
@@ -24,13 +25,15 @@ impl Provider for OverTimeoutCommand {
             requests.push(request);
             step
         };
-        let outcome = if step <= 1 {
+        let outcome = if step <= usize::from(self.planned) {
             let call = ToolCall::Command {
                 program: "bash".into(),
                 args: vec!["-c".into(), "touch src/not-dispatched".into()],
                 cwd: "".into(),
+                resource_class: None,
+                timeout_ms: (!self.planned).then_some(2_000),
             };
-            if step == 0 {
+            if self.planned && step == 0 {
                 let mut contract = proposal_plan_contract(&call).unwrap();
                 contract.command_timeout_ms = Some(2_000);
                 arany::test_support::scenario::plan_outcome(contract)
@@ -62,6 +65,12 @@ impl Provider for OverTimeoutCommand {
 
 #[tokio::test]
 async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
+    for planned in [false, true] {
+        over_max_command(planned).await;
+    }
+}
+
+async fn over_max_command(planned: bool) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -72,6 +81,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(OverTimeoutCommand {
         requests: Arc::clone(&requests),
+        planned,
     });
     let engine = arany::test_support::engine::open(
         state,
@@ -101,7 +111,14 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     .unwrap();
     engine.close().await.unwrap();
 
-    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(
+        outcome.run.status,
+        if planned {
+            RunStatus::Failed
+        } else {
+            RunStatus::Finished
+        }
+    );
     assert_eq!(outcome.run.tools.len(), 1);
     let tool = &outcome.run.tools[0];
     let observation = tool.observation.as_ref().unwrap();
@@ -119,7 +136,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
             .contains("Lower request or change /settings")
     );
     assert!(!workspace.join("src/not-dispatched").exists());
-    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(requests.lock().unwrap().len(), 2 + usize::from(planned));
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
@@ -151,6 +168,11 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
         .unwrap()
         .unwrap();
     assert_eq!(replay.runs[0], outcome.run);
+    assert_eq!(replay.goals[0].plan_contract.is_some(), planned);
+    assert_eq!(
+        replay.goals[0].resource_settings.max_command_timeout_ms,
+        1_000
+    );
     assert!(
         replay.goals[0]
             .report

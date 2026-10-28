@@ -56,6 +56,8 @@ async fn run_case(root: &Path, workspace: &Path, phase: RepositoryPhase) {
         program: "sh".into(),
         args: vec!["-c".into(), script],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let mut requested = request(workspace, "Run repository library tests");
     requested.include_paths.clear();

@@ -53,7 +53,11 @@ pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result
     {
         validate_primary_tool_scope(view, *run_id, &intent.call).map_err(|cause| ToolRefusal {
             cause,
-            reason: ToolRefusalReason::Scope,
+            reason: if cause == InvalidArguments {
+                ToolRefusalReason::Payload
+            } else {
+                ToolRefusalReason::Scope
+            },
         })?;
         validate_primary_tool_lease(run, &intent.call).map_err(|cause| ToolRefusal {
             cause,
@@ -118,6 +122,11 @@ pub(crate) fn validate_primary_tool_scope(
     {
         return Err(PlanScopeExcludesCall);
     }
+    crate::session::events::requested_command_resources(
+        call,
+        goal.plan_contract.as_ref(),
+        goal.resource_settings,
+    )?;
     Ok(())
 }
 

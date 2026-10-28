@@ -369,6 +369,8 @@ mod tests {
                     program: "git".into(),
                     args: vec!["status".into()],
                     cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
                 },
                 [true; 3],
             ),

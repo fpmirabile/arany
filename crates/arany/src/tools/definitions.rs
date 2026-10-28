@@ -694,6 +694,8 @@ mod tests {
             program: "check".into(),
             args: Vec::new(),
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         for name in ["Bash", "command"] {
             let (researcher, notes) =

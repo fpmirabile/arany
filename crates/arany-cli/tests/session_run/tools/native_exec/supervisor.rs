@@ -409,6 +409,8 @@ async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
         program: "bash".into(),
         args: vec!["-c".into(), script.into()],
         cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
     };
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(command.clone()),

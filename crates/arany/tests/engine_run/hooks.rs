@@ -68,6 +68,8 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 program: "sh".into(),
                 args: vec!["-c".into(), "exit 0".into()],
                 cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: arany::ToolLimits::default(),
             use_count: 1,

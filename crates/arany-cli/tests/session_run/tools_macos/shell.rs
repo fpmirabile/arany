@@ -19,6 +19,8 @@ pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde
                 "printf dispatched > src/shell-started.txt".into(),
             ],
             cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
         };
         let provider = Arc::new(Journey {
             requests: requests.clone(),
