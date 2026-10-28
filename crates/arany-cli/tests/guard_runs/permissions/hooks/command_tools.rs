@@ -263,6 +263,8 @@ fn command(host: bool, script: &str) -> arany::ToolCall {
             program: "sh".into(),
             args: vec!["-c".into(), script.into()],
             cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
         }
     }
 }
