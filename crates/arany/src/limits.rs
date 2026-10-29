@@ -13,11 +13,11 @@ use crate::{
         MAX_STEP_TOOL_CALLS, MAX_USER_MESSAGE_BYTES, MAX_WINDOW_CONTENT_BYTES,
     },
     store::{
-        AGGREGATE_BYTES, MAX_ARCHIVE_BYTES, MAX_COMPACTION_EVENT_BYTES, MAX_DISCOVERED_SESSIONS,
-        MAX_EVENT_BYTES, MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_GOAL_FINISHED_BYTES,
-        MAX_GOAL_STARTED_BYTES, MAX_HOT_SESSION_PAYLOAD_BYTES, MAX_LIST_SCAN_EVENTS,
-        MAX_MESSAGE_ACCEPTED_BYTES, MAX_NATIVE_EVIDENCE_ROWS, MAX_SESSION_EVENTS,
-        MAX_TOOL_FINISHED_BYTES, MAX_TOOL_STARTED_BYTES,
+        MAX_COMPACTION_EVENT_BYTES, MAX_DISCOVERED_SESSIONS, MAX_EVENT_BYTES, MAX_EVIDENCE_AGE_MS,
+        MAX_EVIDENCE_ROWS, MAX_GOAL_FINISHED_BYTES, MAX_GOAL_STARTED_BYTES,
+        MAX_HOT_SESSION_PAYLOAD_BYTES, MAX_LIST_SCAN_EVENTS, MAX_MESSAGE_ACCEPTED_BYTES,
+        MAX_NATIVE_EVIDENCE_ROWS, MAX_SESSION_EVENTS, MAX_TOOL_FINISHED_BYTES,
+        MAX_TOOL_STARTED_BYTES,
     },
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
@@ -34,8 +34,8 @@ use crate::{
         types::{
             COMMAND_COMPARE_BYTES_PER_UPPER_BYTE, COMMAND_PATH_METADATA_BYTES,
             COMMAND_SCAN_ENTRIES, COMMAND_SNAPSHOT_BYTES, COMMAND_SNAPSHOT_DEPTH,
-            COMMAND_SNAPSHOT_FILES, DEFAULT_COMMAND_TIMEOUT_MS, GUARD_DISK_RESERVE_BYTES,
-            MAX_BUILD_CACHE_BYTES, MAX_BUILD_MEMORY_BYTES, MAX_BUILD_PROCESSES_OR_THREADS,
+            COMMAND_SNAPSHOT_FILES, DEFAULT_COMMAND_TIMEOUT_MS, GUARD_DISK_EVICTION_BYTES,
+            GUARD_DISK_RESERVE_BYTES, MAX_BUILD_MEMORY_BYTES, MAX_BUILD_PROCESSES_OR_THREADS,
             MAX_BUILD_PROJECT_BYTES, MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES,
             MAX_COMMAND_TIMEOUT_MS, MAX_FILE_BYTES, MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
             MAX_PROCESSES_OR_THREADS, MAX_READ_LINE_CHARS, MAX_READ_PAGE_LINES, MAX_RUNTIME_BYTES,
@@ -534,6 +534,12 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/types.rs",
         },
         Limit {
+            name: "GUARD_DISK_EVICTION_BYTES",
+            value: GUARD_DISK_EVICTION_BYTES,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/types.rs",
+        },
+        Limit {
             name: "MEMORY_BYTES",
             value: MEMORY_BYTES,
             unit: "bytes",
@@ -556,24 +562,6 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: MAX_BUILD_PROJECT_BYTES,
             unit: "bytes",
             owner: "crates/arany/src/tools/types.rs",
-        },
-        Limit {
-            name: "MAX_BUILD_CACHE_BYTES",
-            value: MAX_BUILD_CACHE_BYTES,
-            unit: "bytes",
-            owner: "crates/arany/src/tools/types.rs",
-        },
-        Limit {
-            name: "MAX_ARCHIVE_BYTES",
-            value: MAX_ARCHIVE_BYTES,
-            unit: "bytes",
-            owner: "crates/arany/src/store/state/build_cache.rs",
-        },
-        Limit {
-            name: "AGGREGATE_BYTES",
-            value: AGGREGATE_BYTES,
-            unit: "bytes",
-            owner: "crates/arany/src/store/state/build_cache.rs",
         },
         Limit {
             name: "MAX_BUILD_PROCESSES_OR_THREADS",

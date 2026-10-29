@@ -1220,7 +1220,7 @@ impl RunLoop<'_> {
         let limits = &mut hook_intent.limits;
         limits.result_bytes = HOOK_RESULT_BYTES;
         limits.runtime_ms = runtime_ms;
-        limits.cache_requested_bytes = 0;
+        limits.cache_requested_bytes = crate::tools::BuildCacheSize::DISABLED;
         limits.cache_bytes = 0;
         limits.cache_candidate_bytes = 0;
         limits.cache_transfer_ms = 0;

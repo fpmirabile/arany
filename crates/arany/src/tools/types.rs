@@ -41,11 +41,12 @@ pub(crate) const DEFAULT_COMMAND_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const GUARD_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// Free space below this evicts least-recently-used build caches before the reserve is reached.
+pub(crate) const GUARD_DISK_EVICTION_BYTES: u64 = 2 * GUARD_DISK_RESERVE_BYTES;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
 pub const MAX_BUILD_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_BUILD_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
-pub const MAX_BUILD_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_BUILD_PROCESSES_OR_THREADS: u32 = 256;
 pub const MAX_COMMAND_TIMEOUT_MS: u32 = 600_000;
 pub(super) const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
@@ -954,7 +955,7 @@ pub struct ToolLimits {
     pub build_cpu_cores: u32,
     pub scratch_bytes: u64,
     pub project_bytes: u64,
-    pub cache_requested_bytes: u64,
+    pub cache_requested_bytes: BuildCacheSize,
     pub cache_bytes: u64,
     pub cache_candidate_bytes: u64,
     pub network: NetworkGrant,
@@ -984,7 +985,68 @@ pub struct ToolResourceSettings {
     #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
     pub build_cpu_cores: Option<u32>,
     pub build_project_bytes: u64,
-    pub build_cache_bytes: u64,
+    pub build_cache_bytes: BuildCacheSize,
+}
+
+// Stored as a whole-MiB byte count (zero disables the cache) or the string "unlimited".
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(from = "BuildCacheSizeRecord", into = "BuildCacheSizeRecord")]
+pub enum BuildCacheSize {
+    Bytes(u64),
+    Unlimited,
+}
+
+impl BuildCacheSize {
+    pub const DISABLED: Self = Self::Bytes(0);
+
+    pub fn enabled(self) -> bool {
+        self != Self::DISABLED
+    }
+
+    fn valid(self) -> bool {
+        match self {
+            Self::Bytes(bytes) => bytes.is_multiple_of(BYTES_PER_MEBIBYTE),
+            Self::Unlimited => true,
+        }
+    }
+
+    pub(crate) fn admits(self, bytes: u64) -> bool {
+        match self {
+            Self::Bytes(limit) => bytes <= limit,
+            Self::Unlimited => true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum BuildCacheSizeRecord {
+    Bytes(u64),
+    Keyword(BuildCacheKeyword),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BuildCacheKeyword {
+    Unlimited,
+}
+
+impl From<BuildCacheSizeRecord> for BuildCacheSize {
+    fn from(record: BuildCacheSizeRecord) -> Self {
+        match record {
+            BuildCacheSizeRecord::Bytes(bytes) => Self::Bytes(bytes),
+            BuildCacheSizeRecord::Keyword(BuildCacheKeyword::Unlimited) => Self::Unlimited,
+        }
+    }
+}
+
+impl From<BuildCacheSize> for BuildCacheSizeRecord {
+    fn from(size: BuildCacheSize) -> Self {
+        match size {
+            BuildCacheSize::Bytes(bytes) => Self::Bytes(bytes),
+            BuildCacheSize::Unlimited => Self::Keyword(BuildCacheKeyword::Unlimited),
+        }
+    }
 }
 
 impl Default for ToolResourceSettings {
@@ -997,7 +1059,7 @@ impl Default for ToolResourceSettings {
             build_jobs: one_setting(),
             build_cpu_cores: one_setting(),
             build_project_bytes: MAX_BUILD_PROJECT_BYTES,
-            build_cache_bytes: MAX_BUILD_CACHE_BYTES,
+            build_cache_bytes: BuildCacheSize::Unlimited,
         }
     }
 }
@@ -1014,9 +1076,7 @@ impl ToolResourceSettings {
             && self.build_cpu_cores != Some(0)
             && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
             && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
-            && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
-            && (self.build_cache_bytes == 0
-                || self.build_cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
+            && self.build_cache_bytes.valid()
     }
 }
 
@@ -1059,9 +1119,9 @@ impl Default for ToolLimits {
             build_cpu_cores: one_job(),
             scratch_bytes: SCRATCH_BYTES,
             project_bytes: SCRATCH_BYTES,
-            cache_requested_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
-            cache_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
-            cache_candidate_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
+            cache_requested_bytes: BuildCacheSize::Unlimited,
+            cache_bytes: crate::store::BUILD_CACHE_DEFAULT_VIEW_BYTES,
+            cache_candidate_bytes: crate::store::BUILD_CACHE_DEFAULT_VIEW_BYTES,
             network: NetworkGrant::None,
             resource_class: ToolResourceClass::Default,
             resource_profile: if cfg!(target_os = "macos") {
@@ -1091,6 +1151,16 @@ impl ToolLimits {
             && (self.resource_class == ToolResourceClass::Build
                 || self.build_jobs == one_job() && self.build_cpu_cores == one_job())
             && self.scratch_bytes == SCRATCH_BYTES
+            && self.cache_requested_bytes.valid()
+            && self
+                .cache_requested_bytes
+                .admits(self.cache_candidate_bytes)
+            && (self.cache_requested_bytes.enabled() || self.cache_bytes == 0)
+            && self.cache_candidate_bytes <= self.cache_bytes
+            && self.cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
+            && self
+                .cache_candidate_bytes
+                .is_multiple_of(BYTES_PER_MEBIBYTE)
             && match self.resource_class {
                 ToolResourceClass::Default => {
                     self.memory_bytes == MEMORY_BYTES
@@ -1099,13 +1169,6 @@ impl ToolLimits {
                             self.project_bytes,
                             SCRATCH_BYTES | DEFAULT_COMMAND_PROJECT_BYTES
                         )
-                        && self.cache_requested_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
-                        && self.cache_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
-                        && self.cache_bytes <= self.cache_requested_bytes
-                        && self.cache_candidate_bytes <= self.cache_bytes
-                        && self
-                            .cache_candidate_bytes
-                            .is_multiple_of(BYTES_PER_MEBIBYTE)
                         && (self.cache_transfer_ms == 0
                             || self.cache_transfer_ms == self.runtime_ms)
                         && (self.cache_bytes != 0 || self.cache_transfer_ms == 0)
@@ -1116,19 +1179,6 @@ impl ToolLimits {
                         && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES)
                             .contains(&self.project_bytes)
                         && self.project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
-                        && self.cache_requested_bytes <= MAX_BUILD_CACHE_BYTES
-                        && (self.cache_requested_bytes == 0
-                            || self
-                                .cache_requested_bytes
-                                .is_multiple_of(BYTES_PER_MEBIBYTE))
-                        && self.cache_bytes <= MAX_BUILD_CACHE_BYTES
-                        && self.cache_bytes <= self.cache_requested_bytes
-                        && self.cache_candidate_bytes <= self.cache_bytes
-                        && (self.cache_bytes == 0
-                            || self.cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
-                        && self
-                            .cache_candidate_bytes
-                            .is_multiple_of(BYTES_PER_MEBIBYTE)
                         && self.cache_transfer_ms
                             == if self.cache_bytes == 0 {
                                 0

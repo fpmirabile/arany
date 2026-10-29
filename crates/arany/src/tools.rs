@@ -182,12 +182,12 @@ pub(crate) const GIT_STORAGE_CANARY: &str = "git-storage-canary";
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
-    ApprovalCause, Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause,
-    FailureStage, FileChange, FileReceipt, FileVersion, GuardReceipt, GuardStageFact, HostIntent,
-    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall,
-    ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
-    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
-    UnguardedReceipt,
+    ApprovalCause, Attestation, BuildCacheSize, CacheUpdate, CommandChangeset, EffectIntent,
+    EnforcementCause, FailureStage, FileChange, FileReceipt, FileVersion, GuardReceipt,
+    GuardStageFact, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
+    OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
+    ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
+    ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -963,8 +963,12 @@ impl ToolRuntime {
             })
     }
 
-    pub(crate) fn effective_cache_bytes(&self, requested: u64) -> Result<(u64, u64), ToolError> {
-        if requested == 0 {
+    // The view is the disk headroom above the Guard reserve; a set size caps only publication.
+    pub(crate) fn effective_cache_bytes(
+        &self,
+        requested: BuildCacheSize,
+    ) -> Result<(u64, u64), ToolError> {
+        if !requested.enabled() {
             return Ok((0, 0));
         }
         let Some(state) = self.cache_state.as_ref() else {
@@ -976,8 +980,14 @@ impl ToolRuntime {
             self.workspace_identity.inode,
         )
         .map_err(|_| ToolError::Operation)?;
-        match state.effective_build_cache_bytes(&identity, requested) {
-            Ok(limits) => Ok(limits),
+        match state.build_cache_headroom(&identity, types::GUARD_DISK_RESERVE_BYTES) {
+            Ok(view) => Ok((
+                view,
+                match requested {
+                    BuildCacheSize::Bytes(limit) => view.min(limit),
+                    BuildCacheSize::Unlimited => view,
+                },
+            )),
             Err(crate::store::StoreError::StorageFull) => Ok((0, 0)),
             Err(_) => Err(ToolError::Operation),
         }
@@ -1562,7 +1572,7 @@ impl ToolRuntime {
             ToolLimits {
                 network: NetworkGrant::Host,
                 runtime_ms: 600_000,
-                cache_requested_bytes: 0,
+                cache_requested_bytes: BuildCacheSize::DISABLED,
                 cache_bytes: 0,
                 cache_candidate_bytes: 0,
                 ..ToolLimits::default()

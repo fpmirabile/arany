@@ -211,7 +211,7 @@ fn build_goal_request() -> arany::GoalRequest {
         build_memory_bytes: 512 * 1024 * 1024,
         build_processes: 32,
         build_project_bytes: 128 * 1024 * 1024,
-        build_cache_bytes: 64 * 1024 * 1024,
+        build_cache_bytes: arany::BuildCacheSize::Bytes(64 * 1024 * 1024),
         ..arany::ToolResourceSettings::default()
     };
     goal
@@ -647,9 +647,12 @@ async fn selected_cache_canary_helper_inner() {
         assert_eq!(limits.memory_bytes, 512 * 1024 * 1024);
         assert_eq!(limits.max_processes, 32);
         assert_eq!(limits.project_bytes, 128 * 1024 * 1024);
-        assert_eq!(limits.cache_requested_bytes, 64 * 1024 * 1024);
-        assert!(limits.cache_bytes >= 40 * 1024 * 1024);
-        assert!(limits.cache_bytes <= limits.cache_requested_bytes);
+        assert_eq!(
+            limits.cache_requested_bytes,
+            arany::BuildCacheSize::Bytes(64 * 1024 * 1024)
+        );
+        assert!(limits.cache_candidate_bytes >= 40 * 1024 * 1024);
+        assert!(limits.cache_candidate_bytes <= 64 * 1024 * 1024);
         assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
         let receipt = observation
             .attestation

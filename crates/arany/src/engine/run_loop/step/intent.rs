@@ -863,11 +863,7 @@ fn command_limits(
 ) -> Result<(), EngineError> {
     intent.limits.resource_class = resource_class;
     intent.limits.project_bytes = crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES;
-    let requested_cache_bytes = if resource_class == ToolResourceClass::Build {
-        resource_settings.build_cache_bytes
-    } else {
-        intent.limits.cache_requested_bytes
-    };
+    let requested_cache_bytes = resource_settings.build_cache_bytes;
     intent.limits.cache_requested_bytes = requested_cache_bytes;
     if timeout_refused {
         intent.limits.cache_bytes = 0;

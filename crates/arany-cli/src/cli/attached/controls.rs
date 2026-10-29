@@ -10,17 +10,18 @@ use crate::terminal::{
     InteractiveCommand, NewlineShortcut, PointerSettings, Submission, TerminalInput, TerminalMode,
     transcript_agents,
 };
+use arany::{BuildCacheSize, RecordFormat, RecordKind};
 use arany::{
     CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionId, SessionView, StateRoot,
     fork_session, rename_session, resume_session, validate_native_model_id,
 };
-use arany::{RecordFormat, RecordKind};
 use serde_json::Value;
 use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_BUSY: &str = "Build cache is in use; retry after its command finishes";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
+const BUILD_CACHE_LABEL: &str = "Build cache";
 mod build_cpu;
 mod build_jobs;
 
@@ -326,18 +327,30 @@ const SETTINGS: &[Setting] = &[
         guidance: None,
     },
     Setting {
-        label: "Build cache",
-        hint: "size, e.g. 8GB",
+        label: BUILD_CACHE_LABEL,
+        hint: "size or unlimited, e.g. 8GB",
         input: SettingInput::Typed,
-        value: |p| format_setting_size(p.resources.build_cache_bytes),
+        value: |p| match p.resources.build_cache_bytes {
+            BuildCacheSize::Unlimited => "unlimited".into(),
+            BuildCacheSize::Bytes(bytes) => format_setting_size(bytes),
+        },
         apply: |p, raw| {
-            p.resources.build_cache_bytes = parse_size(raw)?;
+            p.resources.build_cache_bytes = match parse_limit(raw, parse_size)? {
+                None => BuildCacheSize::Unlimited,
+                Some(bytes) => BuildCacheSize::Bytes(bytes),
+            };
             Some(())
         },
         cycle: |p, forward| {
             p.resources.build_cache_bytes = step(
                 p.resources.build_cache_bytes,
-                &[8 * 1024_u64.pow(3), 4 * 1024_u64.pow(3), 1024_u64.pow(3), 0],
+                &[
+                    BuildCacheSize::Unlimited,
+                    BuildCacheSize::Bytes(8 * 1024_u64.pow(3)),
+                    BuildCacheSize::Bytes(4 * 1024_u64.pow(3)),
+                    BuildCacheSize::Bytes(1024_u64.pow(3)),
+                    BuildCacheSize::DISABLED,
+                ],
                 forward,
             );
         },
@@ -570,27 +583,42 @@ fn setting_value(setting: &Setting, preferences: &Preferences) -> String {
     }
 }
 
-fn setting_rows(preferences: Preferences) -> Vec<String> {
+// `cache_used` is the private build caches' current size, shown beside the Build cache row.
+fn setting_value_used(
+    setting: &Setting,
+    preferences: &Preferences,
+    cache_used: Option<u64>,
+) -> String {
+    let value = setting_value(setting, preferences);
+    match cache_used {
+        Some(bytes) if setting.label == BUILD_CACHE_LABEL => {
+            format!("{value} · {} used", format_bytes(bytes))
+        }
+        _ => value,
+    }
+}
+
+fn setting_rows(preferences: Preferences, cache_used: Option<u64>) -> Vec<String> {
     SETTINGS
         .iter()
         .map(|setting| {
             format!(
                 "{}: {}",
                 setting.label,
-                setting_value(setting, &preferences)
+                setting_value_used(setting, &preferences, cache_used)
             )
         })
         .collect()
 }
 
-fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
+fn linear_setting_rows(preferences: Preferences, cache_used: Option<u64>) -> Vec<String> {
     SETTINGS
         .iter()
         .map(|setting| {
             format!(
                 "{}: {} ({})",
                 setting.label,
-                setting_value(setting, &preferences),
+                setting_value_used(setting, &preferences, cache_used),
                 setting.hint
             )
         })
@@ -882,8 +910,13 @@ fn field_notice(setting: &Setting, invalid: &mut bool) -> String {
     )
 }
 
-fn visual_rows(chosen: Preferences, selected_row: usize, field: Option<&str>) -> Vec<String> {
-    let mut rows = setting_rows(chosen);
+fn visual_rows(
+    chosen: Preferences,
+    cache_used: Option<u64>,
+    selected_row: usize,
+    field: Option<&str>,
+) -> Vec<String> {
+    let mut rows = setting_rows(chosen, cache_used);
     if let (Some(text), Some(row), Some(setting)) = (
         field,
         rows.get_mut(selected_row),
@@ -897,6 +930,7 @@ fn visual_rows(chosen: Preferences, selected_row: usize, field: Option<&str>) ->
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
+    cache_used: Option<u64>,
     view: &SessionView,
 ) -> Result<Option<Preferences>, String> {
     let linear = terminal.is_linear();
@@ -918,9 +952,9 @@ async fn choose_settings(
             None => settings_notice(terminal, selected_row, &mut invalid, &mut linear_guidance),
         };
         let rows = if linear {
-            linear_setting_rows(chosen)
+            linear_setting_rows(chosen, cache_used)
         } else {
-            visual_rows(chosen, selected_row, field.as_deref())
+            visual_rows(chosen, cache_used, selected_row, field.as_deref())
         };
         terminal
             .draw_settings(&rows, selected_row, notice.as_deref(), view)
@@ -1016,7 +1050,8 @@ pub(super) async fn settings(
     current.completion = composer.completion_layout();
     current.newline = composer.newline_shortcut();
     current.view = *saved_view;
-    let notice = match choose_settings(terminal, current, view).await? {
+    let cache_used = build_cache_used(admission).await;
+    let notice = match choose_settings(terminal, current, cache_used, view).await? {
         None => "Settings unchanged".to_owned(),
         Some(chosen) => match save_settings(admission, chosen).await {
             Ok(()) => {
@@ -1569,6 +1604,19 @@ async fn provider_command(
     } else {
         format!("Provider: {profile}")
     })
+}
+
+async fn build_cache_used(admission: &Admission) -> Option<u64> {
+    let path = admission.state_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        StateRoot::open_existing(&path)
+            .ok()?
+            .build_cache_bytes()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn cache_command(admission: &Admission, argument: Option<&str>) -> String {
@@ -2189,7 +2237,7 @@ mod tests {
             }
         };
         assert_eq!(
-            linear_setting_rows(preferences),
+            linear_setting_rows(preferences, None),
             [
                 "Slash menu: tabs (default) (tabs|combined)",
                 "Chat view: fullscreen (default) (fullscreen|classic)",
@@ -2201,7 +2249,7 @@ mod tests {
                 "Build memory: 4.0 GB (default) (size, e.g. 512MB)",
                 "Build processes/threads: 256 (default) (number)",
                 "Build writable project: 1.0 GB (default) (size, e.g. 1GB)",
-                "Build cache: 8.0 GB (default) (size, e.g. 8GB)",
+                "Build cache: unlimited (default) (size or unlimited, e.g. 8GB)",
                 "Copy on select: on (default) (on|off)",
                 "Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)",
                 build_jobs.as_str(),
@@ -2283,9 +2331,24 @@ mod tests {
         assert!(apply_setting(&mut preferences, "10 512MB"));
         assert_eq!(preferences.resources.build_project_bytes, 512 * 1024 * 1024);
         assert!(apply_setting(&mut preferences, "11 0B"));
-        assert_eq!(preferences.resources.build_cache_bytes, 0);
+        assert_eq!(
+            preferences.resources.build_cache_bytes,
+            BuildCacheSize::DISABLED
+        );
         assert!(apply_setting(&mut preferences, "11 8gb"));
-        assert_eq!(preferences.resources.build_cache_bytes, 8 * 1024_u64.pow(3));
+        assert_eq!(
+            preferences.resources.build_cache_bytes,
+            BuildCacheSize::Bytes(8 * 1024_u64.pow(3))
+        );
+        assert!(apply_setting(&mut preferences, "11 unlimited"));
+        assert_eq!(
+            preferences.resources.build_cache_bytes,
+            BuildCacheSize::Unlimited
+        );
+        assert_eq!(
+            setting_rows(preferences, Some(3_435_973_837))[10],
+            "Build cache: unlimited (default) · 3.2 GB used"
+        );
         for shortcut in NewlineShortcut::ALL {
             assert!(apply_setting(
                 &mut preferences,
@@ -2315,9 +2378,12 @@ mod tests {
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
         assert_eq!(preferences.goal_budget.max_tokens, Some(100_000));
         assert_eq!(preferences.resources.max_command_timeout_ms, 300_000);
-        assert!(setting_rows(preferences).contains(&"Tokens per task: 100000".into()));
+        assert!(setting_rows(preferences, None).contains(&"Tokens per task: 100000".into()));
         assert!(apply_setting(&mut preferences, "4 default"));
-        assert!(setting_rows(preferences).contains(&"Tokens per task: unlimited (default)".into()));
+        assert!(
+            setting_rows(preferences, None)
+                .contains(&"Tokens per task: unlimited (default)".into())
+        );
         assert!(apply_setting(&mut preferences, "3 64"));
         reset_setting(&mut preferences, 2);
         assert_eq!(preferences.goal_budget, Preferences::default().goal_budget);
@@ -2399,15 +2465,15 @@ mod tests {
                 build_jobs: None,
                 build_cpu_cores: None,
                 build_project_bytes: 513 * 1024 * 1024,
-                build_cache_bytes: 1025 * 1024 * 1024,
+                build_cache_bytes: BuildCacheSize::Bytes(1025 * 1024 * 1024),
             },
             copy_on_select: false,
             newline: NewlineShortcut::AltEnter,
             context_window: arany::ContextWindow::Tokens(123_456),
         };
-        assert!(setting_rows(custom).contains(&"Build memory: 1.0009765625 KB".into()));
-        assert!(setting_rows(custom).contains(&"Context window: 123456".into()));
-        assert!(setting_rows(custom).contains(&"Build cache: 1.0009765625 GB".into()));
+        assert!(setting_rows(custom, None).contains(&"Build memory: 1.0009765625 KB".into()));
+        assert!(setting_rows(custom, None).contains(&"Context window: 123456".into()));
+        assert!(setting_rows(custom, None).contains(&"Build cache: 1.0009765625 GB".into()));
         for mut original in [defaults, custom] {
             for memory in [
                 1,
@@ -2431,7 +2497,7 @@ mod tests {
                         setting.label
                     );
                     assert_eq!(chosen, original, "{}: {rendered}", setting.label);
-                    let accepts_unlimited = matches!(number, 3..=5);
+                    let accepts_unlimited = matches!(number, 3..=5 | 11);
                     assert_eq!(
                         apply_setting(&mut chosen, &format!("{number} unlimited")),
                         accepts_unlimited,

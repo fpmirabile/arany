@@ -65,31 +65,6 @@ pub(super) fn mounts() -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, 
         .collect()
 }
 
-const CLONE_NOFOLLOW: u32 = 1;
-const CLONE_NOOWNERCOPY: u32 = 2;
-
-// APFS copy-on-write clone of a pinned directory tree; another volume reports EXDEV.
-pub(super) fn clone_directory(
-    source: &impl AsRawFd,
-    parent: &impl AsRawFd,
-    name: &CStr,
-) -> std::io::Result<()> {
-    // Both descriptors stay open for the call and the name is a NUL-terminated C string.
-    let result = unsafe {
-        libc::fclonefileat(
-            source.as_raw_fd(),
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            CLONE_NOFOLLOW | CLONE_NOOWNERCOPY,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
 const PROCESS_IDENTITY_INFO: i32 = 17;
 const PROCESS_COALITION_INFO: i32 = 20;
 const ALL_PROCESSES: u32 = 1;

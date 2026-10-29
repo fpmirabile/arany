@@ -14,7 +14,8 @@ use crate::tools::Cancellation;
 use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
 use crate::tools::process::MAX_ARGUMENT_BYTES;
 use crate::tools::types::{
-    CommandResult, GUARD_DISK_RESERVE_BYTES, ToolDisposition, ToolLimits, ToolResourceClass,
+    CommandResult, GUARD_DISK_EVICTION_BYTES, GUARD_DISK_RESERVE_BYTES, ToolDisposition,
+    ToolLimits, ToolResourceClass,
 };
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
@@ -43,6 +44,7 @@ const HOST_PROCESS_CAP: usize = 65_536;
 const JOB_BYTES_CAP: usize = 128 * 1024;
 const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
+const EVICTION_RETRY: Duration = Duration::from_secs(1);
 pub(super) const UNIT_ROOT_PARENT: &str = "/private/tmp";
 const UNIT_ROOT_PREFIX: &str = "arany-u-";
 
@@ -1022,6 +1024,10 @@ pub(super) async fn run_unit(
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let go_cancellation = cancellation.clone();
     let timings = StageTimer::new();
+    let eviction = runtime
+        .cache_state
+        .clone()
+        .map(|state| tokio::spawn(evict_near_reserve(state, unit.root.clone())));
     let execution = async {
         let capture = FixtureSpan::begin(FixtureStage::Connect);
         let mut stream = BufReader::new(
@@ -1314,6 +1320,9 @@ pub(super) async fn run_unit(
             result = tokio::time::timeout_at(completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
         }
     };
+    if let Some(eviction) = eviction {
+        eviction.abort();
+    }
     let stopped = tokio::time::timeout_at(completion_deadline, unit.stop())
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
@@ -1335,7 +1344,7 @@ pub(super) async fn run_unit(
     if result.is_ok() {
         link.release_publisher(&mut unit)?;
     }
-    match result {
+    let result = match result {
         Ok((mut observation, candidate)) => {
             crate::tools::network::annotate(&mut observation, refusals)?;
             super::super::publish_cache_candidate(
@@ -1345,12 +1354,38 @@ pub(super) async fn run_unit(
                 completion_deadline,
             )
             .await;
-            super::retire_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
-            timings.mark("cache");
-            crate::diagnostics::guard_timing(intent.call.label(), &timings.stages());
             Ok(observation)
         }
         Err(error) => Err(error),
+    };
+    super::retire_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
+    timings.mark("cache");
+    crate::diagnostics::guard_timing(intent.call.label(), &timings.stages());
+    result
+}
+
+// Frees regenerable build caches, least recently used first, before the worker reaches the reserve.
+async fn evict_near_reserve(state: std::sync::Arc<crate::store::StateRoot>, root: PathBuf) {
+    let Ok(directory) = crate::tools::fs::open_directory(&root) else {
+        return;
+    };
+    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+    loop {
+        samples.tick().await;
+        if super::storage::free_bytes(&directory)
+            .is_ok_and(|free| free >= GUARD_DISK_EVICTION_BYTES)
+        {
+            continue;
+        }
+        let state = std::sync::Arc::clone(&state);
+        let evicted = tokio::task::spawn_blocking(move || {
+            state.evict_build_caches(GUARD_DISK_EVICTION_BYTES)
+        })
+        .await;
+        // Nothing left to evict: wait before scanning the cache directory again.
+        if !matches!(evicted, Ok(Ok(free)) if free >= GUARD_DISK_EVICTION_BYTES) {
+            tokio::time::sleep(EVICTION_RETRY).await;
+        }
     }
 }
 
@@ -1396,7 +1431,7 @@ fn clone_cache(
     else {
         return Ok(cache);
     };
-    if ffi::clone_directory(&directory.lower, &unit._directory.dir, c"cache").is_err() {
+    if crate::private_fs::clone_at(&directory.lower, &unit._directory.dir, "cache").is_err() {
         return Ok(None);
     }
     let permit = unit._permit.as_ref().ok_or(ToolError::Operation)?;
@@ -3759,7 +3794,7 @@ int main(int argc, char **argv) {
             let runtime = snapshot_runtime(Path::new(&source));
             native_storage_stage(&phase, "command-storage-preparation-started");
             let limits = crate::tools::types::ToolLimits {
-                cache_requested_bytes: 0,
+                cache_requested_bytes: crate::tools::types::BuildCacheSize::DISABLED,
                 cache_bytes: 0,
                 cache_candidate_bytes: 0,
                 cache_transfer_ms: 0,

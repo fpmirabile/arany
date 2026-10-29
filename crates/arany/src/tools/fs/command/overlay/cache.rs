@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::{CACHE_ROOTS, CacheChange, MAX_ARCHIVE_ENTRIES};
+use crate::store::{CACHE_ROOTS, CacheChange};
 use std::os::unix::fs::FileTypeExt;
 
 #[cfg(test)]
@@ -15,14 +15,12 @@ pub(in crate::tools) fn capture(
     let before = inventory(
         lower,
         Layer::Lower,
-        exclusions,
         &mut CommandScanBudget::default(),
         deadline,
     )?;
     let after = inventory(
         upper,
         Layer::Upper,
-        exclusions,
         &mut CommandScanBudget::default(),
         deadline,
     )?;
@@ -78,10 +76,7 @@ pub(in crate::tools) fn capture(
     let total = sizes.values().try_fold(0u64, |sum, bytes| {
         sum.checked_add(*bytes).ok_or(ToolError::Limit)
     })?;
-    if total > limit
-        || sizes.len() > MAX_ARCHIVE_ENTRIES
-        || removals.len() + additions.len() > MAX_ARCHIVE_ENTRIES * 2
-    {
+    if total > limit {
         return Err(ToolError::Limit);
     }
     let mut changes = removals
@@ -114,13 +109,11 @@ fn excluded(path: &str, exclusions: &[String]) -> bool {
 fn inventory(
     root: &Dir,
     layer: Layer,
-    exclusions: &[String],
     budget: &mut CommandScanBudget,
     deadline: Instant,
 ) -> Result<BTreeMap<String, (std::fs::Metadata, bool)>, ToolError> {
     let mut pending = vec![String::new()];
     let mut entries = BTreeMap::new();
-    let mut cache_entries = 0usize;
     if matches!(layer, Layer::Upper) && metadata::validate(&pin(root, "")?, budget)? {
         return Err(ToolError::Path);
     }
@@ -136,12 +129,7 @@ fn inventory(
                 .map_err(|_| ToolError::Path)?;
             let path = joined(&path, &name);
             budget.entry(&path)?;
-            if selected(&path) && !excluded(&path, exclusions) {
-                cache_entries += 1;
-            }
-            if cache_entries > MAX_ARCHIVE_ENTRIES
-                || path.split('/').count() > COMMAND_SNAPSHOT_DEPTH
-            {
+            if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
                 return Err(ToolError::Limit);
             }
             if if selected(&path) {

@@ -103,10 +103,10 @@ async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_
         editor.limits.resource_class = class;
         editor.limits.cache_bytes = 0;
         editor.limits.cache_candidate_bytes = 0;
-        for requested in [0, crate::store::BUILD_CACHE_ARCHIVE_BYTES] {
+        for requested in [BuildCacheSize::DISABLED, BuildCacheSize::Unlimited] {
             editor.limits.cache_requested_bytes = requested;
             let admitted = cache_directory::session(&runtime, &editor, far_deadline()).await;
-            if requested == 0 {
+            if !requested.enabled() {
                 assert!(admitted.unwrap().is_none());
             } else {
                 assert!(matches!(admitted, Err(ToolError::Limit)));

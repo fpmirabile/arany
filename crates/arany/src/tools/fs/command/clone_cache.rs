@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::{CACHE_ROOTS, CacheChange, MAX_ARCHIVE_ENTRIES};
+use crate::store::{CACHE_ROOTS, CacheChange};
 use cap_std::fs::{Metadata, MetadataExt};
 
 #[cfg(test)]
@@ -40,7 +40,7 @@ pub(in crate::tools) fn capture(
             CacheChange::File(path.clone())
         });
     }
-    if total > limit || changes.len() > MAX_ARCHIVE_ENTRIES * 2 {
+    if total > limit {
         return Err(ToolError::Limit);
     }
     Ok(changes)
@@ -118,9 +118,6 @@ fn inventory(
             }
             if selected(&path) {
                 entries.insert(path, metadata);
-                if entries.len() > MAX_ARCHIVE_ENTRIES {
-                    return Err(ToolError::Limit);
-                }
             }
         }
     }

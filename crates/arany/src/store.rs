@@ -32,15 +32,13 @@ pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
 pub(crate) use state::spill::{SWEEP_TIME_MS, SpillAccess};
-pub(crate) use state::{
-    AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
-    MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
-};
 pub use state::{ArchivedHistory, ArchivedRecords, HistoryReset};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use state::{
-    CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES, validate_cache_path,
+    BUILD_CACHE_DEFAULT_VIEW_BYTES, BuildCacheIdentity, BuildCacheLease, ProviderCheckLock,
+    SessionRunLock, WorkspaceRunLock,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use state::{CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_cache_path};
 #[cfg(unix)]
 pub(crate) use state::{
     MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES,

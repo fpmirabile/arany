@@ -7,6 +7,11 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod acl;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod clone;
+#[cfg(target_os = "macos")]
+pub(crate) use clone::clone_at;
 
 #[derive(Debug)]
 pub(crate) enum Error {

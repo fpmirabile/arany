@@ -249,26 +249,13 @@ pub(super) fn build_cache_session(
     )
     .map_err(map_cache_error)?;
     let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
-    let lease = match state.begin_build_cache_with_limits(
-        identity.clone(),
-        intent.limits.cache_bytes,
-        intent.limits.cache_candidate_bytes,
-    ) {
+    let lease = match state
+        .begin_build_cache_with_limit(identity.clone(), intent.limits.cache_candidate_bytes)
+    {
         Ok(lease) => lease,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Err(StoreError::StorageFull) if cache_directory::selected(intent) => {
             return Err(ToolError::Limit);
-        }
-        Err(StoreError::StorageFull) if intent.limits.cache_candidate_bytes > 0 => {
-            match state.begin_build_cache_with_limits(
-                identity.clone(),
-                intent.limits.cache_bytes,
-                0,
-            ) {
-                Ok(lease) => lease,
-                Err(StoreError::StorageFull) => return Ok(None),
-                Err(error) => return Err(map_cache_error(error)),
-            }
         }
         Err(StoreError::StorageFull) => return Ok(None),
         Err(error) => return Err(map_cache_error(error)),
@@ -334,7 +321,9 @@ pub(super) async fn publish_cache_candidate(
         (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
         (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
         (CacheCandidate::Failed, _) => CacheUpdate::Failed,
-        (CacheCandidate::Received, None) if observation.intent.limits.cache_requested_bytes > 0 => {
+        (CacheCandidate::Received, None)
+            if observation.intent.limits.cache_requested_bytes.enabled() =>
+        {
             CacheUpdate::Rejected
         }
         (CacheCandidate::Received, None) => CacheUpdate::NotApplicable,

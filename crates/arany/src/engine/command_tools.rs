@@ -84,7 +84,7 @@ impl Engine {
         let mut intent = runtime.intent(RunId::new(), AgentRunId::new(), tool.call());
         intent.limits.runtime_ms = command_tools::TIMEOUT_MS;
         intent.limits.result_bytes = crate::tools::permissions::HOOK_RESULT_BYTES;
-        intent.limits.cache_requested_bytes = 0;
+        intent.limits.cache_requested_bytes = crate::tools::BuildCacheSize::DISABLED;
         intent.limits.cache_bytes = 0;
         intent.limits.cache_candidate_bytes = 0;
         intent.limits.cache_transfer_ms = 0;

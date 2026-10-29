@@ -40,9 +40,11 @@ pub(in crate::test_support::worker_teams) fn dispatched(
     case: &str,
 ) {
     let root = StateRoot::open_existing(state).unwrap();
-    let bytes = crate::store::BUILD_CACHE_ARCHIVE_BYTES;
     assert!(matches!(
-        root.begin_build_cache_with_limits(cache_identity(workspace), bytes, bytes),
+        root.begin_build_cache_with_limit(
+            cache_identity(workspace),
+            crate::store::BUILD_CACHE_DEFAULT_VIEW_BYTES
+        ),
         Err(StoreError::BuildCacheBusy)
     ));
     assert!(matches!(
@@ -71,9 +73,11 @@ pub(in crate::test_support::worker_teams) fn assert_cache_reusable(
     }
     let root = StateRoot::open_existing(state).unwrap();
     root.clear_workspace_build_cache(workspace).unwrap();
-    let bytes = crate::store::BUILD_CACHE_ARCHIVE_BYTES;
     let lease = root
-        .begin_build_cache_with_limits(cache_identity(workspace), bytes, bytes)
+        .begin_build_cache_with_limit(
+            cache_identity(workspace),
+            crate::store::BUILD_CACHE_DEFAULT_VIEW_BYTES,
+        )
         .unwrap();
     drop(lease);
 }

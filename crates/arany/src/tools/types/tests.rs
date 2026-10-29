@@ -515,3 +515,70 @@ fn guard_stage_is_valid_only_on_unattested_guard_failures() {
     };
     assert!(!observation(read, ToolDisposition::Failed).valid());
 }
+
+#[test]
+fn build_cache_size_pins_unlimited_or_a_set_size_and_bounds_only_the_candidate() {
+    let settings = ToolResourceSettings::default();
+    assert_eq!(settings.build_cache_bytes, BuildCacheSize::Unlimited);
+    assert!(settings.valid());
+    let stored = serde_json::to_value(settings).unwrap();
+    assert_eq!(stored["build_cache_bytes"], json!("unlimited"));
+    assert_eq!(
+        serde_json::from_value::<ToolResourceSettings>(stored).unwrap(),
+        settings
+    );
+    for (value, size) in [
+        (json!(0), BuildCacheSize::DISABLED),
+        (json!(8_u64 << 30), BuildCacheSize::Bytes(8 << 30)),
+        (json!("unlimited"), BuildCacheSize::Unlimited),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<BuildCacheSize>(value.clone()).unwrap(),
+            size
+        );
+        assert_eq!(serde_json::to_value(size).unwrap(), value);
+    }
+    assert!(serde_json::from_value::<BuildCacheSize>(json!("8GB")).is_err());
+    assert!(
+        !ToolResourceSettings {
+            build_cache_bytes: BuildCacheSize::Bytes(1),
+            ..settings
+        }
+        .valid()
+    );
+
+    let mebibyte = 1024 * 1024;
+    let mut intent = EffectIntent {
+        host: None,
+        rewrite: Vec::new(),
+        host_command: None,
+        target: crate::session::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: ToolCall::GitStatus { path: "src".into() },
+        limits: ToolLimits {
+            cache_bytes: 64 * 1024 * mebibyte,
+            cache_candidate_bytes: 64 * 1024 * mebibyte,
+            ..ToolLimits::default()
+        },
+        use_count: 1,
+    };
+    assert!(intent.valid());
+    let limits = &mut intent.limits;
+    limits.cache_requested_bytes = BuildCacheSize::Bytes(mebibyte);
+    let over_size = intent.clone();
+    assert!(!over_size.valid());
+    intent.limits.cache_candidate_bytes = mebibyte;
+    assert!(intent.valid());
+    intent.limits.cache_requested_bytes = BuildCacheSize::DISABLED;
+    assert!(!intent.valid());
+    intent.limits.cache_bytes = 0;
+    intent.limits.cache_candidate_bytes = 0;
+    intent.limits.cache_transfer_ms = 0;
+    assert!(intent.valid());
+}

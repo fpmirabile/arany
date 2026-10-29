@@ -210,22 +210,13 @@ fn seed_empty_build_cache(
             .create(&cache)
             .expect("private cache directory");
     }
-    let archive = cache.join(format!("cache-{token}.arc"));
+    let tree = cache.join(format!("directory-{token}.tree"));
     let lock = cache.join(format!("identity-{token}.lock"));
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"ARANYCACHE\0\x01");
-    bytes.extend_from_slice(&(path.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&metadata.dev().to_le_bytes());
-    bytes.extend_from_slice(&metadata.ino().to_le_bytes());
-    bytes.extend_from_slice(path.as_bytes());
-    bytes.extend_from_slice(&[0; 12]);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&archive)
-        .expect("cache archive");
-    file.write_all(&bytes).expect("write empty cache archive");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(tree.join("target"))
+        .expect("cache directory tree");
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -233,7 +224,7 @@ fn seed_empty_build_cache(
         .mode(0o600)
         .open(&lock)
         .expect("cache identity lock");
-    (archive, lock)
+    (tree, lock)
 }
 
 #[test]
@@ -323,7 +314,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 8: Build memory: 4.0 GB (default) (size, e.g. 512MB)\r\n\
           Choice 9: Build processes/threads: 256 (default) (number)\r\n\
           Choice 10: Build writable project: 1.0 GB (default) (size, e.g. 1GB)\r\n\
-          Choice 11: Build cache: 8.0 GB (default) (size, e.g. 8GB)\r\n\
+          Choice 11: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)\r\n\
           Choice 12: Copy on select: on (default) (on|off)\r\n\
           Choice 13: Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)\r\n\
           Choice 14: Build jobs: {build_jobs} (default) (automatic or 1..cores)\r\n\
@@ -378,10 +369,17 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             "8 4GB",
             "Choice 8: Build memory: 4.0 GB (default) (size, e.g. 512MB)",
         ),
-        ("11 0B", "Choice 11: Build cache: 0 B (size, e.g. 8GB)"),
+        (
+            "11 0B",
+            "Choice 11: Build cache: 0 B · 0 B used (size or unlimited, e.g. 8GB)",
+        ),
         (
             "11 8GB",
-            "Choice 11: Build cache: 8.0 GB (default) (size, e.g. 8GB)",
+            "Choice 11: Build cache: 8.0 GB · 0 B used (size or unlimited, e.g. 8GB)",
+        ),
+        (
+            "11 unlimited",
+            "Choice 11: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)",
         ),
     ] {
         let changed_at = transcript.len();

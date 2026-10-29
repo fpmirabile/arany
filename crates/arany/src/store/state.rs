@@ -14,8 +14,7 @@ use archive::{private_subdirectory, rename, sync};
 mod build_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use build_cache::{
-    CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES,
-    validate_path as validate_cache_path,
+    CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_path as validate_cache_path,
 };
 pub(crate) mod checkpoints;
 #[cfg(unix)]
@@ -23,8 +22,7 @@ mod inventory;
 mod lock;
 pub(crate) mod spill;
 pub(crate) use build_cache::{
-    AGGREGATE_BYTES, BuildCacheIdentity, BuildCacheLease,
-    DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES, MAX_ARCHIVE_BYTES,
+    BuildCacheIdentity, BuildCacheLease, DEFAULT_VIEW_BYTES as BUILD_CACHE_DEFAULT_VIEW_BYTES,
 };
 #[cfg(unix)]
 pub use inventory::{
