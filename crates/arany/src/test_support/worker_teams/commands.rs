@@ -69,13 +69,13 @@ pub(super) fn call(outside: bool) -> ToolCall {
 
 pub(super) fn configure(state: &Path, case: &str) {
     if case == "command_auto" {
-        private_file(
+        crate::test_support::private_file(
             &state.join("permissions.json"),
             br#"{"permissions":{"defaultMode":"auto"}}"#,
         );
     }
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
-    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
+    crate::test_support::private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
         "version":1,"workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
         "commands":[{"name":"build","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}]
     })).unwrap());

@@ -64,30 +64,10 @@ fn padded_event_stream(events: &str, target: usize) -> String {
 }
 
 async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, serde_json::Value) {
-    let mut request = Vec::new();
-    loop {
-        let mut chunk = [0; 4096];
-        let size = stream.read(&mut chunk).await.expect("request bytes");
-        assert!(size > 0 && request.len() + size <= 512 * 1024);
-        request.extend_from_slice(&chunk[..size]);
-        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-            let header_end = end + 4;
-            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            let body_len = header
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("content length");
-            if request.len() >= header_end + body_len {
-                let body = serde_json::from_slice(&request[header_end..header_end + body_len])
-                    .expect("JSON request");
-                return (header.to_ascii_lowercase(), body);
-            }
-        }
-    }
+    let request = crate::provider::test_support::read_loopback_request(stream).await;
+    let header_end = request.find("\r\n\r\n").expect("HTTP header") + 4;
+    let body = serde_json::from_str(&request[header_end..]).expect("JSON request");
+    (request[..header_end].to_ascii_lowercase(), body)
 }
 
 // Serves one reply to one request and returns the Messages aggregate wire and reconstructed sizes.

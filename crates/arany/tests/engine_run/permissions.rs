@@ -1,10 +1,6 @@
 use super::*;
+use arany::test_support::private_file;
 use std::os::unix::fs::PermissionsExt;
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
 
 #[tokio::test]
 async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider() {

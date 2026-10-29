@@ -7,10 +7,7 @@ use crate::{
     },
     session::{AgentRunId, RunId, SessionId},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 const TOKEN: &str = "synthetic-subscription-token";
 
@@ -773,39 +770,11 @@ async fn serve(reply: Vec<u8>) -> (Url, tokio::task::JoinHandle<String>) {
     .expect("test endpoint");
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("request");
-        let request = read_request(&mut socket).await;
+        let request = crate::provider::test_support::read_loopback_request(&mut socket).await;
         socket.write_all(&reply).await.expect("reply");
         request
     });
     (endpoint, server)
-}
-
-async fn read_request(socket: &mut TcpStream) -> String {
-    let mut request = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let count = socket.read(&mut buffer).await.expect("read");
-        if count == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..count]);
-        if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let length = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("body length");
-            if request.len() >= header_end + 4 + length {
-                break;
-            }
-        }
-        assert!(request.len() <= 512 * 1024 + 8192);
-    }
-    String::from_utf8(request).expect("request text")
 }
 
 fn event_reply(stream: Vec<u8>) -> Vec<u8> {

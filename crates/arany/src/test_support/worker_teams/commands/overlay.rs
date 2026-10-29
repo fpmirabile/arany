@@ -16,10 +16,10 @@ pub(in crate::test_support::worker_teams) fn configure(workspace: &Path, case: &
     if call(case).is_none() {
         return;
     }
-    private_file(&workspace.join("sibling"), b"ungranted");
-    private_file(&workspace.join("notes/.gitignore"), b"ignored\n");
-    private_file(&workspace.join("notes/ignored"), b"retained");
-    private_file(&workspace.join("notes/released"), b"hold\n");
+    crate::test_support::private_file(&workspace.join("sibling"), b"ungranted");
+    crate::test_support::private_file(&workspace.join("notes/.gitignore"), b"ignored\n");
+    crate::test_support::private_file(&workspace.join("notes/ignored"), b"retained");
+    crate::test_support::private_file(&workspace.join("notes/released"), b"hold\n");
 }
 
 pub(in crate::test_support::worker_teams) fn dispatch_gate(
@@ -52,9 +52,9 @@ pub(in crate::test_support::worker_teams) fn dispatched(
         Err(StoreError::BuildCacheBusy)
     ));
     if case == "command_overlay_conflict" {
-        private_file(&workspace.join("notes/0"), b"host");
+        crate::test_support::private_file(&workspace.join("notes/0"), b"host");
     }
-    private_file(&workspace.join("notes/released"), b"release\n");
+    crate::test_support::private_file(&workspace.join("notes/released"), b"release\n");
 }
 
 fn cache_identity(workspace: &Path) -> crate::store::BuildCacheIdentity {

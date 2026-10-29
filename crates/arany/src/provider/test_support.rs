@@ -313,3 +313,32 @@ pub(crate) fn compaction_bound_request(
     let body = body_of(&at_bound);
     (at_bound, body)
 }
+
+const LOOPBACK_REQUEST_CAP: usize = 512 * 1024;
+
+// Reads one HTTP request through its Content-Length body and returns the raw text.
+pub(crate) async fn read_loopback_request(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut request = Vec::new();
+    loop {
+        let mut chunk = [0; 4096];
+        let size = stream.read(&mut chunk).await.expect("request bytes");
+        assert!(size > 0 && request.len() + size <= LOOPBACK_REQUEST_CAP);
+        request.extend_from_slice(&chunk[..size]);
+        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let header_end = end + 4;
+            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
+            let body_len = header
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .expect("content length");
+            if request.len() >= header_end + body_len {
+                return String::from_utf8(request).expect("request text");
+            }
+        }
+    }
+}
