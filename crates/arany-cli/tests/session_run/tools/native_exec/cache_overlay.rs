@@ -60,8 +60,9 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
         "set -eu; rm -rf \"$CARGO_TARGET_DIR/nested\"; mkdir -p \"$CARGO_TARGET_DIR/nested\"; printf old > \"$CARGO_TARGET_DIR/nested/old\"; printf stable > \"$CARGO_TARGET_DIR/stable\"; mkdir -p /cache/cargo /cache/.npm/_logs; printf transient > /cache/cargo/.package-cache; printf transient > /cache/.npm/_logs/entry",
         "set -eu; test ! -e /cache/cargo/.package-cache; test ! -e /cache/.npm/_logs/entry; test \"$(cat \"$CARGO_TARGET_DIR/nested/old\")\" = old; rm -rf \"$CARGO_TARGET_DIR/nested\"; mkdir \"$CARGO_TARGET_DIR/nested\"; printf new > \"$CARGO_TARGET_DIR/nested/new\"; rm \"$CARGO_TARGET_DIR/stable\"",
         "set -eu; test ! -e \"$CARGO_TARGET_DIR/nested/old\"; test ! -e \"$CARGO_TARGET_DIR/stable\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; dd if=/dev/zero of=\"$CARGO_TARGET_DIR/exhausted\" bs=1048576 count=80",
-        "set -eu; mkdir -p \"$CARGO_TARGET_DIR/inodes\"; i=0; while { : > \"$CARGO_TARGET_DIR/inodes/empty-$i\"; } 2>/dev/null; do i=$((i + 1)); done; test \"$(/usr/bin/stat -f -c %d /cache)\" -eq 0; rm -rf \"$CARGO_TARGET_DIR/inodes\"",
-        "set -eu; test ! -e \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused",
+        "set -eu; mkdir -p \"$CARGO_TARGET_DIR/inodes\"; i=0; while { : > \"$CARGO_TARGET_DIR/inodes/empty-$i\"; } 2>/dev/null; do i=$((i + 1)); done; test \"$(/usr/bin/stat -f -c %d /cache)\" -eq 0",
+        // The unlimited default published the 80 MiB file; deleting it keeps Build under its set size.
+        "set -eu; test -s \"$CARGO_TARGET_DIR/exhausted\"; rm \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused",
     ];
     let switched = format!(
         "set -eu; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; {}",
@@ -69,6 +70,7 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
     );
     if class == arany::ToolResourceClass::Build {
         scripts[0] = &switched;
+        scripts[4] = "set -eu; test ! -e \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused";
     }
     let calls = scripts
         .iter()
@@ -194,23 +196,17 @@ fn assert_observations(
         let observation = tool.observation.as_ref().unwrap();
         assert!(observation.attestation.is_some());
         assert_eq!(observation.intent.limits.resource_class, class);
+        // The view is the disk headroom, so the 80 MiB write succeeds and only Build's set size
+        // rejects it; the inode-exhausted upper exceeds the capture scan bound in both classes.
         assert_eq!(
             observation.cache_update,
-            // The upper stays inode-bounded; without an entry cap the emptied candidate publishes.
-            if index == 2 {
-                arany::CacheUpdate::NotAttempted
-            } else {
-                arany::CacheUpdate::Published
-            }
+            match (index, class) {
+                (2, arany::ToolResourceClass::Build) | (3, _) => arany::CacheUpdate::Rejected,
+                _ => arany::CacheUpdate::Published,
+            },
+            "command {index}"
         );
-        assert_eq!(
-            observation.disposition,
-            if index == 2 {
-                ToolDisposition::Failed
-            } else {
-                ToolDisposition::Succeeded
-            }
-        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         let result: Value = serde_json::from_str(&observation.output).unwrap();
         assert_eq!(result["changeset"]["files"], json!([]));
     }

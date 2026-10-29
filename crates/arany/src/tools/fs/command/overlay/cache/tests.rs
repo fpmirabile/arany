@@ -73,3 +73,37 @@ fn cache_capture_recreates_subtrees_preserves_host_exclusions_and_rejects_unsafe
     std::os::unix::fs::symlink("/usr", upper_path.join(".npm/_logs/unsafe")).unwrap();
     assert!(capture().is_err());
 }
+
+#[test]
+fn cache_capture_has_no_entry_cap_but_rejects_an_upper_past_the_scan_bound() {
+    let temp = tempfile::tempdir().unwrap();
+    let lower_path = temp.path().join("lower");
+    let files = temp.path().join("upper/target/inodes");
+    std::fs::create_dir_all(&lower_path).unwrap();
+    std::fs::create_dir_all(&files).unwrap();
+    let lower = Dir::open_ambient_dir(&lower_path, cap_std::ambient_authority()).unwrap();
+    let upper =
+        Dir::open_ambient_dir(temp.path().join("upper"), cap_std::ambient_authority()).unwrap();
+    let capture = || {
+        super::capture(
+            &lower,
+            &upper,
+            &[],
+            Instant::now() + crate::tools::selection::TEST_RUNTIME,
+            DEFAULT_COMMAND_PROJECT_BYTES,
+        )
+    };
+    let mut created = 0;
+    for (count, accepted) in [
+        (COMMAND_SCAN_ENTRIES / 4, true),
+        (COMMAND_SCAN_ENTRIES, false),
+    ] {
+        for index in created..count {
+            File::create(files.join(index.to_string())).unwrap();
+        }
+        created = count;
+        let result = capture();
+        assert_eq!(result.is_ok(), accepted, "{count} entries");
+        assert!(accepted || matches!(result, Err(ToolError::Limit)));
+    }
+}
