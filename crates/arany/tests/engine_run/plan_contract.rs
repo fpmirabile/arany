@@ -613,8 +613,7 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
     };
     let provider = ScriptedProvider::new(outcomes)
         .with_compactions((0..16).map(|_| compaction()).collect())
-        .with_profile("anthropic", "test-model")
-        .with_context_window(SMALL_WINDOW_TOKENS);
+        .with_anthropic_window(SMALL_WINDOW_TOKENS);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);

@@ -165,7 +165,7 @@ pub(super) const GOAL_COMPACTION_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 3;
 
 // Two lines at the Read line cut make each page most of its step, so pressure arrives in few calls.
 pub(super) fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
-    const LINE_BYTES: usize = 2000;
+    const LINE_BYTES: usize = arany::test_support::MAX_READ_LINE_CHARS;
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
@@ -2326,8 +2326,7 @@ async fn clearing_below_the_floor_summarizes_and_uses_remaining_capacity_before_
                 })
                 .collect(),
         )
-        .with_profile("anthropic", "test-model")
-        .with_context_window(MIN_WINDOW_TOKENS),
+        .with_anthropic_window(MIN_WINDOW_TOKENS),
     );
     let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
     let mut input = request(

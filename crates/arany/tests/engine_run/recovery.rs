@@ -179,8 +179,7 @@ async fn compact_with_guidance(
             .chain((1..READS).map(|_| good_compaction()))
             .collect(),
         )
-        .with_profile("anthropic", "test-model")
-        .with_context_window(window_tokens);
+        .with_anthropic_window(window_tokens);
     let samples = provider.compact_rate_limits.get_mut().unwrap();
     samples.extend((0..READS).map(|index| Some(compaction_sample(index))));
     let requests = Arc::clone(&provider.requests);
