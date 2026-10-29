@@ -278,7 +278,7 @@ impl StateRoot {
         let path = dirs.state_dir().ok_or(StoreError::InvalidStateDirectory)?;
         #[cfg(not(target_os = "linux"))]
         let path = dirs.data_local_dir();
-        if let Some(fixture) = Self::debug_account_root() {
+        if let Some(fixture) = Self::fixture_account_root() {
             let parent = fixture
                 .parent()
                 .filter(|parent| fixture.is_absolute() && *parent != Path::new("/"))
@@ -295,17 +295,44 @@ impl StateRoot {
         if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
             return Err(StoreError::InvalidStateDirectory);
         }
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(path) = crate::test_support::account_root() {
-            return Ok(path.to_path_buf());
-        }
-        if let Some(path) = Self::debug_account_root() {
+        if let Some(path) = Self::fixture_account_root() {
             if !path.is_absolute() {
                 return Err(StoreError::InvalidStateDirectory);
             }
             return Ok(path);
         }
         Self::configured_account_path()
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn fixture_account_root() -> Option<PathBuf> {
+        Self::debug_account_root()
+    }
+
+    // Test-support builds include the binary that `cargo test` spawns, so no test process reaches real state.
+    #[cfg(any(test, feature = "test-support"))]
+    fn fixture_account_root() -> Option<PathBuf> {
+        if let Some(path) = crate::test_support::account_root() {
+            return Some(path.to_path_buf());
+        }
+        if let Some(path) = Self::debug_account_root() {
+            return Some(path);
+        }
+        // Linux passwd-home fixtures run under Bubblewrap on a tmpfs root, where the passwd home is private.
+        #[cfg(target_os = "linux")]
+        if nix::sys::statfs::statfs("/")
+            .is_ok_and(|root| root.filesystem_type() == nix::sys::statfs::TMPFS_MAGIC)
+        {
+            return None;
+        }
+        // Optimized builds refuse the fixture variable, so a spawned binary isolates itself.
+        if !cfg!(debug_assertions) {
+            return Some(crate::test_support::isolate_account_root().to_path_buf());
+        }
+        panic!(
+            "debug test builds never resolve the real account or state root: call \
+             arany::test_support::isolate_account_root() or set ARANY_TEST_ACCOUNT_ROOT"
+        );
     }
 
     fn debug_account_root() -> Option<PathBuf> {

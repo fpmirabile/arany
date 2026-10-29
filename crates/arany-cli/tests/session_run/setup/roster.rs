@@ -190,6 +190,7 @@ fn clear_conflict(
     for name in ["coding", "research"] {
         let output = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(crate::process::account_fixture(temp.path().join("account")))
             .current_dir(workspace)
             .args(["exec", "--profile", name, "--state-dir"])
             .arg(state)

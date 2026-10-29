@@ -52,6 +52,9 @@ fn interrupted_exec_leaves_its_goal_resumable(
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])

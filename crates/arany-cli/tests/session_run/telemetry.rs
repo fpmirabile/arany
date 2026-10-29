@@ -266,6 +266,9 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .env("OTEL_RESOURCE_ATTRIBUTES", "leak=RESOURCE_SECRET_CANARY")
         .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -479,6 +482,9 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     });
     let mut team = Command::new(env!("CARGO_BIN_EXE_arany"));
     team.env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["--otlp-endpoint", &format!("http://{team_address}"), "exec"])
@@ -590,6 +596,9 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let mut unavailable = Command::new(env!("CARGO_BIN_EXE_arany"));
     unavailable
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .env("OTEL_RESOURCE_ATTRIBUTES", "leak=RESOURCE_SECRET_CANARY")
         .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -727,6 +736,9 @@ fn invalid_telemetry_configuration_exits_before_workspace_or_state_use() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .current_dir(&workspace)
             .args(["--otlp-endpoint", endpoint, "exec"])
             .arg("--state-dir")

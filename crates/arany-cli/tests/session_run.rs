@@ -1279,25 +1279,42 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
 
 #[test]
 fn account_path_ignores_session_state_environment() {
-    use nix::unistd::{User, geteuid};
-
     const CASE: &str = "ARANY_TEST_ACCOUNT_PATH_CASE";
     const TEST: &str = "account_path_ignores_session_state_environment";
     if let Some(case) = std::env::var_os(CASE) {
         match case.to_str() {
+            #[cfg(debug_assertions)]
             Some("system") => {
-                let home = User::from_uid(geteuid())
-                    .expect("OS user lookup")
-                    .expect("OS user")
-                    .dir;
-                #[cfg(target_os = "linux")]
-                let expected = home.join(".local/state/arany");
-                #[cfg(target_os = "macos")]
-                let expected = home.join("Library/Application Support/dev.Arany.arany");
-                assert_eq!(
-                    StateRoot::account_path().expect("OS user account path"),
-                    expected
+                std::panic::set_hook(Box::new(|_| {}));
+                for (name, resolve) in [
+                    ("account", StateRoot::account_path as fn() -> _),
+                    ("default state", StateRoot::default_path),
+                ] {
+                    let panic = std::panic::catch_unwind(resolve)
+                        .expect_err("test builds refuse the real root");
+                    let message = panic.downcast_ref::<&str>().expect("refusal message");
+                    assert!(
+                        message.contains("never resolve the real account or state root"),
+                        "{name}: {message}"
+                    );
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            Some("system") => {
+                let account = StateRoot::account_path().expect("self-isolated account root");
+                assert!(
+                    account
+                        .parent()
+                        .and_then(std::path::Path::file_name)
+                        .is_some_and(|name| name
+                            .to_string_lossy()
+                            .starts_with("arany-test-accounts-")),
+                    "optimized test builds isolate instead of resolving the real root"
                 );
+                assert!(matches!(
+                    StateRoot::default_path(),
+                    Err(StoreError::InvalidStateDirectory)
+                ));
             }
             #[cfg(debug_assertions)]
             Some("fixture") => {
@@ -1381,6 +1398,32 @@ fn account_path_ignores_session_state_environment() {
         assert_eq!(output.stderr, b"");
         process::assert_single_test_completed(&output.stdout, &format!("account-path case {case}"));
     }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn unisolated_binary_refuses_the_real_state_root() {
+    let temp = tempfile::tempdir().expect("temporary home");
+    let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+        .args([
+            "show",
+            "--output",
+            "text",
+            "01900000-0000-7000-8000-000000000000",
+        ])
+        .env_clear()
+        .env("HOME", temp.path())
+        .current_dir(temp.path())
+        .bounded_output_for(std::time::Duration::from_secs(10), 64 * 1024)
+        .expect("bounded unisolated product");
+    assert_eq!(output.status.code(), Some(101), "the refusal is a panic");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("never resolve the real account or state root"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
 
 #[cfg(target_os = "macos")]
@@ -1520,6 +1563,7 @@ fn attached_command_rejects_pipes_before_creating_state() {
     let state_dir = temp.path().join("state");
     let output = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .arg("--state-dir")
         .arg(&state_dir)
@@ -1538,6 +1582,7 @@ fn attached_command_rejects_pipes_before_creating_state() {
 
     let picker = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .arg("--state-dir")
         .arg(&state_dir)
@@ -1554,6 +1599,7 @@ fn attached_command_rejects_pipes_before_creating_state() {
     for flag in ["--screen-reader", "--no-color"] {
         let flagged = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(process::account_fixture(temp.path().join("account")))
             .current_dir(temp.path())
             .arg("--state-dir")
             .arg(&state_dir)
@@ -2438,6 +2484,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     let state = temp.path().join("state");
     let missing_key = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .env("ANTHROPIC_API_KEY", "test-placeholder-key")
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
@@ -2456,6 +2503,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(process::account_fixture(temp.path().join("account")))
             .env("ANTHROPIC_API_KEY", "test-placeholder-key")
             .env("ANTHROPIC_WORKSPACE_ID", workspace_id)
             .current_dir(temp.path())
@@ -2479,6 +2527,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let malformed_model = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2528,6 +2577,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     ] {
         let selection = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(process::account_fixture(temp.path().join("account")))
             .current_dir(temp.path())
             .args(["exec", "--state-dir"])
             .arg(&state)
@@ -2553,6 +2603,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     let overlapping_state = workspace.join("state");
     let overlap = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&overlapping_state)
@@ -2571,6 +2622,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let unsupported_model = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2589,6 +2641,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let unsupported_effort = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2615,6 +2668,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let missing_anthropic_key = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .env("OPENAI_API_KEY", "test-placeholder-key")
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
@@ -2640,6 +2694,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let unsupported_anthropic_model = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2664,8 +2719,13 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let no_provider = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
-        .args(["exec", "--model", "gpt-5.4", "prompt"])
+        .args(["exec", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .args(["--model", "gpt-5.4", "prompt"])
         .bounded_output()
         .expect("unselected provider process");
     assert!(!no_provider.status.success());
@@ -3320,6 +3380,7 @@ fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
     let output = process::file_output(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(process::account_fixture(root.path().join("account")))
             .current_dir(&workspace)
             .args(["serve", "--stdio", "--state-dir"])
             .arg(&state),

@@ -196,6 +196,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .current_dir(cwd)
             .args(["exec", "--state-dir"])
             .arg(state)
@@ -707,6 +710,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
     let mut jsonl_command = Command::new(env!("CARGO_BIN_EXE_arany"));
     jsonl_command
         .env_clear()
+        .envs(crate::process::account_fixture(temp.path().join("account")))
         .env(case.credential_env, case.key)
         .current_dir(&workspace)
         .args([
@@ -1221,6 +1225,7 @@ fn custom_effort_profile_pins_the_selected_effort() {
     let mut rejected = Command::new(env!("CARGO_BIN_EXE_arany"));
     rejected
         .env_clear()
+        .envs(crate::process::account_fixture(temp.path().join("account")))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -1248,6 +1253,7 @@ fn custom_effort_profile_pins_the_selected_effort() {
 
     let mut run = Command::new(env!("CARGO_BIN_EXE_arany"));
     run.env_clear()
+        .envs(crate::process::account_fixture(temp.path().join("account")))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -1461,6 +1467,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     });
     let mut command = crate::isolation::account_isolated_script(temp.path());
     command.env_clear().env("ARANY_TEST_EXE",env!("CARGO_BIN_EXE_arany"))
+        .envs(crate::process::account_fixture(temp.path().join("account")))
         .env("ARANY_TEST_STATE",&state).env("ARANY_TEST_WORKSPACE",&workspace)
         .env(case.credential_env,case.key).env("ARANY_TEST_MODEL",case.model).env("TERM","xterm-256color")
         .current_dir(&workspace).args(["-q","-e","-c",

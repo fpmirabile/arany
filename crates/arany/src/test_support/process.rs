@@ -9,6 +9,13 @@ use std::{
 /// Serializes heavy native gates that share one test binary.
 pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
+// Optimized builds refuse the variable and isolate a spawned product's account root themselves.
+pub fn account_fixture(
+    root: impl AsRef<std::ffi::OsStr>,
+) -> Option<(&'static str, std::ffi::OsString)> {
+    cfg!(debug_assertions).then(|| ("ARANY_TEST_ACCOUNT_ROOT", root.as_ref().to_owned()))
+}
+
 pub fn isolate_host_authentication(command: &mut Command, home: &std::path::Path) {
     let home = std::fs::canonicalize(home).expect("physical fixture home");
     command

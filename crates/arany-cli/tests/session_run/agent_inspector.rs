@@ -244,6 +244,9 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let mut first = Command::new(env!("CARGO_BIN_EXE_arany"));
     first
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -623,6 +626,9 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
     });
     let mut team = Command::new(env!("CARGO_BIN_EXE_arany"));
     team.env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -1156,6 +1162,9 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     let mut prior = Command::new(env!("CARGO_BIN_EXE_arany"));
     prior
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -1211,6 +1220,9 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
     let prior = wait_product(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(&workspace)
             .args(["exec", "--state-dir"])
@@ -1265,6 +1277,9 @@ fn selected_child_messaging_journey() {
     let prior = wait_product(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(&workspace)
             .args(["exec", "--state-dir"])

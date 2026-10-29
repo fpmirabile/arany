@@ -114,6 +114,9 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -257,6 +260,9 @@ fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&launch)
         .args(["exec", "--state-dir"])
@@ -407,6 +413,7 @@ fn state_instructions_precede_project_rules_and_replay_only_digests() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(crate::process::account_fixture(temp.path().join("account")))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(&workspace);
         command.arg("exec");

@@ -2357,6 +2357,7 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
         if let Some(bytes) = bytes { private(&state_path.join("tools.json"), bytes); }
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
         command.env_clear().current_dir(temp.path()).env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .envs(crate::process::account_fixture(temp.path().join("account")))
             .args(["exec", "--tools", "--provider", "openai", "--model", "gpt-5.4", "--state-dir"]).arg(&state_path)
             .arg("--workspace").arg(&workspace).arg("Must reject before hostile Workspace input");
         let output = super::process_output_before_deadline(command);

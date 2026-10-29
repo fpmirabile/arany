@@ -55,7 +55,12 @@ fn record() -> serde_json::Value {
 fn command(workspace: &Path, state: &Path, extra: &[&str]) -> std::process::Output {
     let run = |attached| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-        command.env_clear().current_dir(workspace);
+        command
+            .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
+            .current_dir(workspace);
         if attached {
             command.args(["--screen-reader"]);
         } else {
@@ -146,6 +151,9 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     let mut unused = Command::new(env!("CARGO_BIN_EXE_arany"));
     let output = unused
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("OPENAI_API_KEY", "synthetic-roster-key")
         .current_dir(&workspace)
         .args(["exec", "--profile", "coding", "--state-dir"])
@@ -812,6 +820,9 @@ mod journey {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(workspace)
             .args(["exec", "--state-dir"])
