@@ -151,22 +151,26 @@ async fn answer_summary_uses_the_first_nonempty_line_and_a_character_boundary() 
     }
 }
 
-pub(super) const READS: usize = 400;
+pub(super) const READS: usize = 80;
+// Small model windows shrink the Tool allowance so pressure arrives within a few dozen calls.
+// Only a native Anthropic or ChatGPT identity reports one.
+pub(super) const MIN_WINDOW_TOKENS: u32 = arany::test_support::MIN_CONTEXT_WINDOW_TOKENS;
+// The smallest window where a summary's reservation still fits.
+pub(super) const SMALL_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 3 / 2;
+// Pinned prose shrinks the allowance so clearing frees less than its floor; unpinned text still clears.
+pub(super) const PROSE_COMPACTION_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 9 / 4;
+// Clearing a page prefix passes its floor while the retained steps plus the next-turn reserve still
+// overflow, so a summary follows.
+pub(super) const GOAL_COMPACTION_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 3;
 
+// Two lines at the Read line cut make each page most of its step, so pressure arrives in few calls.
 pub(super) fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
-    paged_read_workspace_with_lines(root, 32)
-}
-
-// Longer lines raise each page's share of the Tool allowance, changing when maintenance runs.
-pub(super) fn paged_read_workspace_with_lines(
-    root: &Path,
-    line_bytes: usize,
-) -> std::path::PathBuf {
+    const LINE_BYTES: usize = 2000;
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
         workspace.join("notes/data.txt"),
-        format!("{}\n", "x".repeat(line_bytes - 1)).repeat(2 * READS),
+        format!("{}\n", "x".repeat(LINE_BYTES - 1)).repeat(2 * READS),
     )
     .expect("bounded fixture file");
     workspace
@@ -1102,7 +1106,7 @@ async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let provider = Arc::new(
         ScriptedProvider::new(script)
             .with_chatgpt_account(Uuid::now_v7(), [7; 32])
-            .with_context_window(32_768)
+            .with_context_window(MIN_WINDOW_TOKENS)
             .with_max_output_tokens(4096)
             .with_input_tokens_at(4, 30_000),
     );
@@ -1992,9 +1996,9 @@ async fn each_pressured_report_maintains_context_once() {
 async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
     for (window, line_repeats) in [
         (None, 96),
-        (Some(32_768), 96),
+        (Some(MIN_WINDOW_TOKENS), 96),
         (Some(272_000), 96),
-        (Some(32_768), 24),
+        (Some(MIN_WINDOW_TOKENS), 24),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(
@@ -2078,7 +2082,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
             .max_context_bytes;
         assert!(
             allowance
-                >= if window == Some(32_768) {
+                >= if window == Some(MIN_WINDOW_TOKENS) {
                     72 * 1024
                 } else {
                     192 * 1024
@@ -2321,7 +2325,9 @@ async fn clearing_below_the_floor_summarizes_and_uses_remaining_capacity_before_
                     })
                 })
                 .collect(),
-        ),
+        )
+        .with_profile("anthropic", "test-model")
+        .with_context_window(MIN_WINDOW_TOKENS),
     );
     let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
     let mut input = request(
@@ -2582,7 +2588,7 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
         ),
         ("invalid third call", 4, true, false, None),
         ("duplicate id", 4, false, true, None),
-        ("context full", 4, false, false, Some(32_768)),
+        ("context full", 4, false, false, Some(MIN_WINDOW_TOKENS)),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "bounded facts");

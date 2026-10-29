@@ -1144,8 +1144,11 @@ async fn a_pause_in_an_in_run_compaction_backoff_starts_no_further_compaction_ca
     let mut failing = ScriptedProvider::new(vec![]).with_profile("openai", "compact-primary");
     failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
     let failing = Arc::new(failing);
-    let primary =
-        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("openai", "primary"));
+    let primary = Arc::new(
+        ScriptedProvider::new(paged_read_outcomes())
+            .with_profile("anthropic", "primary")
+            .with_context_window(SMALL_WINDOW_TOKENS),
+    );
     let mut bindings = AdmittedProviders::single(primary.clone());
     bindings.roles.compaction = vec![failing.clone()];
     let engine = facts_engine(

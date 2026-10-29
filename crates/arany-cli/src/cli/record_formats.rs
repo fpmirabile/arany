@@ -215,21 +215,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[test]
-    fn startup_archives_records_in_a_state_directory_without_history() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let state_dir = temp.path().join("state");
-        std::fs::create_dir(&state_dir).unwrap();
-        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = state_dir.join("ui-preferences.json");
-        std::fs::write(&path, r#"{"version":8,"preferences":{}}"#).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let notices = archive_incompatible(&state_dir).unwrap();
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(!path.exists());
         let unsafe_dir = temp.path().join("file");
         std::fs::write(&unsafe_dir, b"").unwrap();
         assert!(archive_incompatible(&unsafe_dir).is_err());

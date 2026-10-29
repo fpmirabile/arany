@@ -1,5 +1,6 @@
 use super::goals::{
-    AUTONOMOUS_OBJECTIVE, autonomous_input, facts_digest, facts_engine, facts_plan, facts_read,
+    AUTONOMOUS_OBJECTIVE, SMALL_WINDOW_TOKENS, autonomous_input, facts_digest, facts_engine,
+    facts_plan, facts_read,
 };
 use super::recovery::interrupted_autonomous_goal;
 use super::team::child_tool_starts;
@@ -559,12 +560,12 @@ async fn a_recorded_plan_cannot_be_replaced_or_restated() {
 
 #[tokio::test]
 async fn plan_contract_recorded_mid_run_survives_compaction() {
-    const READS: usize = 400;
+    const READS: usize = 40;
 
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-    let content = format!("{}\n", "x".repeat(31)).repeat(4 * READS);
+    let content = format!("{}\n", "x".repeat(511)).repeat(4 * READS);
     std::fs::write(workspace.join("notes/data.txt"), &content).expect("bounded fixture file");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
@@ -610,8 +611,10 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
             wire_provenance: None,
         })
     };
-    let provider =
-        ScriptedProvider::new(outcomes).with_compactions((0..16).map(|_| compaction()).collect());
+    let provider = ScriptedProvider::new(outcomes)
+        .with_compactions((0..16).map(|_| compaction()).collect())
+        .with_profile("anthropic", "test-model")
+        .with_context_window(SMALL_WINDOW_TOKENS);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);

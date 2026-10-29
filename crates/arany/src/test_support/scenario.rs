@@ -132,6 +132,12 @@ impl ScriptedProvider {
         self
     }
 
+    /// Reports the window under a native Anthropic identity, a route whose window evidence a Run admits.
+    pub fn with_anthropic_window(mut self, tokens: u32) -> Self {
+        self.identity.profile = "anthropic".into();
+        self.with_context_window(tokens)
+    }
+
     pub fn with_context_window_snapshots(mut self, windows: Vec<Option<u32>>) -> Self {
         self.context_window_snapshots = Mutex::new(windows.into());
         self

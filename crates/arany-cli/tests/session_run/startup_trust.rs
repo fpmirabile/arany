@@ -1258,25 +1258,40 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
 #[test]
 #[cfg(target_os = "linux")]
 #[cfg_attr(not(arany_ci), ignore = "native Linux PTY folder trust recovery")]
-fn unsupported_trust_record_is_named_and_reset_only_with_consent() {
+fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_current_damage() {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
 
-    for symlink in [false, true] {
+    #[derive(Clone, Copy)]
+    enum Case {
+        OtherVersion,
+        Malformed,
+        Linked,
+    }
+
+    for case in [Case::OtherVersion, Case::Malformed, Case::Linked] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         std::fs::create_dir(&workspace).unwrap();
         let account = temp.path().join("account-home/.local/state/arany");
         let root = arany::StateRoot::admit(&account).unwrap();
         let record = root.path().join("workspace-permissions.json");
-        if symlink {
-            let outside = temp.path().join("outside-permissions.json");
-            std::fs::write(&outside, br#"{"version":1,"workspaces":[]}"#).unwrap();
-            std::os::unix::fs::symlink(&outside, &record).unwrap();
-        } else {
-            root.record(arany::RecordKind::WorkspacePermissions)
-                .replace(br#"{"version":1,"workspaces":[]}"#)
-                .unwrap();
+        match case {
+            Case::Linked => {
+                let outside = temp.path().join("outside-permissions.json");
+                std::fs::write(&outside, br#"{"version":1,"workspaces":[]}"#).unwrap();
+                std::os::unix::fs::symlink(&outside, &record).unwrap();
+            }
+            Case::OtherVersion => {
+                root.record(arany::RecordKind::WorkspacePermissions)
+                    .replace(br#"{"version":1,"workspaces":[]}"#)
+                    .unwrap();
+            }
+            Case::Malformed => {
+                root.record(arany::RecordKind::WorkspacePermissions)
+                    .replace(b"{")
+                    .unwrap();
+            }
         }
         drop(root);
 
@@ -1318,42 +1333,74 @@ fn unsupported_trust_record_is_named_and_reset_only_with_consent() {
                 thread::yield_now();
             }
         };
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            if symlink {
-                "owner-only regular"
-            } else {
-                "unsupported version 1"
-            },
-        );
-        if symlink {
-            assert!(
-                !super::session_picker::screen_contains(&transcript, 80, 24, "Reset folder trust"),
-                "a non-private record must not offer a reset"
-            );
-            input.write_all(b"\x1b[B\r").unwrap();
-        } else {
-            input.write_all(b"\x1b[B\r").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                "Reset folder trust?",
-            );
-            input.write_all(b"\t\r").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                "Do you trust this folder?",
-            );
-            assert!(!record.exists(), "consented reset must delete the record");
-            input.write_all(b"\x03").unwrap();
+        match case {
+            Case::Linked => {
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "owner-only regular",
+                );
+                assert!(
+                    !super::session_picker::screen_contains(
+                        &transcript,
+                        80,
+                        24,
+                        "Reset folder trust"
+                    ),
+                    "a non-private record must not offer a reset"
+                );
+                input.write_all(b"\x1b[B\r").unwrap();
+            }
+            Case::Malformed => {
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "workspace-permissions.json is malformed",
+                );
+                input.write_all(b"\x1b[B\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "Reset folder trust?",
+                );
+                input.write_all(b"\t\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "Do you trust this folder?",
+                );
+                assert!(!record.exists(), "consented reset must delete the record");
+                input.write_all(b"\x03").unwrap();
+            }
+            Case::OtherVersion => {
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "Saved records from an incompatible version",
+                );
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "Do you trust this folder?",
+                );
+                assert!(
+                    !record.exists(),
+                    "an other-version record must leave the state root"
+                );
+                input.write_all(b"\x03").unwrap();
+            }
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -1370,7 +1417,20 @@ fn unsupported_trust_record_is_named_and_reset_only_with_consent() {
         };
         super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(status.success());
-        if symlink {
+        if matches!(case, Case::OtherVersion) {
+            let folders: Vec<_> = std::fs::read_dir(account.join("archive"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            let [folder] = folders.as_slice() else {
+                panic!("expected one archived records folder: {folders:?}");
+            };
+            assert_eq!(
+                std::fs::read(folder.join("workspace-permissions.json")).unwrap(),
+                br#"{"version":1,"workspaces":[]}"#
+            );
+        }
+        if matches!(case, Case::Linked) {
             assert!(
                 std::fs::symlink_metadata(&record)
                     .unwrap()

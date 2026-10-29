@@ -18,6 +18,8 @@ pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
 
 pub const MAX_SESSION_EVENTS: usize = crate::store::MAX_SESSION_EVENTS;
 pub const MAX_STEP_TOOL_CALLS: usize = crate::session::MAX_STEP_TOOL_CALLS as usize;
+pub const MAX_READ_LINE_CHARS: usize = crate::tools::types::MAX_READ_LINE_CHARS;
+pub const MIN_CONTEXT_WINDOW_TOKENS: u32 = crate::provider::MIN_CONTEXT_WINDOW_TOKENS;
 
 pub const fn max_changeset_bytes() -> usize {
     crate::tools::types::MAX_CHANGESET_BYTES
@@ -25,6 +27,13 @@ pub const fn max_changeset_bytes() -> usize {
 
 pub const fn max_changeset_files() -> usize {
     crate::tools::types::MAX_CHANGESET_FILES
+}
+
+#[cfg(unix)]
+pub fn private_file(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 pub async fn record_setup_edit_state(
@@ -162,6 +171,13 @@ pub fn isolate_account_root() -> &'static std::path::Path {
                 let (path, lease) =
                     account_roots::create_in(&parent, 128).expect("private test account root");
                 ACCOUNT_LEASE.set(lease).expect("one account lease");
+                // Parallel tests share this root; default Guard capacity would queue them past short deadlines.
+                crate::private_fs::open_directory(&path.join("guard"), true)
+                    .expect("private test Guard directory");
+                private_file(
+                    &path.join("guard/limits.json"),
+                    br#"{"version":1,"units":64,"queued":1024}"#,
+                );
                 path
             }
             #[cfg(not(unix))]

@@ -12,11 +12,12 @@ From defects this repository actually shipped:
 - Engine and reducer disagreeing: an Event the Engine can append that the reducer rejects, or the reverse, especially on cancellation, deadline, fallback switch, permission deny and fork paths.
 - Cancellation or a timeout racing a durable transition: an append that is journaled but not applied in memory (dropped futures, `tokio::select!`, timeout wrappers around journaling code).
 - Journal admission bounds (`Action::max_events_for`) smaller than the Events a step can append.
+- Untrusted text (paths, Tool output, MCP metadata, errors, model text) reaching instruction, trust or approval decisions ([security](./security.md)).
 - Wall-clock-sensitive tests that flake on slow macOS debug runners.
 
 ## Session and reducer
 
-`crates/arany/src/session/`: an Event payload change bumps that kind's `payload_version`; other versions stay rejected, with no readers. Reducer validation stays exact: flag loosened checks and confirm each new acceptance is limited to the intended actor and state. Fork projection and replay never depend on parent Events after the fork point.
+`crates/arany/src/session/`: an Event payload change follows the [versioning rule](../docs/specs/execution.md#incompatible-history). Reducer validation stays exact: flag loosened checks and confirm each new acceptance is limited to the intended actor and state. Fork projection and replay never depend on parent Events after the fork point.
 
 ## Engine
 
@@ -28,7 +29,7 @@ From defects this repository actually shipped:
 
 ## Tools and private files
 
-`crates/arany/src/tools/` and `private_fs`: effects run only in the Guard under a pinned, typed grant, except the host operations the isolation guarantee names. Read-only operations never widen disclosure, and unsupported enforcement fails closed. Untrusted text (paths, Tool output, MCP metadata, errors) is data, never instructions. Linux (bwrap, seccomp) and macOS (Seatbelt, launchd) keep equivalent behavior; flag a platform-only change without a reason.
+`crates/arany/src/tools/` and `private_fs`: effects run only in the Guard under a pinned, typed grant, except the host operations the isolation guarantee names. Read-only operations never widen disclosure, and unsupported enforcement fails closed. Linux (bwrap, seccomp) and macOS (Seatbelt, launchd) keep equivalent behavior; flag a platform-only change without a reason.
 
 ## Provider
 
@@ -40,11 +41,11 @@ From defects this repository actually shipped:
 
 ## Specs
 
-`docs/specs/`: specs are the only home of behavior, limits and decisions and describe the current system, not history. Flag a number or rule duplicated from another row (a duplicated limit already drifted once). A behavior change in code updates its owning spec, and the spec matches the code.
+`docs/specs/`: the [spec workflow](../docs/specs/README.md) owns content rules. Flag a number or rule duplicated from another owner (a duplicated limit already drifted once), a behavior change in code without its owning spec, and a spec that no longer matches the code.
 
 ## Tests
 
-Tests pin invariants. A fix needs a regression test that fails without it. Flag tests that sleep, depend on wall-clock timing or test order, or weaken an assertion to pass; [testing](./testing.md) owns the rest.
+A fix needs a regression test that fails without it. Flag tests that sleep, depend on wall-clock timing or test order, or weaken an assertion to pass; [testing](./testing.md) owns the rest.
 
 ## Workflows
 

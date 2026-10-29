@@ -4,6 +4,7 @@ use crate::store::RecordKind;
 use crate::store::journal::{append, fork_session, open_connection};
 use crate::store::replay::resolve_view;
 use crate::store::state::FAIL_AT;
+use crate::test_support::private_file;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -27,11 +28,6 @@ fn history(path: &Path) -> History {
         root,
         sessions: [fixture.session, child],
     }
-}
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn checkpoint_fixture(root: &StateRoot) {
