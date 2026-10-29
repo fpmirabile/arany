@@ -3,8 +3,7 @@ use super::super::{BootstrapFailure, GitStage, GuardStage, Task, read_line_cappe
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 use super::git_write::GitLink;
 use super::storage::{
-    cleanup_storage, cleanup_storage_until, prepare_command_storage, read_record, storage_mounted,
-    write_record,
+    cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
 };
 use super::{
     CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, TEARDOWN_WAIT, bootstrap, ffi,
@@ -14,7 +13,9 @@ use crate::private_fs::{PrivateDirectory, open_directory};
 use crate::tools::Cancellation;
 use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
 use crate::tools::process::MAX_ARGUMENT_BYTES;
-use crate::tools::types::{CommandResult, ToolDisposition, ToolLimits, ToolResourceClass};
+use crate::tools::types::{
+    CommandResult, GUARD_DISK_RESERVE_BYTES, ToolDisposition, ToolLimits, ToolResourceClass,
+};
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
@@ -168,6 +169,7 @@ pub(super) struct Scope {
     timebase: ffi::Timebase,
     capture_cpu: Option<(Identity, u128)>,
     limits: ToolLimits,
+    disk: Option<cap_std::fs::Dir>,
     pub(super) teardown: Option<tokio::time::Instant>,
 }
 
@@ -190,12 +192,19 @@ impl Scope {
             timebase,
             capture_cpu: None,
             limits: ToolLimits::default(),
+            disk: None,
             teardown: None,
         })
     }
 
     fn apply_limits(&mut self, limits: ToolLimits) {
         self.limits = limits;
+    }
+
+    // Backstop for every unit kind; the command worker stops its payload earlier, at the full reserve.
+    fn watch_disk(&mut self, root: &Path) -> Result<(), ToolError> {
+        self.disk = Some(crate::tools::fs::open_directory(root)?);
+        Ok(())
     }
 
     fn members(&mut self) -> Result<Vec<Identity>, ToolError> {
@@ -265,6 +274,11 @@ impl Scope {
     }
 
     pub(super) fn check_resources(&mut self) -> Result<(), ToolError> {
+        if let Some(disk) = &self.disk
+            && super::storage::free_bytes(disk)? < GUARD_DISK_RESERVE_BYTES / 2
+        {
+            return Err(ToolError::Limit);
+        }
         let mut memory = 0_u64;
         let mut threads = 0_u64;
         for member in self.members()? {
@@ -474,7 +488,7 @@ async fn recover_root(root: &Path) -> Result<(), ToolError> {
             Scope::new(supervisor.coalition)?.stop(None).await?;
         }
     }
-    cleanup_storage(root).await?;
+    cleanup_storage(root)?;
     remove_root(root, &directory)?;
     if root.exists() {
         return Err(ToolError::Operation);
@@ -828,7 +842,7 @@ impl Unit {
         cleanup?;
         removal?;
         let capture = FixtureSpan::begin(FixtureStage::ControllerStorage);
-        cleanup_storage(&self.root).await?;
+        cleanup_storage(&self.root)?;
         capture.complete();
         self.stopped = true;
         Ok(())
@@ -836,11 +850,7 @@ impl Unit {
 }
 
 fn remove_root(root: &Path, admitted: &PrivateDirectory) -> Result<(), ToolError> {
-    if storage_mounted(root)?
-        || ffi::mounts()?
-            .iter()
-            .any(|(_, target)| target.starts_with(root))
-    {
+    if storage_mounted(root)? {
         return Err(ToolError::ProtectionUnavailable);
     }
     let current = open_directory(root, false).map_err(|_| ToolError::Path)?;
@@ -924,11 +934,7 @@ fn action_deadlines(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn git_storage_fault(
-    root: &Path,
-    volumes: &[cap_std::fs::Dir],
-    intent: &EffectIntent,
-) -> Result<(), ToolError> {
+fn git_storage_fault(root: &Path, intent: &EffectIntent) -> Result<(), ToolError> {
     use crate::fault::GitStorageFault;
     use std::io::Write as _;
     let Ok(injection) = std::fs::read(root.join(crate::tools::GIT_STORAGE_FAULT)) else {
@@ -958,20 +964,11 @@ fn git_storage_fault(
                 .map_err(|_| ToolError::Operation)?;
             Err(ToolError::ProtectionUnavailable)
         }
-        GitStorageFault::Exhaust => {
-            super::storage::exhaust_git_storage(volumes.first().ok_or(ToolError::Operation)?)
-                .map_err(|_| ToolError::Operation)?;
-            canary()
-        }
     }
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
-fn git_storage_fault(
-    _root: &Path,
-    _volumes: &[cap_std::fs::Dir],
-    _intent: &EffectIntent,
-) -> Result<(), ToolError> {
+fn git_storage_fault(_root: &Path, _intent: &EffectIntent) -> Result<(), ToolError> {
     Ok(())
 }
 
@@ -1009,16 +1006,22 @@ pub(super) async fn run_unit(
     let (mut unit, active_window) = admitted;
     let git_stage = link.stage;
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
+    super::storage::require_disk_reserve(&unit._directory.dir)?;
     if git_stage != Some(GitStage::Publish) {
         crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
     }
-    let mut cache = super::super::build_cache_session(runtime, intent)?;
-    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let active_window = super::super::selection_phase::command_window(intent, active_window);
     let proxy = proxy_for(runtime, intent)?;
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
+    let mut cache = clone_cache(
+        super::super::cache_directory::session(runtime, intent, preparation_deadline).await?,
+        &unit,
+        intent,
+    )?;
+    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
     let go_cancellation = cancellation.clone();
+    let timings = StageTimer::new();
     let execution = async {
         let capture = FixtureSpan::begin(FixtureStage::Connect);
         let mut stream = BufReader::new(
@@ -1027,6 +1030,7 @@ pub(super) async fn run_unit(
                 .map_err(|_| ToolError::GuardRejected(GuardStage::ConnectionDeadline))??,
         );
         capture.complete();
+        timings.mark("connect");
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
         let primary_command = primary_command(intent);
         let payload_phase = AtomicBool::new(false);
@@ -1059,45 +1063,20 @@ pub(super) async fn run_unit(
             })
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
-            let mut cache_sent = false;
-            let mut image_sent = false;
-            for _ in 0..2 {
-                if bytes == b"CACHE_READY\n" && !cache_sent {
-                    cache_sent = true;
-                    let session = cache.as_ref().ok_or(ToolError::Operation)?;
-                    let transfer_deadline =
-                        super::super::cache_transfer_deadline(intent, Some(go_deadline));
-                    tokio::time::timeout_at(
-                        transfer_deadline,
-                        super::super::send_cache_archive(stream.get_mut(), &session.lease),
-                    )
+            if bytes == b"WORKER_READY\n" {
+                let input = runtime
+                    .handover
+                    .as_deref()
+                    .ok_or(ToolError::Configuration)?;
+                tokio::time::timeout_at(
+                    go_deadline,
+                    crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
+                )
+                .await
+                .map_err(|_| ToolError::Limit)??;
+                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
                     .await
                     .map_err(|_| ToolError::Limit)??;
-                    bytes =
-                        tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                            .await
-                            .map_err(|_| {
-                                ToolError::GuardRejected(GuardStage::PreparationDeadline)
-                            })??;
-                } else if bytes == b"WORKER_READY\n" && !image_sent {
-                    image_sent = true;
-                    let input = runtime
-                        .handover
-                        .as_deref()
-                        .ok_or(ToolError::Configuration)?;
-                    tokio::time::timeout_at(
-                        go_deadline,
-                        crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
-                    )
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-                    bytes =
-                        tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                            .await
-                            .map_err(|_| ToolError::Limit)??;
-                } else {
-                    break;
-                }
             }
             if primary_command && bytes != b"SELECT_READY\n" {
                 return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
@@ -1155,6 +1134,7 @@ pub(super) async fn run_unit(
                 .check_resources()
                 .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
             capture.complete();
+            timings.mark("ready");
             let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
             if git_stage == Some(GitStage::Publish) {
                 link.feed_publisher(stream.get_mut()).await?;
@@ -1237,25 +1217,10 @@ pub(super) async fn run_unit(
                     }
                 }
                 let capture_result = async {
-                    if let Some(session) = cache.as_ref() {
+                    if cache.is_some() {
                         let observation =
                             super::super::read_observation_line(&mut stream, intent).await?;
-                        let update_deadline = super::super::cache_transfer_deadline(
-                            intent,
-                            active_window.map(|window| window.completion_deadline),
-                        );
-                        let candidate = match tokio::time::timeout_at(
-                            update_deadline,
-                            super::super::receive_cache_candidate(&mut stream, &session.lease),
-                        )
-                        .await
-                        {
-                            Ok(Ok(candidate)) => candidate,
-                            Ok(Err(_)) | Err(_) => super::super::CacheCandidate::Uncertain,
-                        };
-                        if candidate == super::super::CacheCandidate::Uncertain {
-                            return Ok((observation, candidate));
-                        }
+                        let candidate = super::super::CacheCandidate::Received;
                         let cache_status = tokio::time::timeout_at(
                             completion_deadline,
                             read_line_capped(&mut stream, 32),
@@ -1307,6 +1272,7 @@ pub(super) async fn run_unit(
             };
             let observation = observation.await;
             capture.complete();
+            timings.mark("report");
             observation
         };
         tokio::pin!(phases);
@@ -1354,10 +1320,16 @@ pub(super) async fn run_unit(
         .and_then(|stopped| {
             stopped.map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
         });
+    timings.mark("teardown");
     let refusals = crate::tools::network::Proxy::settle(proxy, stopped).await?;
-    #[cfg(any(test, feature = "test-support"))]
-    crate::fault::git_write::storage_finished(&unit.root, intent.id)
-        .map_err(|_| ToolError::Operation)?;
+    super::super::cache_directory::finished(cache.as_ref())?;
+    // The coalition is empty, so the view is quiescent until the root is removed.
+    if let Some(directory) = cache
+        .as_mut()
+        .and_then(|session| session.directory.as_mut())
+    {
+        directory.upper = cap_fs_ext::DirExt::open_dir_nofollow(&unit._directory.dir, "cache").ok();
+    }
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
     if result.is_ok() {
@@ -1373,10 +1345,71 @@ pub(super) async fn run_unit(
                 completion_deadline,
             )
             .await;
+            super::retire_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
+            timings.mark("cache");
+            crate::diagnostics::guard_timing(intent.call.label(), &timings.stages());
             Ok(observation)
         }
         Err(error) => Err(error),
     }
+}
+
+struct StageTimer {
+    started: std::time::Instant,
+    stages: Mutex<Vec<(&'static str, u128)>>,
+}
+
+impl StageTimer {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            stages: Mutex::new(Vec::new()),
+        }
+    }
+
+    // Each mark records the time since the previous one.
+    fn mark(&self, stage: &'static str) {
+        let elapsed = self.started.elapsed().as_millis();
+        if let Ok(mut stages) = self.stages.lock() {
+            let previous = stages.iter().map(|(_, elapsed)| elapsed).sum::<u128>();
+            stages.push((stage, elapsed.saturating_sub(previous)));
+        }
+    }
+
+    fn stages(&self) -> Vec<(&'static str, u128)> {
+        self.stages
+            .lock()
+            .map(|stages| stages.clone())
+            .unwrap_or_default()
+    }
+}
+
+// Clones the pinned Store tree as this unit's cache view; without a same-volume clone the command runs with an empty, unpublished view.
+fn clone_cache(
+    mut cache: Option<super::super::BuildCacheSession>,
+    unit: &Unit,
+    intent: &EffectIntent,
+) -> Result<Option<super::super::BuildCacheSession>, ToolError> {
+    let Some(directory) = cache
+        .as_ref()
+        .and_then(|session| session.directory.as_ref())
+    else {
+        return Ok(cache);
+    };
+    if ffi::clone_directory(&directory.lower, &unit._directory.dir, c"cache").is_err() {
+        return Ok(None);
+    }
+    let permit = unit._permit.as_ref().ok_or(ToolError::Operation)?;
+    super::super::cache_directory::started(cache.as_ref(), permit.id)?;
+    unit._directory
+        .dir
+        .set_permissions(
+            "cache",
+            cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(0o700)),
+        )
+        .map_err(|_| ToolError::Path)?;
+    super::publish_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
+    Ok(cache.take())
 }
 
 fn proxy_for(
@@ -1510,50 +1543,22 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
                 storage = if intent.call.is_git() && git_stage != Some(GitStage::Publish) {
                     let root = path.parent().ok_or(ToolError::Path)?;
-                    let volumes = super::storage::prepare_git_storage(root).await?;
-                    git_storage_fault(root, &volumes, &intent)?;
+                    let volumes = super::storage::prepare_git_storage(root)?;
+                    git_storage_fault(root, &intent)?;
                     Some(volumes)
                 } else if intent.call.is_process() {
-                    Some(
-                        prepare_command_storage(
-                            path.parent().ok_or(ToolError::Path)?,
-                            &runtime,
-                            &intent.limits,
-                            primary_command(&intent),
-                        )
-                        .await?,
-                    )
+                    Some(prepare_command_storage(
+                        path.parent().ok_or(ToolError::Path)?,
+                        &runtime,
+                        &intent.limits,
+                        primary_command(&intent),
+                        cache.is_some(),
+                    )?)
                 } else {
                     None
                 };
-                if let Some(cache) = &cache {
-                    output
-                        .write_all(b"CACHE_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let mut length = [0; 8];
-                    input
-                        .read_exact(&mut length)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let length = u64::from_le_bytes(length);
-                    if length > cache.view_bytes {
-                        return Err(ToolError::Limit);
-                    }
-                    if length > 0 {
-                        let volumes = storage.as_ref().ok_or(ToolError::Operation)?;
-                        let mut archive = (&mut input).take(length);
-                        crate::store::restore_archive_async_with_limit(
-                            &mut archive,
-                            volumes.get(2).ok_or(ToolError::Operation)?,
-                            &cache.identity,
-                            &cache.exclusions,
-                            cache.view_bytes,
-                        )
-                        .await
-                        .map_err(super::super::map_cache_error)?;
-                        drop(archive);
-                    }
+                if storage.is_some() {
+                    scope.watch_disk(path.parent().ok_or(ToolError::Path)?)?;
                 }
                 let command_deadline = if primary_command(&intent) {
                     output
@@ -1788,7 +1793,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             }
             let mut response_sent = false;
             let mut cache_transfer_failed = false;
-            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result) {
+            if let (Some(_), Ok(observation)) = (&cache, &result) {
                 let transfer = async {
                     let bytes = crate::tools::spill::encode_report(observation)?;
                     output
@@ -1800,61 +1805,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .await
                         .map_err(|_| ToolError::Operation)?;
                     response_sent = true;
-                    if cleanup.is_ok() && observation.cache_publication_eligible() {
-                        if cache.candidate_bytes == 0 {
-                            output
-                                .write_all(b"CACHE_REJECTED\n")
-                                .await
-                                .map_err(|_| ToolError::Operation)?;
-                        } else {
-                            match crate::store::archive_size_with_limit(
-                                volumes.get(2).ok_or(ToolError::Operation)?,
-                                &cache.identity,
-                                &cache.exclusions,
-                                cache.candidate_bytes,
-                            ) {
-                                Ok(size) => {
-                                    output
-                                        .write_all(b"CACHE_CANDIDATE\n")
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                    output
-                                        .write_all(&size.to_le_bytes())
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                    let captured = crate::store::capture_archive_async_with_limit(
-                                        volumes.get(2).ok_or(ToolError::Operation)?,
-                                        &cache.identity,
-                                        &cache.exclusions,
-                                        &mut output,
-                                        cache.candidate_bytes,
-                                    )
-                                    .await
-                                    .map_err(super::super::map_cache_error)?;
-                                    if captured != size {
-                                        return Err(ToolError::Operation);
-                                    }
-                                }
-                                Err(crate::store::StoreError::StorageFull) => {
-                                    output
-                                        .write_all(b"CACHE_REJECTED\n")
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                }
-                                Err(_) => {
-                                    output
-                                        .write_all(b"CACHE_FAILED\n")
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                }
-                            }
-                        }
-                    } else {
-                        output
-                            .write_all(b"CACHE_REJECTED\n")
-                            .await
-                            .map_err(|_| ToolError::Operation)?;
-                    }
                     Ok::<(), ToolError>(())
                 }
                 .await;
@@ -1864,8 +1814,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut storage_check = None;
             let storage_cleanup = if cleanup.is_ok() {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
-                let result =
-                    cleanup_storage_until(path.parent().ok_or(ToolError::Path)?, teardown).await;
+                let result = cleanup_storage(path.parent().ok_or(ToolError::Path)?);
                 capture.finish(result.is_ok());
                 result.map_err(|failed| {
                     storage_check = Some(failed.check);
@@ -1987,9 +1936,7 @@ mod tests {
         crate::tools::guard::selection_phase::tests::protocol_outcomes().await;
     }
 
-    use super::super::storage::{
-        FILL_CHUNK_BYTES, STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage,
-    };
+    use super::super::storage::prepare_storage;
     use super::super::{ProfileKind, SYS_COALITION_INFO, SYS_PERSONA, SeatbeltProfile};
     use super::*;
     use crate::tools::ToolCall;
@@ -2011,6 +1958,7 @@ mod tests {
             timebase: ffi::Timebase { numer: 3, denom: 2 },
             capture_cpu: None,
             limits: ToolLimits::default(),
+            disk: None,
             teardown: None,
         };
         assert!(scope.cpu_elapsed(supervisor, prior).unwrap() > CPU_LIMIT.as_nanos());
@@ -2409,16 +2357,7 @@ done
         std::fs::create_dir_all(node_path.join("bin")).unwrap();
         let root = temp.path().join("command-root");
         std::fs::create_dir(&root).unwrap();
-        let reactor = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let storage = reactor.block_on(prepare_command_storage(
-            &root,
-            &runtime,
-            &ToolLimits::default(),
-            true,
-        ));
+        let storage = prepare_command_storage(&root, &runtime, &ToolLimits::default(), true, false);
         assert!(matches!(storage, Err(ToolError::ChangedInput)));
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
@@ -2993,14 +2932,14 @@ int main(int argc, char **argv) {
 
     async fn verify_uncertain_storage_is_retained(fixture: &Path) {
         let mut uncertain = Unit::new(fixture).await.unwrap();
-        std::fs::write(uncertain.root.join(STORAGE_PENDING), []).unwrap();
+        std::fs::write(uncertain.root.join("scratch"), []).unwrap();
         assert!(uncertain.stop().await.is_err());
         let uncertain_root = uncertain.root.clone();
         drop(uncertain);
         assert!(uncertain_root.exists());
         crate::tools::fs::open_directory(&uncertain_root)
             .unwrap()
-            .remove_file(STORAGE_PENDING)
+            .remove_file("scratch")
             .unwrap();
         assert!(!storage_mounted(&uncertain_root).unwrap());
         crate::tools::fs::open_directory(fixture)
@@ -3013,7 +2952,7 @@ int main(int argc, char **argv) {
         let mut partial = Unit::new(fixture).await.unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), partial.root.join("scratch")).unwrap();
-        let preparation = prepare_storage(&partial.root).await;
+        let preparation = prepare_storage(&partial.root);
         assert!(
             matches!(preparation, Err(ToolError::ChangedInput)),
             "partial native storage: {:?}",
@@ -3022,7 +2961,6 @@ int main(int argc, char **argv) {
         assert!(storage_mounted(&partial.root).unwrap());
         assert!(partial.stop().await.is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
-        assert!(!partial.root.join("scratch.dmg").exists());
         std::fs::remove_file(partial.root.join("scratch")).unwrap();
         partial.stop().await.unwrap();
         assert!(!storage_mounted(&partial.root).unwrap());
@@ -3031,65 +2969,16 @@ int main(int argc, char **argv) {
         assert!(!partial_root.exists());
     }
 
-    async fn verify_storage_ownership(fixture: &Path) {
-        use super::super::storage::ImageIdentity;
-        let mut unit = Unit::new(fixture).await.unwrap();
-        let _volumes = prepare_storage(&unit.root).await.unwrap();
-        let mut image: ImageIdentity =
-            read_record(&unit._directory.dir, "scratch.image.json").unwrap();
-        image.inode = image.inode.wrapping_add(1);
-        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
-        let mounted = ffi::mounts().unwrap();
-        assert!(
-            unit.stop().await.is_err(),
-            "a mismatched backing inode must reject before any detach"
-        );
-        assert_eq!(
-            ffi::mounts()
-                .unwrap()
-                .iter()
-                .filter(|(_, target)| target.starts_with(&unit.root))
-                .count(),
-            2
-        );
-        assert!(
-            mounted
-                .iter()
-                .filter(|(_, target)| target.starts_with(&unit.root))
-                .all(|mount| ffi::mounts().unwrap().contains(mount))
-        );
-        image.inode = image.inode.wrapping_sub(1);
-        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
-        use crate::test_process::BoundedOutput;
-        let unmounted = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["unmount", "-force", "-quiet"])
-            .arg(unit.root.join("workspace"))
-            .env_clear()
-            .current_dir(&unit.root)
-            .bounded_output_for(Duration::from_secs(20), 4096)
-            .unwrap();
-        assert!(unmounted.status.success(), "owned image unmount fixture");
-        assert!(
-            !ffi::mounts()
-                .unwrap()
-                .iter()
-                .any(|(_, target)| target == &unit.root.join("workspace"))
-        );
-        unit.stop().await.unwrap();
-    }
-
     async fn verify_git_storage_exits(fixture: &Path) {
-        use super::super::storage::{
-            GIT_VOLUME, exhaust_git_storage, prepare_git_storage, verify_git_storage,
-        };
-        for exit in ["success", "exhaustion", "cancellation", "refusal"] {
+        use super::super::storage::{GIT_VOLUME, prepare_git_storage, verify_git_storage};
+        for exit in ["success", "cancellation", "refusal"] {
             let mut unit = Unit::new(fixture).await.unwrap();
             std::fs::write(unit.root.join("canary"), b"control").unwrap();
             let outside = tempfile::tempdir().unwrap();
             let volume = if exit == "refusal" {
                 assert!(verify_git_storage(&unit.root).is_err());
                 std::os::unix::fs::symlink(outside.path(), unit.root.join(GIT_VOLUME)).unwrap();
-                let refused = prepare_git_storage(&unit.root).await;
+                let refused = prepare_git_storage(&unit.root);
                 assert!(
                     matches!(refused, Err(ToolError::ChangedInput)),
                     "{:?}",
@@ -3098,7 +2987,7 @@ int main(int argc, char **argv) {
                 std::fs::remove_file(unit.root.join(GIT_VOLUME)).unwrap();
                 None
             } else {
-                let volume = prepare_git_storage(&unit.root).await.unwrap();
+                let volume = prepare_git_storage(&unit.root).unwrap();
                 verify_git_storage(&unit.root).unwrap();
                 Some(volume)
             };
@@ -3112,12 +3001,8 @@ int main(int argc, char **argv) {
             };
             let before = names(&unit.root);
             let view = unit.root.join(GIT_VOLUME);
-            match exit {
-                "success" => std::fs::write(view.join("probe"), b"view").unwrap(),
-                "exhaustion" => {
-                    exhaust_git_storage(&volume.as_ref().unwrap()[0]).unwrap();
-                }
-                _ => {}
+            if exit == "success" {
+                std::fs::write(view.join("probe"), b"view").unwrap();
             }
             assert_eq!(names(&unit.root), before, "{exit}: control root changed");
             assert_eq!(
@@ -3135,28 +3020,6 @@ int main(int argc, char **argv) {
             );
             drop(volume);
         }
-    }
-
-    async fn verify_storage_free_cleanup(fixture: &Path) {
-        use crate::test_process::BoundedOutput;
-        let mut unit = Unit::new(fixture).await.unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", HELPER, "--ignored", "--nocapture"])
-            .env_clear()
-            .env("ARANY_TEST_NATIVE_UNIT_ROOT", &unit.root)
-            .env("ARANY_TEST_NATIVE_UNIT_PHASE", "storage-free-cleanup")
-            .current_dir("/")
-            .bounded_output_for(Duration::from_secs(10), 16 * 1024)
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "storage-free cleanup with hdiutil exec denied: {output:?}"
-        );
-        crate::test_process::assert_single_test_completed(
-            &output.stdout,
-            "storage-free cleanup helper",
-        );
-        unit.stop().await.unwrap();
     }
 
     async fn verify_previous_boot_never_signals() {
@@ -3194,164 +3057,7 @@ int main(int argc, char **argv) {
         assert!(identity(own.pid).unwrap().same_process(own));
     }
 
-    struct DiskGate {
-        child: tokio::process::Child,
-        output: BufReader<tokio::process::ChildStdout>,
-    }
-
-    impl DiskGate {
-        async fn start(executable: &Path, action: &str, root: &Path, image: &str) -> Self {
-            let name = format!("{}-{image}", root.file_name().unwrap().to_str().unwrap());
-            let mut child = Command::new(executable)
-                .args([action, &name])
-                .env_clear()
-                .current_dir("/")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
-            let output = BufReader::new(child.stdout.take().unwrap());
-            let mut gate = Self { child, output };
-            assert_eq!(gate.message().await, b"READY\n");
-            gate
-        }
-
-        async fn message(&mut self) -> Vec<u8> {
-            tokio::time::timeout(
-                Duration::from_secs(8),
-                read_line_capped(&mut self.output, 128),
-            )
-            .await
-            .unwrap()
-            .unwrap()
-        }
-
-        async fn blocked(&mut self) -> PathBuf {
-            let message = self.message().await;
-            let device = std::str::from_utf8(&message)
-                .unwrap()
-                .trim()
-                .strip_prefix("BLOCKED ")
-                .unwrap();
-            assert!(device.starts_with("/dev/disk"));
-            device.into()
-        }
-
-        async fn release(mut self) {
-            self.child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(b"G")
-                .await
-                .unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .success()
-            );
-        }
-    }
-
-    fn disk_gate_actor(directory: &Path) -> PathBuf {
-        use crate::test_process::BoundedOutput;
-        let executable = directory.join("disk-gate");
-        let compiled = std::process::Command::new("/usr/bin/xcrun")
-            .args([
-                "--sdk",
-                "macosx",
-                "clang",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-O1",
-                "-framework",
-                "DiskArbitration",
-                "-framework",
-                "CoreFoundation",
-            ])
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/macos-disk-approval-gate.c"
-            ))
-            .arg("-o")
-            .arg(&executable)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", directory)
-            .env("TMPDIR", directory)
-            .current_dir(directory)
-            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
-            .unwrap();
-        assert!(
-            compiled.status.success(),
-            "disk gate compilation: {compiled:?}"
-        );
-        assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
-        executable
-    }
-
-    async fn verify_recovery_cancellation(gate: &Path, fixture: &Path) {
-        let mut unit = Unit::new(fixture).await.unwrap();
-        let _volumes = prepare_storage(&unit.root).await.unwrap();
-        let record = unit._directory.dir.read(RECOVERY_RECORD).unwrap();
-        write_record(
-            &unit._directory.dir,
-            STORAGE_PENDING,
-            &super::super::storage::PendingAttachment {
-                version: 1,
-                image: "workspace".into(),
-                boot: ffi::boot_session().unwrap(),
-                state: super::super::storage::AttachmentState::Attaching,
-            },
-        )
-        .unwrap();
-        let mut observer = DiskGate::start(gate, "unmount", &unit.root, "workspace").await;
-        rustix::fs::flock(&unit._liveness, rustix::fs::FlockOperation::Unlock).unwrap();
-        let mut recovering = Box::pin(recover_root(&unit.root));
-        let device = tokio::select! {
-            result = &mut recovering => panic!("recovery finished before native unmount gate: {result:?}"),
-            device = observer.blocked() => device,
-        };
-        assert!(
-            super::super::storage::owned_devices(&unit.root)
-                .await
-                .unwrap()
-                .contains(&device)
-        );
-        drop(recovering);
-        assert!(unit.root.exists());
-        assert_eq!(unit._directory.dir.read(RECOVERY_RECORD).unwrap(), record);
-        assert!(is_retained(&unit.root).unwrap());
-        let pending: super::super::storage::PendingAttachment =
-            read_record(&unit._directory.dir, STORAGE_PENDING).unwrap();
-        assert!(pending.state == super::super::storage::AttachmentState::Observed);
-        observer.release().await;
-        super::super::storage::detach_owned_image(&unit.root, "workspace")
-            .await
-            .unwrap();
-        assert!(
-            !super::super::storage::owned_devices(&unit.root)
-                .await
-                .unwrap()
-                .contains(&device)
-        );
-        assert!(
-            unit._directory
-                .dir
-                .symlink_metadata(STORAGE_PENDING)
-                .is_ok()
-        );
-        recover_root(&unit.root).await.unwrap();
-        assert!(!unit.root.exists());
-        unit.stopped = true;
-    }
-
-    async fn verify_controller_crash_recovery(script: &Path, gate: &Path) {
+    async fn verify_controller_crash_recovery(script: &Path) {
         struct Controller(std::process::Child);
         impl Drop for Controller {
             fn drop(&mut self) {
@@ -3413,7 +3119,6 @@ int main(int argc, char **argv) {
             limits: None,
             stopped: false,
         });
-        let mut observer = DiskGate::start(gate, "mount", &root, "scratch").await;
         stream.get_mut().write_all(b"G").await.unwrap();
         let members: Vec<Identity> = serde_json::from_slice(
             &tokio::time::timeout(Duration::from_secs(30), read_line_capped(&mut stream, 2048))
@@ -3425,24 +3130,9 @@ int main(int argc, char **argv) {
         let record = recovery(&fallback.as_ref().unwrap()._directory).unwrap();
         let coalition = record.supervisor.unwrap().coalition;
         fallback.as_mut().unwrap().scope = Some(Scope::new(coalition).unwrap());
-        let device = observer.blocked().await;
-        assert!(storage_mounted(&root).unwrap());
-        assert!(
-            super::super::storage::owned_devices(&root)
-                .await
-                .unwrap()
-                .contains(&device)
-        );
-        assert!(
-            !ffi::mounts()
-                .unwrap()
-                .iter()
-                .any(|(_, target)| target == &root.join("scratch"))
-        );
-        let pending: super::super::storage::PendingAttachment =
-            read_record(&fallback.as_ref().unwrap()._directory.dir, STORAGE_PENDING).unwrap();
-        assert_eq!(pending.image, "scratch");
-        assert!(Scope::new(coalition).unwrap().members().unwrap().len() > members.len() + 1);
+        assert!(!storage_mounted(&root).unwrap());
+        let live = Scope::new(coalition).unwrap().members().unwrap();
+        assert!(members.iter().all(|member| live.contains(member)));
         assert!(!is_retained(&root).unwrap());
         assert!(
             recover_root(&root).await.is_err(),
@@ -3459,25 +3149,9 @@ int main(int argc, char **argv) {
             "process death releases the liveness lock"
         );
         // The restarted admission path must recover storage and escaped descendants together.
-        let mut recovering = Box::pin(recover_retained_roots(
-            fixture.path(),
-            rustix::process::geteuid().as_raw(),
-        ));
-        let emptied = async {
-            let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
-            loop {
-                if Scope::new(coalition).unwrap().members().unwrap().is_empty() {
-                    break;
-                }
-                samples.tick().await;
-            }
-        };
-        tokio::select! {
-            result = &mut recovering => panic!("recovery ended before attachment gate release: {result:?}"),
-            result = tokio::time::timeout(Duration::from_secs(5), emptied) => result.unwrap(),
-        }
-        observer.release().await;
-        recovering.await.unwrap();
+        recover_retained_roots(fixture.path(), rustix::process::geteuid().as_raw())
+            .await
+            .unwrap();
         assert!(!root.exists());
         assert!(Scope::new(coalition).unwrap().members().unwrap().is_empty());
         for member in members {
@@ -3654,15 +3328,11 @@ int main(int argc, char **argv) {
             assert!(architectures.stdout.is_empty() && architectures.stderr.is_empty());
         }
         let (actor, plain, sysctl_probe, rust_probe) = native_actors(generated.path());
-        let disk_gate = disk_gate_actor(generated.path());
         verify_uncertain_storage_is_retained(generated.path()).await;
         verify_partial_storage_is_cleaned(generated.path()).await;
-        verify_storage_ownership(generated.path()).await;
         verify_git_storage_exits(generated.path()).await;
-        verify_storage_free_cleanup(generated.path()).await;
         verify_previous_boot_never_signals().await;
-        verify_controller_crash_recovery(&plain, &disk_gate).await;
-        verify_recovery_cancellation(&disk_gate, generated.path()).await;
+        verify_controller_crash_recovery(&plain).await;
 
         let baseline = std::process::Command::new(&sysctl_probe)
             .arg("baseline")
@@ -3769,10 +3439,7 @@ int main(int argc, char **argv) {
                 phase,
                 "storage" | "storage-drop" | "command-profile" | "entitlement-profile"
             ) {
-                assert_eq!(
-                    storage_mounted(&unit.root).unwrap(),
-                    phase != "entitlement-profile"
-                );
+                assert!(!storage_mounted(&unit.root).unwrap());
                 if matches!(phase, "command-profile" | "entitlement-profile") {
                     assert!(
                         tokio::time::timeout(Duration::from_secs(20), read_capped(&mut stream, 1))
@@ -3828,7 +3495,7 @@ int main(int argc, char **argv) {
                             "native {phase} payload: {error}; {}",
                             diagnostic(&unit.root)
                         )),
-                        b"FULL\n"
+                        b"WRITTEN\n"
                     );
                 }
                 scope.check_resources().unwrap();
@@ -3838,10 +3505,7 @@ int main(int argc, char **argv) {
                 );
                 if phase != "storage-drop" {
                     scope.stop(None).await.unwrap();
-                    assert_eq!(
-                        storage_mounted(&unit.root).unwrap(),
-                        phase != "entitlement-profile"
-                    );
+                    assert!(!storage_mounted(&unit.root).unwrap());
                 }
             } else {
                 let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
@@ -3911,15 +3575,6 @@ int main(int argc, char **argv) {
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
         native_storage_stage(&phase, "helper-entered");
-        if phase == "storage-free-cleanup" {
-            let reactor = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            super::super::install_profile("(version 1)\n(allow default)\n(deny process-exec (literal \"/usr/bin/hdiutil\"))\n".into()).unwrap();
-            reactor.block_on(cleanup_storage(root)).unwrap();
-            return;
-        }
         if phase == "recovery-controller" {
             let source = std::env::var_os("ARANY_TEST_NATIVE_UNIT_WORKSPACE").unwrap();
             let reactor = tokio::runtime::Builder::new_current_thread()
@@ -4110,9 +3765,7 @@ int main(int argc, char **argv) {
                 cache_transfer_ms: 0,
                 ..crate::tools::types::ToolLimits::default()
             };
-            let volumes = reactor
-                .block_on(prepare_command_storage(root, &runtime, &limits, false))
-                .unwrap();
+            let volumes = prepare_command_storage(root, &runtime, &limits, false, false).unwrap();
             native_storage_stage(&phase, "command-storage-preparation-finished");
             assert_eq!(volumes[0].read("selected").unwrap(), b"after typed edit");
             assert!(!volumes[0].exists("omitted"));
@@ -4314,6 +3967,16 @@ int main(int argc, char **argv) {
                         .kind(),
                     std::io::ErrorKind::PermissionDenied
                 );
+                // Unit storage shares the host volume, so Seatbelt must refuse a writable alias of a readable input.
+                assert_eq!(
+                    std::fs::hard_link(
+                        root.join("runtime/inputs/shell/fixture.txt"),
+                        root.join("workspace/alias")
+                    )
+                    .unwrap_err()
+                    .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
                 assert_eq!(
                     std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                         .unwrap_err()
@@ -4460,22 +4123,10 @@ printf 'native command success'
                 volumes[0].write("profile-receipt", b"PROFILE\n").unwrap();
                 return;
             }
-            let block = vec![0; FILL_CHUNK_BYTES];
             for volume in &volumes {
-                let mut output = volume.create("filled").unwrap();
-                let full = (0..=STORAGE_BYTES_CAP / block.len() as u64).any(|_| {
-                    match output.write_all(&block).and_then(|()| output.sync_all()) {
-                        Ok(()) => false,
-                        Err(error) => {
-                            assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
-                            true
-                        }
-                    }
-                });
-                assert!(full, "native filesystem must enforce its aggregate ceiling");
-                assert!(output.metadata().unwrap().len() <= STORAGE_BYTES_CAP);
+                volume.write("written", b"disposable").unwrap();
             }
-            stream.write_all(b"FULL\n").unwrap();
+            stream.write_all(b"WRITTEN\n").unwrap();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             return;
         }
@@ -4515,12 +4166,7 @@ printf 'native command success'
             control.write_all(b"G").unwrap();
         }
         if phase == "attachment" {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(prepare_storage(root))
-                .unwrap();
+            prepare_storage(root).unwrap();
         }
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
     }

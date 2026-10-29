@@ -27,8 +27,6 @@ use replay::{
     inspect_session, latest_session_id, list_session_page, load_session, resolve_open_view,
     resolve_view, session_for_run,
 };
-#[cfg(test)]
-pub(crate) use state::capture_archive;
 pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
@@ -39,7 +37,7 @@ pub(crate) use state::{
     MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
 };
 pub use state::{ArchivedHistory, ArchivedRecords, HistoryReset};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use state::{
     CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES, validate_cache_path,
 };
@@ -48,10 +46,6 @@ pub(crate) use state::{
     MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES,
 };
 pub use state::{ProviderRecordEdit, ProviderRecordTarget, Record, RecordKind, StateRoot};
-#[cfg(target_os = "macos")]
-pub(crate) use state::{
-    archive_size_with_limit, capture_archive_async_with_limit, restore_archive_async_with_limit,
-};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 const PROVIDER_SETUP_EDIT_EVENT_SLOTS: usize = 2;

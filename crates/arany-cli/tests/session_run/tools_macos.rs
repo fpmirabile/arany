@@ -1113,6 +1113,7 @@ fn build_goal_request() -> arany::GoalRequest {
     goal
 }
 
+const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
 #[async_trait::async_trait]
 impl Provider for RuntimeJourney {
@@ -1201,87 +1202,14 @@ async fn native_offline_rust_build_helper() {
     trace_case(root, "rust-build");
     assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
 
-    let source_sysroot =
-        std::env::var_os("ARANY_TEST_RUST_SYSROOT").expect("validated parent Rust sysroot");
-    let source_sysroot = setup_context("source Rust sysroot validation", || {
-        validate_rust_sysroot(Path::new(&source_sysroot))
-    });
-    let versioned_name = source_sysroot.file_name().unwrap();
-    let rustup = root.join("home/.rustup");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&rustup)
-        .unwrap();
-    let toolchains = rustup.join("toolchains");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&toolchains)
-        .unwrap();
-    let copied = setup_context("private Rust sysroot clone", || {
-        std::process::Command::new("/bin/cp")
-            .args(["-cR"])
-            .arg(&source_sysroot)
-            .arg(&toolchains)
-            .env_clear()
-            .env("HOME", root.join("home"))
-            .env("TMPDIR", root)
-            .current_dir(root)
-            .bounded_output_for(Duration::from_secs(45), 4096)
-            .expect("bounded private Rust sysroot clone")
-    });
-    assert!(copied.status.success(), "Rust sysroot clone: {copied:?}");
-    assert!(copied.stdout.is_empty() && copied.stderr.is_empty());
-    let rust_sysroot = toolchains.join(versioned_name);
-    assert_eq!(
-        setup_context("cloned Rust sysroot validation", || {
-            validate_rust_sysroot(&rust_sysroot)
-        }),
-        rust_sysroot
-    );
-
+    let rust_sysroot = private_rust_sysroot(root);
     if std::env::var_os("ARANY_TEST_CARGO_REGISTRY").is_some() {
         repository::run(root).await;
         return;
     }
     let workspace = root.join("workspace");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&workspace)
-        .unwrap();
-    arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), &workspace);
-    const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
-    let permissions = arany::WorkspacePermissions::open(&workspace)
-        .unwrap()
-        .prepare_profile_selection(&StateRoot::account_path().unwrap());
-    let choices = permissions.runtime_profile_choices();
-    let rust = choices
-        .iter()
-        .find(|option| option.group == "Rust" && option.path == rust_sysroot)
-        .expect("copied exact Rust sysroot candidate");
-    let compiler = choices
-        .iter()
-        .find(|option| {
-            option.group == "Command Line Tools compiler"
-                && option.path == Path::new(APPLE_COMPILER)
-        })
-        .expect("physical Apple Command Line Tools compiler candidate");
-    let sdk = choices
-        .iter()
-        .find(|option| option.group == "macOS SDK" && option.detected && option.selected)
-        .expect("physical versioned macOS SDK candidate");
-    assert!(rust.detected && compiler.detected && sdk.detected);
-    setup_context("Apple runtime baseline probes", || {
-        assert_apple_runtime_baseline(root, &sdk.path)
-    });
-    assert_eq!(rust.version.as_deref(), versioned_name.to_str());
-    assert_eq!(compiler.version, None);
-    assert!(sdk.version.is_some());
-    let apple_sdk = sdk.path.to_str().unwrap();
-    let rust_token = rust.token.clone();
-    let compiler_token = compiler.token.clone();
-    let sdk_token = sdk.token.clone();
-
-    let mut permissions = permissions;
+    let (mut permissions, [rust_token, compiler_token, sdk_token], apple_sdk) =
+        offline_rust_workspace(root, &workspace, &rust_sysroot);
     permissions
         .remember_profiles(
             true,
@@ -1349,6 +1277,195 @@ async fn native_offline_rust_build_helper() {
         Path::new(env!("CARGO_BIN_EXE_arany")),
     )
     .await;
+}
+
+fn private_rust_sysroot(root: &Path) -> std::path::PathBuf {
+    let source_sysroot =
+        std::env::var_os("ARANY_TEST_RUST_SYSROOT").expect("validated parent Rust sysroot");
+    let source_sysroot = setup_context("source Rust sysroot validation", || {
+        validate_rust_sysroot(Path::new(&source_sysroot))
+    });
+    let versioned_name = source_sysroot.file_name().unwrap();
+    let rustup = root.join("home/.rustup");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&rustup)
+        .unwrap();
+    let toolchains = rustup.join("toolchains");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&toolchains)
+        .unwrap();
+    let copied = setup_context("private Rust sysroot clone", || {
+        std::process::Command::new("/bin/cp")
+            .args(["-cR"])
+            .arg(&source_sysroot)
+            .arg(&toolchains)
+            .env_clear()
+            .env("HOME", root.join("home"))
+            .env("TMPDIR", root)
+            .current_dir(root)
+            .bounded_output_for(Duration::from_secs(45), 4096)
+            .expect("bounded private Rust sysroot clone")
+    });
+    assert!(copied.status.success(), "Rust sysroot clone: {copied:?}");
+    assert!(copied.stdout.is_empty() && copied.stderr.is_empty());
+    let rust_sysroot = toolchains.join(versioned_name);
+    assert_eq!(
+        setup_context("cloned Rust sysroot validation", || {
+            validate_rust_sysroot(&rust_sysroot)
+        }),
+        rust_sysroot
+    );
+
+    rust_sysroot
+}
+
+fn offline_rust_workspace(
+    root: &Path,
+    workspace: &Path,
+    rust_sysroot: &Path,
+) -> (arany::WorkspacePermissions, [String; 3], String) {
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(workspace)
+        .unwrap();
+    arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), workspace);
+    let permissions = arany::WorkspacePermissions::open(workspace)
+        .unwrap()
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
+    let choices = permissions.runtime_profile_choices();
+    let rust = choices
+        .iter()
+        .find(|option| option.group == "Rust" && option.path == rust_sysroot)
+        .expect("copied exact Rust sysroot candidate");
+    let compiler = choices
+        .iter()
+        .find(|option| {
+            option.group == "Command Line Tools compiler"
+                && option.path == Path::new(APPLE_COMPILER)
+        })
+        .expect("physical Apple Command Line Tools compiler candidate");
+    let sdk = choices
+        .iter()
+        .find(|option| option.group == "macOS SDK" && option.detected && option.selected)
+        .expect("physical versioned macOS SDK candidate");
+    assert!(rust.detected && compiler.detected && sdk.detected);
+    setup_context("Apple runtime baseline probes", || {
+        assert_apple_runtime_baseline(root, &sdk.path)
+    });
+    assert_eq!(
+        rust.version.as_deref(),
+        rust_sysroot.file_name().unwrap().to_str()
+    );
+    assert_eq!(compiler.version, None);
+    assert!(sdk.version.is_some());
+    let apple_sdk = sdk.path.to_str().unwrap().to_owned();
+    let tokens = [
+        rust.token.clone(),
+        compiler.token.clone(),
+        sdk.token.clone(),
+    ];
+    (permissions, tokens, apple_sdk)
+}
+
+// Owner-run measurement: a trivial default-class command, then cold and incremental Build checks sharing one State.
+#[tokio::test]
+#[ignore = "isolated helper owned by the native command latency probe"]
+async fn native_command_latency_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let rust_sysroot = private_rust_sysroot(root);
+    let workspace = root.join("workspace");
+    let (mut permissions, tokens, _) = offline_rust_workspace(root, &workspace, &rust_sysroot);
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::Request, &tokens)
+        .unwrap();
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
+    let selected = permissions
+        .runtime_profile_choices()
+        .iter()
+        .filter(|choice| choice.selected)
+        .map(|choice| choice.token.clone())
+        .collect::<Vec<_>>();
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::Request, &selected)
+        .unwrap();
+    for (case, script, class) in [
+        ("true 1", "true", arany::ToolResourceClass::Default),
+        ("true 2", "true", arany::ToolResourceClass::Default),
+        ("true 3", "true", arany::ToolResourceClass::Default),
+        (
+            "cargo check cold",
+            "cargo check --locked",
+            arany::ToolResourceClass::Build,
+        ),
+        (
+            "cargo check warm 1",
+            "cargo check --locked",
+            arany::ToolResourceClass::Build,
+        ),
+        (
+            "cargo check warm 2",
+            "cargo check --locked",
+            arany::ToolResourceClass::Build,
+        ),
+    ] {
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: String::new(),
+            resource_class: Some(class),
+            timeout_ms: None,
+        };
+        let mut requested =
+            arany::test_support::scenario::request(&workspace, "Measure one guarded command");
+        requested.include_paths.clear();
+        requested.goal = build_goal_request();
+        let permissions = arany::WorkspacePermissions::open(&workspace)
+            .unwrap()
+            .prepare_profile_selection(&StateRoot::account_path().unwrap());
+        let started = std::time::Instant::now();
+        let (outcome, _) =
+            run_offline_build_case(&root.join("state"), requested, permissions, call, 60_000).await;
+        let elapsed = started.elapsed();
+        let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Succeeded,
+            "{case}: {}",
+            observation.output
+        );
+        let stderr =
+            serde_json::from_str::<serde_json::Value>(&observation.output).unwrap()["stderr"]
+                .as_str()
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("Compiling") || line.contains("Finished"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+        println!(
+            "offline Cargo latency {case}: {} ms; cache {:?}; {stderr}",
+            elapsed.as_millis(),
+            observation.cache_update
+        );
+    }
+}
+
+#[test]
+#[ignore = "owner-run native macOS command latency probe; requires ARANY_TEST_RUST_SYSROOT"]
+fn guarded_command_latency_probe() {
+    let sysroot = std::env::var_os("ARANY_TEST_RUST_SYSROOT")
+        .expect("set ARANY_TEST_RUST_SYSROOT to one physical versioned macOS Rust sysroot");
+    let sysroot = validate_rust_sysroot(Path::new(&sysroot));
+    native_journey_with_rust_sysroot(
+        "tools::native_command_latency_helper",
+        Some(&sysroot),
+        None,
+        None,
+    );
 }
 
 async fn run_offline_build_case(

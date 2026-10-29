@@ -549,10 +549,8 @@ async fn storage_rows(
     state: &Path,
     recorded: &mut Vec<Recorded>,
 ) {
-    for fault in [
-        arany::GitStorageFault::Refuse,
-        arany::GitStorageFault::Exhaust,
-    ] {
+    {
+        let fault = arany::GitStorageFault::Refuse;
         let call = branch_creation(&format!("storage-{fault:?}"));
         let before = tree_snapshot(workspace);
         let leftovers = unit_leftovers();
@@ -577,14 +575,7 @@ async fn storage_rows(
             serde_json::from_slice(&std::fs::read(evidence).unwrap()).unwrap();
         assert_eq!(intent, observation(&row).intent.id);
         assert!(!unit.exists());
-        if fault == arany::GitStorageFault::Refuse {
-            assert!(observation(&row).attestation.is_none());
-        } else {
-            assert!(
-                observation(&row).attestation.is_some(),
-                "Git reached its confined view after ENOSPC and the control-root canary check"
-            );
-        }
+        assert!(observation(&row).attestation.is_none());
         recorded.push(row);
         capacity_released(
             engine,

@@ -36,10 +36,7 @@ impl CacheFailure {
             .await
             .expect("editor command reached cache publication");
         // Preparation also syncs the root, so arm this fault only at publication.
-        #[cfg(target_os = "linux")]
         FaultPlan::fail_record_sync(self.identity.token().into(), "");
-        #[cfg(not(target_os = "linux"))]
-        FaultPlan::fail_commit_marker(&self.identity);
         self.release
             .take()
             .unwrap()

@@ -3,6 +3,8 @@ use crate::tools::selection::{CONTROL_BYTES, Selector};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+pub(in crate::tools) mod clone_cache;
 #[cfg(target_os = "linux")]
 pub(in crate::tools) mod overlay;
 
@@ -430,14 +432,10 @@ impl Inputs<'_> {
         };
         #[cfg(not(unix))]
         let executable = false;
-        put_entry(
-            self.target,
-            Entry {
-                path: path.into(),
-                content: Some(content),
-                executable,
-            },
-        )
+        // Keeping the source time lets incremental builds such as Cargo treat unchanged inputs as fresh.
+        write_new(self.target, path, &content, executable)?
+            .set_modified(metadata.modified().map_err(|_| ToolError::Path)?)
+            .map_err(|_| ToolError::Operation)
     }
 }
 

@@ -40,6 +40,7 @@ pub(crate) const COMMAND_PATH_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const DEFAULT_COMMAND_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const GUARD_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
 pub const MAX_BUILD_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;

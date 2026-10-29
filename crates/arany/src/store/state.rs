@@ -12,7 +12,7 @@ pub(super) use archive::identity_of;
 pub use archive::{ArchivedHistory, ArchivedRecords};
 use archive::{private_subdirectory, rename, sync};
 mod build_cache;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use build_cache::{
     CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES,
     validate_path as validate_cache_path,
@@ -22,15 +22,9 @@ pub(crate) mod checkpoints;
 mod inventory;
 mod lock;
 pub(crate) mod spill;
-#[cfg(test)]
-pub(crate) use build_cache::capture_archive;
 pub(crate) use build_cache::{
     AGGREGATE_BYTES, BuildCacheIdentity, BuildCacheLease,
     DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES, MAX_ARCHIVE_BYTES,
-};
-#[cfg(target_os = "macos")]
-pub(crate) use build_cache::{
-    archive_size_with_limit, capture_archive_async_with_limit, restore_archive_async_with_limit,
 };
 #[cfg(unix)]
 pub use inventory::{

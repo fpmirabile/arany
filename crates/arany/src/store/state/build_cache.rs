@@ -7,9 +7,9 @@ use std::collections::BTreeSet;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod directory;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use directory::{CacheChange, CacheGuardRecovery};
 
 pub(super) const DIRECTORY: &str = "build-cache";
@@ -159,7 +159,7 @@ impl BuildCacheLease {
         Ok(Some((opened, file.metadata()?.len())))
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(test)]
     pub(crate) fn publish<R: Read>(
         &mut self,
         candidate: &mut R,
@@ -318,7 +318,6 @@ impl BuildCacheLease {
             )?;
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
-            crate::fault::commit_marker(&self.token)?;
             write_transaction(
                 &self.dir,
                 &self.token,
@@ -349,12 +348,7 @@ impl BuildCacheLease {
         Ok(())
     }
 
-    #[cfg(any(test, all(target_os = "macos", feature = "test-support")))]
-    pub(crate) fn token(&self) -> &str {
-        &self.token
-    }
-
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(test)]
     pub(crate) fn candidate_writer(&self) -> Result<File, StoreError> {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
@@ -362,7 +356,7 @@ impl BuildCacheLease {
         create_private_file(&self.dir, &candidate_name(&self.token))
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(test)]
     pub(crate) fn open_candidate(&self) -> Result<File, StoreError> {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
@@ -433,7 +427,7 @@ impl StateRoot {
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         remove_stale_candidates(&dir)?;
         let token = identity.token();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             directory::directory_available(&dir, &token)?;
         }
@@ -442,7 +436,7 @@ impl StateRoot {
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => 0,
             Err(error) => return Err(error),
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let archive_size = directory::committed_bytes(&dir, &token, archive_size)?;
         let metadata_reserve = if contains_cache_identity(&dir, &token)? {
             0
@@ -461,7 +455,7 @@ impl StateRoot {
         } else {
             candidate
         };
-        let view = if cfg!(target_os = "linux") && candidate > 0 {
+        let view = if cfg!(any(target_os = "linux", target_os = "macos")) && candidate > 0 {
             candidate
         } else {
             requested
@@ -493,7 +487,7 @@ impl StateRoot {
         }
         let (identity_file, created_lock) = open_lock_file(&dir, &lock_name)?;
         let identity_lock = FlockGuard::acquire(identity_file, true)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             directory::guard::admit(&dir, &token)?;
             directory::directory_available(&dir, &token)?;
@@ -572,13 +566,13 @@ impl StateRoot {
         let lock_name = identity_lock_name(&token);
         let (identity_file, _) = open_lock_file(&dir, &lock_name)?;
         let _identity_lock = FlockGuard::acquire(identity_file, true)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         directory::guard::admit(&dir, &token)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         for name in identity_file_names(&token) {
             if name != lock_name {
                 if name.ends_with(".tree") && file_exists(&dir, &name)? {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     let _lease = dir.open_dir_nofollow(&name)?;
                     dir.remove_dir_all(&name)?;
                     continue;
@@ -626,7 +620,7 @@ impl StateRoot {
         for name in &names {
             let file = open_regular(&dir, name, 0)?;
             held.push(FlockGuard::acquire(file, true)?);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             directory::guard::admit(
                 &dir,
                 suffix(name, IDENTITY_LOCK_PREFIX, ".lock").ok_or(StoreError::StateNotPrivate)?,
@@ -681,7 +675,7 @@ pub(crate) fn restore_archive<R: Read>(
     restore_archive_with_limit(input, destination, identity, exclusions, MAX_ARCHIVE_BYTES)
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn restore_archive_with_limit<R: Read>(
     input: &mut R,
     destination: &Dir,
@@ -722,111 +716,6 @@ pub(crate) fn restore_archive_with_limit<R: Read>(
         }
     }
     archive.finish()
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) async fn restore_archive_async_with_limit<R: tokio::io::AsyncRead + Unpin>(
-    input: &mut R,
-    destination: &Dir,
-    identity: &BuildCacheIdentity,
-    exclusions: &[String],
-    max_bytes: u64,
-) -> Result<(), StoreError> {
-    use tokio::io::AsyncReadExt;
-
-    let mut magic = [0; MAGIC.len()];
-    input.read_exact(&mut magic).await?;
-    if &magic != MAGIC {
-        return Err(StoreError::InvalidBuildCache);
-    }
-    let path_len = read_u16_async(input).await? as usize;
-    let device = read_u64_async(input).await?;
-    let inode = read_u64_async(input).await?;
-    check_path_len(path_len)?;
-    let mut path = vec![0; path_len];
-    input.read_exact(&mut path).await?;
-    check_header(&path, device, inode, identity)?;
-    let mut cursor = ArchiveCursor::new(identity, max_bytes)?;
-    loop {
-        let path_len = read_u16_async(input).await? as usize;
-        let kind = read_u8_async(input).await?;
-        let flags = read_u8_async(input).await?;
-        let size = read_u64_async(input).await?;
-        if path_len == 0 {
-            cursor.terminate(kind, flags, size)?;
-            let mut extra = [0; 1];
-            if input.read(&mut extra).await? != 0 {
-                return Err(StoreError::InvalidBuildCache);
-            }
-            return Ok(());
-        }
-        check_path_len(path_len)?;
-        let mut path_bytes = vec![0; path_len];
-        input.read_exact(&mut path_bytes).await?;
-        let AdmittedEntry {
-            path,
-            directory,
-            executable,
-        } = cursor.admit(path_bytes, kind, flags, size)?;
-        if is_excluded(&path, exclusions) {
-            discard_async(input, size).await?;
-            continue;
-        }
-        if directory {
-            let (parent, leaf) = create_parent(destination, &path)?;
-            let mut builder = DirBuilder::new();
-            cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
-            match parent.create_dir_with(&leaf, &builder) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    parent.open_dir_nofollow(&leaf)?;
-                }
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            let (parent, leaf) = create_parent(destination, &path)?;
-            let mut options = OpenOptions::new();
-            options
-                .write(true)
-                .create_new(true)
-                .follow(FollowSymlinks::No);
-            cap_std::fs::OpenOptionsExt::mode(&mut options, if executable { 0o700 } else { 0o600 });
-            let mut file = parent.open_with(&leaf, &options)?;
-            copy_async_to_file(input, &mut file, size).await?;
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn copy_async_to_file<R: tokio::io::AsyncRead + Unpin>(
-    input: &mut R,
-    output: &mut File,
-    mut remaining: u64,
-) -> Result<(), StoreError> {
-    use tokio::io::AsyncReadExt;
-    let mut buffer = [0; 32 * 1024];
-    while remaining > 0 {
-        let count = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        input.read_exact(&mut buffer[..count]).await?;
-        output.write_all(&buffer[..count])?;
-        remaining -= count as u64;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-async fn discard_async<R: tokio::io::AsyncRead + Unpin>(
-    input: &mut R,
-    mut remaining: u64,
-) -> Result<(), StoreError> {
-    use tokio::io::AsyncReadExt;
-    let mut buffer = [0; 32 * 1024];
-    while remaining > 0 {
-        let count = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        input.read_exact(&mut buffer[..count]).await?;
-        remaining -= count as u64;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -886,7 +775,7 @@ pub(crate) fn capture_archive_with_limit<W: Write>(
     Ok(total)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(crate) fn archive_size_with_limit(
     source: &Dir,
     identity: &BuildCacheIdentity,
@@ -927,62 +816,6 @@ fn account_entry(total: u64, path: &str, size: u64, max_bytes: u64) -> Result<u6
         .ok_or(StoreError::StorageFull)?;
     if total.checked_add(12).ok_or(StoreError::StorageFull)? > max_bytes {
         return Err(StoreError::StorageFull);
-    }
-    Ok(total)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) async fn capture_archive_async_with_limit<W: tokio::io::AsyncWrite + Unpin>(
-    source: &Dir,
-    identity: &BuildCacheIdentity,
-    exclusions: &[String],
-    writer: &mut W,
-    max_bytes: u64,
-) -> Result<u64, StoreError> {
-    use tokio::io::AsyncWriteExt;
-
-    let expected_size = archive_size_with_limit(source, identity, exclusions, max_bytes)?;
-    let mut header = Vec::with_capacity(MAGIC.len() + 2 + 16 + identity.path.len());
-    write_header(&mut header, identity)?;
-    writer.write_all(&header).await?;
-    let paths = cache_paths(source, exclusions)?;
-    let mut total = header_size(identity)?;
-    let mut buffer = [0; 32 * 1024];
-    for path in paths.iter() {
-        let metadata = metadata_relative(source, path)?;
-        let directory = metadata.is_dir();
-        let executable = !directory && metadata.mode() & 0o111 != 0;
-        if !directory {
-            check_source_file(&metadata)?;
-        }
-        let size = if directory { 0 } else { metadata.len() };
-        total = account_entry(total, path, size, max_bytes)?;
-        let mut entry_header = Vec::with_capacity(12 + path.len());
-        write_entry_header(&mut entry_header, path, directory, executable, size)?;
-        writer.write_all(&entry_header).await?;
-        if !directory {
-            let mut file = open_nofollow(source, path)?;
-            let mut remaining = size;
-            while remaining > 0 {
-                let wanted =
-                    usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-                let count = file.read(&mut buffer[..wanted])?;
-                if count == 0 {
-                    return Err(StoreError::InvalidBuildCache);
-                }
-                writer.write_all(&buffer[..count]).await?;
-                remaining -= count as u64;
-            }
-            let mut extra = [0; 1];
-            if file.read(&mut extra)? != 0 {
-                return Err(StoreError::InvalidBuildCache);
-            }
-        }
-    }
-    writer.write_all(&[0; 12]).await?;
-    total = total.checked_add(12).ok_or(StoreError::StorageFull)?;
-    if total != expected_size {
-        return Err(StoreError::InvalidBuildCache);
     }
     Ok(total)
 }
@@ -1224,7 +1057,7 @@ impl<R: Read> ArchiveEntry<'_, R> {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn write_entry<R: Read, W: Write>(
     output: &mut W,
     entry: &mut ArchiveEntry<'_, R>,
@@ -1485,7 +1318,7 @@ fn check_private(file: &File, max: usize) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn own_tree_bytes(dir: &Dir, token: &str) -> Result<u64, StoreError> {
     let name = directory::tree_name(token);
     if !file_exists(dir, &name)? {
@@ -1494,7 +1327,7 @@ fn own_tree_bytes(dir: &Dir, token: &str) -> Result<u64, StoreError> {
     directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn own_tree_bytes(_dir: &Dir, _token: &str) -> Result<u64, StoreError> {
     Ok(0)
 }
@@ -1522,14 +1355,14 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
         if let Some(token) = suffix(&name, GUARD_PREFIX, ".unit") {
             validate_token(token)?;
             identities.insert(token.to_owned());
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             open_regular(dir, &name, directory::guard::GUARD_BYTES)?;
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return Err(StoreError::StateNotPrivate);
         } else if let Some(token) = suffix(&name, TREE_PREFIX, ".tree") {
             validate_token(token)?;
             identities.insert(token.to_owned());
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 let bytes = directory::measure(&dir.open_dir_nofollow(&name)?, MAX_ARCHIVE_BYTES)?;
                 if file_exists(dir, &reservation_name(token))? {
@@ -1541,7 +1374,7 @@ fn inventory(dir: &Dir) -> Result<u64, StoreError> {
                     total = total.checked_add(bytes).ok_or(StoreError::StorageFull)?;
                 }
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return Err(StoreError::StateNotPrivate);
         } else if let Some(token) = suffix(&name, DIRTY_PREFIX, ".pending") {
             validate_token(token)?;
@@ -1738,7 +1571,7 @@ fn contains_cache_identity(dir: &Dir, token: &str) -> Result<bool, StoreError> {
 }
 
 fn release_reservation(dir: &Dir, token: &str) -> Result<(), StoreError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if directory::guard::active(dir, token)?
         || file_exists(dir, &format!("{DIRTY_PREFIX}{token}.pending"))?
     {
@@ -1764,7 +1597,7 @@ enum CacheTransaction {
 }
 
 impl CacheTransaction {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(test)]
     fn record(self) -> &'static str {
         match self {
             Self::RollbackPrevious => "rollback-previous",
@@ -1791,7 +1624,7 @@ fn sync_directory(dir: &Dir) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn write_transaction(
     dir: &Dir,
     token: &str,
@@ -2006,7 +1839,7 @@ fn remove_archive_file(dir: &Dir, name: &str) -> Result<(), StoreError> {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn finish_committed(dir: &Dir, token: &str) -> Result<(), StoreError> {
     let transaction = read_transaction(dir, token)?.ok_or(StoreError::StateNotPrivate)?;
     if !matches!(
@@ -2080,7 +1913,7 @@ fn is_excluded(path: &str, exclusions: &[String]) -> bool {
     })
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn write_header<W: Write>(writer: &mut W, identity: &BuildCacheIdentity) -> Result<(), StoreError> {
     writer.write_all(MAGIC)?;
     let path = identity.path.as_bytes();
@@ -2097,7 +1930,7 @@ fn header_size(identity: &BuildCacheIdentity) -> Result<u64, StoreError> {
         .map_err(|_| StoreError::StorageFull)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn write_entry_header<W: Write>(
     writer: &mut W,
     path: &str,
@@ -2117,7 +1950,7 @@ fn entry_header_size(path: &str) -> Result<u64, StoreError> {
     u64::try_from(12 + path.len()).map_err(|_| StoreError::StorageFull)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn write_terminator<W: Write>(writer: &mut W) -> Result<(), StoreError> {
     writer.write_all(&[0; 12])?;
     Ok(())
@@ -2136,34 +1969,6 @@ fn read_u16<R: Read>(reader: &mut R) -> Result<u16, StoreError> {
 fn read_u64<R: Read>(reader: &mut R) -> Result<u64, StoreError> {
     let mut value = [0; 8];
     reader.read_exact(&mut value)?;
-    Ok(u64::from_le_bytes(value))
-}
-
-#[cfg(target_os = "macos")]
-async fn read_u8_async<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<u8, StoreError> {
-    use tokio::io::AsyncReadExt;
-    let mut value = [0; 1];
-    reader.read_exact(&mut value).await?;
-    Ok(value[0])
-}
-
-#[cfg(target_os = "macos")]
-async fn read_u16_async<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut R,
-) -> Result<u16, StoreError> {
-    use tokio::io::AsyncReadExt;
-    let mut value = [0; 2];
-    reader.read_exact(&mut value).await?;
-    Ok(u16::from_le_bytes(value))
-}
-
-#[cfg(target_os = "macos")]
-async fn read_u64_async<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut R,
-) -> Result<u64, StoreError> {
-    use tokio::io::AsyncReadExt;
-    let mut value = [0; 8];
-    reader.read_exact(&mut value).await?;
     Ok(u64::from_le_bytes(value))
 }
 

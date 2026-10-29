@@ -764,6 +764,15 @@ fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
 }
 
 pub(super) fn put(root: &Dir, path: &str, bytes: &[u8], executable: bool) -> Result<(), ToolError> {
+    write_new(root, path, bytes, executable).map(drop)
+}
+
+pub(super) fn write_new(
+    root: &Dir,
+    path: &str,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<File, ToolError> {
     let (parent, leaf) = create_parents(root, path)?;
     let mut options = OpenOptions::new();
     options
@@ -778,7 +787,8 @@ pub(super) fn put(root: &Dir, path: &str, bytes: &[u8], executable: bool) -> Res
     let mut file = parent
         .open_with(leaf, &options)
         .map_err(|_| ToolError::Operation)?;
-    file.write_all(bytes).map_err(|_| ToolError::Operation)
+    file.write_all(bytes).map_err(|_| ToolError::Operation)?;
+    Ok(file.into_std())
 }
 
 fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {

@@ -76,6 +76,8 @@ use git_stage::{GitWork, read_plan_report, receive_git_input};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+pub(super) use macos::disk_floor_reached;
+#[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
 pub(super) use macos::{
@@ -84,7 +86,7 @@ pub(super) use macos::{
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cache_directory;
 mod cache_recovery;
 pub use cache_recovery::recover_build_cache;
@@ -177,19 +179,30 @@ pub(super) struct BuildCacheTransfer {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CacheCandidate {
     Received,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(
+            dead_code,
+            reason = "only the Linux overlay capture refuses or loses a candidate"
+        )
+    )]
     Rejected,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(
+            dead_code,
+            reason = "only the Linux overlay capture refuses or loses a candidate"
+        )
+    )]
     Failed,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(
+            dead_code,
+            reason = "only the Linux overlay capture refuses or loses a candidate"
+        )
+    )]
     Uncertain,
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn cache_transfer_deadline(
-    intent: &EffectIntent,
-    ceiling: Option<tokio::time::Instant>,
-) -> tokio::time::Instant {
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-    ceiling.map_or(deadline, |ceiling| deadline.min(ceiling))
 }
 
 impl BuildCacheTransfer {
@@ -210,7 +223,7 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) directory: Option<cache_directory::Session>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
@@ -242,7 +255,7 @@ pub(super) fn build_cache_session(
         intent.limits.cache_candidate_bytes,
     ) {
         Ok(lease) => lease,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Err(StoreError::StorageFull) if cache_directory::selected(intent) => {
             return Err(ToolError::Limit);
         }
@@ -262,7 +275,7 @@ pub(super) fn build_cache_session(
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         directory: None,
         lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
@@ -330,13 +343,10 @@ pub(super) async fn publish_cache_candidate(
         }
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if cache.directory.is_some() {
                     return cache_directory::publish(cache);
                 }
-                #[cfg(any(target_os = "macos", test))]
-                return publish_archive(cache);
-                #[cfg(all(not(target_os = "macos"), not(test)))]
                 CacheUpdate::Failed
             });
             match tokio::time::timeout_at(deadline, publication).await {
@@ -352,27 +362,6 @@ pub(super) async fn publish_cache_candidate(
         observation.limit_cause = None;
     }
     debug_assert!(observation.valid());
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn publish_archive(cache: BuildCacheSession) -> CacheUpdate {
-    let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
-        return CacheUpdate::Uncertain;
-    };
-    let mut candidate = match lease.open_candidate() {
-        Ok(candidate) => candidate,
-        Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
-            return CacheUpdate::Rejected;
-        }
-        Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
-        Err(_) => return CacheUpdate::Failed,
-    };
-    match lease.publish(&mut candidate, &cache.transfer.exclusions) {
-        Ok(()) => CacheUpdate::Published,
-        Err(StoreError::StorageFull) if !lease.publication_uncertain() => CacheUpdate::Rejected,
-        Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
-        Err(_) => CacheUpdate::Failed,
-    }
 }
 
 impl Task {
@@ -459,10 +448,6 @@ struct Ready {
 #[serde(rename_all = "snake_case")]
 pub enum GuardCheck {
     Inspection,
-    ListingUnavailable,
-    DeviceUnlisted,
-    DetachFailed,
-    ImageStillListed,
     MountStillPresent,
     WorkerClosed,
     WorkerPanicked,
@@ -487,10 +472,6 @@ impl GuardCheck {
             Self::SelectionInputVanished => Some(SelectionCause::InputVanished),
             Self::SelectionInputConflict => Some(SelectionCause::InputConflict),
             Self::Inspection
-            | Self::ListingUnavailable
-            | Self::DeviceUnlisted
-            | Self::DetachFailed
-            | Self::ImageStillListed
             | Self::MountStillPresent
             | Self::WorkerClosed
             | Self::WorkerPanicked
@@ -509,10 +490,6 @@ impl GuardCheck {
     pub fn label(self) -> &'static str {
         match self {
             Self::Inspection => "inspection",
-            Self::ListingUnavailable => "listing unavailable",
-            Self::DeviceUnlisted => "device unlisted before detach",
-            Self::DetachFailed => "detach failed",
-            Self::ImageStillListed => "image still listed",
             Self::MountStillPresent => "mount still present",
             Self::WorkerClosed => "worker closed before its report",
             Self::WorkerPanicked => "worker panicked",
@@ -1159,46 +1136,6 @@ pub(super) async fn drain_stderr(
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<T, ToolError>>>(
-    attempts: usize,
-    pause: Duration,
-    deadline: tokio::time::Instant,
-    mut operation: impl FnMut() -> Fut,
-) -> Result<T, ToolError> {
-    let mut attempt = 1;
-    loop {
-        match operation().await {
-            Err(error @ (ToolError::ProtectionUnavailable | ToolError::Operation))
-                if attempt < attempts && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep_until(
-                    deadline.min(tokio::time::Instant::now() + pause * attempt as u32),
-                )
-                .await;
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(error);
-                }
-                attempt += 1;
-            }
-            result => return result,
-        }
-    }
-}
-
-// A device gone at the re-check may still be detaching; never detach it, and let a fresh attempt confirm.
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn require_listed<T: PartialEq>(
-    mut listed: impl Iterator<Item = T>,
-    device: T,
-) -> Result<(), ToolError> {
-    if listed.any(|candidate| candidate == device) {
-        Ok(())
-    } else {
-        Err(ToolError::ProtectionUnavailable)
-    }
-}
-
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
     serde_json::from_slice::<BootstrapFailure>(stderr)
         .ok()
@@ -1407,158 +1344,6 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(observation)
 }
 
-#[cfg(target_os = "macos")]
-pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    lease: &BuildCacheLease,
-) -> Result<(), ToolError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let Some((file, size)) = lease.archive().map_err(map_cache_error)? else {
-        writer
-            .write_all(&0u64.to_le_bytes())
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        return Ok(());
-    };
-    if size > crate::tools::types::MAX_BUILD_CACHE_BYTES {
-        return Err(ToolError::Limit);
-    }
-    let mut file = tokio::fs::File::from_std(file.into_std());
-    writer
-        .write_all(&size.to_le_bytes())
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    let mut remaining = size;
-    let mut buffer = vec![0u8; 32 * 1024];
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        let count = file
-            .read(&mut buffer[..wanted])
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        if count == 0 {
-            return Err(ToolError::Operation);
-        }
-        writer
-            .write_all(&buffer[..count])
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        remaining -= count as u64;
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    lease: &Arc<BuildCacheLease>,
-) -> Result<CacheCandidate, ToolError> {
-    use tokio::io::AsyncReadExt;
-
-    let marker = read_line_capped(reader, 32).await?;
-    if marker == b"CACHE_REJECTED\n" {
-        return Ok(CacheCandidate::Rejected);
-    }
-    if marker == b"CACHE_FAILED\n" {
-        return Ok(CacheCandidate::Failed);
-    }
-    if marker != b"CACHE_CANDIDATE\n" {
-        return Err(ToolError::Operation);
-    }
-    let mut length = [0; 8];
-    reader
-        .read_exact(&mut length)
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    let length = u64::from_le_bytes(length);
-    if length == 0 || length > lease.candidate_limit() {
-        return Err(ToolError::Limit);
-    }
-    let lease = Arc::clone(lease);
-    let synced = drain_candidate(
-        reader,
-        length,
-        move || {
-            lease.candidate_writer().ok().map(|file| CandidateStaging {
-                file,
-                _lease: lease,
-            })
-        },
-        |staged| {
-            let completion = crate::fault::candidate_sync(&staged._lease);
-            let synced = completion.is_ok() && staged.file.sync_all().is_ok();
-            drop(staged);
-            crate::fault::candidate_sync_finished(completion);
-            synced
-        },
-    )
-    .await?;
-    Ok(if synced {
-        CacheCandidate::Received
-    } else {
-        CacheCandidate::Failed
-    })
-}
-
-// Drop the file before the lease can reclaim its reservation and identity lock.
-#[cfg(any(target_os = "macos", test))]
-struct CandidateStaging {
-    file: cap_std::fs::File,
-    _lease: Arc<BuildCacheLease>,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl Write for CandidateStaging {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.file.write(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-// Keep draining after a staging write failure so the archive stream stays aligned.
-#[cfg(any(target_os = "macos", test))]
-async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
-    reader: &mut R,
-    length: u64,
-    stage: impl FnOnce() -> Option<W> + Send + 'static,
-    finish: impl FnOnce(W) -> bool + Send + 'static,
-) -> Result<bool, ToolError> {
-    let (chunks, mut pending) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
-    let writer = tokio::task::spawn_blocking(move || {
-        let mut staged = stage();
-        let mut remaining = length;
-        let mut failed = false;
-        while let Some(bytes) = pending.blocking_recv() {
-            remaining -= bytes.len() as u64;
-            if !failed && let Some(writer) = staged.as_mut() {
-                failed = writer.write_all(&bytes).is_err();
-            }
-        }
-        let Some(mut writer) = staged else {
-            return false;
-        };
-        remaining == 0 && !failed && writer.flush().is_ok() && finish(writer)
-    });
-    let mut remaining = length;
-    let mut read = Ok(());
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(32 * 1024)).unwrap_or(32 * 1024);
-        let mut buffer = vec![0u8; wanted];
-        if reader.read_exact(&mut buffer).await.is_err() || chunks.send(buffer).await.is_err() {
-            read = Err(ToolError::Operation);
-            break;
-        }
-        remaining -= wanted as u64;
-    }
-    drop(chunks);
-    let staged = writer.await.map_err(|_| ToolError::Operation)?;
-    read.map(|()| staged)
-}
-
 // Seatbelt blocks Tokio's signal wake socket, so macOS closes stdin and polls try_wait when reaping.
 pub(super) async fn reap_owned_child(
     child: &mut Child,
@@ -1628,6 +1413,7 @@ pub(super) async fn capture_command(
     mut child: Child,
     cap: usize,
     deadline: Duration,
+    stop: impl std::future::Future<Output = ()>,
 ) -> Result<
     (
         Option<std::process::ExitStatus>,
@@ -1641,26 +1427,32 @@ pub(super) async fn capture_command(
     let mut stdout = super::output::Window::capturing(cap);
     let mut stderr = super::output::Window::capturing(cap);
     let result = tokio::time::timeout(deadline, async {
-        tokio::try_join!(
-            async {
-                reap_owned_child(&mut child)
-                    .await
-                    .map_err(|_| ToolError::Operation)
-            },
-            super::output::read_window_into(out, &mut stdout),
-            super::output::read_window_into(err, &mut stderr)
-        )
+        tokio::select! {
+            biased;
+            result = async {
+                tokio::try_join!(
+                    async {
+                        reap_owned_child(&mut child)
+                            .await
+                            .map_err(|_| ToolError::Operation)
+                    },
+                    super::output::read_window_into(out, &mut stdout),
+                    super::output::read_window_into(err, &mut stderr)
+                )
+            } => Some(result),
+            () = stop => None,
+        }
     })
     .await;
-    if let Ok(Ok((status, (), ()))) = result {
+    if let Ok(Some(Ok((status, (), ())))) = result {
         return Ok((Some(status), stdout, stderr));
     }
     let _ = child.start_kill();
     let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
     match result {
-        Err(_) => Ok((None, stdout, stderr)),
-        Ok(Err(error)) => Err(error),
-        Ok(Ok(_)) => unreachable!(),
+        Err(_) | Ok(None) => Ok((None, stdout, stderr)),
+        Ok(Some(Err(error))) => Err(error),
+        Ok(Some(Ok(_))) => unreachable!(),
     }
 }
 
@@ -2175,7 +1967,11 @@ pub(super) fn payload(
     let workspace = root.join("workspace");
     let scratch = root.join("scratch");
     let cache = root.join("cache");
-    let cache_base = if cache_enabled { &cache } else { &scratch };
+    #[cfg(target_os = "macos")]
+    let view = macos::cache_view(root);
+    #[cfg(not(target_os = "macos"))]
+    let view = cache.clone();
+    let cache_base = if cache_enabled { &view } else { &scratch };
     let executable = if native_system_program(&program.executable)? {
         Path::new(&program.executable).to_owned()
     } else {
@@ -2473,12 +2269,13 @@ mod tests {
             wait_discovery_completion(&mut malformed, &intent).await,
             Err(ToolError::Operation)
         ));
-        let mut failure = &b"{\"stage\":\"storage_cleanup\",\"check\":\"detach_failed\"}\n"[..];
+        let mut failure =
+            &b"{\"stage\":\"storage_cleanup\",\"check\":\"mount_still_present\"}\n"[..];
         assert!(matches!(
             wait_discovery_completion(&mut failure, &intent).await,
             Err(ToolError::GuardBootstrap(failure))
                 if failure.failure_stage() == FailureStage::StorageCleanup
-                    && failure.check() == Some(GuardCheck::DetachFailed)
+                    && failure.check() == Some(GuardCheck::MountStillPresent)
         ));
     }
 
@@ -3032,50 +2829,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn an_unlisted_device_is_refused_retryably_and_retried_within_the_bound() {
-        assert!(require_listed(["disk4", "disk5"].into_iter(), "disk4").is_ok());
-        assert!(matches!(
-            require_listed(["disk5"].into_iter(), "disk4"),
-            Err(ToolError::ProtectionUnavailable)
-        ));
-        let recheck = |listings: &'static [&'static [&'static str]]| {
-            let attempt = std::cell::Cell::new(0);
-            move || {
-                let listed = listings[attempt.get().min(listings.len() - 1)];
-                attempt.set(attempt.get() + 1);
-                std::future::ready(require_listed(listed.iter().copied(), "disk4"))
-            }
-        };
-        let far = tokio::time::Instant::now() + Duration::from_secs(60);
-        assert!(
-            retry_transient(8, Duration::ZERO, far, recheck(&[&[], &["disk4"]]))
-                .await
-                .is_ok(),
-            "a later attempt re-lists before acting"
-        );
-        let calls = std::cell::Cell::new(0);
-        let unlisted = recheck(&[&[]]);
-        let never_listed = retry_transient(8, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            unlisted()
-        })
-        .await;
-        assert!(matches!(
-            never_listed,
-            Err(ToolError::ProtectionUnavailable)
-        ));
-        assert_eq!(calls.get(), 8);
-        let lapsed = retry_transient(
-            8,
-            Duration::ZERO,
-            tokio::time::Instant::now(),
-            recheck(&[&[]]),
-        )
-        .await;
-        assert!(matches!(lapsed, Err(ToolError::ProtectionUnavailable)));
-    }
-
     #[test]
     fn supervisor_selection_failures_survive_serialization_and_reach_the_observation() {
         for (cause, label) in [
@@ -3204,12 +2957,15 @@ mod tests {
         );
         assert_eq!(
             check(
-                br#"{"stage":"storage_cleanup","check":"detach_failed"}
+                br#"{"stage":"storage_cleanup","check":"mount_still_present"}
 "#
                 .to_vec()
             )
             .await,
-            Some((FailureStage::StorageCleanup, Some(GuardCheck::DetachFailed))),
+            Some((
+                FailureStage::StorageCleanup,
+                Some(GuardCheck::MountStillPresent)
+            )),
             "a worker's own closed failure passes through unchanged"
         );
         assert_eq!(
@@ -3243,67 +2999,6 @@ mod tests {
                 .disposition,
             ToolDisposition::Limit
         );
-    }
-
-    #[tokio::test]
-    async fn transient_retry_is_bounded_and_keeps_terminal_errors() {
-        let calls = std::cell::Cell::new(0);
-        let far = tokio::time::Instant::now() + Duration::from_secs(60);
-        let recovered = retry_transient(3, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            let attempt = calls.get();
-            async move {
-                if attempt < 3 {
-                    Err(ToolError::ProtectionUnavailable)
-                } else {
-                    Ok(attempt)
-                }
-            }
-        })
-        .await;
-        assert!(matches!(recovered, Ok(3)));
-
-        calls.set(0);
-        let exhausted: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            async { Err(ToolError::Operation) }
-        })
-        .await;
-        assert!(matches!(exhausted, Err(ToolError::Operation)));
-        assert_eq!(calls.get(), 3);
-
-        calls.set(0);
-        let expired: Result<(), _> =
-            retry_transient(3, Duration::ZERO, tokio::time::Instant::now(), || {
-                calls.set(calls.get() + 1);
-                async { Err(ToolError::Operation) }
-            })
-            .await;
-        assert!(matches!(expired, Err(ToolError::Operation)));
-        assert_eq!(calls.get(), 1);
-
-        calls.set(0);
-        let soon = tokio::time::Instant::now() + Duration::from_millis(20);
-        let lapsed: Result<(), _> = retry_transient(3, Duration::from_secs(5), soon, || {
-            calls.set(calls.get() + 1);
-            async { Err(ToolError::Operation) }
-        })
-        .await;
-        assert!(matches!(lapsed, Err(ToolError::Operation)));
-        assert_eq!(
-            calls.get(),
-            1,
-            "no attempt starts after the pause reaches the deadline"
-        );
-
-        calls.set(0);
-        let terminal: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            async { Err(ToolError::Path) }
-        })
-        .await;
-        assert!(matches!(terminal, Err(ToolError::Path)));
-        assert_eq!(calls.get(), 1);
     }
 
     #[cfg(unix)]
@@ -3524,17 +3219,14 @@ mod tests {
     #[test]
     fn storage_cleanup_failure_carries_a_closed_check_without_changing_its_stage() {
         let failure: BootstrapFailure =
-            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#).unwrap();
+            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"mount_still_present"}"#)
+                .unwrap();
         assert_eq!(failure.failure_stage(), FailureStage::StorageCleanup);
-        assert_eq!(failure.check(), Some(GuardCheck::DetachFailed));
+        assert_eq!(failure.check(), Some(GuardCheck::MountStillPresent));
         assert_eq!(
             serde_json::to_string(&failure).unwrap(),
-            r#"{"stage":"storage_cleanup","check":"detach_failed"}"#
+            r#"{"stage":"storage_cleanup","check":"mount_still_present"}"#
         );
-        let unlisted: BootstrapFailure =
-            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"device_unlisted"}"#)
-                .unwrap();
-        assert_eq!(unlisted.check(), Some(GuardCheck::DeviceUnlisted));
         let bare: BootstrapFailure = serde_json::from_str(r#"{"stage":"payload"}"#).unwrap();
         assert_eq!(bare.check(), None);
         assert_eq!(
@@ -3753,16 +3445,6 @@ mod tests {
         (state, identity)
     }
 
-    fn empty_archive(identity: &BuildCacheIdentity) -> Vec<u8> {
-        let mut bytes = b"ARANYCACHE\0\x01".to_vec();
-        bytes.extend((identity.path.len() as u16).to_le_bytes());
-        bytes.extend(identity.device.to_le_bytes());
-        bytes.extend(identity.inode.to_le_bytes());
-        bytes.extend(identity.path.as_bytes());
-        bytes.extend([0; 12]);
-        bytes
-    }
-
     pub(super) fn command_observation() -> ToolObservation {
         let mut intent = intent(ToolCall::Command {
             program: "cargo".into(),
@@ -3794,484 +3476,8 @@ mod tests {
         }
     }
 
-    fn cache_session(
-        state: &crate::store::StateRoot,
-        identity: &BuildCacheIdentity,
-    ) -> BuildCacheSession {
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let candidate_bytes = lease.candidate_limit();
-        BuildCacheSession {
-            #[cfg(target_os = "linux")]
-            directory: None,
-            lease: Arc::new(lease),
-            transfer: BuildCacheTransfer {
-                identity: identity.clone(),
-                exclusions: Vec::new(),
-                view_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
-                candidate_bytes,
-            },
-        }
-    }
-
     pub(super) fn far_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_secs(60)
-    }
-
-    #[tokio::test]
-    async fn cache_publication_never_replaces_a_succeeded_command() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        for original in [
-            command_observation(),
-            super::cache_tests::timeout_observation(),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let (state, identity) = cache_fixture(temp.path());
-
-            let session = cache_session(&state, &identity);
-            let mut corrupt = session.lease.candidate_writer().unwrap();
-            corrupt.write_all(b"not an archive").unwrap();
-            drop(corrupt);
-            let mut observation = original.clone();
-            publish_cache_candidate(
-                &mut observation,
-                CacheCandidate::Received,
-                Some(session),
-                far_deadline(),
-            )
-            .await;
-            assert_eq!(observation.disposition, original.disposition);
-            assert_eq!(observation.cache_update, CacheUpdate::Failed);
-
-            let session = cache_session(&state, &identity);
-            let mut valid = session.lease.candidate_writer().unwrap();
-            valid.write_all(&empty_archive(&identity)).unwrap();
-            valid.sync_all().unwrap();
-            drop(valid);
-            let mut observation = original.clone();
-            publish_cache_candidate(
-                &mut observation,
-                CacheCandidate::Received,
-                Some(session),
-                far_deadline(),
-            )
-            .await;
-            assert_eq!(observation.disposition, original.disposition);
-            assert_eq!(observation.cache_update, CacheUpdate::Published);
-            assert!(observation.valid());
-            for candidate in [CacheCandidate::Rejected, CacheCandidate::Received] {
-                let session = cache_session(&state, &identity);
-                let mut invalid = session.lease.candidate_writer().unwrap();
-                invalid.write_all(b"invalid").unwrap();
-                drop(invalid);
-                let mut rejected = original.clone();
-                publish_cache_candidate(
-                    &mut rejected,
-                    candidate,
-                    Some(session),
-                    tokio::time::Instant::now(),
-                )
-                .await;
-                assert_eq!(rejected.cache_update, CacheUpdate::Rejected);
-                assert_eq!(rejected.disposition, original.disposition);
-                assert_eq!(
-                    committed_archive(&state, &identity),
-                    empty_archive(&identity)
-                );
-            }
-        }
-    }
-
-    fn captured_archive(root: &Path, identity: &BuildCacheIdentity, marker: &[u8]) -> Vec<u8> {
-        let source = root.join(format!("source-{}", marker.len()));
-        std::fs::create_dir_all(source.join("target")).unwrap();
-        std::fs::write(source.join("target/marker"), marker).unwrap();
-        let source =
-            cap_std::fs::Dir::open_ambient_dir(&source, cap_std::ambient_authority()).unwrap();
-        let mut bytes = Vec::new();
-        crate::store::capture_archive(&source, identity, &[], &mut bytes).unwrap();
-        bytes
-    }
-
-    async fn publish_archive(
-        state: &crate::store::StateRoot,
-        identity: &BuildCacheIdentity,
-        bytes: &[u8],
-    ) {
-        let session = cache_session(state, identity);
-        let mut candidate = session.lease.candidate_writer().unwrap();
-        candidate.write_all(bytes).unwrap();
-        candidate.sync_all().unwrap();
-        drop(candidate);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.cache_update, CacheUpdate::Published);
-    }
-
-    fn committed_archive(
-        state: &crate::store::StateRoot,
-        identity: &BuildCacheIdentity,
-    ) -> Vec<u8> {
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let (mut file, length) = lease.archive().unwrap().unwrap();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(length, bytes.len() as u64);
-        bytes
-    }
-
-    #[tokio::test]
-    async fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
-        let prior = captured_archive(temp.path(), &identity, b"prior");
-        let candidate = captured_archive(temp.path(), &identity, b"candidate");
-        assert_ne!(prior, candidate);
-        publish_archive(&state, &identity, &prior).await;
-
-        let session = cache_session(&state, &identity);
-        let mut valid = session.lease.candidate_writer().unwrap();
-        valid.write_all(&candidate).unwrap();
-        valid.sync_all().unwrap();
-        drop(valid);
-        crate::fault::FaultPlan::fail_commit_marker(&identity);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert_eq!(observation.cache_update, CacheUpdate::Uncertain);
-        assert!(observation.valid());
-        assert!(observation.stops_run());
-
-        // The commit marker never reached disk, so recovery rolls back to the prior archive.
-        assert_eq!(committed_archive(&state, &identity), prior);
-    }
-
-    #[tokio::test]
-    async fn candidate_sync_orders_publication_and_cancellation_keeps_the_prior_archive() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
-        let prior = captured_archive(temp.path(), &identity, b"prior");
-        let candidate = captured_archive(temp.path(), &identity, &vec![b'C'; 2 * 32 * 1024 + 1]);
-        publish_archive(&state, &identity, &prior).await;
-
-        for action in ["cancel", "timeout", "fail", "publish"] {
-            let session = cache_session(&state, &identity);
-            let mut stream = b"CACHE_CANDIDATE\n".to_vec();
-            stream.extend((candidate.len() as u64).to_le_bytes());
-            stream.extend(&candidate);
-            stream.extend(b"CACHE_DONE\n");
-            let mut reader = tokio::io::BufReader::new(stream.as_slice());
-            let (entered, release, finished) =
-                crate::fault::FaultPlan::gate_candidate_sync(&identity);
-            if action == "fail" {
-                crate::fault::FaultPlan::fail_candidate_sync(&identity);
-            }
-            let mut receive = Box::pin(receive_cache_candidate(&mut reader, &session.lease));
-            tokio::select! {
-                biased;
-                _ = &mut receive => panic!("candidate returned before sync: {action}"),
-                result = entered => {
-                    result.unwrap();
-                }
-            }
-            let (mut committed, _) = session.lease.archive().unwrap().unwrap();
-            let mut bytes = Vec::new();
-            committed.read_to_end(&mut bytes).unwrap();
-            assert_eq!(bytes, prior);
-
-            if matches!(action, "cancel" | "timeout") {
-                if action == "timeout" {
-                    assert!(
-                        tokio::time::timeout_at(tokio::time::Instant::now(), &mut receive)
-                            .await
-                            .is_err()
-                    );
-                }
-                drop(receive);
-                drop(session);
-                let reservation = state
-                    .path()
-                    .join("build-cache")
-                    .join(format!("reserve-{}.reserve", identity.token()));
-                let candidate_path = state
-                    .path()
-                    .join("build-cache")
-                    .join(format!("candidate-{}.arc", identity.token()));
-                assert!(reservation.exists(), "reservation released during {action}");
-                assert!(
-                    candidate_path.exists(),
-                    "candidate unlinked during {action}"
-                );
-                assert!(matches!(
-                    state.begin_build_cache(identity.clone()),
-                    Err(StoreError::BuildCacheBusy)
-                ));
-                let (_, held_capacity) = state
-                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
-                    .unwrap();
-                release.send(()).unwrap();
-                finished.await.unwrap();
-                assert!(!reservation.exists(), "reservation retained after {action}");
-                assert!(
-                    !candidate_path.exists(),
-                    "candidate retained after {action}"
-                );
-                let (_, released_capacity) = state
-                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
-                    .unwrap();
-                assert!(released_capacity > held_capacity);
-                assert_eq!(committed_archive(&state, &identity), prior);
-                continue;
-            }
-            release.send(()).unwrap();
-            let outcome = receive.await.unwrap();
-            assert!(
-                outcome
-                    == if action == "fail" {
-                        CacheCandidate::Failed
-                    } else {
-                        CacheCandidate::Received
-                    },
-                "unexpected candidate outcome: {action}"
-            );
-            let mut trailer = String::new();
-            reader.read_line(&mut trailer).await.unwrap();
-            assert_eq!(trailer, "CACHE_DONE\n");
-            let mut observation = command_observation();
-            publish_cache_candidate(&mut observation, outcome, Some(session), far_deadline()).await;
-            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-            assert_eq!(
-                observation.cache_update,
-                if action == "fail" {
-                    CacheUpdate::Failed
-                } else {
-                    CacheUpdate::Published
-                }
-            );
-            assert_eq!(
-                &committed_archive(&state, &identity),
-                if action == "fail" { &prior } else { &candidate }
-            );
-        }
-    }
-
-    struct FailAfter {
-        remaining: usize,
-        flush_fails: bool,
-    }
-
-    impl Write for FailAfter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let accepted = bytes.len().min(self.remaining);
-            self.remaining -= accepted;
-            Ok(accepted)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            if self.flush_fails {
-                Err(std::io::Error::other("injected flush failure"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn candidate_read_error_waits_for_the_writer_to_stop() {
-        struct GatedWriter {
-            entered: Option<tokio::sync::oneshot::Sender<()>>,
-            release: std::sync::mpsc::Receiver<()>,
-            stopped: Option<tokio::sync::oneshot::Sender<()>>,
-        }
-
-        impl Write for GatedWriter {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                let _ = self.entered.take().unwrap().send(());
-                self.release
-                    .recv_timeout(Duration::from_secs(10))
-                    .map_err(std::io::Error::other)?;
-                Ok(bytes.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                panic!("truncated candidate reached flush");
-            }
-        }
-
-        impl Drop for GatedWriter {
-            fn drop(&mut self) {
-                let _ = self.stopped.take().unwrap().send(());
-            }
-        }
-
-        let (entered, writing) = tokio::sync::oneshot::channel();
-        let (release, gate) = std::sync::mpsc::sync_channel(1);
-        let (stopped, mut completion) = tokio::sync::oneshot::channel();
-        let archive = vec![b'A'; 32 * 1024];
-        let mut reader = archive.as_slice();
-        let mut receive = Box::pin(drain_candidate(
-            &mut reader,
-            archive.len() as u64 + 1,
-            move || {
-                Some(GatedWriter {
-                    entered: Some(entered),
-                    release: gate,
-                    stopped: Some(stopped),
-                })
-            },
-            |_| panic!("truncated candidate reached sync"),
-        ));
-        let early = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! {
-                biased;
-                result = &mut receive => Some(result),
-                result = writing => {
-                    result.unwrap();
-                    None
-                }
-            }
-        })
-        .await;
-        release.send(()).unwrap();
-        let early = early.unwrap();
-        let returned_early = early.is_some();
-        let result = match early {
-            Some(result) => result,
-            None => tokio::time::timeout(Duration::from_secs(5), receive)
-                .await
-                .unwrap(),
-        };
-        let stopped_before_return = completion.try_recv().is_ok();
-        if !stopped_before_return {
-            tokio::time::timeout(Duration::from_secs(5), completion)
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        assert!(
-            !returned_early,
-            "read error returned while the writer was held"
-        );
-        assert!(
-            stopped_before_return,
-            "staging survived the read error return"
-        );
-        assert!(matches!(result, Err(ToolError::Operation)));
-    }
-
-    #[tokio::test]
-    async fn candidate_drain_keeps_framing_and_skips_sync_after_failures() {
-        let archive = vec![b'A'; 2 * 32 * 1024 + 1];
-        let reactor = std::thread::current().id();
-        for (create_fails, remaining, flush_fails, truncated) in [
-            (true, usize::MAX, false, false),
-            (false, 4, false, false),
-            (false, usize::MAX, true, false),
-            (false, usize::MAX, false, true),
-        ] {
-            let mut stream = archive.clone();
-            if truncated {
-                stream.pop();
-            } else {
-                stream.extend(b"CACHE_DONE\n");
-            }
-            let mut reader = tokio::io::BufReader::new(stream.as_slice());
-            let (synced, completion) = tokio::sync::oneshot::channel();
-            let staged = drain_candidate(
-                &mut reader,
-                archive.len() as u64,
-                move || {
-                    assert_ne!(std::thread::current().id(), reactor);
-                    (!create_fails).then_some(FailAfter {
-                        remaining,
-                        flush_fails,
-                    })
-                },
-                move |_| {
-                    let _ = synced.send(());
-                    true
-                },
-            )
-            .await;
-            assert!(
-                completion.await.is_err(),
-                "failed staging reached candidate sync"
-            );
-            if truncated {
-                assert!(matches!(staged, Err(ToolError::Operation)));
-                continue;
-            }
-            assert!(!staged.unwrap());
-            let mut trailer = String::new();
-            reader.read_line(&mut trailer).await.unwrap();
-            assert_eq!(trailer, "CACHE_DONE\n");
-        }
-    }
-
-    #[tokio::test]
-    async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
-        let session = cache_session(&state, &identity);
-        let mut valid = session.lease.candidate_writer().unwrap();
-        valid.write_all(&empty_archive(&identity)).unwrap();
-        valid.sync_all().unwrap();
-        drop(valid);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.cache_update, CacheUpdate::Published);
-
-        let lease = Arc::new(state.begin_build_cache(identity.clone()).unwrap());
-        // Occupies the candidate name, so the create_new staging step fails.
-        drop(lease.candidate_writer().unwrap());
-
-        let archive = b"ARCHIVE\nbytes";
-        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
-        stream.extend((archive.len() as u64).to_le_bytes());
-        stream.extend(archive);
-        stream.extend(b"CACHE_DONE\n");
-        let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        let candidate = receive_cache_candidate(&mut reader, &lease).await.unwrap();
-        assert!(matches!(candidate, CacheCandidate::Failed));
-        let mut trailer = String::new();
-        reader.read_line(&mut trailer).await.unwrap();
-        assert_eq!(trailer, "CACHE_DONE\n");
-        drop(lease);
-
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let (mut file, length) = lease.archive().unwrap().unwrap();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(length, bytes.len() as u64);
-        assert_eq!(bytes, empty_archive(&identity));
     }
 
     #[test]
@@ -4439,10 +3645,14 @@ mod command_output_tests {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let (status, out, err) =
-                capture_command(command.spawn().unwrap(), 4096, Duration::from_secs(10))
-                    .await
-                    .unwrap();
+            let (status, out, err) = capture_command(
+                command.spawn().unwrap(),
+                4096,
+                Duration::from_secs(10),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
             let output = super::super::process::fit_command(
                 status.and_then(|status| status.code()),
                 &out,

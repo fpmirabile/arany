@@ -463,43 +463,24 @@ async fn native_git_journey_helper() {
     .expect("Git journey deadline")
     .unwrap();
     let cancelled = cancelled_git_read(&engine, &workspace).await;
-    for fault in [
-        arany::GitStorageFault::Refuse,
-        arany::GitStorageFault::Exhaust,
-    ] {
-        let refusal_evidence = root.join(format!("git-storage-{fault:?}.json"));
-        let faulted = faulted_git_read(&engine, &workspace, fault, &refusal_evidence).await;
-        assert_eq!(faulted.run.tools.len(), 1, "{fault:?}");
-        let observation = faulted.run.tools[0].observation.as_ref().unwrap();
-        assert_eq!(
-            observation.disposition,
-            ToolDisposition::Failed,
-            "{fault:?}"
-        );
-        match fault {
-            arany::GitStorageFault::Refuse => {
-                assert!(observation.attestation.is_none(), "{observation:?}");
-                let (intent, unit): (uuid::Uuid, std::path::PathBuf) = serde_json::from_slice(
-                    &std::fs::read(&refusal_evidence)
-                        .expect("Git unit attached its volume, checked the canary and refused"),
-                )
-                .unwrap();
-                assert_eq!(intent, observation.intent.id);
-                assert!(!unit.exists(), "refused Git unit root must be removed");
-            }
-            arany::GitStorageFault::Exhaust => {
-                assert!(observation.attestation.is_some(), "{observation:?}");
-                assert_eq!(
-                    observation.output,
-                    "Tool operation failed; no automatic retry"
-                );
-            }
-        }
-    }
+    let fault = arany::GitStorageFault::Refuse;
+    let refusal_evidence = root.join(format!("git-storage-{fault:?}.json"));
+    let faulted = faulted_git_read(&engine, &workspace, fault, &refusal_evidence).await;
+    assert_eq!(faulted.run.tools.len(), 1);
+    let observation = faulted.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Failed);
+    assert!(observation.attestation.is_none(), "{observation:?}");
+    let (intent, unit): (uuid::Uuid, std::path::PathBuf) = serde_json::from_slice(
+        &std::fs::read(&refusal_evidence)
+            .expect("Git unit prepared its view, checked the canary and refused"),
+    )
+    .unwrap();
+    assert_eq!(intent, observation.intent.id);
+    assert!(!unit.exists(), "refused Git unit root must be removed");
     engine.close().await.unwrap();
     assert_no_new_units(
         &leftovers,
-        "every Git unit, including the failed and denied reads, must detach its volume and remove its root",
+        "every Git unit, including the failed and denied reads, must remove its root",
     );
     assert_eq!(
         outcome.run.status,
@@ -899,10 +880,7 @@ async fn native_git_branch_helper() {
 
     let recovered = recovery::run(&engine, root, &workspace, &state_path).await;
     engine.close().await.unwrap();
-    assert_no_new_units(
-        &leftovers,
-        "every Git write unit must detach its volume and remove its root",
-    );
+    assert_no_new_units(&leftovers, "every Git write unit must remove its root");
 
     std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
     recovery::replay(&state_path, &home, &workspace, recovered).await;

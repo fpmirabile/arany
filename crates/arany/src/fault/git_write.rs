@@ -86,23 +86,3 @@ pub(crate) fn has_gate(call: &ToolCall, stage: GitWriteStage) -> bool {
         .iter()
         .any(|(candidate, point, ..)| candidate == call && *point == stage)
 }
-
-pub(crate) fn storage_finished(root: &std::path::Path, intent: uuid::Uuid) -> std::io::Result<()> {
-    use std::io::Write;
-    let Ok(bytes) = std::fs::read(root.join(crate::tools::GIT_STORAGE_FAULT)) else {
-        return Ok(());
-    };
-    let (fault, evidence): (super::GitStorageFault, PathBuf) =
-        serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
-    if fault != super::GitStorageFault::Exhaust {
-        return Ok(());
-    }
-    if std::fs::read(root.join(crate::tools::GIT_STORAGE_CANARY))? != b"control" {
-        return Err(std::io::Error::other("Git changed the control-root canary"));
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(evidence)?;
-    file.write_all(&serde_json::to_vec(&(intent, root)).map_err(std::io::Error::other)?)
-}

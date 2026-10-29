@@ -256,6 +256,8 @@ pub enum ToolError {
     OutputCeiling,
     #[error("Tool runtime expired")]
     Timeout(String),
+    #[error("{0}")]
+    DiskSpace(String),
     #[error("Tool file precondition changed")]
     Conflict,
     #[error("Search pattern refused: {0}")]
@@ -330,6 +332,7 @@ impl ToolError {
             Self::Limit => "Limit",
             Self::OutputCeiling => "OutputCeiling",
             Self::Timeout(_) => "Timeout",
+            Self::DiskSpace(_) => "DiskSpace",
             Self::Conflict => "Conflict",
             Self::Pattern(_) => "Pattern",
             Self::Operation => "Operation",
@@ -2240,6 +2243,9 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     }
     if matches!(error, ToolError::Timeout(_)) {
         return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
+    }
+    if let ToolError::DiskSpace(message) = &error {
+        return unattested_limit(intent, LimitCause::Resource, message);
     }
     if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
         return unattested_limit(

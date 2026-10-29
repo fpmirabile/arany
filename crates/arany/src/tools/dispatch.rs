@@ -78,7 +78,7 @@ pub(super) fn outcome(
         Ok(output) if output.len() > intent.limits.result_bytes as usize => {
             Some(LimitCause::Resource)
         }
-        Err(ToolError::Limit) => Some(LimitCause::Resource),
+        Err(ToolError::Limit | ToolError::DiskSpace(_)) => Some(LimitCause::Resource),
         Err(ToolError::OutputCeiling) => Some(LimitCause::OutputCeiling),
         Err(ToolError::Timeout(_)) => Some(LimitCause::Timeout),
         _ => None,
@@ -108,6 +108,7 @@ pub(super) fn outcome(
                 output
             },
         ),
+        Err(ToolError::DiskSpace(output)) => (ToolDisposition::Limit, output),
         Err(ToolError::OutputCeiling) => (
             ToolDisposition::Limit,
             "output_ceiling: output passed 1 GiB per stream; stopped".into(),

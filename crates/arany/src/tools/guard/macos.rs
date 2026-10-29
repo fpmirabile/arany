@@ -71,6 +71,57 @@ pub(super) fn configure_runtime_compat(
     Ok(())
 }
 
+// Resolves once the payload's volume falls below the reserve, or when free space cannot be observed.
+pub(in crate::tools) async fn disk_floor_reached(workspace: &Path) {
+    let Ok(directory) = crate::tools::fs::open_directory(workspace) else {
+        return;
+    };
+    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+    loop {
+        samples.tick().await;
+        if !storage::free_bytes(&directory)
+            .is_ok_and(|free| free >= crate::tools::types::GUARD_DISK_RESERVE_BYTES)
+        {
+            return;
+        }
+    }
+}
+
+const CACHE_ALIAS: &str = "cache-alias";
+
+// Cargo fingerprints absolute registry and target paths, so a stable per-Workspace alias keeps a cloned cache fresh across units.
+fn cache_alias(device: u64, inode: u64) -> PathBuf {
+    Path::new(unit::UNIT_ROOT_PARENT).join(format!("arany-c-{device}-{inode}"))
+}
+
+// The alias is used only while it resolves to this unit's own view; the Workspace cache lease keeps other units from repointing it.
+pub(in crate::tools) fn cache_view(root: &Path) -> PathBuf {
+    let view = root.join("cache");
+    std::fs::read_link(root.join(CACHE_ALIAS))
+        .ok()
+        .filter(|alias| std::fs::read_link(alias).is_ok_and(|target| target == view))
+        .unwrap_or(view)
+}
+
+// Best effort: a name another user squats in the sticky parent leaves the unit on its private path.
+pub(super) fn publish_cache_alias(root: &Path, device: u64, inode: u64) {
+    let alias = cache_alias(device, inode);
+    let staged = alias.with_extension(uuid::Uuid::now_v7().to_string());
+    let published = std::os::unix::fs::symlink(root.join("cache"), &staged)
+        .and_then(|()| std::fs::rename(&staged, &alias))
+        .and_then(|()| std::os::unix::fs::symlink(&alias, root.join(CACHE_ALIAS)));
+    if published.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+}
+
+pub(super) fn retire_cache_alias(root: &Path, device: u64, inode: u64) {
+    let alias = cache_alias(device, inode);
+    if std::fs::read_link(&alias).is_ok_and(|target| target == root.join("cache")) {
+        let _ = std::fs::remove_file(alias);
+    }
+}
+
 pub(super) fn unit_main() -> std::process::ExitCode {
     unit::helper_main()
 }
@@ -269,7 +320,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    for program in ["/bin/launchctl", "/usr/bin/env", "/usr/bin/hdiutil"] {
+    for program in ["/bin/launchctl", "/usr/bin/env"] {
         if !system_program(program)? {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -285,7 +336,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v17:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
+    let mut bytes = b"arany-macos-guard-v18:shared-fifo-capacity;owner-only-same-device-unit-directories;boot-bound-locked-root-recovery;persisted-supervisor-before-task;no-mount-under-unit-root;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-root-removal;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cloned-cache-directory-grant-stable-alias-metadata-literal;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(MACOS_REWIND_CONTRACT);
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
@@ -312,12 +363,12 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";typed-git-write-two-units:executor-view-volume-write-only-fcntl-denied-publisher-workspace-write-no-exec-no-network;one-reservation-for-both-units;controller-relay-one-chunk-in-flight-hash-verified;executor-coalition-empty-before-publisher-go");
     bytes.extend_from_slice(&(crate::tools::git::WRITE_FRAME_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(b";typed-git-read-pinned-clt-git-after-go-read-only-workspace-unit-root-view-no-repository-config-closed-env-coalition-supervised");
-    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
+    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;disk-floor-supervised-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
     bytes.extend_from_slice(&MAX_PROCESSES_OR_THREADS.to_le_bytes());
-    bytes.extend_from_slice(&storage::STORAGE_BYTES_CAP.to_le_bytes());
+    bytes.extend_from_slice(&crate::tools::types::GUARD_DISK_RESERVE_BYTES.to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(PROFILE_BYTES_CAP as u64).to_le_bytes());
@@ -710,6 +761,15 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     }
     for grant in &task.config.runtime_grants {
         profile.runtime_grant(grant)?;
+    }
+    let view = cache_view(&root);
+    if task.intent.limits.cache_bytes > 0 && view != root.join("cache") {
+        profile.rule(
+            "allow file-read-metadata",
+            "literal",
+            &root.join(CACHE_ALIAS),
+        )?;
+        profile.rule("allow file-read-metadata", "literal", &view)?;
     }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
@@ -1481,6 +1541,21 @@ async fn execute_worker(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cache_view_uses_the_stable_alias_only_while_it_resolves_to_this_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("unit");
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        assert_eq!(super::cache_view(&root), root.join("cache"));
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&alias, root.join(super::CACHE_ALIAS)).unwrap();
+        std::os::unix::fs::symlink(root.join("cache"), &alias).unwrap();
+        assert_eq!(super::cache_view(&root), alias);
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        assert_eq!(super::cache_view(&root), root.join("cache"));
+    }
+
+    #[test]
     fn enforcement_prose_matches_resource_limits() {
         use crate::validate::hex_digest;
 
@@ -2027,36 +2102,7 @@ mod tests {
         std::fs::write(workspace.path().join("a.txt"), "two\n").unwrap();
         std::fs::write(root.path().join("outside"), b"synthetic excluded data").unwrap();
         let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let reactor = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        struct DetachOnUnwind<'a> {
-            root: &'a Path,
-            armed: bool,
-        }
-
-        impl Drop for DetachOnUnwind<'_> {
-            fn drop(&mut self) {
-                if self.armed {
-                    // Volume handles drop first, so the image detaches even while unwinding.
-                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        let _ = runtime.block_on(storage::cleanup_storage(self.root));
-                    }
-                }
-            }
-        }
-
-        let mut detach = DetachOnUnwind {
-            root: root.path(),
-            armed: true,
-        };
-        let volume = reactor
-            .block_on(storage::prepare_git_storage(root.path()))
-            .unwrap();
+        let volume = storage::prepare_git_storage(root.path()).unwrap();
         let bare = tempfile::Builder::new()
             .prefix("arany-git-bare-")
             .tempdir_in(&temp)
@@ -2094,15 +2140,11 @@ mod tests {
         let before = control_root();
         let refused = run("bare", bare.path());
         let read = run("read", root.path());
-        storage::exhaust_git_storage(&volume[0])
-            .expect("the Git view volume must be exhausted before the full-volume run");
-        let exhausted = run("full", root.path());
         let after = control_root();
         drop(volume);
-        let detached = reactor.block_on(storage::cleanup_storage(root.path()));
-        detach.armed = false;
+        let detached = storage::cleanup_storage(root.path());
         let mounted = storage::storage_mounted(root.path());
-        for (phase, output) in [("bare", &refused), ("read", &read), ("full", &exhausted)] {
+        for (phase, output) in [("bare", &refused), ("read", &read)] {
             assert!(
                 output.status.success(),
                 "native git profile {phase}: {:?}; stdout={:?}; stderr={:?}",
@@ -2444,6 +2486,13 @@ mod tests {
             std::fs::create_dir(&view).unwrap();
             std::fs::write(&writable, b"allowed").unwrap();
             assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
+            // The view shares the Workspace's volume, so Seatbelt alone must refuse a writable alias.
+            assert_eq!(
+                std::fs::hard_link(&workspace_file, view.join("alias"))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
             std::fs::remove_dir_all(&view).unwrap();
         }
         assert_eq!(
@@ -2474,22 +2523,6 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        if phase == "full" {
-            assert!(!scratch.join(crate::tools::git::VIEW).exists());
-            let result = runtime.block_on(crate::tools::git::execute(
-                crate::tools::git::GitReadRequest {
-                    workspace: &workspace,
-                    scratch: &scratch,
-                    git: &git,
-                    call: &call,
-                    hidden: &Default::default(),
-                    max_bytes: 16 * 1024,
-                    runtime: Duration::from_secs(20),
-                },
-            ));
-            assert!(matches!(result, Err(ToolError::Operation)), "{result:?}");
-            return;
-        }
         let output = runtime
             .block_on(crate::tools::git::execute(
                 crate::tools::git::GitReadRequest {

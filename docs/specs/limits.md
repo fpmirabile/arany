@@ -81,6 +81,7 @@
 | <a id="max_manager_shim_grants"></a>[`MAX_MANAGER_SHIM_GRANTS`](#max_manager_shim_grants) | 4 | roots | `crates/arany/src/tools/toolchains.rs` |
 | <a id="max_discovery_path_entries"></a>[`MAX_DISCOVERY_PATH_ENTRIES`](#max_discovery_path_entries) | 32 | entries | `crates/arany/src/tools/toolchains.rs` |
 | <a id="scratch_bytes"></a>[`SCRATCH_BYTES`](#scratch_bytes) | 67108864 | bytes | `crates/arany/src/tools/types.rs` |
+| <a id="guard_disk_reserve_bytes"></a>[`GUARD_DISK_RESERVE_BYTES`](#guard_disk_reserve_bytes) | 2147483648 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="memory_bytes"></a>[`MEMORY_BYTES`](#memory_bytes) | 536870912 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_processes_or_threads"></a>[`MAX_PROCESSES_OR_THREADS`](#max_processes_or_threads) | 64 | processes or threads | `crates/arany/src/tools/types.rs` |
 | <a id="max_build_memory_bytes"></a>[`MAX_BUILD_MEMORY_BYTES`](#max_build_memory_bytes) | 4294967296 | bytes | `crates/arany/src/tools/types.rs` |

@@ -78,7 +78,11 @@ pub(super) fn publish(cache: BuildCacheSession) -> CacheUpdate {
     let Some(upper) = session.upper else {
         return CacheUpdate::Failed;
     };
-    let changes = match super::super::fs::command::overlay::cache::capture(
+    #[cfg(target_os = "linux")]
+    let capture = super::super::fs::command::overlay::cache::capture;
+    #[cfg(target_os = "macos")]
+    let capture = super::super::fs::command::clone_cache::capture;
+    let changes = match capture(
         &session.lower,
         &upper,
         &cache.transfer.exclusions,

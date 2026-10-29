@@ -65,41 +65,29 @@ pub(super) fn mounts() -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, 
         .collect()
 }
 
-pub(super) fn property_list(bytes: &[u8]) -> Result<core_foundation::base::CFType, ToolError> {
-    use core_foundation::data::CFData;
-    use core_foundation::propertylist::{create_with_data, kCFPropertyListImmutable};
-    let (value, _) = create_with_data(CFData::from_buffer(bytes), kCFPropertyListImmutable)
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
-    // The successful Create returned a non-null owned CF object; this wrapper releases it once.
-    Ok(unsafe { core_foundation::base::TCFType::wrap_under_create_rule(value) })
-}
+const CLONE_NOFOLLOW: u32 = 1;
+const CLONE_NOOWNERCOPY: u32 = 2;
 
-pub(super) fn dictionary(
-    value: &core_foundation::base::CFType,
-) -> Result<
-    core_foundation::dictionary::CFDictionary<
-        core_foundation::string::CFString,
-        core_foundation::base::CFType,
-    >,
-    ToolError,
-> {
-    use core_foundation::{base::TCFType, dictionary::CFDictionary};
-    let dictionary = value
-        .downcast::<CFDictionary>()
-        .ok_or(ToolError::ProtectionUnavailable)?;
-    // Plist dictionary keys are strings and all values are CF objects; the checked Get is retained.
-    Ok(unsafe { CFDictionary::wrap_under_get_rule(dictionary.as_concrete_TypeRef()) })
-}
-
-pub(super) fn array(
-    value: &core_foundation::base::CFType,
-) -> Result<core_foundation::array::CFArray<core_foundation::base::CFType>, ToolError> {
-    use core_foundation::{array::CFArray, base::TCFType};
-    let array = value
-        .downcast::<CFArray>()
-        .ok_or(ToolError::ProtectionUnavailable)?;
-    // Plist arrays contain only CF objects; retain the checked Get while the original stays live.
-    Ok(unsafe { CFArray::wrap_under_get_rule(array.as_concrete_TypeRef()) })
+// APFS copy-on-write clone of a pinned directory tree; another volume reports EXDEV.
+pub(super) fn clone_directory(
+    source: &impl AsRawFd,
+    parent: &impl AsRawFd,
+    name: &CStr,
+) -> std::io::Result<()> {
+    // Both descriptors stay open for the call and the name is a NUL-terminated C string.
+    let result = unsafe {
+        libc::fclonefileat(
+            source.as_raw_fd(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            CLONE_NOFOLLOW | CLONE_NOOWNERCOPY,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 const PROCESS_IDENTITY_INFO: i32 = 17;

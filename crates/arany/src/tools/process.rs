@@ -159,45 +159,8 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         std::process::Stdio::null()
     });
     let deadline = tokio::time::Instant::now() + site.remaining_runtime();
-    let mut child = spawn_before(&mut command, deadline)?;
-    let mut writer = None;
-    if let (Some(input), Some(mut stdin)) = (site.hook_stdin, child.stdin.take()) {
-        let input = input.to_owned();
-        // Aborted below once capture ends, so a hook that never reads cannot outlive the deadline.
-        writer = Some(tokio::spawn(async move {
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await;
-        }));
-    }
-    // Hook output is control data: a cut deny verdict must still fail closed.
-    let captured = if site.hook_stdin.is_some() {
-        match capture(
-            child,
-            (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
-        .await
-        {
-            Ok((status, stdout, stderr)) => {
-                let mut out = super::output::Window::new(site.intent.limits.result_bytes as usize);
-                let mut err = super::output::Window::new(site.intent.limits.result_bytes as usize);
-                out.push(&stdout, super::output::DRAIN_BYTES)?;
-                err.push(&stderr, super::output::DRAIN_BYTES)?;
-                Ok((Some(status), out, err))
-            }
-            Err(error) => Err(error),
-        }
-    } else {
-        capture_command(
-            child,
-            site.intent.limits.result_bytes as usize,
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
-        .await
-    };
-    if let Some(writer) = writer {
-        writer.abort();
-    }
-    let (status, out, err) = captured?;
+    let child = spawn_before(&mut command, deadline)?;
+    let (status, out, err, disk_stopped) = capture_payload(site, child, deadline).await?;
     let timed_out = status.is_none();
     let exit_code = status.and_then(|status| status.code());
     #[cfg(target_os = "linux")]
@@ -260,13 +223,101 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         super::types::CommandChangeset::default(),
         Default::default(),
     );
-    command_output(site, exit_code, timed_out, out, err, changeset, selection)
+    command_output(
+        site,
+        exit_code,
+        (timed_out, disk_stopped),
+        out,
+        err,
+        changeset,
+        selection,
+    )
+}
+
+type Captured = (
+    Option<std::process::ExitStatus>,
+    super::output::Window,
+    super::output::Window,
+    bool,
+);
+
+async fn capture_payload(
+    site: &GuardContext<'_>,
+    mut child: tokio::process::Child,
+    deadline: tokio::time::Instant,
+) -> Result<Captured, ToolError> {
+    let mut writer = None;
+    if let (Some(input), Some(mut stdin)) = (site.hook_stdin, child.stdin.take()) {
+        let input = input.to_owned();
+        // Aborted below once capture ends, so a hook that never reads cannot outlive the deadline.
+        writer = Some(tokio::spawn(async move {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await;
+        }));
+    }
+    let disk_stopped = std::sync::atomic::AtomicBool::new(false);
+    // Hook output is control data: a cut deny verdict must still fail closed.
+    let captured = if site.hook_stdin.is_some() {
+        match capture(
+            child,
+            (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await
+        {
+            Ok((status, stdout, stderr)) => {
+                let mut out = super::output::Window::new(site.intent.limits.result_bytes as usize);
+                let mut err = super::output::Window::new(site.intent.limits.result_bytes as usize);
+                out.push(&stdout, super::output::DRAIN_BYTES)?;
+                err.push(&stderr, super::output::DRAIN_BYTES)?;
+                Ok((Some(status), out, err))
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        capture_command(
+            child,
+            site.intent.limits.result_bytes as usize,
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            async {
+                disk_floor_reached(site).await;
+                disk_stopped.store(true, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .await
+    };
+    if let Some(writer) = writer {
+        writer.abort();
+    }
+    let (status, out, mut err) = captured?;
+    let disk_stopped = disk_stopped.into_inner();
+    if disk_stopped {
+        err.push(disk_stopped_line().as_bytes(), super::output::DRAIN_BYTES)?;
+    }
+    Ok((status, out, err, disk_stopped))
+}
+
+// Linux payloads write sized tmpfs uppers; macOS unit storage shares the host volume, so its worker watches the reserve.
+async fn disk_floor_reached(site: &GuardContext<'_>) {
+    #[cfg(target_os = "macos")]
+    super::guard::disk_floor_reached(site.workspace).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = site;
+        std::future::pending::<()>().await;
+    }
+}
+
+pub(super) fn disk_stopped_line() -> String {
+    format!(
+        "\n[arany] Command stopped: the disk holding its private copy fell below {} MiB free. Free disk space, then retry.\n",
+        super::types::GUARD_DISK_RESERVE_BYTES / super::types::BYTES_PER_MEBIBYTE
+    )
 }
 
 fn command_output(
     site: &GuardContext<'_>,
     exit_code: Option<i32>,
-    timed_out: bool,
+    (timed_out, disk_stopped): (bool, bool),
     out: super::output::Window,
     err: super::output::Window,
     changeset: super::types::CommandChangeset,
@@ -282,32 +333,21 @@ fn command_output(
         *site.captured.lock().map_err(|_| ToolError::Operation)? =
             Some(super::spill::streams(&out, &err));
     }
+    let output = fit_selected_command(
+        exit_code, &out, &err, changeset, budget, truncation, selection,
+    )?;
     #[cfg(target_os = "macos")]
-    {
-        let output = fit_selected_command(
-            exit_code, &out, &err, changeset, budget, truncation, selection,
-        )?;
-        super::output::CommandWindows {
-            stdout: out,
-            stderr: err,
-        }
-        .send()?;
-        if timed_out {
-            Err(ToolError::Timeout(output))
-        } else {
-            Ok(output)
-        }
+    super::output::CommandWindows {
+        stdout: out,
+        stderr: err,
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let output = fit_selected_command(
-            exit_code, &out, &err, changeset, budget, truncation, selection,
-        )?;
-        if timed_out {
-            Err(ToolError::Timeout(output))
-        } else {
-            Ok(output)
-        }
+    .send()?;
+    if disk_stopped {
+        Err(ToolError::DiskSpace(output))
+    } else if timed_out {
+        Err(ToolError::Timeout(output))
+    } else {
+        Ok(output)
     }
 }
 

@@ -82,8 +82,9 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         timeout_ms: None,
     };
     let cleanup = intent(command.clone());
-    let failure = serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#)
-        .expect("closed storage cleanup failure");
+    let failure =
+        serde_json::from_str(r#"{"stage":"storage_cleanup","check":"mount_still_present"}"#)
+            .expect("closed storage cleanup failure");
     let observation = super::uncertain_observation(
         cleanup.clone(),
         super::ToolError::GuardBootstrap(failure),
@@ -95,7 +96,7 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
     );
     assert_eq!(
         crate::test_support::recorded_tool_failure(cleanup.id).as_deref(),
-        Some("Guard stage=storage cleanup check=detach failed")
+        Some("Guard stage=storage cleanup check=mount still present")
     );
     let unstarted = intent(command);
     super::unstarted_observation(
@@ -660,6 +661,40 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
     observation.limit_cause = Some(super::LimitCause::RequestedTime);
     assert!(observation.valid());
     assert!(!observation.stops_run());
+}
+
+#[test]
+fn disk_space_limits_keep_their_actionable_text_before_and_after_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    let intent = runtime.intent(
+        crate::RunId::new(),
+        crate::AgentRunId::new(),
+        ToolCall::Command {
+            program: "script".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
+        },
+    );
+    let refusal = "Not enough free disk space for a guarded command: free disk space, then retry.";
+    let observation =
+        super::unstarted_observation(intent.clone(), super::ToolError::DiskSpace(refusal.into()));
+    assert_eq!(observation.disposition, ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
+    assert_eq!(observation.output, refusal);
+    assert!(observation.valid());
+    let stopped = r#"{"exit_code":null,"stderr":"[arany] Command stopped"}"#;
+    assert_eq!(
+        super::dispatch::outcome(&intent, Err(super::ToolError::DiskSpace(stopped.into()))),
+        (
+            ToolDisposition::Limit,
+            stopped.into(),
+            None,
+            Some(super::LimitCause::Resource)
+        )
+    );
 }
 
 #[test]

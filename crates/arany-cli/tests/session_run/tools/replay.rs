@@ -1908,8 +1908,8 @@ pub(super) async fn native_command_changeset_corpus(
             "{case}: terminal Event"
         );
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped =
-            matches!(case, "cancel" | "partial") || case == "depth-33" && cfg!(target_os = "macos");
+        // A pre-dispatch Guard limit, such as macOS depth-33 selection, returns to the model.
+        let stopped = matches!(case, "cancel" | "partial");
         let criterion_unmet = matches!(
             case,
             "deny"

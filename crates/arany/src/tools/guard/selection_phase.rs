@@ -163,7 +163,7 @@ pub(super) fn decode_command_deadline(
 pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
     match result {
         Ok(_) => b"SELECT_DONE\n",
-        Err(ToolError::Limit) => b"SELECT_LIMIT\n",
+        Err(ToolError::Limit | ToolError::DiskSpace(_)) => b"SELECT_LIMIT\n",
         Err(ToolError::Timeout(_) | ToolError::ProjectSelection(SelectionCause::TimedOut)) => {
             b"SELECT_TIMEOUT\n"
         }

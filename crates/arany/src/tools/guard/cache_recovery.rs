@@ -4,7 +4,7 @@ pub async fn recover_build_cache(
     state: &crate::store::StateRoot,
     workspace: Option<&Path>,
 ) -> Result<(), StoreError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let state = state.try_clone()?;
         let workspace = workspace.map(Path::to_path_buf);
@@ -29,7 +29,7 @@ pub async fn recover_build_cache(
             .map_err(|_| StoreError::InvalidBuildCache)??;
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = (state, workspace);
     Ok(())
 }

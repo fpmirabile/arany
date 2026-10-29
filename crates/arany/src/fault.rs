@@ -1,7 +1,5 @@
 use crate::provider::{ProviderError, ProviderRequest, ProviderResponse};
 use crate::session::{Event, EventEnvelope, RunId, SessionId};
-#[cfg(any(target_os = "macos", test))]
-use crate::store::BuildCacheLease;
 use crate::store::{AdmissionKind, StoreError};
 use crate::tools::{ToolError, ToolObservation};
 use std::io;
@@ -91,17 +89,6 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
 pub(crate) fn private_record_admission(state: &std::path::Path, record: &str) {
     #[cfg(test)]
     FaultPlan::private_record_admission_gate(state, record);
-}
-
-#[cfg(any(target_os = "macos", test))]
-#[cfg_attr(
-    not(any(test, all(target_os = "macos", feature = "test-support"))),
-    expect(unused_variables)
-)]
-pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-    #[cfg(any(test, all(target_os = "macos", feature = "test-support")))]
-    FaultPlan::commit_marker(token)?;
-    Ok(())
 }
 
 #[derive(Default)]
@@ -332,33 +319,6 @@ pub(crate) async fn guard_dispatch_gate(intent: &crate::tools::EffectIntent) {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-pub(crate) struct CandidateSync {
-    #[cfg(any(test, feature = "test-support"))]
-    finished: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn candidate_sync(lease: &BuildCacheLease) -> io::Result<CandidateSync> {
-    Ok(CandidateSync {
-        #[cfg(any(test, feature = "test-support"))]
-        finished: FaultPlan::candidate_sync(lease.token())?,
-    })
-}
-
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn candidate_sync_finished(completion: io::Result<CandidateSync>) {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Ok(CandidateSync {
-        finished: Some(finished),
-    }) = completion
-    {
-        let _ = finished.send(());
-    }
-}
-
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn record_tool_failure(
     intent: uuid::Uuid,
@@ -441,9 +401,7 @@ pub(crate) fn commit_latency(recorder: &LatencyRecorder, envelope: &EventEnvelop
 #[cfg(any(test, feature = "test-support"))]
 mod injection {
     use crate::session::{Event, SessionId};
-    #[cfg(any(target_os = "macos", test))]
-    use crate::store::BuildCacheIdentity;
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(target_os = "macos")]
     use std::io;
     use std::sync::Mutex;
     #[cfg(target_os = "linux")]
@@ -512,17 +470,6 @@ mod injection {
             oneshot::Sender<()>,
             std::sync::mpsc::Receiver<()>,
         ),
-        #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
-        CandidateSync(String),
-        #[cfg(test)]
-        CandidateSyncGate(
-            String,
-            oneshot::Sender<()>,
-            std::sync::mpsc::Receiver<()>,
-            oneshot::Sender<()>,
-        ),
-        #[cfg(any(target_os = "macos", test))]
-        CommitMarker(String),
         // Without a gate the Session's retry backoffs end at once; a gate holds one backoff.
         RetryBackoff(
             SessionId,
@@ -564,7 +511,6 @@ mod injection {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub enum GitStorageFault {
         Refuse,
-        Exhaust,
     }
 
     pub struct FaultPlan;
@@ -752,36 +698,6 @@ mod injection {
                 wait_release,
             ));
             (wait_entered, release)
-        }
-
-        #[cfg(test)]
-        pub(crate) fn fail_candidate_sync(identity: &BuildCacheIdentity) {
-            plan().push(Fault::CandidateSync(identity.token()));
-        }
-
-        #[cfg(test)]
-        pub(crate) fn gate_candidate_sync(
-            identity: &BuildCacheIdentity,
-        ) -> (
-            oneshot::Receiver<()>,
-            std::sync::mpsc::Sender<()>,
-            oneshot::Receiver<()>,
-        ) {
-            let (entered, wait_entered) = oneshot::channel();
-            let (release, wait_release) = std::sync::mpsc::channel();
-            let (finished, wait_finished) = oneshot::channel();
-            plan().push(Fault::CandidateSyncGate(
-                identity.token(),
-                entered,
-                wait_release,
-                finished,
-            ));
-            (wait_entered, release, wait_finished)
-        }
-
-        #[cfg(any(target_os = "macos", test))]
-        pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
-            plan().push(Fault::CommitMarker(identity.token()));
         }
 
         /// Ends every same-route retry backoff of the Session at once; the journaled delays are unchanged.
@@ -1092,35 +1008,6 @@ mod injection {
             }) {
                 Some(Fault::GoalAcknowledgment(_, _, entered, release)) => Some((entered, release)),
                 _ => None,
-            }
-        }
-
-        #[cfg(any(target_os = "macos", test))]
-        pub(crate) fn candidate_sync(token: &str) -> io::Result<Option<oneshot::Sender<()>>> {
-            let finished = None;
-            #[cfg(test)]
-            let finished = if let Some(Fault::CandidateSyncGate(_, entered, release, finished)) =
-                take(|fault| matches!(fault, Fault::CandidateSyncGate(key, ..) if key == token))
-            {
-                let _ = entered.send(());
-                release
-                    .recv()
-                    .map_err(|_| io::Error::other("candidate sync gate closed"))?;
-                Some(finished)
-            } else {
-                finished
-            };
-            match take(|fault| matches!(fault, Fault::CandidateSync(key) if key == token)) {
-                Some(_) => Err(io::Error::other("injected candidate sync failure")),
-                None => Ok(finished),
-            }
-        }
-
-        #[cfg(any(target_os = "macos", test))]
-        pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-            match take(|fault| matches!(fault, Fault::CommitMarker(key) if key == token)) {
-                Some(_) => Err(io::Error::other("injected commit marker failure")),
-                None => Ok(()),
             }
         }
     }
