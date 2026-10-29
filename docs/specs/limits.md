@@ -47,9 +47,6 @@
 | <a id="max_tool_started_bytes"></a>[`MAX_TOOL_STARTED_BYTES`](#max_tool_started_bytes) | 524288 | bytes | `crates/arany/src/store.rs` |
 | <a id="max_tool_observation_bytes"></a>[`MAX_TOOL_OBSERVATION_BYTES`](#max_tool_observation_bytes) | 540672 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_tool_finished_bytes"></a>[`MAX_TOOL_FINISHED_BYTES`](#max_tool_finished_bytes) | 541184 | bytes | `crates/arany/src/store.rs` |
-| <a id="max_evidence_rows"></a>[`MAX_EVIDENCE_ROWS`](#max_evidence_rows) | 32 | custom Provider rows | `crates/arany/src/store/evidence.rs` |
-| <a id="max_native_evidence_rows"></a>[`MAX_NATIVE_EVIDENCE_ROWS`](#max_native_evidence_rows) | 256 | native Provider rows | `crates/arany/src/store/evidence.rs` |
-| <a id="max_evidence_age_ms"></a>[`MAX_EVIDENCE_AGE_MS`](#max_evidence_age_ms) | 86400000 | ms | `crates/arany/src/store/evidence.rs` |
 | <a id="max_discovered_sessions"></a>[`MAX_DISCOVERED_SESSIONS`](#max_discovered_sessions) | 65536 | Sessions | `crates/arany/src/store/replay.rs` |
 | <a id="max_list_scan_events"></a>[`MAX_LIST_SCAN_EVENTS`](#max_list_scan_events) | 262144 | Events | `crates/arany/src/store/replay.rs` |
 | <a id="max_tool_argument_bytes"></a>[`MAX_TOOL_ARGUMENT_BYTES`](#max_tool_argument_bytes) | 409600 | bytes | `crates/arany/src/tools/types.rs` |

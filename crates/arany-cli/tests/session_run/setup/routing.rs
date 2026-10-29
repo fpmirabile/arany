@@ -1,4 +1,4 @@
-use super::checks::{Presentation, acknowledge_result, assert_result_contains, inline_frame};
+use super::manager::{Presentation, acknowledge_result, assert_result_contains, inline_frame};
 use super::*;
 use arany::{AgentPhase, AgentRole, Event, ProviderSetupDisposition, ProviderSetupTargetKind};
 use serde_json::json;
@@ -8,7 +8,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-const ROUTE_CHECK_CALLS: usize = 3;
 const ROUTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MAX_WARNING_PAGES: usize = 128;
@@ -312,17 +311,17 @@ fn saved_role_choices_feed_the_next_submission_without_rechecking_or_losing_defa
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
-    let (primary, child) = checked_role_peers(&workspace, &state);
+    let (primary, child) = role_peers(&state);
     let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Configured);
     save_distinct_child_route(&mut pty);
     assert_eq!(
         primary.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS,
+        0,
         "Save must not check or infer on primary"
     );
     assert_eq!(
         child.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS,
+        0,
         "Save must not check or infer on child"
     );
     assert_retained_setup_conversation(&state, &workspace, Some(0));
@@ -349,14 +348,8 @@ fn saved_role_choices_feed_the_next_submission_without_rechecking_or_losing_defa
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        primary.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS + primary_requests.len()
-    );
-    assert_eq!(
-        child.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS + child_requests.len()
-    );
+    assert_eq!(primary.calls.load(Ordering::SeqCst), primary_requests.len());
+    assert_eq!(child.calls.load(Ordering::SeqCst), child_requests.len());
     assert_routed_run(&state, &workspace);
 }
 
@@ -440,37 +433,14 @@ struct RolePeer {
     peer: thread::JoinHandle<Vec<serde_json::Value>>,
 }
 
-fn checked_role_peers(workspace: &Path, state: &Path) -> (RolePeer, RolePeer) {
+fn role_peers(state: &Path) -> (RolePeer, RolePeer) {
     let primary = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let child = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     write_role_profiles(state, &primary, &child);
-    let primary = serve_role(primary, AgentRole::Primary, "model-1");
-    let child = serve_role(child, AgentRole::Child, "model-2");
-    for (name, credential_env, key) in [
-        ("local", "ARANY_PROVIDER_LOCAL_KEY", "test-key"),
-        (
-            "distinct-child",
-            "ARANY_PROVIDER_FIRST_ROUTE_KEY",
-            FIRST_ROUTE_KEY_CANARY,
-        ),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env(credential_env, key)
-            .current_dir(workspace)
-            .args(["provider", "check", name, "--state-dir"])
-            .arg(state)
-            .stdin(Stdio::null())
-            .bounded_output()
-            .unwrap();
-        assert!(output.status.success(), "synthetic role conformance");
-        assert_eq!(output.stderr, b"");
-        assert_eq!(
-            crate::check_output(&output.stdout, state, arany::CheckDisposition::Succeeded),
-            format!("Provider: {name}\nStatus: custom verified\n").as_bytes()
-        );
-    }
-    (primary, child)
+    (
+        serve_role(primary, AgentRole::Primary, "model-1"),
+        serve_role(child, AgentRole::Child, "model-2"),
+    )
 }
 
 fn write_role_profiles(state: &Path, primary: &TcpListener, child: &TcpListener) {
@@ -501,19 +471,8 @@ fn write_role_profiles(state: &Path, primary: &TcpListener, child: &TcpListener)
         },
     )
     .collect::<Vec<_>>();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            arany::CustomProfile::write_profiles(
-                &StateRoot::admit(state).unwrap(),
-                None,
-                &profiles,
-            )
-            .await
-            .unwrap();
-        });
+    arany::CustomProfile::write_profiles(&StateRoot::admit(state).unwrap(), None, &profiles)
+        .unwrap();
 }
 
 fn serve_role(listener: TcpListener, role: AgentRole, model: &'static str) -> RolePeer {
@@ -521,23 +480,6 @@ fn serve_role(listener: TcpListener, role: AgentRole, model: &'static str) -> Ro
     let calls = Arc::new(AtomicUsize::new(0));
     let served = Arc::clone(&calls);
     let peer = thread::spawn(move || {
-        let checks = [
-            json!("ok"),
-            json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
-            json!("synthetic summary"),
-        ];
-        for (index, text) in checks.into_iter().enumerate() {
-            let (mut stream, wire) = role_request(&listener, role);
-            assert_eq!(wire["model"], model);
-            served.fetch_add(1, Ordering::SeqCst);
-            super::super::loopback::send_response_for_model(
-                &mut stream,
-                index,
-                model,
-                text,
-                wire["stream"] == true,
-            );
-        }
         let script = match role {
             AgentRole::Primary => vec![
                 (
@@ -558,7 +500,7 @@ fn serve_role(listener: TcpListener, role: AgentRole, model: &'static str) -> Ro
             served.fetch_add(1, Ordering::SeqCst);
             super::super::loopback::send_response_for_model(
                 &mut stream,
-                ROUTE_CHECK_CALLS + index,
+                index,
                 model,
                 text,
                 wire["stream"] == true,

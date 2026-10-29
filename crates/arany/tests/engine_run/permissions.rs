@@ -1588,9 +1588,5 @@ fn assert_concurrent_preflight_refusal(
     let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&run.tools[1].intent).unwrap()).into();
     assert_eq!(record.intent_digest, digest);
     assert!(record.verdict.as_ref().unwrap().approved);
-    assert_eq!(
-        refused.event.version(),
-        arany::test_support::payload_version("ToolPreflightRefused")
-    );
     assert!(run.tools[0].finished_sequence.unwrap() < refused.sequence);
 }

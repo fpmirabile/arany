@@ -431,7 +431,7 @@ fn attached_leg_macos(
         "cancelled attached run leaves stdout empty"
     );
     assert_eq!(crate::process::terminal_settings(&input), before);
-    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 5);
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let session: String = connection
         .query_row("SELECT DISTINCT session_id FROM events", [], |row| {
@@ -736,7 +736,7 @@ mod journey {
         time::Duration,
     };
 
-    const ROSTER_REQUESTS: usize = 11;
+    const ROSTER_REQUESTS: usize = 8;
 
     fn preset(child_profiles: &[&str]) -> Vec<u8> {
         let route = json!({"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null});
@@ -769,17 +769,12 @@ mod journey {
                 served.fetch_add(1, Ordering::SeqCst);
                 let input = crate::semantic::input(&body);
                 let text = match index {
-                    0 => json!("ok"),
-                    1 => {
-                        json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                    }
-                    2 => json!(r#"synthetic summary"#),
-                    3 | 5 | 8 => {
+                    0 | 2 | 5 => {
                         assert_eq!(input["phase"], "root_plan");
                         assert!(body.to_string().contains("\"inspect\""));
                         delegate_to_inspect()
                     }
-                    4 => {
+                    1 => {
                         assert_eq!(input["phase"], "child_work");
                         held.send(()).expect("observed child request");
                         stream
@@ -789,15 +784,15 @@ mod journey {
                         let _ = stream.read(&mut [0; 1]);
                         continue;
                     }
-                    6 | 9 => {
+                    3 | 6 => {
                         assert_eq!(input["phase"], "child_work");
                         json!("child result")
                     }
-                    7 => {
+                    4 => {
                         assert_eq!(input["phase"], "root_synthesis");
                         json!("resumed answer")
                     }
-                    10 => {
+                    7 => {
                         assert_eq!(input["phase"], "root_synthesis");
                         json!("research answer")
                     }
@@ -873,7 +868,7 @@ mod journey {
         let words: Vec<&str> = hint.split_whitespace().collect();
         let session_id = SessionId::from_str(words[9]).unwrap();
         let goal_id = GoalId::from_str(words[11]).unwrap();
-        assert_eq!(served.load(Ordering::SeqCst), 5);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
         (session_id, goal_id)
     }
 
@@ -957,7 +952,7 @@ mod journey {
             "attached exit: {status:?}: {}",
             super::super::session_picker::tail(&transcript)
         );
-        assert_eq!(served.load(Ordering::SeqCst), 5);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
         let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
         let session: String = connection
             .query_row("SELECT DISTINCT session_id FROM events", [], |row| {
@@ -988,7 +983,6 @@ mod journey {
         let served = Arc::new(AtomicUsize::new(0));
         let (held_tx, held_rx) = mpsc::channel();
         let server = serve(listener, served.clone(), held_tx);
-        super::super::loopback::check_profile(&workspace, &state);
 
         #[cfg(target_os = "linux")]
         let (session_id, goal_id) = if attached {
@@ -1044,7 +1038,7 @@ mod journey {
                 stderr.ends_with("error: restore the matching --profile preset to resume this Goal, or start a new Goal\n"),
                 "{name}: {stderr}"
             );
-            assert_eq!(served.load(Ordering::SeqCst), 5, "{name}: no request");
+            assert_eq!(served.load(Ordering::SeqCst), 2, "{name}: no request");
         }
         private_file(&roster, &preset(&["main", "inspect"]));
         let resumed = resume(true);
@@ -1054,7 +1048,7 @@ mod journey {
             String::from_utf8_lossy(&resumed.stderr)
         );
         assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed answer"));
-        assert_eq!(served.load(Ordering::SeqCst), 8);
+        assert_eq!(served.load(Ordering::SeqCst), 5);
 
         let view = replay();
         assert_eq!(view.runs.len(), 2);

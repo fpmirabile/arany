@@ -2866,7 +2866,7 @@ fn token_sized_write_deltas_cover_the_content_ceiling_at_the_real_cap() {
 #[test]
 fn declared_stream_bounds_fail_closed_at_the_framing_limit_stage() {
     for cap in [
-        crate::provider::PROBE_OUTPUT_CAP,
+        crate::provider::SMALL_OUTPUT_CAP,
         crate::provider::MAX_OUTPUT_TOKEN_CAP,
     ] {
         let (publisher, _) = crate::provider::ResponsePreview::new();

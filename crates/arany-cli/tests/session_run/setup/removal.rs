@@ -109,11 +109,15 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
             "disconnected":false,"plan_permission_missing":false,"token":null
         })
     };
-    root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema":3,"selected":selected,
-        "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)],
-        "model_checks":[]
-    })).unwrap()).unwrap();
+    root.record(RecordKind::ChatgptAccounts)
+        .replace(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema":4,"selected":selected,
+                "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     (selected, removed)
 }
 

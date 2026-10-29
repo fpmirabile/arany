@@ -65,7 +65,7 @@ macro_rules! raw_select {
                 length(CAST(session_id AS BLOB)),
                 length(CAST(kind AS BLOB)),
                 length(CAST(payload AS BLOB)),
-                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+                session_id, run_id, agent_run_id, kind, payload, created_at_ms
          FROM events ",
             $tail
         )
@@ -83,7 +83,7 @@ pub(super) const SESSION_EVENTS_SQL: &str = "SELECT sequence,
             length(CAST(session_id AS BLOB)),
             length(CAST(kind AS BLOB)),
             length(CAST(payload AS BLOB)),
-            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+            session_id, run_id, agent_run_id, kind, payload, created_at_ms
      FROM events WHERE session_id=?1 ORDER BY sequence LIMIT ?2";
 
 struct SessionHead {
@@ -133,7 +133,7 @@ fn scan_inspected_events(
     session_id: SessionId,
 ) -> Result<(Vec<InspectedEvent>, Option<InspectionFailure>), StoreError> {
     let mut statement = connection.prepare(&format!(
-        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND {MAX_EVENT_KIND_BYTES} THEN kind ELSE '{INVALID_KIND_MARKER}' END, event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
+        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND {MAX_EVENT_KIND_BYTES} THEN kind ELSE '{INVALID_KIND_MARKER}' END, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
         MAX_LIST_SCAN_EVENTS + 1
     ))?;
     let mut rows = statement.query([session_id.to_string()])?;
@@ -155,7 +155,7 @@ fn scan_inspected_events(
             });
         }
         expected = sequence.checked_add(1).ok_or(StoreError::InvalidHistory)?;
-        let selected: bool = row.get(11)?;
+        let selected: bool = row.get(10)?;
         let kind = inspected_kind(row);
         let raw = match raw_row(row) {
             Ok(raw) => raw,
@@ -1094,7 +1094,7 @@ fn load_session_events_through(
             length(CAST(session_id AS BLOB)),
             length(CAST(kind AS BLOB)),
             length(CAST(payload AS BLOB)),
-            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+            session_id, run_id, agent_run_id, kind, payload, created_at_ms
          FROM events WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence LIMIT ?3",
     )?;
     let mut rows = statement.query(rusqlite::params![
@@ -1116,7 +1116,6 @@ fn load_session_events_through(
 }
 
 pub(super) fn validate_history(connection: &Connection) -> Result<(), StoreError> {
-    super::check::validate(connection)?;
     scan_all_events(connection, |_| Ok(()))
 }
 
@@ -1136,7 +1135,7 @@ fn scan_events(
                 length(CAST(session_id AS BLOB)),
                 length(CAST(kind AS BLOB)),
                 length(CAST(payload AS BLOB)),
-                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+                session_id, run_id, agent_run_id, kind, payload, created_at_ms
          FROM events";
     if filter.is_empty() {
         // Cold or invalidated writes validate globally; unchanged cache hits defer detection and keep reads indexed.
@@ -1211,7 +1210,6 @@ pub(super) struct RawRow {
     pub(super) run_id: Option<String>,
     pub(super) agent_run_id: Option<String>,
     pub(super) kind: String,
-    pub(super) version: i64,
     pub(super) payload: String,
     pub(super) created_at_ms: i64,
 }
@@ -1234,9 +1232,8 @@ pub(super) fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
         run_id: optional(5)?,
         agent_run_id: optional(6)?,
         kind: text(7)?,
-        version: row.get(8)?,
-        payload: text(9)?,
-        created_at_ms: row.get(10)?,
+        payload: text(8)?,
+        created_at_ms: row.get(9)?,
     })
 }
 
@@ -1270,17 +1267,10 @@ impl RawRow {
             .map(AgentRunId::from_str)
             .transpose()
             .map_err(|_| crate::session::ReplayError::InvalidPayload)?;
-        if !(1..=event_payload_limit(&self.kind, self.version) as i64).contains(&self.payload_bytes)
-        {
+        if !(1..=event_payload_limit(&self.kind) as i64).contains(&self.payload_bytes) {
             return Err(crate::session::ReplayError::InvalidPayload);
         }
-        let event = Event::decode(
-            &self.kind,
-            self.version,
-            &self.payload,
-            run_id,
-            agent_run_id,
-        )?;
+        let event = Event::decode(&self.kind, &self.payload, run_id, agent_run_id)?;
         Ok(EventEnvelope {
             sequence: u64::try_from(self.sequence)
                 .map_err(|_| crate::session::ReplayError::InvalidPayload)?,
@@ -1360,8 +1350,8 @@ mod tests {
         ] {
             let result = connection
                 .query_row(
-                    "SELECT 1, 36, length(CAST(?1 AS BLOB)), length(CAST(?2 AS BLOB)), ?3, NULL, NULL, ?1, ?4, ?2, 0",
-                    rusqlite::params![kind, event.payload().unwrap(), session.to_string(), event.version()],
+                    "SELECT 1, 36, length(CAST(?1 AS BLOB)), length(CAST(?2 AS BLOB)), ?3, NULL, NULL, ?1, ?2, 0",
+                    rusqlite::params![kind, event.payload().unwrap(), session.to_string()],
                     |row| Ok(decode_event(row)),
                 )
                 .unwrap();
@@ -1399,7 +1389,6 @@ mod tests {
             run_id: Some(run_id.to_string()),
             agent_run_id: Some(agent_run_id.to_string()),
             kind: event.kind().into(),
-            version: event.version(),
             payload: payload.clone(),
             created_at_ms: 0,
         };
@@ -1414,7 +1403,6 @@ mod tests {
                 run_id: Some(run_id.to_string()),
                 agent_run_id: Some(agent_run_id.to_string()),
                 kind: event.kind().into(),
-                version: event.version(),
                 payload: payload.clone(),
                 created_at_ms: 0,
             };

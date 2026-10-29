@@ -3058,7 +3058,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let file = admission.state_dir.join("provider-profiles.json");
             let profile = serde_json::json!({
-                "version": 2,
+                "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
                 "profiles": [{
                     "name": "local",
                     "protocol": "openai-responses",
@@ -3068,7 +3068,6 @@ mod tests {
                     "outcome_encoding": "json_schema",
                     "privacy": "user_authorized",
                     "max_output_tokens": 4096,
-                    "capability_evidence_version": 2,
                     "efforts": ["low", "high"]
                 }]
             });

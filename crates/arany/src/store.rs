@@ -1,24 +1,17 @@
-use crate::provider::evidence::{
-    EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
-};
 use crate::session::{
     Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionListItem, SessionPage,
-    SessionView, WorkspaceIdentity, payload_version,
+    SessionView, WorkspaceIdentity,
 };
 use std::io;
 use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
-pub(crate) mod check;
-mod evidence;
-use crate::journal::check::{CheckId, CheckOp, CheckView};
 pub use replay::{InspectedEvent, InspectionCause, InspectionFailure, SessionInspection};
 mod format;
 mod journal;
 mod replay;
 mod state;
-pub(crate) use evidence::{MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_NATIVE_EVIDENCE_ROWS};
 pub use format::{RECORD_FORMATS, RecordFormat};
 pub(crate) use journal::MAX_HOT_SESSION_PAYLOAD_BYTES;
 use journal::{HotSession, append, open_connection};
@@ -34,8 +27,8 @@ pub(crate) use state::checkpoints::{
 pub(crate) use state::spill::{SWEEP_TIME_MS, SpillAccess};
 pub use state::{ArchivedHistory, ArchivedRecords, HistoryReset};
 pub(crate) use state::{
-    BUILD_CACHE_DEFAULT_VIEW_BYTES, BuildCacheIdentity, BuildCacheLease, ProviderCheckLock,
-    SessionRunLock, WorkspaceRunLock,
+    BUILD_CACHE_DEFAULT_VIEW_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
+    WorkspaceRunLock,
 };
 pub(crate) use state::{CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_cache_path};
 pub(crate) use state::{
@@ -66,24 +59,16 @@ const _: () = assert!(MAX_TOOL_STARTED_BYTES <= MAX_TOOL_FINISHED_BYTES);
 // Run start needs extra headroom because GoalStarted and MessageAccepted exceed the ordinary Event bound.
 const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
-fn event_payload_limit(kind: &str, version: i64) -> usize {
+fn event_payload_limit(kind: &str) -> usize {
     match kind {
-        "SupervisorVerdictRecorded" if payload_version(kind) == Some(version) => {
-            crate::supervisor::MAX_VERDICT_BYTES
-        }
-        "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
-        "ContextCompacted" | "GoalContextCompacted" if payload_version(kind) == Some(version) => {
-            MAX_COMPACTION_EVENT_BYTES
-        }
-        "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
-        "GoalFinished" if payload_version(kind) == Some(version) => MAX_GOAL_FINISHED_BYTES,
-        "ToolProposed" | "ToolStarted" | "CommandToolProbeStarted"
-            if payload_version(kind) == Some(version) =>
-        {
-            MAX_TOOL_STARTED_BYTES
-        }
-        "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
-        "HookFinished" | "CommandToolProbeFinished" if payload_version(kind) == Some(version) => {
+        "SupervisorVerdictRecorded" => crate::supervisor::MAX_VERDICT_BYTES,
+        "MessageAccepted" => MAX_MESSAGE_ACCEPTED_BYTES,
+        "ContextCompacted" | "GoalContextCompacted" => MAX_COMPACTION_EVENT_BYTES,
+        "GoalStarted" => MAX_GOAL_STARTED_BYTES,
+        "GoalFinished" => MAX_GOAL_FINISHED_BYTES,
+        "ToolProposed" | "ToolStarted" | "CommandToolProbeStarted" => MAX_TOOL_STARTED_BYTES,
+        "ToolFinished" => MAX_TOOL_FINISHED_BYTES,
+        "HookFinished" | "CommandToolProbeFinished" => {
             crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
         }
         _ => MAX_EVENT_BYTES,
@@ -102,8 +87,6 @@ pub enum StoreError {
     ForkNotAtRunBoundary,
     #[error("state storage is full")]
     StorageFull,
-    #[error("another Provider check is active")]
-    ProviderCheckBusy,
     #[error("Session has an active operation")]
     SessionBusy,
     #[error("Workspace has an active writer")]
@@ -235,10 +218,6 @@ pub enum AdmissionKind {
 }
 
 enum Request {
-    Check {
-        op: Box<CheckOp>,
-        reply: oneshot::Sender<Result<Option<CheckView>, StoreError>>,
-    },
     SupervisorCorpus {
         session_id: SessionId,
         reply: oneshot::Sender<Result<String, crate::supervisor::CorpusError>>,
@@ -309,10 +288,6 @@ enum Request {
         title: String,
         reply: oneshot::Sender<Result<SessionId, StoreError>>,
     },
-    Evidence {
-        op: EvidenceOp,
-        reply: oneshot::Sender<Result<Option<EvidenceRecord>, StoreError>>,
-    },
     CheckpointCapture {
         capture: CheckpointCapture,
         reply: oneshot::Sender<Result<crate::session::Checkpoint, StoreError>>,
@@ -335,17 +310,6 @@ pub struct Store {
 }
 
 impl Store {
-    pub(crate) async fn check(&self, op: CheckOp) -> Result<Option<CheckView>, StoreError> {
-        self.call(|reply| Request::Check {
-            op: Box::new(op),
-            reply,
-        })
-        .await
-    }
-    pub async fn load_check(&self, id: CheckId) -> Result<Option<CheckView>, StoreError> {
-        self.check(CheckOp::Load(id)).await
-    }
-
     pub fn open(root: StateRoot) -> Result<Self, StoreError> {
         Self::start(root, false)
     }
@@ -525,13 +489,6 @@ impl Store {
                             };
                             let _ = reply.send(result);
                         }
-                        Request::Check { op, reply } => {
-                            let result = check::apply(&mut connection, read_only, *op);
-                            let _ = reply.send(result);
-                        }
-                        Request::Evidence { op, reply } => {
-                            let _ = reply.send(evidence::apply(&mut connection, read_only, op));
-                        }
                         Request::CheckpointCapture { capture, reply } => {
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
@@ -642,66 +599,6 @@ impl Store {
             reply,
         })
         .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_provider_evidence(
-        &self,
-        record: ProviderEvidenceRecord,
-    ) -> Result<(), StoreError> {
-        self.check(CheckOp::Seed(EvidenceRecord::Provider(record)))
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn load_provider_evidence(
-        &self,
-        name: String,
-    ) -> Result<Option<ProviderEvidenceRecord>, StoreError> {
-        match self.evidence(EvidenceOp::LoadProvider(name)).await? {
-            None => Ok(None),
-            Some(EvidenceRecord::Provider(record)) => Ok(Some(record)),
-            Some(EvidenceRecord::Native(_)) => Err(StoreError::InvalidHistory),
-        }
-    }
-
-    pub(crate) async fn clear_provider_evidence(&mut self, name: String) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::ClearProvider(name)).await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn clear_native_evidence(
-        &self,
-        fingerprint: [u8; 32],
-    ) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::ClearNative(fingerprint)).await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_native_evidence(
-        &self,
-        record: NativeEvidenceRecord,
-    ) -> Result<(), StoreError> {
-        self.check(CheckOp::Seed(EvidenceRecord::Native(record)))
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn load_native_evidence(
-        &self,
-        fingerprint: [u8; 32],
-    ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-        match self.evidence(EvidenceOp::LoadNative(fingerprint)).await? {
-            None => Ok(None),
-            Some(EvidenceRecord::Native(record)) => Ok(Some(record)),
-            Some(EvidenceRecord::Provider(_)) => Err(StoreError::InvalidHistory),
-        }
-    }
-
-    async fn evidence(&self, op: EvidenceOp) -> Result<Option<EvidenceRecord>, StoreError> {
-        self.call(|reply| Request::Evidence { op, reply }).await
     }
 
     pub(crate) async fn supervisor_corpus(

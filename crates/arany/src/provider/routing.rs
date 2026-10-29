@@ -149,10 +149,10 @@ impl AdmittedProviders {
     }
 
     // Every primary route must carry a window, so a fallback never receives a request above its own ceiling.
-    pub(crate) async fn context_window_tokens_for_run(&self) -> Option<u32> {
+    pub(crate) fn context_window_tokens(&self) -> Option<u32> {
         let mut window = None;
         for provider in &self.primary {
-            let current = provider.context_window_tokens_for_run().await?;
+            let current = provider.context_window_tokens()?;
             window = Some(window.map_or(current, |window: u32| window.min(current)));
         }
         window
@@ -220,7 +220,7 @@ mod tests {
             model,
             Provenance::ChatGpt(ChatGptProvenance {
                 account_id: Uuid::from_u128(account),
-                evidence_fingerprint: [fingerprint; 32],
+                admission_fingerprint: [fingerprint; 32],
                 admission: ChatGptAdmission::AccountConsent,
             }),
         )

@@ -13,7 +13,7 @@ pub const CAPABILITIES: &[&str] = &[
     "interrupt_receipt_v1",
     "approvals_v2",
     "host_command_session_approval_v1",
-    "events_subscribe_v2",
+    "events_subscribe_v3",
     "receipt_get_v1",
     "thread_fork_v1",
     "turn_steer_v1",

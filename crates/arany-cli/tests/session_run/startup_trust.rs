@@ -69,65 +69,48 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
     );
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..4 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "request {index} missing");
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("loopback accept failed: {error}"),
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "request missing");
+                    thread::yield_now();
                 }
-            };
-            let request = loopback::read_request(&mut stream);
-            for canary in OMITTED {
-                assert!(
-                    !request.windows(canary.len()).any(|part| part == canary),
-                    "omitted input disclosed in request {index}"
-                );
+                Err(error) => panic!("loopback accept failed: {error}"),
             }
+        };
+        let request = loopback::read_request(&mut stream);
+        for canary in OMITTED {
             assert!(
-                !request
-                    .windows(b"test-key".len())
-                    .any(|part| part == b"test-key"),
-                "credential appeared in request body"
+                !request.windows(canary.len()).any(|part| part == canary),
+                "omitted input disclosed in request"
             );
-            let body: serde_json::Value =
-                serde_json::from_slice(&request).expect("bounded request JSON");
-            assert_eq!(body["model"], "model-1");
-            let input: serde_json::Value = crate::semantic::input(&body);
-            if index == 3 {
-                assert_eq!(
-                    input["workspace_guidance"],
-                    serde_json::json!([{"path": "AGENTS.md", "text": "EXPECTED_ROOT_GUIDANCE"}])
-                );
-                assert_eq!(body["input"][0]["role"], "user");
-                assert_eq!(
-                    body["input"][0]["content"],
-                    serde_json::json!([{"type": "input_text", "text": "# AGENTS.md instructions for AGENTS.md\n\n<INSTRUCTIONS>\nEXPECTED_ROOT_GUIDANCE\n</INSTRUCTIONS>"}])
-                );
-                assert_eq!(input["objective"], "answer");
-                assert_eq!(input["phase"], "root_plan");
-            } else {
-                assert!(input["workspace_guidance"].is_null());
-            }
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    serde_json::json!("verified answer")
-                }
-            };
-            loopback::send_response(&mut stream, index, text);
         }
+        assert!(
+            !request
+                .windows(b"test-key".len())
+                .any(|part| part == b"test-key"),
+            "credential appeared in request body"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&request).expect("bounded request JSON");
+        assert_eq!(body["model"], "model-1");
+        let input: serde_json::Value = crate::semantic::input(&body);
+        assert_eq!(
+            input["workspace_guidance"],
+            serde_json::json!([{"path": "AGENTS.md", "text": "EXPECTED_ROOT_GUIDANCE"}])
+        );
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(
+            body["input"][0]["content"],
+            serde_json::json!([{"type": "input_text", "text": "# AGENTS.md instructions for AGENTS.md\n\n<INSTRUCTIONS>\nEXPECTED_ROOT_GUIDANCE\n</INSTRUCTIONS>"}])
+        );
+        assert_eq!(input["objective"], "answer");
+        assert_eq!(input["phase"], "root_plan");
+        loopback::send_response(&mut stream, 0, serde_json::json!("verified answer"));
     });
 
-    loopback::check_profile(&workspace, &state);
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
@@ -162,10 +145,8 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
         RunId::from_str(lines[1].strip_prefix("Run: ").expect("Run line")).expect("Run ID");
     assert_eq!(
         output.stderr,
-        format!(
-            "Session: {session_id}\nRun: {run_id}\nStatus: finished\nProvider: custom verified\n"
-        )
-        .as_bytes()
+        format!("Session: {session_id}\nRun: {run_id}\nStatus: finished\nProvider: custom\n")
+            .as_bytes()
     );
     assert!(!marker.exists(), "repository Git trap activated");
 
@@ -237,54 +218,42 @@ fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_
     );
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..4 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "request {index} missing");
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("loopback accept failed: {error}"),
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "request missing");
+                    thread::yield_now();
                 }
-            };
-            let request = loopback::read_request(&mut stream);
-            for canary in OMITTED {
-                assert!(
-                    !request.windows(canary.len()).any(|part| part == canary),
-                    "omitted input disclosed in request {index}"
-                );
+                Err(error) => panic!("loopback accept failed: {error}"),
             }
-            let body: serde_json::Value =
-                serde_json::from_slice(&request).expect("bounded request JSON");
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    assert_eq!(body["input"][0]["role"], "user");
-                    assert_eq!(
-                        body["input"][0]["content"],
-                        serde_json::Value::Array(
-                            FILES
-                                .iter()
-                                .map(|(path, text)| serde_json::json!({"type": "input_text", "text": format!("# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")}))
-                                .collect()
-                        ),
-                        "one block per file, root first"
-                    );
-                    assert_eq!(body["input"][1]["role"], "user");
-                    serde_json::json!("nested answer")
-                }
-            };
-            loopback::send_response(&mut stream, index, text);
+        };
+        let request = loopback::read_request(&mut stream);
+        for canary in OMITTED {
+            assert!(
+                !request.windows(canary.len()).any(|part| part == canary),
+                "omitted input disclosed in request"
+            );
         }
+        let body: serde_json::Value =
+            serde_json::from_slice(&request).expect("bounded request JSON");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(
+            body["input"][0]["content"],
+            serde_json::Value::Array(
+                FILES
+                    .iter()
+                    .map(|(path, text)| serde_json::json!({"type": "input_text", "text": format!("# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")}))
+                    .collect()
+            ),
+            "one block per file, root first"
+        );
+        assert_eq!(body["input"][1]["role"], "user");
+        let text = serde_json::json!("nested answer");
+        loopback::send_response(&mut stream, 0, text);
     });
 
-    loopback::check_profile(&workspace, &state);
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
@@ -398,16 +367,13 @@ fn state_instructions_precede_project_rules_and_replay_only_digests() {
     write_global("USER_RULE");
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for (index, user_rule) in ["", "", "", "USER_RULE", "NEWER_USER_RULE"]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, user_rule) in ["USER_RULE", "NEWER_USER_RULE"].into_iter().enumerate() {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "request {index} missing");
+                        assert!(Instant::now() < deadline, "request missing");
                         thread::yield_now();
                     }
                     Err(error) => panic!("loopback accept failed: {error}"),
@@ -417,19 +383,8 @@ fn state_instructions_precede_project_rules_and_replay_only_digests() {
             for canary in [OMITTED, b"OTHER_STATE_CANARY"] {
                 assert!(
                     !request.windows(canary.len()).any(|part| part == canary),
-                    "omitted input disclosed in request {index}"
+                    "omitted input disclosed in request"
                 );
-            }
-            if index < 3 {
-                let text = match index {
-                    0 => serde_json::json!("ok"),
-                    1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                    }
-                    _ => serde_json::json!(r#"synthetic summary"#),
-                };
-                loopback::send_response(&mut stream, index, text);
-                continue;
             }
             let body: serde_json::Value =
                 serde_json::from_slice(&request).expect("bounded request JSON");
@@ -448,7 +403,6 @@ fn state_instructions_precede_project_rules_and_replay_only_digests() {
         }
     });
 
-    loopback::check_profile(&workspace, &state);
     let run = |select: &dyn Fn(&mut Command)| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command

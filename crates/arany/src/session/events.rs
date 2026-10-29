@@ -140,59 +140,6 @@ impl FromStr for GoalId {
     }
 }
 
-const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
-    ("HostEnvironmentCapture", 1),
-    ("CommandToolProbeStarted", 1),
-    ("CommandToolProbeFinished", 1),
-    ("SessionStarted", 6),
-    ("SessionDefaultChanged", 6),
-    ("SessionForked", 6),
-    ("SessionRenamed", 6),
-    ("ProviderSetupEditStarted", 3),
-    ("ProviderSetupEditFinished", 1),
-    ("GoalRunLinked", 6),
-    ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 15),
-    ("GoalContextCompacted", 7),
-    ("GoalSteeringNoteRecorded", 6),
-    ("AgentSteeringNoteRecorded", 1),
-    ("AssistantDisplayRecorded", 6),
-    ("MessageCommitted", 6),
-    ("MessageAccepted", 7),
-    ("AgentSpawned", 18),
-    ("AgentFinished", 12),
-    ("ProviderCallRecorded", 27),
-    ("WorkerStopObserved", 1),
-    ("WorkerLeaseReleased", 2),
-    ("WorkerVerificationRecorded", 1),
-    ("ToolResultsCleared", 1),
-    ("GoalStarted", 9),
-    ("GoalFinished", 8),
-    ("SupervisorVerdictRecorded", 2),
-    ("WorkspaceRewindStarted", 2),
-    ("WorkspaceRewindFinished", 1),
-    ("ProviderFallbackUsed", 1),
-    ("ProviderRetryScheduled", 1),
-    ("ToolProposed", 7),
-    ("ToolPreflightRefused", 1),
-    ("HookStarted", 18),
-    ("HookFinished", 25),
-    ("ToolFinished", 36),
-    ("RunStarted", 29),
-    ("RunFinished", 9),
-    ("GoalProviderCallReserved", 7),
-    ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 29),
-    ("ToolActiveTimeReserved", 1),
-    ("ContextCompacted", 8),
-];
-
-pub(crate) fn payload_version(kind: &str) -> Option<i64> {
-    PAYLOAD_VERSIONS
-        .iter()
-        .find(|(name, _)| *name == kind)
-        .map(|(_, version)| *version)
-}
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 // Every model Tool call takes one inference turn, plus the final report.
 pub(crate) const MAX_CHILD_TURNS: u8 = {
@@ -856,10 +803,6 @@ impl Event {
         .map(|payload| payload.len())
     }
 
-    pub fn version(&self) -> i64 {
-        payload_version(self.kind()).expect("every Event kind has a payload version")
-    }
-
     pub fn kind(&self) -> &'static str {
         match self {
             Self::HostEnvironmentCapture { .. } => "HostEnvironmentCapture",
@@ -1292,14 +1235,10 @@ impl Event {
 
     pub(crate) fn decode(
         kind: &str,
-        version: i64,
         payload: &str,
         run_id: Option<RunId>,
         agent_run_id: Option<AgentRunId>,
     ) -> Result<Self, ReplayError> {
-        if payload_version(kind) != Some(version) {
-            return Err(ReplayError::UnknownEvent);
-        }
         if kind == "SupervisorVerdictRecorded"
             && payload.len() > crate::supervisor::MAX_VERDICT_BYTES
         {

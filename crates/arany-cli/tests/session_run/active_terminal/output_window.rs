@@ -20,36 +20,24 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
     let (request_sender, request_ready) = mpsc::channel();
     let (response_sender, response_ready) = mpsc::channel();
     let server = thread::spawn(move || {
-        for index in 0..4 {
-            let mut stream = crate::process::accept_with_deadline(
-                &listener,
-                Duration::from_secs(30),
-                "Provider request",
-            );
-            let body = read_request(&mut stream);
-            assert!(
-                !body
-                    .windows(b"OMITTED_CANARY".len())
-                    .any(|part| part == b"OMITTED_CANARY")
-            );
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    request_sender.send(()).expect("active Provider gate");
-                    response_ready
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("response release");
-                    serde_json::json!("A".repeat(32 * 1024))
-                }
-            };
-            super::super::loopback::send_response_for(&mut stream, index, text, index != 2);
-        }
+        let mut stream = crate::process::accept_with_deadline(
+            &listener,
+            Duration::from_secs(30),
+            "Provider request",
+        );
+        let body = read_request(&mut stream);
+        assert!(
+            !body
+                .windows(b"OMITTED_CANARY".len())
+                .any(|part| part == b"OMITTED_CANARY")
+        );
+        request_sender.send(()).expect("active Provider gate");
+        response_ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("response release");
+        let text = serde_json::json!("A".repeat(32 * 1024));
+        super::super::loopback::send_response_for(&mut stream, 0, text, true);
     });
-    check_profile(&workspace, &state);
 
     let command = "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 finish; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
     let mut attached =

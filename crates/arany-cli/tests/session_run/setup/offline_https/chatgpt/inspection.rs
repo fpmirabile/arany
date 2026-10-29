@@ -1,5 +1,5 @@
 use super::*;
-use crate::setup::checks::{Presentation, acknowledge_result, assert_result_contains};
+use crate::setup::manager::{Presentation, acknowledge_result, assert_result_contains};
 use crate::setup::{SetupPty, SetupPtyMode, setup_pty_command};
 use std::{net::TcpListener, os::unix::net::UnixListener};
 
@@ -127,9 +127,8 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema": 3, "selected": selected,
-        "accounts": [entry(selected, "oaiapp_selected_inspection"), entry(inspected, "oaiapp_other_inspection")],
-        "model_checks": []
+        "schema": 4, "selected": selected,
+        "accounts": [entry(selected, "oaiapp_selected_inspection"), entry(inspected, "oaiapp_other_inspection")]
     })).unwrap()).unwrap();
     root.record(RecordKind::ChatgptRegistration)
         .replace(

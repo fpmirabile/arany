@@ -761,6 +761,11 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
                 "Provider response did not match the selected model, completed-message, or usage contract. No answer was accepted.",
             );
         }
+        (ProviderCallDisposition::InvalidResponse, Some(ProviderFailureReason::OutcomeDecode)) => {
+            return Some(
+                "Provider reply could not be decoded as one complete answer, Tool call or delegation from the selected model. No answer was accepted.",
+            );
+        }
         (
             ProviderCallDisposition::InvalidResponse,
             Some(ProviderFailureReason::OutcomeContract),

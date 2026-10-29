@@ -1146,7 +1146,7 @@ async fn a_pause_in_an_in_run_compaction_backoff_starts_no_further_compaction_ca
     let failing = Arc::new(failing);
     let primary = Arc::new(
         ScriptedProvider::new(paged_read_outcomes())
-            .with_profile("anthropic", "primary")
+            .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32])
             .with_context_window(SMALL_WINDOW_TOKENS),
     );
     let mut bindings = AdmittedProviders::single(primary.clone());

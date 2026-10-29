@@ -50,40 +50,31 @@ pub use engine::{
 pub use fault::git_write::GitWriteStage;
 #[cfg(feature = "test-support")]
 pub use fault::{FaultPlan, GitStorageFault};
-pub(crate) use journal::check::CheckJournal;
-pub use journal::check::{
-    CHECK_FORMATS, ChatGptCheck, ChatGptCheckError, ChatGptCheckRequest, CheckCallKind,
-    CheckCallToken, CheckDisposition, CheckEvent, CheckId, CheckOpenError, CheckProbe,
-    CheckReceipt, CheckStart, CheckTarget, CheckUsage, CheckView,
-};
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]
 pub use provider::semantic;
 pub use provider::{
     AdmittedProviders, AdmittedRoster, AgentPhase, Answer, AnthropicProvider, CallLimits,
     ChatGptAdmission, ChatGptProvenance, ChatGptProvider, ChildAssignment, ChildResult,
-    CompactionItem, CompactionRequest, CompactionResponse, CustomCheckStatus, CustomProfile,
-    CustomProfileCheck, CustomProfileDraft, CustomProfileError, CustomProfileProvenance,
-    CustomProtocol, CustomProvider, Delegate, Effort, GoalContextFacts, HistoryTurn,
-    ImageAttachment, ImageOrigin, LimitFailure, LimitSource, LimitUnavailable,
-    MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_CATALOG_MODELS, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
-    MAX_CUSTOM_PROFILE_EFFORTS_BYTES, MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
-    MAX_CUSTOM_PROFILE_MODEL_BYTES, MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_ENCODED_IMAGE_BYTES,
-    MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP, MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES,
-    MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES, MessagesAuth, ModelEntry,
-    NamedProviderRoutes, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
+    CompactionItem, CompactionRequest, CompactionResponse, CustomProfile, CustomProfileDraft,
+    CustomProfileError, CustomProfileProvenance, CustomProtocol, CustomProvider, Delegate, Effort,
+    GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin, LimitFailure, LimitSource,
+    LimitUnavailable, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_CATALOG_MODELS,
+    MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES, MAX_CUSTOM_PROFILE_EFFORTS_BYTES,
+    MAX_CUSTOM_PROFILE_ENDPOINT_BYTES, MAX_CUSTOM_PROFILE_MODEL_BYTES,
+    MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP,
+    MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES,
+    MAX_PROVIDER_SWITCHES, MessagesAuth, ModelEntry, NamedProviderRoutes, NativeApiCredentials,
     OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText, PromptRole, Provenance,
     Provider, ProviderError, ProviderFailureReason, ProviderFallback, ProviderIdentity,
     ProviderImage, ProviderKind, ProviderOutcome, ProviderRecord, ProviderRequest,
     ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
     ProviderWireProvenance, Providers, RateLimitSlot, RateLimits, ResponsePreview, RetryCause,
     ReviewVerdict, RosterSnapshot, RunInput, ToolUseId, UnansweredStatus, Usage, UsedPercent,
-    WorkspaceGuidance, admitted_context_window, check_custom_profile,
-    check_custom_profile_value_with_cancellation, check_custom_profile_with_cancellation,
-    check_native_model, check_native_model_from_env, list_native_models,
-    list_native_models_with_api_key, list_native_models_with_credentials, probe_chatgpt_model,
-    resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
-    validate_native_api_key, validate_native_model_id,
+    WorkspaceGuidance, admitted_context_window, list_native_models,
+    list_native_models_with_api_key, list_native_models_with_credentials, resolve_native_effort,
+    resolve_native_effort_for_run, valid_profile_name, validate_native_api_key,
+    validate_native_model_id,
 };
 pub use provider::{ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, MAX_API_LIMIT_ROWS};
 pub use provider::{

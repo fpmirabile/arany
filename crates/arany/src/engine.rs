@@ -2136,8 +2136,7 @@ impl Engine {
         )?
         .checked_add(feedback_reserved)
         .ok_or(EngineError::ContextTooLarge)?;
-        let model_context_window_tokens =
-            submission.providers.context_window_tokens_for_run().await;
+        let model_context_window_tokens = submission.providers.context_window_tokens();
         let context_window_tokens = request
             .goal
             .context_window

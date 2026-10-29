@@ -2,9 +2,7 @@ use super::{
     ProductGuard, collect_nonblocking, product_child_of, redacted_tail, transcript_field,
     tty_settings,
 };
-use crate::loopback::{
-    ChildGuard, check_profile, read_request, send_response_for, wait_product, write_profile,
-};
+use crate::loopback::{ChildGuard, read_request, send_response_for, wait_product, write_profile};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -47,7 +45,8 @@ fn run_broken_stderr_case(compaction: bool) {
     let (fault_sender, fault_ready) = mpsc::channel();
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..if compaction { 5 } else { 4 } {
+        // The committed Run (3), then the held Run or, with compaction, the held summary (4).
+        for index in if compaction { 3..5 } else { 4..5 } {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -68,7 +67,7 @@ fn run_broken_stderr_case(compaction: bool) {
                     .windows(b"OMITTED_CANARY".len())
                     .any(|part| part == b"OMITTED_CANARY")
             );
-            if index == if compaction { 4 } else { 3 } {
+            if index == 4 {
                 if compaction {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("compaction request");
@@ -95,21 +94,15 @@ fn run_broken_stderr_case(compaction: bool) {
                 );
                 return;
             }
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    serde_json::json!("committed answer")
-                }
-            };
             // The attached Classic Run requests a streamed answer preview.
-            send_response_for(&mut stream, index, text, index != 2);
+            send_response_for(
+                &mut stream,
+                index,
+                serde_json::json!("committed answer"),
+                true,
+            );
         }
     });
-    check_profile(&workspace, &state);
 
     let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)
         .expect("stderr PTY master");

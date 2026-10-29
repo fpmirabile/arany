@@ -2,10 +2,7 @@ use super::acquisition::ProductGuard;
 use super::{
     redacted_tail, transcript_field, try_product_child_of_executable, tty_settings, wait_stopped,
 };
-use crate::loopback::{
-    ChildGuard, check_profile_with_binary, read_request, send_response_for, wait_product,
-    write_profile,
-};
+use crate::loopback::{ChildGuard, read_request, send_response_for, wait_product, write_profile};
 use arany::{StateRoot, list_sessions, resume_session};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Signal, kill_process};
@@ -908,7 +905,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let (response_sender, response_ready) = mpsc::channel();
     let provider = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..5 {
+        for index in 3..5 {
             let deadline = Instant::now() + Duration::from_secs(if index == 4 { 40 } else { 10 });
             let (mut stream, _) = loop {
                 match listener.accept() {
@@ -922,11 +919,6 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             };
             let body = read_request(&mut stream);
             let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"summary"#),
                 3 => {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("run request JSON");
@@ -956,11 +948,10 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                     serde_json::json!(r#"derived summary"#)
                 }
             };
-            // Run requests (0, 1, 3) stream; summary requests (2, 4) return plain JSON.
-            send_response_for(&mut stream, index, text, matches!(index, 0 | 1 | 3));
+            // The Run request (3) streams; the summary request (4) returns plain JSON.
+            send_response_for(&mut stream, index, text, index == 3);
         }
     });
-    check_profile_with_binary(&workspace, &state, &executable);
 
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(
@@ -1655,26 +1646,13 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     let (pause_ready_sender, pause_ready) = mpsc::channel();
     let (release_sender, release_primary) = mpsc::channel::<()>();
     let (stop_sender, stop) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; 3 primary Delegate, 4 held child, 5 synthesis with the note;
-    // 6 the second primary, held until pause. Any later request is a violation.
+    // Call 3 is the primary Delegate, 4 the held child, 5 synthesis with the note and 6 the second
+    // primary, held until pause. Any later request is a violation.
     let provider = thread::spawn(move || {
-        for index in 0..7 {
+        for index in 3..7 {
             let (mut stream, input) =
                 accept_provider_request(&listener, "synthetic Provider request missing");
             match index {
-                0 => send_response_for(&mut stream, index, serde_json::json!("ok"), true),
-                1 => send_response_for(
-                    &mut stream,
-                    index,
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
-                    true,
-                ),
-                2 => send_response_for(
-                    &mut stream,
-                    index,
-                    serde_json::json!(r#"synthetic summary"#),
-                    false,
-                ),
                 3 => {
                     assert_eq!(input["objective"], "steer");
                     send_response_for(
@@ -1717,7 +1695,6 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
             .expect("bounded final accept");
         listener.accept().is_err()
     });
-    check_profile_with_binary(&workspace, &state, &executable);
 
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(

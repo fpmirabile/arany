@@ -1419,10 +1419,8 @@ fn compaction_record(status: CompactionStatus) -> crate::session::CompactionReco
         recent_files: Vec::new(),
         provider: "other".into(),
         model: "model-1".into(),
-        prompt_version: 1,
         prompt: crate::provider::EffectivePrompts::default()
             .pin(crate::provider::PromptFile::Compaction),
-        schema_version: 1,
         compiler_version: 3,
         source_bytes: 1,
         source_tokens_estimate: 1,

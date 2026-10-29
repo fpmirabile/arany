@@ -232,7 +232,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events:Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"payload":payload,"created_at_ms":0
     })).collect();
     adapter
         .respond(json!({"events":events,"nextSince":null}))

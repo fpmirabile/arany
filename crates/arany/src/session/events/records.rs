@@ -348,12 +348,12 @@ impl RunConfig {
                     && self.custom_profile_provenance.is_none()
                     && self
                         .identity()
-                        .is_some_and(|identity| supports_context_window_evidence(&identity))
+                        .is_some_and(|identity| identity.chatgpt_provenance().is_some())
                     && self.providers.as_ref().is_none_or(|providers| {
                         providers
                             .primary
                             .iter()
-                            .all(supports_context_window_evidence)
+                            .all(|identity| identity.chatgpt_provenance().is_some())
                     })
             })
             && self
@@ -491,15 +491,6 @@ impl RunConfig {
         }
         self.policy.validate()
     }
-}
-
-fn supports_context_window_evidence(identity: &crate::provider::ProviderIdentity) -> bool {
-    identity.chatgpt_provenance().is_some()
-        || ProviderKind::parse(&identity.profile) == Some(ProviderKind::Anthropic)
-            && matches!(
-                identity.provenance,
-                crate::provider::Provenance::Native { .. }
-            )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -722,9 +713,7 @@ pub struct CompactionRecord {
     pub recent_files: Vec<RecentFile>,
     pub provider: String,
     pub model: String,
-    pub prompt_version: u16,
     pub prompt: crate::provider::PromptPin,
-    pub schema_version: u16,
     pub compiler_version: u16,
     pub source_bytes: u32,
     pub source_tokens_estimate: u32,
@@ -782,9 +771,7 @@ impl CompactionRecord {
                         .any(|previous| previous.path == file.path)
             })
             || self.covered_sequence == 0
-            || self.prompt_version != 1
             || self.prompt.file != crate::provider::PromptFile::Compaction
-            || self.schema_version != 1
             || !(crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION
                 ..=crate::session::COMPACTION_COMPILER_VERSION)
                 .contains(&self.compiler_version)

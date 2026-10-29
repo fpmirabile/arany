@@ -1507,13 +1507,14 @@ mod tests {
             state
                 .record(RecordKind::ChatgptAccounts).replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "schema": 3, "selected": id, "accounts": [{
+                        "schema": crate::accounts::chatgpt::account::CHATGPT_ACCOUNTS.current,
+                        "selected": id, "accounts": [{
                             "id": id, "host_id": "11111111-1111-4111-8111-111111111111",
                             "client_id": "synthetic-client", "subject": "synthetic-subject",
                             "chatgpt_account_id": null, "keyring_slot": client_slot,
                             "storage": "keyring", "renewal_pending": false, "signout_pending": false,
                             "disconnected": false, "plan_permission_missing": false, "token": null
-                        }], "model_checks": []
+                        }]
                     }))
                     .unwrap(),
                 )
@@ -1687,7 +1688,7 @@ mod tests {
                 rusqlite::Connection::open(session_path.join("events.sqlite3")).unwrap();
             connection
                 .execute_batch(
-                    "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
+                    "UPDATE events SET kind = 'ToolPermissionDecided' WHERE sequence = 1",
                 )
                 .unwrap();
         }
@@ -1905,7 +1906,7 @@ mod tests {
             if profile == "chatgpt" {
                 identity.provenance = Provenance::ChatGpt(ChatGptProvenance {
                     account_id,
-                    evidence_fingerprint: [1; 32],
+                    admission_fingerprint: [1; 32],
                     admission: ChatGptAdmission::AccountConsent,
                 });
                 identity.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;

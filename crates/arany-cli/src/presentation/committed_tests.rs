@@ -212,6 +212,10 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                             "Provider output did not match Arany's structured outcome contract.",
                         ),
                         (
+                            arany::ProviderFailureReason::OutcomeDecode,
+                            "Provider reply could not be decoded as one complete answer",
+                        ),
+                        (
                             arany::ProviderFailureReason::LocalOutputLimit,
                             "Provider reported output above Arany's local token limit.",
                         ),
@@ -228,7 +232,6 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], envelope.event.version());
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }

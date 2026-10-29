@@ -197,7 +197,7 @@ fn role_chains_are_canonical_and_tool_history_stays_in_one_adapter_and_account()
                 alternate.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
                 alternate.provenance = Provenance::ChatGpt(crate::provider::ChatGptProvenance {
                     account_id: uuid::Uuid::now_v7(),
-                    evidence_fingerprint: [1; 32],
+                    admission_fingerprint: [1; 32],
                     admission: crate::provider::ChatGptAdmission::AccountConsent,
                 });
             }

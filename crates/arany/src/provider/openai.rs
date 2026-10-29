@@ -18,17 +18,6 @@ pub use subscription::ChatGptProvider;
 
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
-/// Makes three potentially plan-consuming, data-free strict-outcome probes.
-/// The caller must verify the selected account, catalog visibility, and explicit cost consent.
-pub async fn probe_chatgpt_model(
-    access_token: &str,
-    model: &str,
-    effort: Effort,
-    check: &mut crate::ChatGptCheck,
-) -> Result<(), crate::ChatGptCheckError> {
-    subscription::probe_model(access_token, model, effort, check).await
-}
-
 pub struct OpenAiProvider {
     client: Client,
     identity: ProviderIdentity,
@@ -37,17 +26,6 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub(super) fn for_conformance(
-        model: String,
-        effort: Effort,
-        key: String,
-    ) -> Result<Self, ProviderError> {
-        if !super::catalog::valid_model_id(&model) {
-            return Err(ProviderError::Rejected);
-        }
-        Self::with_resolved_effort(model, effort, key)
-    }
-
     /// Reads only the native OpenAI API key. The caller must select this profile before Workspace input.
     pub fn from_env(model: String) -> Result<Self, ProviderError> {
         Self::from_env_with_effort(model, None)
@@ -87,43 +65,6 @@ impl OpenAiProvider {
             saved_api_account_id: Some(account_id),
         };
         Ok(provider)
-    }
-
-    /// Admits one previously checked native model/effort before Workspace input.
-    pub async fn from_checked_api_key_with_effort(
-        root: crate::store::StateRoot,
-        model: String,
-        effort: Effort,
-        key: String,
-        saved_api_account_id: Option<Uuid>,
-    ) -> Result<Self, ProviderError> {
-        super::native_check::verify_for_run(
-            root,
-            "openai",
-            &model,
-            effort,
-            &key,
-            saved_api_account_id,
-        )
-        .await?;
-        let mut provider = Self::with_resolved_effort(model, effort, key)?;
-        provider.identity.provenance = Provenance::Native {
-            saved_api_account_id,
-        };
-        provider.identity.limits.concurrency = native::UNREVIEWED_MODEL_CONCURRENCY;
-        Ok(provider)
-    }
-
-    pub async fn from_checked_env_with_effort(
-        root: crate::store::StateRoot,
-        model: String,
-        effort: Effort,
-    ) -> Result<Self, ProviderError> {
-        if !super::catalog::valid_model_id(&model) {
-            return Err(ProviderError::Rejected);
-        }
-        let key = std::env::var("OPENAI_API_KEY").map_err(|_| ProviderError::Unavailable)?;
-        Self::from_checked_api_key_with_effort(root, model, effort, key, None).await
     }
 
     fn with_resolved_effort(

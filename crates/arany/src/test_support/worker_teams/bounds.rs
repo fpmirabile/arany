@@ -60,13 +60,12 @@ pub(super) async fn pad_session(
     engine.close().await.unwrap();
     let mut connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let transaction = connection.transaction().unwrap();
-    let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"padding\"}',0)").unwrap();
+    let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed','{\"title\":\"padding\"}',0)").unwrap();
     for sequence in 2..=through {
         insert
             .execute(rusqlite::params![
                 i64::try_from(sequence).unwrap(),
-                session.to_string(),
-                crate::session::payload_version("SessionRenamed").unwrap()
+                session.to_string()
             ])
             .unwrap();
     }

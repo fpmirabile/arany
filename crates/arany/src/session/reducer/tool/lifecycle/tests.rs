@@ -686,14 +686,7 @@ fn enforcement_causes_round_trip_and_reject_unsupported_claims() {
         serde_json::from_str::<serde_json::Value>(&payload).unwrap()["enforcement_cause"],
         "filesystem_denied"
     );
-    let decoded = Event::decode(
-        "ToolFinished",
-        crate::session::events::payload_version("ToolFinished").unwrap(),
-        &payload,
-        Some(run),
-        Some(agent),
-    )
-    .unwrap();
+    let decoded = Event::decode("ToolFinished", &payload, Some(run), Some(agent)).unwrap();
     assert_eq!(decoded, event);
     apply(&mut view, decoded).unwrap();
     assert_eq!(
@@ -936,14 +929,7 @@ fn an_in_process_attestation_cannot_finish_a_write() {
     ));
     let finished = tool_finished(run, agent, &write, b"after");
     let bytes = finished.payload().unwrap();
-    let decoded = Event::decode(
-        finished.kind(),
-        finished.version(),
-        &bytes,
-        Some(run),
-        Some(agent),
-    )
-    .unwrap();
+    let decoded = Event::decode(finished.kind(), &bytes, Some(run), Some(agent)).unwrap();
     apply(&mut view, decoded).expect("historical Guard receipt");
     assert_eq!(finished.payload().unwrap(), bytes);
 }
@@ -1034,8 +1020,8 @@ fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
     assert!(matches!(observed.attestation, Some(Attestation::Guard(_))));
     let finished = finish(observed);
     let bytes = finished.payload().unwrap();
-    let (kind, version) = (finished.kind(), finished.version());
-    let decoded = Event::decode(kind, version, &bytes, Some(run), Some(agent)).unwrap();
+    let kind = finished.kind();
+    let decoded = Event::decode(kind, &bytes, Some(run), Some(agent)).unwrap();
     assert_eq!(decoded.payload().unwrap(), bytes);
     apply(&mut historical, decoded).expect("historical Guard Mkdir receipt");
     intent.enforcement_digest = FileReceipt::enforcement_digest();
@@ -1519,7 +1505,6 @@ fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps
             assert_eq!(
                 Event::decode(
                     event.kind(),
-                    crate::session::payload_version(event.kind()).unwrap(),
                     &event.payload().unwrap(),
                     Some(run),
                     Some(agent)

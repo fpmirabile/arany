@@ -1693,57 +1693,6 @@ fn model_catalog_command_reads_only_selected_configuration() {
         assert!(!account_root.exists());
         assert!(!state_dir.exists());
 
-        let unchecked = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("HOME", &fixture_home)
-            .env("XDG_STATE_HOME", &fixture_state)
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-            .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
-            .current_dir(&workspace)
-            .args([
-                "provider",
-                "check",
-                "chatgpt",
-                "model-one",
-                "--effort",
-                "high",
-            ])
-            .bounded_output()
-            .expect("ChatGPT check requires explicit cost acceptance");
-        assert!(!unchecked.status.success());
-        assert_eq!(unchecked.stdout, b"");
-        assert!(String::from_utf8_lossy(&unchecked.stderr).contains("no remote output-token cap"));
-        assert!(!account_root.exists());
-
-        let check_missing = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("HOME", &fixture_home)
-            .env("XDG_STATE_HOME", &fixture_state)
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-            .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
-            .current_dir(&workspace)
-            .args([
-                "provider",
-                "check",
-                "chatgpt",
-                "model-one",
-                "--effort",
-                "high",
-                "--accept-cost",
-            ])
-            .bounded_output()
-            .expect("ChatGPT check with missing account");
-        assert!(!check_missing.status.success());
-        assert_eq!(check_missing.stdout, b"");
-        assert_eq!(
-            check_missing.stderr,
-            b"error: no selected ChatGPT account; run arany --setup\n"
-        );
-        assert!(!account_root.exists());
-        assert!(!state_dir.exists());
-
         for flag in ["--saved-account", "--state-dir"] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
@@ -1769,34 +1718,6 @@ fn model_catalog_command_reads_only_selected_configuration() {
                 "{flag}"
             );
             assert!(!account_root.exists(), "{flag}");
-        }
-
-        for flag in ["--saved-account", "--state-dir"] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-            command
-                .env_clear()
-                .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-                .env("HOME", &fixture_home)
-                .env("XDG_STATE_HOME", &fixture_state)
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .current_dir(&workspace)
-                .args(["provider", "check", flag]);
-            if flag == "--state-dir" {
-                command.arg(&state_dir);
-            }
-            let result = command
-                .args(["chatgpt", "model-one", "--effort", "high", "--accept-cost"])
-                .bounded_output()
-                .expect("invalid ChatGPT check flag");
-            assert!(!result.status.success(), "{flag}");
-            assert_eq!(result.stdout, b"", "{flag}");
-            assert!(
-                String::from_utf8_lossy(&result.stderr)
-                    .contains("omit --saved-account and --state-dir"),
-                "{flag}"
-            );
-            assert!(!account_root.exists(), "{flag}");
-            assert!(!state_dir.exists(), "{flag}");
         }
     }
 
@@ -1838,7 +1759,8 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
     let root = StateRoot::admit(&state_dir).expect("private state root");
     let profile_file = root.path().join("provider-profiles.json");
-    std::fs::write(&profile_file, r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#).expect("profile file");
+    let version = arany::test_support::record_version(arany::RecordKind::ProviderProfiles);
+    std::fs::write(&profile_file, format!(r#"{{"version":{version},"profiles":[{{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"efforts":[]}}]}}"#)).expect("profile file");
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o600))
@@ -1859,124 +1781,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
     );
     assert_eq!(
         custom.stdout,
-        b"Provider: custom:local\nModels: 1\nmodel-1 \xC2\xB7 exact profile; Run requires current conformance; effort provider default\n"
+        b"Provider: custom:local\nModels: 1\nmodel-1 \xC2\xB7 exact profile; effort provider default\n"
     );
     assert_eq!(custom.stderr, b"");
-}
-
-#[test]
-fn native_model_check_requires_explicit_cost_consent_before_state_or_credentials() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("Workspace");
-    let state_dir = temp.path().join("state");
-    let without_consent = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args(["openai", "example-model", "--effort", "high"])
-        .bounded_output()
-        .expect("native check without consent");
-    assert!(!without_consent.status.success());
-    assert_eq!(without_consent.stdout, b"");
-    assert_eq!(
-        without_consent.stderr,
-        b"error: native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost\n"
-    );
-    assert!(!state_dir.exists());
-
-    let saved_without_consent = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args([
-            "openai",
-            "example-model",
-            "--effort",
-            "high",
-            "--saved-account",
-        ])
-        .bounded_output()
-        .expect("saved native check without consent");
-    assert!(!saved_without_consent.status.success());
-    assert_eq!(saved_without_consent.stdout, b"");
-    assert_eq!(saved_without_consent.stderr, without_consent.stderr);
-    assert!(!state_dir.exists());
-
-    let invalid_model = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args(["openai", "bad\nmodel", "--effort", "high", "--accept-cost"])
-        .bounded_output()
-        .expect("native check with invalid model");
-    assert!(!invalid_model.status.success());
-    assert_eq!(invalid_model.stdout, b"");
-    assert_eq!(
-        invalid_model.stderr,
-        b"error: native Provider, model, or effort is invalid\n"
-    );
-    assert!(!state_dir.exists());
-
-    let without_key = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args([
-            "openai",
-            "example-model",
-            "--effort",
-            "high",
-            "--accept-cost",
-        ])
-        .bounded_output()
-        .expect("native check without key");
-    assert!(!without_key.status.success());
-    assert_eq!(without_key.stdout, b"");
-    assert_eq!(
-        without_key.stderr,
-        b"error: selected native API key is unavailable or invalid\n"
-    );
-    assert!(state_dir.exists());
-
-    #[cfg(all(target_os = "linux", debug_assertions))]
-    {
-        let marker = temp.path().join("credential-command-marker");
-        let address = format!("unixexec:path=/usr/bin/touch,argv1={}", marker.display());
-        let unsafe_saved_account = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-            .env("DBUS_SESSION_BUS_ADDRESS", address)
-            .current_dir(&workspace)
-            .args(["provider", "check", "--state-dir"])
-            .arg(&state_dir)
-            .args([
-                "openai",
-                "example-model",
-                "--effort",
-                "high",
-                "--saved-account",
-                "--accept-cost",
-            ])
-            .bounded_output()
-            .expect("saved native check with unsafe transport");
-        assert!(!unsafe_saved_account.status.success());
-        assert_eq!(unsafe_saved_account.stdout, b"");
-        assert_eq!(
-            unsafe_saved_account.stderr,
-            b"error: unsafe or unsupported D-Bus session address for the OS credential store\n"
-        );
-        assert!(!marker.exists());
-    }
 }
 
 #[test]
@@ -2065,30 +1872,11 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert!(shown.status.success());
         assert_eq!(shown.stderr, b"");
         let expected = format!(
-            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":{},\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
-             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":{},\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
-            events[0].event.version(), events[0].created_at_ms, events[1].event.version(), events[1].created_at_ms
+            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
+             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
+            events[0].created_at_ms, events[1].created_at_ms
         );
         assert_eq!(shown.stdout, expected.as_bytes());
-        let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-            .expect("version inspection");
-        let version: i64 = connection
-            .query_row("SELECT event_version FROM events WHERE sequence=1", [], |row| {
-                row.get(0)
-            })
-            .expect("start Event version");
-        assert_eq!(version, events[0].event.version());
-        connection
-            .execute("UPDATE events SET event_version=1 WHERE sequence=1", [])
-            .expect("version fault injection");
-        drop(connection);
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
-            .expect("read-only reopen after corruption");
-        assert!(matches!(
-            store.load_view(id).await,
-            Err(StoreError::InvalidHistory)
-        ));
-        store.close().await.expect("store shutdown after corruption");
     });
 }
 
@@ -2204,7 +1992,7 @@ fn continue_selects_latest_committed_activity_in_the_admitted_workspace() {
             .expect("test fault injection");
         connection
             .execute(
-                "UPDATE events SET event_version=9 WHERE session_id=?1",
+                "UPDATE events SET kind='ToolPermissionDecided' WHERE session_id=?1",
                 [other.to_string()],
             )
             .expect("malformed unrelated Session");
@@ -2463,7 +2251,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                 id,
                 Event::SessionStarted {
                     title: "First Session".into(),
-                    workspace_identity: WorkspaceIdentity { device: 1, inode: 1 },
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 1,
+                    },
                 },
             )
             .await
@@ -2485,7 +2276,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                     id,
                     Event::SessionStarted {
                         title: "Invalid duplicate".into(),
-                        workspace_identity: WorkspaceIdentity { device: 1, inode: 1 },
+                        workspace_identity: WorkspaceIdentity {
+                            device: 1,
+                            inode: 1
+                        },
                     },
                 )
                 .await,
@@ -2502,7 +2296,13 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             .expect("Session exists");
         assert_eq!(view.title, hostile_title);
         assert_eq!(view.last_sequence, 2);
-        assert_eq!(view.workspace_identity, Some(WorkspaceIdentity { device: 1, inode: 1 }));
+        assert_eq!(
+            view.workspace_identity,
+            Some(WorkspaceIdentity {
+                device: 1,
+                inode: 1
+            })
+        );
         store.close().await.expect("closed reopened store");
 
         let text = Command::new(env!("CARGO_BIN_EXE_arany"))
@@ -2545,13 +2345,15 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["kind"], "SessionStarted");
         assert_eq!(lines[1]["payload"]["title"], hostile_title);
-        assert_eq!(jsonl.stdout.iter().filter(|byte| **byte == b'\n').count(), 2);
+        assert_eq!(
+            jsonl.stdout.iter().filter(|byte| **byte == b'\n').count(),
+            2
+        );
         for (line, event) in lines.iter().zip(&events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["session_id"], id.to_string());
             assert!(line["run_id"].is_null());
             assert!(line["agent_run_id"].is_null());
-            assert_eq!(line["event_version"], event.event.version());
             assert_eq!(line["created_at_ms"], event.created_at_ms);
         }
 
@@ -2589,8 +2391,8 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             .expect("test fault injection");
         connection
             .execute(
-                "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-                 VALUES (3, ?1, 'UnknownEvent', 1, '{}', 1)",
+                "INSERT INTO events (sequence, session_id, kind, payload, created_at_ms)
+                 VALUES (3, ?1, 'UnknownEvent', '{}', 1)",
                 [id.to_string()],
             )
             .expect("injected unsupported Event");
@@ -2601,7 +2403,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             store.load_session(id).await,
             Err(StoreError::InvalidHistory)
         ));
-        store.close().await.expect("closed store after rejected replay");
+        store
+            .close()
+            .await
+            .expect("closed store after rejected replay");
 
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
             .expect("test fault injection");
@@ -2618,7 +2423,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             store.load_session(id).await,
             Err(StoreError::InvalidHistory)
         ));
-        store.close().await.expect("closed store after size rejection");
+        store
+            .close()
+            .await
+            .expect("closed store after size rejection");
     });
 }
 
@@ -3615,9 +3423,7 @@ fn headless_startup_archives_incompatible_history_and_fails_closed_on_unsafe_his
             .unwrap();
         rusqlite::Connection::open(state.join("events.sqlite3"))
             .unwrap()
-            .execute_batch(
-                "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
-            )
+            .execute_batch("UPDATE events SET kind = 'ToolPermissionDecided' WHERE sequence = 1")
             .unwrap();
         let history = std::fs::read(state.join("events.sqlite3")).unwrap();
         let run = || {
@@ -3848,95 +3654,6 @@ fn acp_refuses_terminal_input_before_state_admission() {
         b"error: acp requires piped stdin and stdout\n"
     );
     assert!(!state.exists());
-}
-
-fn check_output(
-    bytes: &[u8],
-    state: &std::path::Path,
-    disposition: arany::CheckDisposition,
-) -> Vec<u8> {
-    let text = std::str::from_utf8(bytes).expect("check output UTF-8");
-    let (prefix, receipt) = text.rsplit_once("Check: ").expect("durable check receipt");
-    let (id, status) = receipt.split_once('\n').expect("check disposition");
-    let id: arany::CheckId = id.parse().expect("check UUID");
-    assert_eq!(status, format!("Disposition: {disposition}\n"));
-    let database = rusqlite::Connection::open_with_flags(
-        state.join("events.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .expect("closed check database");
-    let mut statement = database.prepare("SELECT kind, event_version, payload FROM provider_check_events WHERE check_id=?1 ORDER BY sequence").expect("check events");
-    let events: Vec<arany::CheckEvent> = statement
-        .query_map([id.to_string()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .expect("query")
-        .map(|row| {
-            let (kind, version, payload) = row.expect("event row");
-            let event: arany::CheckEvent =
-                serde_json::from_str(&payload).expect("typed check event");
-            assert_eq!(kind, event.kind());
-            assert_eq!(version, event.version());
-            event
-        })
-        .collect();
-    let view = arany::CheckView::replay(id, &events)
-        .expect("strict check replay")
-        .expect("check");
-    assert_eq!(view.disposition, Some(disposition));
-    if disposition == arany::CheckDisposition::Succeeded {
-        let catalog_pages = events
-            .windows(2)
-            .filter(|pair| {
-                matches!(
-                    *pair,
-                    [
-                        arany::CheckEvent::ProviderCheckCallStarted {
-                            kind: arany::CheckCallKind::Catalog,
-                            ..
-                        },
-                        arany::CheckEvent::ProviderCheckCallFinished {
-                            disposition: arany::CheckDisposition::Succeeded,
-                            ..
-                        }
-                    ]
-                )
-            })
-            .count();
-        assert_eq!(
-            view.completed_calls as usize,
-            view.start.probes.len() + catalog_pages
-        );
-    }
-    prefix.as_bytes().to_vec()
-}
-
-fn assert_check_privacy(output: &std::process::Output, state: &std::path::Path, canaries: &[&str]) {
-    let database = std::fs::read(state.join("events.sqlite3")).expect("whole check database");
-    let diagnostics = match std::fs::read(state.join("development.log")) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("diagnostic inspection failed: {error}"),
-    };
-    for (channel, bytes) in [
-        ("stdout", output.stdout.as_slice()),
-        ("stderr", output.stderr.as_slice()),
-        ("database", database.as_slice()),
-        ("diagnostics", diagnostics.as_slice()),
-    ] {
-        for canary in canaries {
-            assert!(
-                !bytes
-                    .windows(canary.len())
-                    .any(|part| part == canary.as_bytes()),
-                "check leaked a private canary into {channel}"
-            );
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]

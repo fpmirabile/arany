@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-pub(crate) const MAX_ADDRESSES: usize = 8;
+const MAX_ADDRESSES: usize = 8;
 const DNS_DEADLINE: Duration = Duration::from_secs(5);
 const CALL_DEADLINE: Duration = Duration::from_secs(120);
 
@@ -51,7 +51,8 @@ impl PinnedDestination {
         &self.endpoint
     }
 
-    pub(super) fn addresses(&self) -> &[SocketAddr] {
+    #[cfg(test)]
+    fn addresses(&self) -> &[SocketAddr] {
         &self.addresses
     }
 
@@ -250,7 +251,6 @@ mod tests {
             endpoint: "http://127.0.0.1:9321/v1/responses".into(),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: 2,
             efforts: Vec::new(),
         };
         let pinned = profile.resolve_destination().await.unwrap();

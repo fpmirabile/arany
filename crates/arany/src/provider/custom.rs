@@ -6,15 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 mod adapter;
-mod check;
 mod destination;
 mod transport;
+#[cfg(test)]
+mod transport_tests;
 pub use adapter::CustomProvider;
-pub use check::{
-    CustomProfileCheck, check_custom_profile, check_custom_profile_value_with_cancellation,
-    check_custom_profile_with_cancellation,
-};
-pub(crate) use destination::MAX_ADDRESSES;
 use destination::PinnedDestination;
 pub(crate) use destination::resolve_admitted;
 
@@ -33,7 +29,6 @@ pub struct CustomProfile {
     protocol: Protocol,
     model: String,
     credential_env: String,
-    capability_evidence_version: u32,
     efforts: Vec<Effort>,
 }
 
@@ -42,13 +37,6 @@ pub enum CustomProtocol {
     OpenaiResponses,
     AnthropicMessages,
     OpenaiChatCompletions,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CustomCheckStatus {
-    Unchecked,
-    Stale,
-    VerifiedUntil(i64),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,13 +52,6 @@ pub struct CustomProfileDraft {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CustomProfileError {
-    #[error("Provider check could not start: {0}")]
-    Journal(Box<crate::CheckOpenError>),
-    #[error("{source}\n{receipt}")]
-    Check {
-        source: Box<CustomProfileError>,
-        receipt: crate::CheckReceipt,
-    },
     #[error("custom Provider profile file is unavailable")]
     Unavailable,
     #[error("custom Provider profile file is unsafe")]
@@ -79,23 +60,15 @@ pub enum CustomProfileError {
     Changed,
     #[error("custom Provider profile publication may have completed")]
     PublicationUncertain,
-    #[error("custom Provider check is active; retry after it finishes")]
-    CheckBusy,
     #[error("invalid custom Provider profile configuration")]
     InvalidConfiguration,
     #[error("custom Provider profile not found")]
     NotFound,
     #[error("custom Provider credential unavailable")]
     CredentialUnavailable,
-    #[error("selected custom Provider credential is not set")]
-    CredentialNotSet,
-    #[error("custom Provider conformance failed")]
-    ConformanceFailed,
-    #[error("custom Provider evidence unavailable")]
-    EvidenceUnavailable,
     #[error("selected custom Provider model does not match its profile")]
     ModelMismatch,
-    #[error("selected custom Provider effort is not conformed for its profile")]
+    #[error("selected custom Provider effort is not declared by its profile")]
     EffortUnavailable,
 }
 
@@ -118,7 +91,6 @@ enum ProfileEntry {
         outcome_encoding: OutcomeEncoding,
         privacy: Privacy,
         max_output_tokens: u32,
-        capability_evidence_version: u32,
         efforts: Vec<Effort>,
     },
     #[serde(rename = "anthropic-messages")]
@@ -131,7 +103,6 @@ enum ProfileEntry {
         outcome_encoding: OutcomeEncoding,
         privacy: Privacy,
         max_output_tokens: u32,
-        capability_evidence_version: u32,
         efforts: Vec<Effort>,
     },
     #[serde(rename = "openai-chat-completions")]
@@ -144,7 +115,6 @@ enum ProfileEntry {
         outcome_encoding: OutcomeEncoding,
         privacy: Privacy,
         max_output_tokens: u32,
-        capability_evidence_version: u32,
         efforts: Vec<Effort>,
     },
 }
@@ -185,7 +155,7 @@ enum Privacy {
 pub(crate) const PROVIDER_PROFILES: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderProfiles,
     field: "version",
-    current: 2,
+    current: 3,
     accepts: |bytes| CustomProfile::parse_document(bytes).is_ok(),
 };
 
@@ -220,31 +190,15 @@ impl CustomProfile {
         Ok((bytes, profiles))
     }
 
-    pub fn check_limits(&self) -> (usize, std::time::Duration) {
-        (
-            3 + 2 * self.efforts.len(),
-            crate::provider::PROBE_TOTAL_DEADLINE,
-        )
-    }
-
-    pub async fn write_profiles(
+    pub fn write_profiles(
         state: &StateRoot,
         expected: Option<&[u8]>,
         profiles: &[CustomProfileDraft],
     ) -> Result<Vec<u8>, CustomProfileError> {
         let bytes = encode_profiles(profiles)?;
-        let _check_lock = state.lock_provider_check().map_err(|error| match error {
-            StoreError::ProviderCheckBusy => CustomProfileError::CheckBusy,
-            _ => CustomProfileError::EvidenceUnavailable,
-        })?;
         if Self::snapshot(state)?.as_deref() != expected {
             return Err(CustomProfileError::Changed);
         }
-        let old_profiles = expected
-            .map(Self::parse_document)
-            .transpose()?
-            .unwrap_or_default();
-        invalidate_profile_evidence(state, &old_profiles, profiles).await?;
         state
             .edit_provider_record(
                 crate::store::ProviderRecordTarget::Profiles,
@@ -292,7 +246,9 @@ impl CustomProfile {
                 .map_err(|_| CustomProfileError::InvalidConfiguration)?,
         )
         .map_err(|_| CustomProfileError::InvalidConfiguration)?;
-        if document.version != 2 || document.profiles.len() > MAX_PROFILES {
+        if u64::from(document.version) != PROVIDER_PROFILES.current
+            || document.profiles.len() > MAX_PROFILES
+        {
             return Err(CustomProfileError::InvalidConfiguration);
         }
         let mut names = HashSet::new();
@@ -328,7 +284,6 @@ impl CustomProfile {
                 outcome_encoding,
                 privacy,
                 max_output_tokens,
-                capability_evidence_version,
                 efforts,
             } => {
                 if !valid_endpoint(&endpoint) {
@@ -341,7 +296,6 @@ impl CustomProfile {
                         protocol: Protocol::OpenaiResponses,
                         model,
                         credential_env,
-                        capability_evidence_version,
                         efforts,
                     },
                     max_output_tokens,
@@ -359,7 +313,6 @@ impl CustomProfile {
                 outcome_encoding,
                 privacy,
                 max_output_tokens,
-                capability_evidence_version,
                 efforts,
             } => {
                 let (base_url, endpoint) =
@@ -371,7 +324,6 @@ impl CustomProfile {
                         protocol: Protocol::AnthropicMessages { base_url, auth },
                         model,
                         credential_env,
-                        capability_evidence_version,
                         efforts,
                     },
                     max_output_tokens,
@@ -389,7 +341,6 @@ impl CustomProfile {
                 outcome_encoding,
                 privacy,
                 max_output_tokens,
-                capability_evidence_version,
                 efforts,
             } => {
                 if auth != MessagesAuth::Bearer {
@@ -404,7 +355,6 @@ impl CustomProfile {
                         protocol: Protocol::OpenaiChatCompletions { base_url },
                         model,
                         credential_env,
-                        capability_evidence_version,
                         efforts,
                     },
                     max_output_tokens,
@@ -421,7 +371,6 @@ impl CustomProfile {
             || !profile.model.bytes().all(|byte| byte.is_ascii_graphic())
             || cap != CUSTOM_OUTPUT_TOKEN_CAP
             || encoding != expected
-            || profile.capability_evidence_version != 2
             || profile.efforts.len() > Effort::ALL.len()
             || profile
                 .efforts
@@ -465,64 +414,8 @@ impl CustomProfile {
         }
     }
 
-    pub async fn check_status(
-        &self,
-        state: &StateRoot,
-    ) -> Result<CustomCheckStatus, CustomProfileError> {
-        Self::check_statuses(state, std::slice::from_ref(self))
-            .await?
-            .into_iter()
-            .next()
-            .map(|(_, status)| status)
-            .ok_or(CustomProfileError::EvidenceUnavailable)
-    }
-
-    pub async fn check_statuses(
-        state: &StateRoot,
-        profiles: &[Self],
-    ) -> Result<Vec<(String, CustomCheckStatus)>, CustomProfileError> {
-        let store = crate::Store::open(
-            state
-                .try_clone()
-                .map_err(|_| CustomProfileError::EvidenceUnavailable)?,
-        )
-        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        let mut statuses = Vec::with_capacity(profiles.len());
-        for profile in profiles {
-            let evidence = store
-                .load_provider_evidence(profile.name.clone())
-                .await
-                .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-            let status = match evidence {
-                None => CustomCheckStatus::Unchecked,
-                Some(evidence) if evidence.digest == check::fingerprint(profile) => {
-                    CustomCheckStatus::VerifiedUntil(evidence.expires_at_ms)
-                }
-                Some(_) => CustomCheckStatus::Stale,
-            };
-            statuses.push((profile.name.clone(), status));
-        }
-        store
-            .close()
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        Ok(statuses)
-    }
-
     pub fn endpoint(&self) -> &str {
         &self.endpoint
-    }
-
-    pub fn check_destination(&self) -> String {
-        match self.protocol {
-            Protocol::OpenaiResponses => self.endpoint.clone(),
-            Protocol::AnthropicMessages { .. } => messages_endpoint(&self.endpoint)
-                .map(|(_, endpoint)| endpoint)
-                .unwrap_or_else(|| self.endpoint.clone()),
-            Protocol::OpenaiChatCompletions { .. } => chat_completions_endpoint(&self.endpoint)
-                .map(|(_, endpoint)| endpoint)
-                .unwrap_or_else(|| self.endpoint.clone()),
-        }
     }
 
     pub fn model(&self) -> &str {
@@ -541,12 +434,44 @@ impl CustomProfile {
         &self.efforts
     }
 
-    pub fn capability_evidence_version(&self) -> u32 {
-        self.capability_evidence_version
-    }
-
     pub fn admits_effort(&self, effort: Option<Effort>) -> bool {
         effort.is_none_or(|value| self.efforts.contains(&value))
+    }
+
+    // Binds every declared field, so Run provenance names the exact admitted declaration.
+    fn digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let (protocol, base, auth) = match &self.protocol {
+            Protocol::OpenaiResponses => ("openai-responses", "", "bearer"),
+            Protocol::AnthropicMessages { base_url, auth } => (
+                "anthropic-messages",
+                base_url.as_str(),
+                match auth {
+                    MessagesAuth::Bearer => "bearer",
+                    MessagesAuth::ApiKey => "x-api-key",
+                },
+            ),
+            Protocol::OpenaiChatCompletions { base_url } => {
+                ("openai-chat-completions", base_url.as_str(), "bearer")
+            }
+        };
+        let mut digest = Sha256::new();
+        for field in [
+            self.name.as_str(),
+            &self.endpoint,
+            &self.model,
+            &self.credential_env,
+            protocol,
+            base,
+            auth,
+        ]
+        .into_iter()
+        .chain(self.efforts.iter().map(|effort| effort.as_str()))
+        {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+        digest.finalize().into()
     }
 }
 
@@ -569,84 +494,15 @@ fn encode_profiles(profiles: &[CustomProfileDraft]) -> Result<Vec<u8>, CustomPro
         .iter()
         .map(CustomProfileDraft::to_value)
         .collect::<Vec<_>>();
-    let bytes = serde_json::to_vec(&serde_json::json!({"version": 2, "profiles": entries}))
-        .map_err(|_| CustomProfileError::InvalidConfiguration)?;
+    let bytes = serde_json::to_vec(
+        &serde_json::json!({"version": PROVIDER_PROFILES.current, "profiles": entries}),
+    )
+    .map_err(|_| CustomProfileError::InvalidConfiguration)?;
     CustomProfile::parse_document(&bytes)?;
     Ok(bytes)
 }
 
-async fn invalidate_profile_evidence(
-    state: &StateRoot,
-    old_profiles: &[CustomProfile],
-    profiles: &[CustomProfileDraft],
-) -> Result<(), CustomProfileError> {
-    let mut invalidated = HashSet::new();
-    for old in old_profiles {
-        if profiles
-            .iter()
-            .find(|new| new.name == old.name())
-            .is_none_or(|new| !new.matches(old))
-        {
-            invalidated.insert(old.name().to_owned());
-        }
-    }
-    for new in profiles {
-        if old_profiles
-            .iter()
-            .find(|old| old.name() == new.name)
-            .is_none_or(|old| !new.matches(old))
-        {
-            invalidated.insert(new.name.clone());
-        }
-    }
-    if invalidated.is_empty() {
-        return Ok(());
-    }
-    let mut store = crate::Store::open(
-        state
-            .try_clone()
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?,
-    )
-    .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-    for name in invalidated {
-        store
-            .clear_provider_evidence(name)
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-    }
-    store
-        .close()
-        .await
-        .map_err(|_| CustomProfileError::EvidenceUnavailable)
-}
-
 impl CustomProfileDraft {
-    fn matches(&self, profile: &CustomProfile) -> bool {
-        let protocol_matches = match (&self.protocol, &profile.protocol) {
-            (CustomProtocol::OpenaiResponses, Protocol::OpenaiResponses) => {
-                self.endpoint == profile.endpoint
-            }
-            (CustomProtocol::AnthropicMessages, Protocol::AnthropicMessages { base_url, auth }) => {
-                messages_endpoint(&self.endpoint).is_some_and(|(base, _)| &base == base_url)
-                    && self.messages_auth == *auth
-            }
-            (
-                CustomProtocol::OpenaiChatCompletions,
-                Protocol::OpenaiChatCompletions { base_url },
-            ) => {
-                self.messages_auth == MessagesAuth::Bearer
-                    && chat_completions_endpoint(&self.endpoint)
-                        .is_some_and(|(base, _)| &base == base_url)
-            }
-            _ => false,
-        };
-        protocol_matches
-            && self.name == profile.name
-            && self.model == profile.model
-            && self.credential_env == profile.credential_env
-            && self.efforts == profile.efforts
-    }
-
     fn to_value(&self) -> serde_json::Value {
         let common = serde_json::json!({
             "name": self.name,
@@ -654,7 +510,6 @@ impl CustomProfileDraft {
             "credential_env": self.credential_env,
             "privacy": "user_authorized",
             "max_output_tokens": CUSTOM_OUTPUT_TOKEN_CAP,
-            "capability_evidence_version": 2,
             "efforts": self.efforts,
         });
         match self.protocol {
@@ -776,7 +631,14 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const VALID: &str = r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
+    const VALID_PROFILES: &str = r#"[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"efforts":[]}]"#;
+
+    fn valid() -> String {
+        format!(
+            r#"{{"version":{},"profiles":{VALID_PROFILES}}}"#,
+            PROVIDER_PROFILES.current
+        )
+    }
 
     fn state_with_file(temp: &Path, body: &[u8]) -> StateRoot {
         let state = StateRoot::admit(&temp.join("state")).expect("private state root");
@@ -793,7 +655,7 @@ mod tests {
     #[test]
     fn named_profiles_require_private_files_and_exact_closed_configuration() {
         let temp = tempfile::tempdir().expect("private test root");
-        let state = state_with_file(temp.path(), VALID.as_bytes());
+        let state = state_with_file(temp.path(), valid().as_bytes());
         let profile = CustomProfile::load_named(&state, "local").expect("valid profile");
         assert_eq!(profile.name(), "local");
         assert_eq!(profile.endpoint(), "http://127.0.0.1:9321/v1/responses");
@@ -805,7 +667,7 @@ mod tests {
             Err(CustomProfileError::NotFound)
         ));
 
-        let messages = VALID
+        let messages = valid()
             .replace("openai-responses", "anthropic-messages")
             .replace(
                 "\"endpoint\":\"http://127.0.0.1:9321/v1/responses\"",
@@ -817,7 +679,7 @@ mod tests {
             parsed[0].endpoint(),
             "https://example.com/anthropic/v1/messages"
         );
-        let mut routes = serde_json::json!({"version":2,"profiles":[]});
+        let mut routes = serde_json::json!({"version":PROVIDER_PROFILES.current,"profiles":[]});
         for (name, base, endpoint, model, auth, credential) in [
             (
                 "kimi-api",
@@ -886,7 +748,7 @@ mod tests {
                 CustomProfile::parse_document(&serde_json::to_vec(&conflicting).unwrap()).is_err()
             );
         }
-        std::fs::write(state.path().join("provider-profiles.json"), VALID).unwrap();
+        std::fs::write(state.path().join("provider-profiles.json"), valid()).unwrap();
         for base in [
             "https://example.com",
             "https://example.com/",
@@ -980,15 +842,15 @@ mod tests {
                 "\"auth\":\"x-api-key\"",
                 "\"auth\":\"x-api-key\",\"auth\":\"bearer\"",
             ),
-            VALID.replace(
+            valid().replace(
                 "\"model\":",
                 "\"base_url\":\"https://example.com\",\"model\":",
             ),
-            VALID.replace("\"model\":", "\"auth\":\"bearer\",\"model\":"),
+            valid().replace("\"model\":", "\"auth\":\"bearer\",\"model\":"),
         ] {
             assert!(CustomProfile::parse_document(invalid.as_bytes()).is_err());
         }
-        let mut mixed: serde_json::Value = serde_json::from_str(VALID).unwrap();
+        let mut mixed: serde_json::Value = serde_json::from_str(&valid()).unwrap();
         let mut other: serde_json::Value = serde_json::from_str(&messages).unwrap();
         other["profiles"][0]["name"] = "messages".into();
         mixed["profiles"]
@@ -1000,12 +862,11 @@ mod tests {
         assert!(CustomProfile::parse_document(&serde_json::to_vec(&mixed).unwrap()).is_ok());
 
         let replacements = [
-            ("version", "\"version\":3"),
+            ("version", "\"version\":0"),
             ("protocol", "\"protocol\":\"openai-chat-completions\""),
             ("encoding", "\"outcome_encoding\":\"json_mode\""),
             ("privacy", "\"privacy\":\"provider_zdr\""),
             ("cap", "\"max_output_tokens\":8192"),
-            ("evidence", "\"capability_evidence_version\":1"),
             ("credential", "\"credential_env\":\"OPENAI_API_KEY\""),
             (
                 "metadata address",
@@ -1023,17 +884,18 @@ mod tests {
                 "noncanonical host",
                 "\"endpoint\":\"https://EXAMPLE.com/v1/responses\"",
             ),
-            ("unknown field", "\"version\":2,\"unexpected\":true"),
+            ("unknown field", "\"unexpected\":true,\"profiles\":"),
             ("invalid name", "\"name\":\"OpenAI\""),
         ];
+        let current = format!("\"version\":{}", PROVIDER_PROFILES.current);
         for (case, replacement) in replacements {
             let original = match case {
-                "version" | "unknown field" => "\"version\":2",
+                "version" => current.as_str(),
+                "unknown field" => "\"profiles\":",
                 "protocol" => "\"protocol\":\"openai-responses\"",
                 "encoding" => "\"outcome_encoding\":\"json_schema\"",
                 "privacy" => "\"privacy\":\"user_authorized\"",
                 "cap" => "\"max_output_tokens\":4096",
-                "evidence" => "\"capability_evidence_version\":2",
                 "credential" => "\"credential_env\":\"ARANY_PROVIDER_LOCAL_KEY\"",
                 "metadata address" | "plaintext domain" | "query" | "noncanonical host" => {
                     "\"endpoint\":\"http://127.0.0.1:9321/v1/responses\""
@@ -1041,8 +903,8 @@ mod tests {
                 "invalid name" => "\"name\":\"local\"",
                 _ => unreachable!(),
             };
-            let invalid = VALID.replace(original, replacement);
-            assert_ne!(invalid, VALID, "{case} fixture must change");
+            let invalid = valid().replace(original, replacement);
+            assert_ne!(invalid, valid(), "{case} fixture must change");
             std::fs::write(state.path().join("provider-profiles.json"), invalid)
                 .expect("replace profile file");
             assert!(
@@ -1054,7 +916,7 @@ mod tests {
             );
         }
 
-        let mut versioned: serde_json::Value = serde_json::from_str(VALID).unwrap();
+        let mut versioned: serde_json::Value = serde_json::from_str(&valid()).unwrap();
         for (efforts, valid) in [
             (serde_json::json!(["low", "high"]), true),
             (serde_json::json!([]), true),
@@ -1076,22 +938,10 @@ mod tests {
                     !profile.efforts().is_empty()
                 );
                 assert!(!profile.admits_effort(Some(Effort::Max)));
-                assert_eq!(profile.capability_evidence_version(), 2);
             }
         }
-        versioned["profiles"][0]["capability_evidence_version"] = serde_json::json!(1);
-        versioned["profiles"][0]["efforts"] = serde_json::json!([]);
-        std::fs::write(
-            state.path().join("provider-profiles.json"),
-            serde_json::to_vec(&versioned).unwrap(),
-        )
-        .unwrap();
-        assert!(matches!(
-            CustomProfile::load_named(&state, "local"),
-            Err(CustomProfileError::InvalidConfiguration)
-        ));
 
-        let mut document: serde_json::Value = serde_json::from_str(VALID).expect("valid JSON");
+        let mut document: serde_json::Value = serde_json::from_str(&valid()).expect("valid JSON");
         let first = document["profiles"][0].clone();
         document["profiles"]
             .as_array_mut()
@@ -1163,7 +1013,6 @@ mod tests {
             efforts: Vec::new(),
         };
         let written = CustomProfile::write_profiles(&state, None, &[draft])
-            .await
             .expect("write validated custom profile");
         assert_eq!(
             CustomProfile::parse_document(&written).expect("written profiles parse")[0].name(),
@@ -1189,142 +1038,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_profile_edit_and_restore_cannot_reuse_old_evidence() {
-        use crate::provider::evidence::ProviderEvidenceRecord;
-
-        let temp = tempfile::tempdir().expect("private test root");
-        let state = StateRoot::admit(&temp.path().join("state")).expect("private state root");
-        let original = CustomProfile::write_profiles(&state, None, &[local_draft("model-1")])
-            .await
-            .expect("write original profile");
-        let now = i64::try_from(crate::tools::now_ms()).expect("time fits signed Event range");
-        let store =
-            crate::Store::open(state.try_clone().expect("clone StateRoot")).expect("open Store");
-        store
-            .record_provider_evidence(ProviderEvidenceRecord {
-                name: "local".into(),
-                digest: [42; 32],
-                addresses: vec!["127.0.0.1:80".parse().expect("socket address")],
-                checked_at_ms: now,
-                expires_at_ms: now + 60_000,
-            })
-            .await
-            .expect("seed evidence");
-        store.close().await.expect("close Store");
-
-        let changed =
-            CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-2")])
-                .await
-                .expect("edit profile");
-        assert!(load_evidence(&state, "local").await.is_none());
-        let restored =
-            CustomProfile::write_profiles(&state, Some(&changed), &[local_draft("model-1")])
-                .await
-                .expect("restore profile");
-        assert_eq!(restored, original);
-        assert!(load_evidence(&state, "local").await.is_none());
-        CustomProfile::write_profiles(&state, Some(&restored), &[])
-            .await
-            .expect("remove profile");
-        assert!(load_evidence(&state, "local").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn stale_profile_editor_preserves_current_check_evidence() {
-        use crate::provider::evidence::ProviderEvidenceRecord;
-
-        let temp = tempfile::tempdir().expect("private test root");
-        let state = StateRoot::admit(&temp.path().join("state")).expect("private state root");
-        let first = CustomProfile::write_profiles(&state, None, &[local_draft("model-1")])
-            .await
-            .expect("write original profile");
-        let current =
-            CustomProfile::write_profiles(&state, Some(&first), &[local_draft("model-2")])
-                .await
-                .expect("write editor update");
-        let profile = CustomProfile::load_named(&state, "local").expect("current profile");
-        let now = i64::try_from(crate::tools::now_ms()).expect("time fits signed Event range");
-        let store =
-            crate::Store::open(state.try_clone().expect("clone StateRoot")).expect("open Store");
-        store
-            .record_provider_evidence(ProviderEvidenceRecord {
-                name: "local".into(),
-                digest: check::fingerprint(&profile),
-                addresses: vec!["127.0.0.1:80".parse().expect("socket address")],
-                checked_at_ms: now,
-                expires_at_ms: now + 60_000,
-            })
-            .await
-            .expect("seed current evidence");
-        store.close().await.expect("close Store");
-
-        assert!(matches!(
-            CustomProfile::write_profiles(&state, Some(&first), &[local_draft("model-3")]).await,
-            Err(CustomProfileError::Changed)
-        ));
-        assert_eq!(
-            CustomProfile::snapshot(&state)
-                .expect("read profiles")
-                .as_deref(),
-            Some(current.as_slice())
-        );
-        assert_eq!(
-            load_evidence(&state, "local")
-                .await
-                .expect("current evidence")
-                .digest,
-            check::fingerprint(&profile)
-        );
-    }
-
-    async fn load_evidence(
-        state: &StateRoot,
-        name: &str,
-    ) -> Option<crate::provider::evidence::ProviderEvidenceRecord> {
-        let store =
-            crate::Store::open(state.try_clone().expect("clone StateRoot")).expect("open Store");
-        let evidence = store
-            .load_provider_evidence(name.to_owned())
-            .await
-            .expect("load evidence");
-        store.close().await.expect("close Store");
-        evidence
-    }
-
-    #[tokio::test]
-    async fn custom_profile_edits_refuse_during_a_check_lease() {
-        let temp = tempfile::tempdir().expect("private test root");
-        let state = StateRoot::admit(&temp.path().join("state")).expect("private state root");
-        let original = CustomProfile::write_profiles(&state, None, &[local_draft("model-1")])
-            .await
-            .expect("write original profile");
-        let _check = state.lock_provider_check().expect("acquire check lease");
-        assert!(matches!(
-            CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-2")]).await,
-            Err(CustomProfileError::CheckBusy)
-        ));
-        assert_eq!(
-            state
-                .record(RecordKind::ProviderProfiles)
-                .read()
-                .expect("read profile"),
-            Some(original)
-        );
-    }
-
-    #[tokio::test]
     async fn custom_profile_stale_editor_cannot_overwrite_newer_snapshot() {
         let temp = tempfile::tempdir().expect("private test root");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private state root");
         let original = CustomProfile::write_profiles(&state, None, &[local_draft("model-1")])
-            .await
             .expect("write initial profile");
         let newer =
             CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-2")])
-                .await
                 .expect("write concurrent editor");
         assert!(matches!(
-            CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-3")]).await,
+            CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-3")]),
             Err(CustomProfileError::Changed)
         ));
         assert_eq!(CustomProfile::snapshot(&state).unwrap(), Some(newer));
@@ -1335,14 +1058,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("private test root");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private state root");
         let original = CustomProfile::write_profiles(&state, None, &[local_draft("model-1")])
-            .await
             .expect("write original profile");
         crate::fault::FaultPlan::fail_record_sync(
             state.path().to_path_buf(),
             "provider-profiles.json",
         );
         assert!(matches!(
-            CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-2")]).await,
+            CustomProfile::write_profiles(&state, Some(&original), &[local_draft("model-2")]),
             Err(CustomProfileError::PublicationUncertain)
         ));
         let current = state
@@ -1354,48 +1076,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_profiles_from_another_version_are_refused_unchanged() {
-        let temp = tempfile::tempdir().unwrap();
-        let v1 = VALID.replace("\"version\":2", "\"version\":1");
-        let state = state_with_file(temp.path(), v1.as_bytes());
-        assert!(PROVIDER_PROFILES.mismatched(v1.as_bytes()));
-        assert!(CustomProfile::load_named(&state, "local").is_err());
-        let path = state.path().to_path_buf();
-        assert_eq!(
-            std::fs::read(path.join("provider-profiles.json")).unwrap(),
-            v1.as_bytes()
-        );
-        assert!(CustomProfile::parse_document(v1.as_bytes()).is_err());
-        let messages = VALID
-            .replace("openai-responses", "anthropic-messages")
-            .replace(
-                "\"endpoint\":\"http://127.0.0.1:9321/v1/responses\"",
-                "\"base_url\":\"https://example.com/anthropic\",\"auth\":\"x-api-key\"",
-            )
-            .replace("json_schema", "native_tools");
-        assert!(CustomProfile::parse_document(messages.as_bytes()).is_ok());
-        for invalid in [
-            v1.replace("json_schema", "native_tools"),
-            v1.replace("\"version\":1", "\"version\":1,\"version\":1"),
-            messages.replace("\"version\":2", "\"version\":1"),
-            VALID.replace("\"version\":2", "\"version\":3"),
-            VALID.replace("json_schema", "native_tools"),
-        ] {
-            std::fs::write(path.join("provider-profiles.json"), &invalid).unwrap();
-            assert!(CustomProfile::load_named(&state, "local").is_err());
-            assert_eq!(
-                std::fs::read(path.join("provider-profiles.json")).unwrap(),
-                invalid.as_bytes()
-            );
-        }
-    }
-
-    #[test]
     fn profile_file_rejects_links_public_modes_and_oversize() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let temp = tempfile::tempdir().expect("private test root");
-        let state = state_with_file(temp.path(), VALID.as_bytes());
+        let state = state_with_file(temp.path(), valid().as_bytes());
         let profile_path = state.path().join("provider-profiles.json");
 
         std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o644))
@@ -1428,7 +1113,7 @@ mod tests {
 
     #[test]
     fn chat_completions_profile_derives_endpoint_and_rejects_noncanonical_bases() {
-        let profile = VALID
+        let profile = valid()
             .replace("openai-responses", "openai-chat-completions")
             .replace(
                 "\"endpoint\":\"http://127.0.0.1:9321/v1/responses\"",

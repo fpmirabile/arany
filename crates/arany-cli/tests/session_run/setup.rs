@@ -43,8 +43,8 @@ mod custom;
 mod offline_https;
 
 #[cfg(debug_assertions)]
-#[path = "setup/checks.rs"]
-mod checks;
+#[path = "setup/manager.rs"]
+mod manager;
 
 #[cfg(debug_assertions)]
 #[path = "setup/routing.rs"]
@@ -86,7 +86,7 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 3,
+        "schema": 4,
         "selected": account_id,
         "accounts": [{
             "id": account_id,
@@ -98,7 +98,7 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
             "storage": "keyring",
             "renewal_pending": false, "signout_pending": false,
             "disconnected": false, "plan_permission_missing": false, "token": null
-        }], "model_checks": []
+        }]
     });
     state
         .record(RecordKind::ChatgptAccounts)
@@ -1051,7 +1051,6 @@ fn configured_unsaved_conversation_survives_custom_save_and_back() {
         "retained setup answer",
         super::loopback::HeldResponseKind::Buffered,
     );
-    super::loopback::check_profile(&workspace, &state);
     let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Configured);
     assert_retained_setup_conversation(&state, &workspace, None);
     let routes_at = pty.transcript.len();

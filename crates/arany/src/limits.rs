@@ -12,11 +12,10 @@ use crate::{
         MAX_STEP_TOOL_CALLS, MAX_USER_MESSAGE_BYTES, MAX_WINDOW_CONTENT_BYTES,
     },
     store::{
-        MAX_COMPACTION_EVENT_BYTES, MAX_DISCOVERED_SESSIONS, MAX_EVENT_BYTES, MAX_EVIDENCE_AGE_MS,
-        MAX_EVIDENCE_ROWS, MAX_GOAL_FINISHED_BYTES, MAX_GOAL_STARTED_BYTES,
-        MAX_HOT_SESSION_PAYLOAD_BYTES, MAX_LIST_SCAN_EVENTS, MAX_MESSAGE_ACCEPTED_BYTES,
-        MAX_NATIVE_EVIDENCE_ROWS, MAX_SESSION_EVENTS, MAX_TOOL_FINISHED_BYTES,
-        MAX_TOOL_STARTED_BYTES,
+        MAX_COMPACTION_EVENT_BYTES, MAX_DISCOVERED_SESSIONS, MAX_EVENT_BYTES,
+        MAX_GOAL_FINISHED_BYTES, MAX_GOAL_STARTED_BYTES, MAX_HOT_SESSION_PAYLOAD_BYTES,
+        MAX_LIST_SCAN_EVENTS, MAX_MESSAGE_ACCEPTED_BYTES, MAX_SESSION_EVENTS,
+        MAX_TOOL_FINISHED_BYTES, MAX_TOOL_STARTED_BYTES,
     },
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
@@ -318,24 +317,6 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: MAX_TOOL_FINISHED_BYTES as u64,
             unit: "bytes",
             owner: "crates/arany/src/store.rs",
-        },
-        Limit {
-            name: "MAX_EVIDENCE_ROWS",
-            value: MAX_EVIDENCE_ROWS as u64,
-            unit: "custom Provider rows",
-            owner: "crates/arany/src/store/evidence.rs",
-        },
-        Limit {
-            name: "MAX_NATIVE_EVIDENCE_ROWS",
-            value: MAX_NATIVE_EVIDENCE_ROWS as u64,
-            unit: "native Provider rows",
-            owner: "crates/arany/src/store/evidence.rs",
-        },
-        Limit {
-            name: "MAX_EVIDENCE_AGE_MS",
-            value: MAX_EVIDENCE_AGE_MS as u64,
-            unit: "ms",
-            owner: "crates/arany/src/store/evidence.rs",
         },
         Limit {
             name: "MAX_DISCOVERED_SESSIONS",

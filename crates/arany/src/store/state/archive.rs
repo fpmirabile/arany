@@ -455,9 +455,7 @@ mod tests {
         std::fs::set_permissions(&checkpoints, std::fs::Permissions::from_mode(0o600)).unwrap();
         rusqlite::Connection::open(path.join(DATABASE_FILE))
             .unwrap()
-            .execute_batch(
-                "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
-            )
+            .execute_batch("UPDATE events SET kind = 'ToolPermissionDecided' WHERE sequence = 1")
             .unwrap();
         std::fs::read(path.join(DATABASE_FILE)).unwrap()
     }

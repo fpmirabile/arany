@@ -266,10 +266,9 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
             started(intent.digest(), &hook_intent),
             finished(hook_observation.clone(), deny.clone()),
         ] {
-            let version = event.version();
             let payload = event.payload().unwrap();
             assert_eq!(
-                Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
+                Event::decode(event.kind(), &payload, Some(run), Some(agent)).unwrap(),
                 event
             );
         }
@@ -418,18 +417,6 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
             .payload()
             .is_err()
         );
-        let payload = verdict(
-            Decision::Deny,
-            Some(Decision::Deny),
-            1,
-            PermissionSource::Hook,
-        )
-        .payload()
-        .unwrap();
-        assert!(matches!(
-            Event::decode("ToolStarted", 2, &payload, Some(run), Some(agent)),
-            Err(ReplayError::UnknownEvent)
-        ));
 
         // An unknown hook outcome stops the Run exactly like an uncertain Tool.
         let mut uncertain = observation_for(hook_intent.clone(), b"");
@@ -1888,14 +1875,7 @@ fn unknown_command_rewrite_stops_the_primary_and_never_reuses_the_hook() {
     let mut observation = observation_for(hook.intent.clone(), b"");
     let payload = start.payload().unwrap();
     assert_eq!(
-        Event::decode(
-            start.kind(),
-            start.version(),
-            &payload,
-            Some(run),
-            Some(agent)
-        )
-        .unwrap(),
+        Event::decode(start.kind(), &payload, Some(run), Some(agent)).unwrap(),
         start
     );
     apply(&mut view, start.clone()).unwrap();

@@ -6,7 +6,6 @@ use std::{
     net::TcpStream,
     os::unix::fs::PermissionsExt,
     path::Path,
-    process::{Command, Stdio},
 };
 use std::{
     process::{Child, Output},
@@ -107,7 +106,7 @@ pub(super) fn read_request_within(
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[cfg(target_os = "linux")]
 pub(super) fn assert_compaction_request(request: &serde_json::Value) {
     for field in [
         "text",
@@ -233,7 +232,7 @@ pub(super) fn responses_stream(mut response: serde_json::Value) -> String {
 pub(super) fn write_profile(state: &Path, port: u16) {
     StateRoot::admit(state).expect("state root");
     let profile = serde_json::json!({
-        "version": 2,
+        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
         "profiles": [{
             "name": "local",
             "protocol": "openai-responses",
@@ -243,7 +242,7 @@ pub(super) fn write_profile(state: &Path, port: u16) {
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
-            "capability_evidence_version": 2, "efforts": []
+            "efforts": []
         }]
     });
     let path = state.join("provider-profiles.json");
@@ -253,34 +252,7 @@ pub(super) fn write_profile(state: &Path, port: u16) {
         .expect("private profile file");
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-pub(super) fn check_profile(workspace: &Path, state: &Path) {
-    check_profile_with_binary(workspace, state, Path::new(env!("CARGO_BIN_EXE_arany")));
-}
-
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-pub(super) fn check_profile_with_binary(workspace: &Path, state: &Path, executable: &Path) {
-    let mut command = Command::new(executable);
-    command
-        .env_clear()
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .current_dir(workspace)
-        .args(["provider", "check", "local", "--state-dir"])
-        .arg(state)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let result = wait_product(command.spawn().expect("provider check process"));
-    assert!(result.status.success(), "data-free custom conformance");
-    assert_eq!(
-        crate::check_output(&result.stdout, state, arany::CheckDisposition::Succeeded),
-        b"Provider: local\nStatus: custom verified\n"
-    );
-    assert_eq!(result.stderr, b"");
-}
-
-// Answers the provider check (calls 0-2), then streams the Run's call up to its text delta and
-// holds the rest until released.
+// Streams the Run's call up to its text delta and holds the rest until released.
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) struct HeldStream {
     pub(super) streaming: std::sync::mpsc::Receiver<()>,
@@ -323,18 +295,6 @@ pub(super) fn held_provider(
         let accept = |context| {
             super::process::accept_with_deadline(&listener, Duration::from_secs(30), context)
         };
-        for index in 0..3 {
-            let mut stream = accept("provider check request");
-            read_request(&mut stream);
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                _ => serde_json::json!(r#"synthetic summary"#),
-            };
-            send_response(&mut stream, index, text);
-        }
         let mut stream = accept("held Run request");
         let remaining = begin_held_response(&mut stream, answer, kind);
         streaming_sender.send(()).expect("streaming gate");

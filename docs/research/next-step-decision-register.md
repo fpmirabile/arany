@@ -356,8 +356,10 @@ separate from conversation Sessions. Reusing its checked opening, thread,
 transactions and migration owner avoids fabricated Runs or a second database.
 A pure reducer and evidence linkage make crash prefixes inspectable without
 retrying paid requests or treating an old cache row as proof. Custom/native
-behavior and bounds live in [Provider](../specs/provider.md#commands) and
-[Execution](../specs/execution.md#standalone-provider-checks).
+behavior and bounds lived in Provider and Execution. Superseded on 2026-10-29:
+the owner removed every conformance pre-check, so Arany sends no paid request the
+user did not ask for and validates each real response instead
+([Provider](../specs/provider.md#custom-destinations-and-routing)).
 
 The plan's scoped primary-source review on 2026-10-22 found direct probes and
 protocol qualification: [Claude gateway verification](https://code.claude.com/docs/en/llm-gateway-connect#verify-the-connection)

@@ -176,31 +176,6 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
             assert!(!format!("{:?}", requests[0]).contains(reason));
         }
         engine.close().await.unwrap();
-        let database = state.join("events.sqlite3");
-        let connection = rusqlite::Connection::open(&database).unwrap();
-        let version: i64 = connection
-            .query_row(
-                "SELECT event_version FROM events WHERE kind='HookFinished'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, outcome.version());
-        assert_eq!(
-            connection
-                .execute(
-                    "UPDATE events SET event_version=8 WHERE kind='HookFinished'",
-                    []
-                )
-                .unwrap(),
-            1
-        );
-        drop(connection);
-        let before = std::fs::read(&database).unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-        assert!(store.load_view(result.session_id).await.is_err());
-        store.close().await.unwrap();
-        assert_eq!(std::fs::read(&database).unwrap(), before);
     }
 }
 

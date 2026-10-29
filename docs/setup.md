@@ -99,7 +99,7 @@ to finish selection. Cancellation does not roll back a saved account or a token
 refresh already started.
 
 If plan permission is disabled, `/setup` → Enable plan explicitly requests it for
-the same registration and identity. No catalog, check or Run can use the disabled
+the same registration and identity. No catalog or Run can use the disabled
 account. Arany never switches to API billing automatically. Anthropic consumer
 subscriptions remain unsupported; Anthropic API keys use separate billing.
 
@@ -170,11 +170,11 @@ Unix). Each profile names one `ARANY_PROVIDER_*` environment key; supply it
 privately in Arany's launching environment. Native accounts, workspace headers,
 other vendors' keys and other clients' OAuth identities never supply its
 credentials, and Arany always identifies itself as `arany/<version>`. A profile
-file from another version is archived at startup; recreate the profiles and check
-them again.
+file from another version is archived at startup; recreate the profiles.
 
-Every route must pass its exact [text-compaction conformance check](./specs/provider.md#custom-destinations-and-routing)
-before use; each model needs its own check.
+Arany runs no conformance pre-check: like Claude Code, Codex CLI and OpenCode, it
+sends no request you did not ask for, and every Run validates each real response
+([custom routes](./specs/provider.md#custom-destinations-and-routing)).
 If AI Tool review is needed, select a native review route in
 [provider-routing.json](./specs/provider.md#per-role-selection-and-fallback);
 text compaction does not attest a strict review verdict.
@@ -185,7 +185,7 @@ accept the Bearer credential and use its exact model ID:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "profiles": [{
     "name": "local",
     "protocol": "openai-chat-completions",
@@ -196,23 +196,20 @@ accept the Bearer credential and use its exact model ID:
     "outcome_encoding": "json_schema",
     "privacy": "user_authorized",
     "max_output_tokens": 4096,
-    "capability_evidence_version": 2,
     "efforts": []
   }]
 }
 ```
 
-Check the route, then use it with the matching model ID only after the check succeeds:
+Use it with the matching model ID:
 
 ```sh
-arany provider check custom:local --state-dir STATE
 arany exec --state-dir STATE --provider custom:local --model MODEL_ID "Your task"
 ```
 
 Chat Completions routes append `/chat/completions` to `base_url`; Anthropic
 Messages routes append `/v1/messages`. `efforts: []` omits the effort override
-(`reasoning_effort` for Chat Completions). Explicit efforts each need their own
-conformance; Arany never inherits Claude defaults or translates unsupported
+(`reasoning_effort` for Chat Completions). Arany never inherits Claude defaults or translates unsupported
 values. Vendor profiles keep the remaining fields of the example above and change
 these:
 
@@ -227,22 +224,21 @@ these:
 Vendor notes:
 
 - **DeepSeek.** API keys only; no DeepSeek subscription route is included.
-- **Kimi platform.** Explicit platform efforts `["low", "high", "max"]` each need
-  their own conformance.
+- **Kimi platform.** Explicit platform efforts are `["low", "high", "max"]`.
 - **Kimi Code.** Its console keys belong to a separate subscription service and
-  billing route; it needs its own check and subscription entitlement, and platform
-  compatibility does not establish Code support. It sends to
+  billing route; it needs its subscription entitlement, and platform compatibility
+  does not establish Code support. It sends to
   `https://api.kimi.com/coding/v1/messages`; keep `.com` unless the owner
   explicitly selects another region, and confirm the tier-visible model and billing
   settings first. Other Code candidates (`k3`, `kimi-for-coding`,
-  `kimi-for-coding-highspeed`) each need their own check; a mistyped HighSpeed ID
+  `kimi-for-coding-highspeed`) need their exact model ID; a mistyped HighSpeed ID
   can select another model. An entitlement failure can return 401 and never selects
   a platform key or another billing route. Arany never impersonates kimi-cli or
   reuses its OAuth client or registration.
 - **GLM Standard API.** Use only a newly issued, console-classified **Standard API
   Key** and confirm account-balance or standard-bundle billing first. Reject
   pre-update **Compatible** keys: they can consume Coding Plan quota at this same
-  endpoint. Key type cannot be inferred from key bytes or a successful check; the
+  endpoint. Key type cannot be inferred from key bytes or a successful Run; the
   owner must verify its console classification. The
   [key-management guide](https://docs.z.ai/devpack/notice/api-key-management.md)
   explains the October 16, 2026 billing split. Ordinary Messages text needs no
@@ -285,21 +281,8 @@ These commands use only the selected consented OS-user ChatGPT account; they
 never fall back to `OPENAI_API_KEY`. A catalog read may refresh a near-expiry
 token. A Run revalidates account identity and consent before Workspace input.
 
-Compatibility checks are optional for ordinary native/ChatGPT Runs and can
-consume usage. Only after choosing the account/model and accepting that cost:
-
-```sh
-arany provider check chatgpt MODEL_ID --effort high --accept-cost
-arany provider check openai MODEL_ID --effort high --accept-cost
-```
-
-The native command uses the environment key; `--saved-account` explicitly selects
-the saved native account instead. ChatGPT always uses its selected consented
-account. Each check makes at most three synthetic calls and sends no Workspace
-content. ChatGPT's output cap is local acceptance only; failure or cancellation
-does not prove remote usage stopped. Checks do not authorize fallback, retries or
-broader disclosure. Exact custom profiles have their own mandatory conformance
-admission under [Provider spec](./specs/provider.md).
+There is no compatibility check: each Run validates the real response and fails
+with an actionable notice when the model's reply does not fit the contract.
 
 ## Resume and inspect results
 

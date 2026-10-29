@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
-    use super::loopback::{check_profile, read_request, send_response, write_profile};
+    use super::loopback::{read_request, send_response, write_profile};
     use sha2::Digest;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -34,33 +34,19 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
         })
         .collect::<Vec<_>>();
     let peer = thread::spawn(move || {
-        for index in 0..4 {
-            let mut stream = crate::process::accept_with_deadline(
-                &listener,
-                Duration::from_secs(20),
-                "directory mention request",
-            );
-            let wire: serde_json::Value =
-                serde_json::from_slice(&read_request(&mut stream)).unwrap();
-            if index == 3 {
-                let input = crate::semantic::input(&wire);
-                assert_eq!(input["objective"], draft);
-                assert_eq!(input["includes"], serde_json::json!(expected));
-                assert!(!wire.to_string().contains("FILE_BODY_CANARY"));
-                assert!(!wire.to_string().contains("NESTED_BODY_CANARY"));
-            }
-            let answer = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!("synthetic summary"),
-                _ => serde_json::json!("Directory listed."),
-            };
-            send_response(&mut stream, index, answer);
-        }
+        let mut stream = crate::process::accept_with_deadline(
+            &listener,
+            Duration::from_secs(20),
+            "directory mention request",
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&read_request(&mut stream)).unwrap();
+        let input = crate::semantic::input(&wire);
+        assert_eq!(input["objective"], draft);
+        assert_eq!(input["includes"], serde_json::json!(expected));
+        assert!(!wire.to_string().contains("FILE_BODY_CANARY"));
+        assert!(!wire.to_string().contains("NESTED_BODY_CANARY"));
+        send_response(&mut stream, 0, serde_json::json!("Directory listed."));
     });
-    check_profile(&workspace, &state);
     let shell = r#"printf 'SHELL_PID:%s\n' "$$"; "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --resume "$ARANY_TEST_SESSION" --provider custom:local --model model-1"#;
     let mut command = crate::isolation::account_isolated_script(temp.path());
     command
@@ -2301,13 +2287,13 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     }
     let profile_path = state.join("provider-profiles.json");
     let mut profile = serde_json::json!({
-        "version": 2,
+        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
         "profiles": [{
             "name": "synthetic", "protocol": "openai-responses",
             "endpoint": "http://127.0.0.1:9/responses", "model": "different-model",
             "credential_env": "ARANY_PROVIDER_SYNTHETIC", "outcome_encoding": "json_schema",
             "privacy": "user_authorized", "max_output_tokens": 4096,
-            "capability_evidence_version": 2, "efforts": ["low", "high"]
+            "efforts": ["low", "high"]
         }]
     });
     let mismatched = serde_json::to_vec(&profile).expect("mismatched profile JSON");

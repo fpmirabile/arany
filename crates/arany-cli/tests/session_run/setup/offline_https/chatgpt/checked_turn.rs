@@ -202,7 +202,7 @@ pub(super) fn respond_after_catalog(
         .expect("failed cached refresh");
     respond_unchecked(input, output, catalog);
     respond_without_catalog(input, output);
-    respond_probes(input, output, catalog);
+    respond_turns(input, output, catalog);
     respond_team(input, output, catalog);
     respond_failure(input, output, catalog);
     respond_diagnostics(input, output, catalog);
@@ -260,37 +260,19 @@ fn respond_unchecked(input: &mut impl Write, output: &mut impl Read, catalog: &[
     send_sse(input, "resp_without_check", serde_json::json!(ANSWER));
 }
 
-fn respond_probes(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
-    serve_catalog(input, output, catalog);
-    let probes = [
-        (
-            "resp_check_direct",
-            "Synthetic conformance check: finish directly",
-            serde_json::json!("done"),
-        ),
-        (
-            "resp_check_delegate",
-            "Synthetic conformance check: delegate exactly one",
-            serde_json::json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}}),
-        ),
-        (
-            "resp_check_compact",
-            "Synthetic conformance question",
-            serde_json::json!(r#"Condensed"#),
-        ),
-        ("resp_offline_chatgpt", OBJECTIVE, serde_json::json!(ANSWER)),
+fn respond_turns(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
+    for (index, (id, objective, outcome)) in [
+        ("resp_offline_chatgpt", OBJECTIVE, ANSWER),
         (
             "resp_offline_chatgpt_followup",
             FOLLOWUP_OBJECTIVE,
-            serde_json::json!(FOLLOWUP_ANSWER),
+            FOLLOWUP_ANSWER,
         ),
-    ];
-    for (index, (id, expected_input, outcome)) in probes.into_iter().enumerate() {
-        if index == 3 {
-            serve_unavailable_catalog(input, output);
-        } else if index > 3 {
-            serve_catalog(input, output, catalog);
-        }
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        serve_catalog(input, output, catalog);
         let body = checked_request(output, "POST /v1/responses").expect("Responses body");
         assert_eq!(body["model"], "gpt-6.1-sol");
         assert_eq!(body["reasoning"]["effort"], "medium");
@@ -301,23 +283,19 @@ fn respond_probes(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]
         assert!(body.get("text").is_none());
         let rendered_input = body["input"].to_string();
         let content = rendered_input.as_str();
-        assert!(content.contains(expected_input), "wrong probe or Run input");
-        assert_eq!(content.contains(OBJECTIVE), index >= 3);
-        assert_eq!(content.contains(FOLLOWUP_OBJECTIVE), index == 4);
-        if index >= 3 {
-            assert!(!content.contains("Synthetic conformance"));
-            let structured = crate::semantic::input(&body);
-            assert_eq!(structured["objective"], expected_input);
-            assert_eq!(
-                structured["history"],
-                if index == 3 {
-                    serde_json::json!([])
-                } else {
-                    serde_json::json!([{"user": OBJECTIVE, "assistant": ANSWER}])
-                }
-            );
-        }
-        send_sse(input, id, outcome);
+        assert!(content.contains(OBJECTIVE));
+        assert_eq!(content.contains(FOLLOWUP_OBJECTIVE), index == 1);
+        let structured = crate::semantic::input(&body);
+        assert_eq!(structured["objective"], objective);
+        assert_eq!(
+            structured["history"],
+            if index == 0 {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{"user": OBJECTIVE, "assistant": ANSWER}])
+            }
+        );
+        send_sse(input, id, serde_json::json!(outcome));
     }
 }
 
@@ -351,8 +329,6 @@ fn respond_team(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) 
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
         assert!(body.get("text").is_none());
-        let content = body["input"].to_string();
-        assert!(!content.contains("Synthetic conformance"));
         let context: serde_json::Value = crate::semantic::input(&body);
         assert_eq!(context["phase"], phase);
         assert_eq!(context["objective"], objective);
@@ -488,9 +464,6 @@ fn replace_selected_identity() -> (StateRoot, Vec<u8>) {
     changed["selected"] = replacement.clone().into();
     changed["accounts"][0]["id"] = replacement.clone().into();
     changed["accounts"][0]["token"]["credentials"]["access_expires_at_unix"] = 1.into();
-    for check in changed["model_checks"].as_array_mut().expect("checks") {
-        check["account_id"] = replacement.clone().into();
-    }
     root.record(RecordKind::ChatgptAccounts)
         .replace(&serde_json::to_vec(&changed).expect("replacement JSON"))
         .expect("synthetic identity drift");
@@ -594,7 +567,6 @@ pub(super) fn accept_check_and_run(
         .unwrap()
         .unwrap();
     let index: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    assert!(index["model_checks"].as_array().unwrap().is_empty());
     let result = Command::new("/arany")
         .args([
             "exec",
@@ -641,7 +613,7 @@ pub(super) fn accept_check_and_run(
         provenance.admission,
         arany::ChatGptAdmission::AccountConsent
     );
-    assert_ne!(provenance.evidence_fingerprint, [0; 32]);
+    assert_ne!(provenance.admission_fingerprint, [0; 32]);
     assert!(
         root.record(RecordKind::ChatgptAccounts)
             .read()
@@ -664,61 +636,6 @@ pub(super) fn accept_check_and_run(
         );
     }
     run_without_catalog();
-    let diagnostic = Command::new("/arany")
-        .args([
-            "provider",
-            "check",
-            "chatgpt",
-            "gpt-6.1-sol",
-            "--effort",
-            "medium",
-            "--accept-cost",
-        ])
-        .env_clear()
-        .env("SSL_CERT_FILE", "/fixture/ca.pem")
-        .current_dir("/root/workspace")
-        .bounded_output()
-        .expect("explicit optional synthetic diagnostic after the first real Run");
-    assert!(diagnostic.status.success());
-    assert!(diagnostic.stderr.is_empty());
-    let prefix = crate::check_output(
-        &diagnostic.stdout,
-        root.path(),
-        arany::CheckDisposition::Succeeded,
-    );
-    assert_eq!(prefix, format!("Provider: chatgpt\nAccount: {}\nModel: gpt-6.1-sol\nEffort: medium\nContext window: 272k tokens\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n", index["selected"].as_str().unwrap()).as_bytes());
-    let database = rusqlite::Connection::open_with_flags(
-        root.path().join("events.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    assert_eq!(
-        database
-            .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    drop(database);
-    let journal = std::fs::read(root.path().join("events.sqlite3")).unwrap();
-    for secret in [ACCESS, REFRESH, signed, OBJECTIVE, FAILURE_BODY_CANARY] {
-        assert!(
-            !journal
-                .windows(secret.len())
-                .any(|part| part == secret.as_bytes()),
-            "diagnostic journal disclosed private input"
-        );
-    }
-    let checked: serde_json::Value = serde_json::from_slice(
-        &root
-            .record(RecordKind::ChatgptAccounts)
-            .read()
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(checked["schema"], 3);
-    assert!(checked["model_checks"][0]["check_id"].as_str().is_some());
     for effort in ["high", "low", "medium"] {
         let select_at = transcript.len();
         input
@@ -1070,20 +987,12 @@ fn assert_catalog_window(view: &SessionView) {
     }
 }
 
-pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_json::Value) {
+pub(super) fn assert_runs(view: &SessionView, account_id: Uuid) {
     assert_catalog_window(view);
-    assert_eq!(check["account_id"], account_id.to_string());
-    let checked_fingerprint = check["fingerprint"]
-        .as_array()
-        .expect("checked fingerprint")
-        .iter()
-        .map(|byte| byte.as_u64().expect("fingerprint byte") as u8)
-        .collect::<Vec<_>>();
-    assert_eq!(checked_fingerprint.len(), 32);
     assert_eq!(
         view.runs.len(),
         4,
-        "checked direct/team turns and rejected Run count"
+        "direct/team turns and rejected Run count"
     );
     assert_ne!(view.runs[0].id, view.runs[1].id);
     assert!(view.runs[0].finished_sequence.expect("first finish") < view.runs[1].accepted_sequence);
@@ -1120,10 +1029,7 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
             provenance.admission,
             arany::ChatGptAdmission::AccountConsent
         );
-        assert_ne!(
-            provenance.evidence_fingerprint.as_slice(),
-            checked_fingerprint
-        );
+        assert_ne!(provenance.admission_fingerprint, [0; 32]);
         assert_eq!(run.agents.len(), 1);
         assert_eq!(run.agents[0].provider_calls.len(), 1);
         let call = &run.agents[0].provider_calls[0];
@@ -1199,10 +1105,7 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
             .as_ref()
             .unwrap()
     );
-    assert_ne!(
-        provenance.evidence_fingerprint.as_slice(),
-        checked_fingerprint
-    );
+    assert_ne!(provenance.admission_fingerprint, [0; 32]);
     assert_eq!(
         config.history_run_ids,
         vec![view.runs[0].id, view.runs[1].id]
@@ -1283,10 +1186,7 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
             .as_ref()
             .unwrap()
     );
-    assert_ne!(
-        provenance.evidence_fingerprint.as_slice(),
-        checked_fingerprint
-    );
+    assert_ne!(provenance.admission_fingerprint, [0; 32]);
     assert_eq!(
         config.history_run_ids,
         vec![view.runs[0].id, view.runs[1].id, team.id]

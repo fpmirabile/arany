@@ -57,7 +57,7 @@ fn subscription_replay_provider(account_id: Uuid, fingerprint: [u8; 32]) -> Arc<
         "synthetic-subscription-token".into(),
         ChatGptProvenance {
             account_id,
-            evidence_fingerprint: fingerprint,
+            admission_fingerprint: fingerprint,
             admission: ChatGptAdmission::AccountConsent,
         },
     )
@@ -124,7 +124,7 @@ fn assert_subscription_account(config: &arany::RunConfig, account_id: Uuid, fing
         config.chatgpt_provenance,
         Some(ChatGptProvenance {
             account_id,
-            evidence_fingerprint: fingerprint,
+            admission_fingerprint: fingerprint,
             admission: ChatGptAdmission::AccountConsent,
         })
     );

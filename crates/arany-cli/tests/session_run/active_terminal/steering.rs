@@ -128,16 +128,6 @@ fn semantic_input(stream: &mut std::net::TcpStream) -> serde_json::Value {
     crate::semantic::input(&wire)
 }
 
-// The provider check consumes three requests: finish, delegate and summary.
-fn answer_provider_check(stream: &mut std::net::TcpStream, index: usize) {
-    let text = match index {
-        0 => serde_json::json!("ok"),
-        1 => serde_json::from_str(DELEGATE).expect("Delegate JSON"),
-        _ => serde_json::json!(r#"synthetic summary"#),
-    };
-    send_response_for(stream, index, text, index < 2);
-}
-
 fn fixture_root(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
@@ -180,15 +170,11 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
     );
     let (child_ready_sender, child_ready) = mpsc::channel();
     let (release_sender, release_child) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; then 3 primary Delegate, 4 held child, 5 synthesis.
+    // Call 3 is the primary Delegate, 4 the held child and 5 the synthesis.
     let server = thread::spawn(move || {
-        for index in 0..6 {
+        for index in 3..6 {
             let mut stream = accept_within(&listener);
             let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_provider_check(&mut stream, index);
-                continue;
-            }
             match index {
                 3 => {
                     assert_eq!(input["objective"], "steer");
@@ -222,7 +208,6 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
             }
         }
     });
-    check_profile(&workspace, &state);
 
     let mut attached = spawn_linear_run(
         &state,
@@ -302,27 +287,21 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
     let (primary_ready_sender, primary_ready) = mpsc::channel();
     let (release_sender, release_primary) = mpsc::channel::<()>();
     let (stop_sender, stop) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; call 3 is the held primary. Any later request is a violation.
+    // The one call is the held primary. Any later request is a violation.
     let server = thread::spawn(move || {
-        for index in 0..4 {
-            let mut stream = accept_within(&listener);
-            let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_provider_check(&mut stream, index);
-                continue;
-            }
-            assert_eq!(input["objective"], "pause");
-            primary_ready_sender.send(()).expect("held primary gate");
-            release_primary
-                .recv_timeout(Duration::from_secs(10))
-                .expect("release held primary call");
-            send_response_for(
-                &mut stream,
-                index,
-                serde_json::from_str(DELEGATE).expect("Delegate JSON"),
-                false,
-            );
-        }
+        let mut stream = accept_within(&listener);
+        let input = semantic_input(&mut stream);
+        assert_eq!(input["objective"], "pause");
+        primary_ready_sender.send(()).expect("held primary gate");
+        release_primary
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release held primary call");
+        send_response_for(
+            &mut stream,
+            0,
+            serde_json::from_str(DELEGATE).expect("Delegate JSON"),
+            false,
+        );
         stop.recv_timeout(Duration::from_secs(15))
             .expect("product exit observed");
         listener
@@ -330,7 +309,6 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
             .expect("bounded final accept");
         listener.accept().is_ok()
     });
-    check_profile(&workspace, &state);
 
     let mut attached = spawn_linear_run(
         &state,
@@ -429,15 +407,11 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
     let (child_ready_sender, child_ready) = mpsc::channel();
     let (release_child_sender, release_child) = mpsc::channel::<()>();
     let (release_synthesis_sender, release_synthesis) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; then 3 primary Delegate, 4 held child, 5 held synthesis.
+    // Call 3 is the primary Delegate, 4 the held child and 5 the held synthesis.
     let server = thread::spawn(move || {
-        for index in 0..6 {
+        for index in 3..6 {
             let mut stream = accept_within(&listener);
             let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_provider_check(&mut stream, index);
-                continue;
-            }
             match index {
                 3 => {
                     assert_eq!(input["objective"], "steer");
@@ -465,7 +439,6 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
             }
         }
     });
-    check_profile(&workspace, &state);
 
     let mut attached = spawn_linear_run(
         &state,

@@ -308,16 +308,6 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
             panic!("fresh token must not rotate")
         })
         .unwrap();
-        record_model_check_at(
-            &state,
-            &workspace,
-            &selected,
-            "model-one",
-            Effort::Medium,
-            None,
-            1_799_999_000,
-        )
-        .unwrap();
         let outcome = sign_out_at_with(
             &state,
             &workspace,
@@ -326,7 +316,6 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
                 assert_eq!(saved.refresh_token, "synthetic-refresh");
                 let pending = AccountIndex::read(&state).unwrap();
                 assert!(pending.accounts[0].signout_pending);
-                assert!(pending.model_checks.is_empty());
                 assert!(matches!(
                     selected_id_at(&state),
                     Err(AuthorizationError::NoSelectedAccount)
@@ -348,7 +337,6 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
         assert!(index.accounts[0].disconnected);
         assert!(!index.accounts[0].signout_pending);
         assert!(index.accounts[0].token.is_none());
-        assert!(index.model_checks.is_empty());
         assert_eq!(selected_registration_at(&reopened).unwrap(), (id, false));
         assert_eq!(
             selected_reauthorization_target_at(&reopened, id)
@@ -365,11 +353,7 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
                 &reopened,
                 &workspace,
                 &selected,
-                RunModel {
-                    slug: "model-one",
-                    effort: Effort::Medium,
-                    now: 1_799_999_010,
-                },
+                ("model-one", Effort::Medium),
                 Ok(&[])
             ),
             Err(AuthorizationError::NoSelectedAccount)
@@ -449,7 +433,6 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     ));
     let index = AccountIndex::read(&state).unwrap();
     assert!(index.accounts[0].disconnected);
-    assert!(index.model_checks.is_empty());
     assert!(matches!(
         load_selected_keyring_at(&state, id),
         Err(AuthorizationError::NoSelectedAccount)
@@ -614,19 +597,9 @@ fn terminal_refresh_error_clears_private_token_and_keeps_registration() {
         None,
     )
     .unwrap();
-    let selected = refresh_selected_with(&state, &workspace, id, 1_799_000_000, |_| {
+    refresh_selected_with(&state, &workspace, id, 1_799_000_000, |_| {
         panic!("fresh token must not rotate")
     })
-    .unwrap();
-    record_model_check_at(
-        &state,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::Medium,
-        None,
-        1_799_999_000,
-    )
     .unwrap();
 
     assert!(matches!(
@@ -643,7 +616,6 @@ fn terminal_refresh_error_clears_private_token_and_keeps_registration() {
     assert!(index.accounts[0].disconnected);
     assert!(!index.accounts[0].renewal_pending);
     assert!(index.accounts[0].token.is_none());
-    assert!(index.model_checks.is_empty());
     assert_eq!(selected_registration_at(&reopened).unwrap(), (id, false));
     assert!(matches!(
         load_selected_private_file_at(&reopened, id),
@@ -695,14 +667,6 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
             plan_permission_missing: false,
             token: None,
         }],
-        model_checks: vec![ModelCheck {
-            check_id: CheckId::new(),
-            account_id: id,
-            fingerprint: [7; 32],
-            checked_at_sec: 1_799_999_000,
-            expires_at_sec: 1_799_999_000 + MODEL_CHECK_AGE_SECONDS,
-            context_window_tokens: None,
-        }],
     }
     .write(&state)
     .unwrap();
@@ -712,7 +676,6 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
             assert_eq!(slot, account_keyring_slot("oaiapp_terminal_keyring", id));
             let blocked = AccountIndex::read(&state).unwrap();
             assert!(blocked.accounts[0].disconnected);
-            assert!(blocked.model_checks.is_empty());
             assert!(matches!(
                 load_selected_keyring_at(&state, id),
                 Err(AuthorizationError::NoSelectedAccount)
@@ -908,25 +871,6 @@ fn keyring_entry(id: Uuid, credentials: &VerifiedCredentials, slot: String) -> A
         plan_permission_missing: false,
         token: None,
     }
-}
-
-fn to_version_two_shape(value: &mut serde_json::Value) {
-    for entry in value["accounts"].as_array_mut().unwrap() {
-        let entry = entry.as_object_mut().unwrap();
-        entry.remove("keyring_slot");
-        entry.remove("chatgpt_account_id");
-        if let Some(token) = entry.get_mut("token").and_then(|t| t.as_object_mut()) {
-            token.insert("schema".into(), LEGACY_TOKEN_RECORD_SCHEMA.into());
-            token.remove("slot");
-        }
-    }
-}
-
-fn version_two_value(index: &AccountIndex) -> serde_json::Value {
-    let mut value = serde_json::to_value(index).unwrap();
-    value["schema"] = 2.into();
-    to_version_two_shape(&mut value);
-    value
 }
 
 #[test]
@@ -1218,32 +1162,6 @@ fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path()
             admit_keyring_record(&legacy_entry, duplicated.as_bytes()),
             Err(AuthorizationError::InvalidIdentity)
         ));
-    }
-}
-
-#[test]
-fn older_account_indexes_are_refused_unchanged() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    for subject in ["subject-one", "subject-two"] {
-        let creds = credentials("oaiapp_twin", subject);
-        save_private_file_at(&state, &workspace, creds.clone(), accepted(&creds), None).unwrap();
-    }
-    let current = AccountIndex::read(&state).unwrap();
-    assert_eq!(current.accounts.len(), 2);
-    assert!(current.validate().is_ok());
-
-    for version in [1, 2] {
-        let mut source = version_two_value(&current);
-        source["schema"] = version.into();
-        let bytes = serde_json::to_vec(&source).unwrap();
-        assert!(CHATGPT_ACCOUNTS.mismatched(&bytes));
-        let record = state.record(RecordKind::ChatgptAccounts);
-        record.replace(&bytes).unwrap();
-        assert!(AccountIndex::read(&state).is_err());
-        assert_eq!(record.read().unwrap().unwrap(), bytes);
     }
 }
 
@@ -1554,7 +1472,6 @@ fn pending_keyring_renewal_blocks_load_before_os_store_access() {
             plan_permission_missing: false,
             token: None,
         }],
-        model_checks: Vec::new(),
     }
     .write(&state)
     .unwrap();
@@ -1598,17 +1515,6 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
         },
     )
     .unwrap();
-    let mut index = AccountIndex::read(&state).unwrap();
-    index.model_checks.push(ModelCheck {
-        check_id: CheckId::new(),
-        account_id: id,
-        fingerprint: [7; 32],
-        checked_at_sec: 1_800_000_000,
-        expires_at_sec: 1_800_000_000 + MODEL_CHECK_AGE_SECONDS,
-        context_window_tokens: None,
-    });
-    index.write(&state).unwrap();
-
     let mut replacement = first;
     replacement.refresh_token = "synthetic-reconnected-refresh".into();
     let consent = RiskPrompt::new(AccountStorage::Keyring)
@@ -1644,7 +1550,6 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
     let pending = AccountIndex::read(&state).unwrap();
     assert_eq!(pending.selected, Some(id));
     assert!(pending.accounts[0].renewal_pending);
-    assert_eq!(pending.model_checks.len(), 1);
     assert!(matches!(
         load_selected_keyring_at(&state, id),
         Err(AuthorizationError::RenewalStorageUncertain)
@@ -1674,7 +1579,6 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
     let restored = AccountIndex::read(&state).unwrap();
     assert_eq!(restored.selected, Some(id));
     assert!(!restored.accounts[0].renewal_pending);
-    assert!(restored.model_checks.is_empty());
 }
 
 fn model_account() -> (tempfile::TempDir, StateRoot, PathBuf, SelectedAccount) {
@@ -1699,7 +1603,7 @@ fn model_account() -> (tempfile::TempDir, StateRoot, PathBuf, SelectedAccount) {
 }
 
 #[test]
-fn catalog_admission_uses_matching_metadata_without_a_check() {
+fn catalog_admission_uses_matching_metadata() {
     for (slug, catalog_window, expected) in [
         ("model-one", Some(272_000), Some(272_000)),
         ("model-one", Some(32_768), Some(32_768)),
@@ -1717,121 +1621,8 @@ fn catalog_admission_uses_matching_metadata_without_a_check() {
             &state,
             &workspace,
             &selected,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
+            ("model-one", Effort::High),
             Ok(&catalog),
-        )
-        .unwrap();
-        assert_eq!(window, expected);
-        assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
-    }
-}
-
-#[test]
-fn catalog_failure_uses_the_latest_same_slug_check_across_efforts() {
-    let (_temp, state, workspace, selected) = model_account();
-    for (slug, effort, window, now) in [
-        ("model-one", Effort::High, Some(272_000), 1_799_999_001),
-        ("model-one", Effort::Low, Some(320_000), 1_799_999_000),
-        ("model-two", Effort::High, Some(500_000), 1_799_999_002),
-    ] {
-        record_model_check_at(&state, &workspace, &selected, slug, effort, window, now).unwrap();
-    }
-    let catalog = [super::super::ChatGptModel {
-        slug: "model-one".into(),
-        display_name: "First model".into(),
-        context_window_tokens: Some(400_000),
-    }];
-    let without_window = [super::super::ChatGptModel {
-        slug: "model-one".into(),
-        display_name: "First model".into(),
-        context_window_tokens: None,
-    }];
-    for (slug, live, expected) in [
-        (
-            "model-one",
-            Err(&AuthorizationError::Unavailable),
-            Some(272_000),
-        ),
-        ("model-one", Ok(catalog.as_slice()), Some(400_000)),
-        ("model-one", Ok(without_window.as_slice()), None),
-        ("model-one", Ok([].as_slice()), None),
-        ("model-three", Err(&AuthorizationError::Unavailable), None),
-    ] {
-        let (_, window) = admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            RunModel {
-                slug,
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            live,
-        )
-        .unwrap();
-        assert_eq!(window, expected);
-    }
-    record_model_check_at(
-        &state,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::Medium,
-        None,
-        1_799_999_003,
-    )
-    .unwrap();
-    let (_, window) = admitted_model_at(
-        &state,
-        &workspace,
-        &selected,
-        RunModel {
-            slug: "model-one",
-            effort: Effort::High,
-            now: 1_799_999_010,
-        },
-        Err(&AuthorizationError::Unavailable),
-    )
-    .unwrap();
-    assert_eq!(
-        window, None,
-        "the newest check must not revive older metadata"
-    );
-}
-
-#[test]
-fn catalog_failure_ignores_stale_and_future_checks() {
-    let (_temp, state, workspace, selected) = model_account();
-    let checked_at = 1_799_999_000;
-    record_model_check_at(
-        &state,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::High,
-        Some(272_000),
-        checked_at,
-    )
-    .unwrap();
-    for (now, expected) in [
-        (checked_at - 1, None),
-        (checked_at + MODEL_CHECK_AGE_SECONDS - 1, Some(272_000)),
-        (checked_at + MODEL_CHECK_AGE_SECONDS, None),
-    ] {
-        let (_, window) = admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now,
-            },
-            Err(&AuthorizationError::Unavailable),
         )
         .unwrap();
         assert_eq!(window, expected);
@@ -1839,22 +1630,11 @@ fn catalog_failure_ignores_stale_and_future_checks() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn slow_admission_catalog_falls_back_after_five_seconds() {
+async fn slow_admission_catalog_leaves_the_window_absent_after_five_seconds() {
     use std::time::Duration;
     const DELAYED_REPLY: Duration = Duration::from_secs(6);
 
     let (_temp, state, workspace, selected) = model_account();
-    let checked_at = 1_799_999_000;
-    record_model_check_at(
-        &state,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::High,
-        Some(272_000),
-        checked_at,
-    )
-    .unwrap();
     let started = tokio::time::Instant::now();
     let catalog = super::super::catalog::read_for_run(async {
         tokio::time::sleep(DELAYED_REPLY).await;
@@ -1867,426 +1647,11 @@ async fn slow_admission_catalog_falls_back_after_five_seconds() {
         &state,
         &workspace,
         &selected,
-        RunModel {
-            slug: "model-one",
-            effort: Effort::High,
-            now: checked_at + 1,
-        },
+        ("model-one", Effort::High),
         catalog.as_deref(),
     )
     .unwrap();
-    assert_eq!(window, Some(272_000));
-}
-
-#[test]
-fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let credentials = credentials("oaiapp_checked", "subject-one");
-    let id = save_private_file_at(
-        &state,
-        &workspace,
-        credentials.clone(),
-        accepted(&credentials),
-        None,
-    )
-    .unwrap();
-    let selected = refresh_selected_with(&state, &workspace, id, 1_799_000_000, |_| {
-        panic!("fresh token must not rotate")
-    })
-    .unwrap();
-    let now = 1_799_999_000;
-    let (admitted, window) = admitted_model_at(
-        &state,
-        &workspace,
-        &selected,
-        RunModel {
-            slug: "model-one",
-            effort: Effort::High,
-            now: 1_799_999_010,
-        },
-        Err(&AuthorizationError::Unavailable),
-    )
-    .expect("consented account needs no synthetic check");
     assert_eq!(window, None);
-    assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
-    let baseline = AccountIndex::read(&state).unwrap();
-    for (field, expected) in [
-        (
-            "renewal_pending",
-            AuthorizationError::RenewalStorageUncertain,
-        ),
-        ("signout_pending", AuthorizationError::SignOutPending),
-        ("disconnected", AuthorizationError::NoSelectedAccount),
-    ] {
-        let mut blocked = serde_json::to_value(&baseline).unwrap();
-        blocked["accounts"][0][field] = true.into();
-        if field == "disconnected" {
-            blocked["accounts"][0]["token"] = serde_json::Value::Null;
-        }
-        let blocked: AccountIndex = serde_json::from_value(blocked).unwrap();
-        blocked.write(&state).unwrap();
-        assert_eq!(
-            admitted_model_at(
-                &state,
-                &workspace,
-                &selected,
-                RunModel {
-                    slug: "model-one",
-                    effort: Effort::High,
-                    now: 1_799_999_010,
-                },
-                Err(&AuthorizationError::Unavailable)
-            ),
-            Err(expected)
-        );
-    }
-    baseline.write(&state).unwrap();
-    assert!(matches!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            RunModel {
-                slug: "bad model",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Err(&AuthorizationError::Unavailable)
-        ),
-        Err(AuthorizationError::InvalidSelection)
-    ));
-    record_model_check_at(
-        &state,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::High,
-        Some(272_000),
-        now,
-    )
-    .unwrap();
-    let index = AccountIndex::read(&state).unwrap();
-    let fingerprint = model_check_fingerprint(&selected, "model-one", Effort::High).unwrap();
-    assert_ne!(admitted, fingerprint);
-    let proof = &index.model_checks[0];
-    assert!(
-        state
-            .check_evidence_valid(proof.check_id, fingerprint, proof.digest().unwrap())
-            .unwrap()
-    );
-    assert_superseded_account_versions(&state, &selected, admitted, &index, now);
-    for (model, effort, window) in [
-        ("model-one", Effort::High, Some(272_000)),
-        ("model-two", Effort::High, None),
-        ("model-one", Effort::Low, Some(272_000)),
-    ] {
-        assert_eq!(
-            admitted_model_at(
-                &state,
-                &workspace,
-                &selected,
-                RunModel {
-                    slug: model,
-                    effort,
-                    now: 1_799_999_010,
-                },
-                Err(&AuthorizationError::Unavailable)
-            )
-            .map(|(_, window)| window),
-            Ok(window),
-            "the last same-slug check supplies the cached window across efforts"
-        );
-    }
-    let mut out_of_range = serde_json::to_value(&index).unwrap();
-    out_of_range["model_checks"][0]["context_window_tokens"] = 2_000_001.into();
-    assert!(AccountIndex::decode(&serde_json::to_vec(&out_of_range).unwrap()).is_err());
-    assert_eq!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Err(&AuthorizationError::Unavailable)
-        )
-        .unwrap(),
-        (admitted, Some(272_000))
-    );
-    for (model, effort) in [("model-two", Effort::High), ("model-one", Effort::Low)] {
-        let (other, window) = admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            RunModel {
-                slug: model,
-                effort,
-                now: 1_799_999_010,
-            },
-            Err(&AuthorizationError::Unavailable),
-        )
-        .unwrap();
-        assert_ne!(admitted, other);
-        assert_eq!(window, (model == "model-one").then_some(272_000));
-    }
-
-    let renewed = refresh_selected_with(&state, &workspace, id, 1_799_999_900, |_| {
-        let mut replacement = credentials.clone();
-        replacement.access_token = "rotated-access".into();
-        replacement.refresh_token = "rotated-refresh".into();
-        replacement.access_expires_at_unix = 1_800_003_600;
-        Ok(replacement)
-    })
-    .unwrap();
-    assert_eq!(
-        model_check_fingerprint(&renewed, "model-one", Effort::High).unwrap(),
-        fingerprint
-    );
-    assert_eq!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &renewed,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Err(&AuthorizationError::Unavailable)
-        )
-        .unwrap(),
-        (admitted, Some(272_000))
-    );
-
-    let mut altered = renewed.clone();
-    let mut consent = serde_json::to_value(&altered.consent).unwrap();
-    consent["accepted_at_sec"] = 1_u64.into();
-    altered.consent = serde_json::from_value(consent).unwrap();
-    assert_ne!(
-        model_check_fingerprint(&altered, "model-one", Effort::High).unwrap(),
-        fingerprint
-    );
-    assert!(matches!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &altered,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Err(&AuthorizationError::Unavailable)
-        ),
-        Err(AuthorizationError::InvalidIdentity)
-    ));
-
-    clear_model_check_at(&state, &workspace, &renewed, "model-one", Effort::High).unwrap();
-    assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
-    assert_eq!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &renewed,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Err(&AuthorizationError::Unavailable)
-        )
-        .unwrap(),
-        (admitted, None)
-    );
-    record_model_check_at(
-        &state,
-        &workspace,
-        &renewed,
-        "model-one",
-        Effort::High,
-        None,
-        now,
-    )
-    .unwrap();
-    assert_eq!(
-        save_private_file_at(
-            &state,
-            &workspace,
-            credentials.clone(),
-            accepted(&credentials),
-            Some(id),
-        )
-        .unwrap(),
-        id
-    );
-    assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
-}
-
-fn assert_superseded_account_versions(
-    state: &StateRoot,
-    selected: &SelectedAccount,
-    admitted: [u8; 32],
-    index: &AccountIndex,
-    now: u64,
-) {
-    let previous_admission = account_fingerprint(
-        selected,
-        "model-one",
-        Effort::High,
-        "chatgpt-consented-account-admission-v38",
-        "no-preflight-inference;strict-stream-outcomes;local-output-bound",
-    )
-    .unwrap();
-    assert_ne!(admitted, previous_admission);
-    assert!(
-        selected
-            .consent
-            .matches(&selected.credentials, selected.storage)
-    );
-    let previous_check = account_fingerprint(
-        selected,
-        "model-one",
-        Effort::High,
-        "chatgpt-goal-contract-strict-stream-conformance-journal-v39",
-        "three-probes-1024-local-output-tokens",
-    )
-    .unwrap();
-    let current = model_check_fingerprint(selected, "model-one", Effort::High).unwrap();
-    assert_ne!(current, previous_check);
-    let mut superseded = AccountIndex::decode(&serde_json::to_vec(index).unwrap()).unwrap();
-    assert_eq!(superseded.model_checks.len(), 1);
-    superseded.model_checks[0].fingerprint = previous_check;
-    assert_eq!(
-        checked_model_window(state, &superseded, selected, "model-one", now).unwrap(),
-        None
-    );
-}
-
-#[test]
-fn replaced_or_stale_account_cannot_publish_model_evidence() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let first = credentials("oaiapp_first", "subject-one");
-    let first_id =
-        save_private_file_at(&state, &workspace, first.clone(), accepted(&first), None).unwrap();
-    let selected = refresh_selected_with(&state, &workspace, first_id, 1_799_000_000, |_| {
-        panic!("fresh token must not rotate")
-    })
-    .unwrap();
-    let second = credentials("oaiapp_second", "subject-two");
-    save_private_file_at(&state, &workspace, second.clone(), accepted(&second), None).unwrap();
-    assert!(matches!(
-        record_model_check_at(
-            &state,
-            &workspace,
-            &selected,
-            "model-one",
-            Effort::High,
-            None,
-            1_799_000_000,
-        ),
-        Err(AuthorizationError::InvalidIdentity)
-    ));
-    assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
-    assert!(matches!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Ok(&[])
-        ),
-        Err(AuthorizationError::InvalidIdentity)
-    ));
-
-    let mut stale = selected;
-    stale.credentials.subject = "changed-subject".into();
-    assert!(matches!(
-        clear_model_check_at(&state, &workspace, &stale, "model-one", Effort::High),
-        Err(AuthorizationError::ConsentRequired)
-    ));
-    assert!(matches!(
-        admitted_model_at(
-            &state,
-            &workspace,
-            &stale,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::High,
-                now: 1_799_999_010,
-            },
-            Ok(&[])
-        ),
-        Err(AuthorizationError::ConsentRequired)
-    ));
-}
-
-#[test]
-fn model_check_record_limit_fails_without_replacing_account() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let credentials = credentials("oaiapp_checked", "subject-one");
-    let id = save_private_file_at(
-        &state,
-        &workspace,
-        credentials.clone(),
-        accepted(&credentials),
-        None,
-    )
-    .unwrap();
-    let selected = refresh_selected_with(&state, &workspace, id, 1_799_000_000, |_| {
-        panic!("fresh token must not rotate")
-    })
-    .unwrap();
-    let now = 1_799_999_000;
-    let mut index = AccountIndex::read(&state).unwrap();
-    for byte in 0..MAX_MODEL_CHECKS {
-        index.model_checks.push(ModelCheck {
-            check_id: CheckId::new(),
-            account_id: id,
-            fingerprint: [byte as u8; 32],
-            checked_at_sec: now,
-            expires_at_sec: now + MODEL_CHECK_AGE_SECONDS,
-            context_window_tokens: None,
-        });
-    }
-    index.write(&state).unwrap();
-    let mut oversized = serde_json::to_value(AccountIndex::read(&state).unwrap()).unwrap();
-    oversized["model_checks"] = serde_json::Value::Array(vec![
-        oversized["model_checks"][0].clone();
-        MAX_MODEL_CHECKS + 1
-    ]);
-    assert!(serde_json::from_value::<AccountIndex>(oversized).is_err());
-    assert!(matches!(
-        record_model_check_at(
-            &state,
-            &workspace,
-            &selected,
-            "new-model",
-            Effort::High,
-            None,
-            now,
-        ),
-        Err(AuthorizationError::EvidenceUnavailable)
-    ));
-    assert_eq!(
-        AccountIndex::read(&state).unwrap().model_checks.len(),
-        MAX_MODEL_CHECKS
-    );
-    assert_eq!(AccountIndex::read(&state).unwrap().selected, Some(id));
 }
 
 #[test]
@@ -2891,16 +2256,6 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         panic!("fresh token must not rotate")
     })
     .unwrap();
-    record_model_check_at(
-        &reopened,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::Medium,
-        None,
-        1_799_999_000,
-    )
-    .unwrap();
     let outcome = save_without_plan_permission_at(
         &reopened,
         &workspace,
@@ -2919,7 +2274,6 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     let disabled = AccountIndex::read(&reopened).unwrap();
     assert!(disabled.accounts[1].plan_permission_missing);
     assert!(disabled.accounts[1].token.is_none());
-    assert!(disabled.model_checks.is_empty());
     assert_eq!(
         selected_registration_at(&reopened).unwrap(),
         (second_id, false)
@@ -2944,11 +2298,7 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
             &reopened,
             &workspace,
             &selected,
-            RunModel {
-                slug: "model-one",
-                effort: Effort::Medium,
-                now: 1_799_999_010,
-            },
+            ("model-one", Effort::Medium),
             Ok(&[])
         ),
         Err(AuthorizationError::PermissionMissing)
@@ -3027,7 +2377,6 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     );
     let enabled = AccountIndex::read(&reopened).unwrap();
     assert!(!enabled.accounts[1].plan_permission_missing);
-    assert!(enabled.model_checks.is_empty());
     assert_eq!(
         load_selected_private_file_at(&reopened, second_id)
             .unwrap()
@@ -3051,9 +2400,6 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
             .remove(field);
         assert!(serde_json::from_value::<AccountIndex>(missing).is_err());
     }
-    let mut missing = encoded.clone();
-    missing.as_object_mut().unwrap().remove("model_checks");
-    assert!(serde_json::from_value::<AccountIndex>(missing).is_err());
 
     let valid = serde_json::to_value(AccountIndex::read(&reopened).unwrap()).unwrap();
     let mut contradictory = valid.clone();
@@ -3124,161 +2470,9 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     assert_eq!(index.selected, Some(outcome.id));
     assert!(index.accounts[0].plan_permission_missing);
     assert!(index.accounts[0].token.is_none());
-    assert!(index.model_checks.is_empty());
     assert!(outcome.local_cleared);
     assert!(matches!(
         load_selected_private_file_at(&metadata_reopened, outcome.id),
         Err(AuthorizationError::PermissionMissing)
     ));
-}
-
-fn record_model_check_at(
-    state: &StateRoot,
-    workspace: &Path,
-    selected: &SelectedAccount,
-    model: &str,
-    effort: Effort,
-    context_window_tokens: Option<u32>,
-    now: u64,
-) -> Result<(), AuthorizationError> {
-    let (state, workspace, selected, model) = (
-        state.path().to_owned(),
-        workspace.to_owned(),
-        selected.clone(),
-        model.to_owned(),
-    );
-    std::thread::spawn(move || {
-        let state = StateRoot::open_existing(&state).unwrap();
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let mut check = model_check_fixture(&state, &selected, (&model, effort)).await;
-                let record = new_model_check(
-                    &selected,
-                    (&model, effort),
-                    context_window_tokens,
-                    check.id(),
-                    now,
-                )?;
-                let digest = record.digest()?;
-                check.evidence_started(digest).await.unwrap();
-                publish_model_check_at(&state, &workspace, &selected, record)?;
-                check.evidence_published(digest).await.unwrap();
-                check.close().await.unwrap();
-                Ok(())
-            })
-    })
-    .join()
-    .unwrap()
-}
-
-#[tokio::test]
-async fn an_unfinished_attempt_suppresses_cached_metadata_without_revoking_account_admission() {
-    let (_temp, state, workspace, selected) = model_account();
-    let now = 1_799_999_000;
-    record_model_check_at(
-        &state,
-        &workspace,
-        &selected,
-        "model-one",
-        Effort::High,
-        Some(272_000),
-        now,
-    )
-    .unwrap();
-    let index = AccountIndex::read(&state).unwrap();
-    assert_eq!(
-        checked_model_window(&state, &index, &selected, "model-one", now).unwrap(),
-        Some(272_000)
-    );
-    let mut check = model_check_fixture(&state, &selected, ("model-one", Effort::High)).await;
-    assert_eq!(
-        checked_model_window(&state, &index, &selected, "model-one", now).unwrap(),
-        None
-    );
-    let record = new_model_check(
-        &selected,
-        ("model-one", Effort::High),
-        Some(320_000),
-        check.id(),
-        now,
-    )
-    .unwrap();
-    let digest = record.digest().unwrap();
-    let payload = serde_json::to_vec(&record).unwrap();
-    check.evidence_started(digest).await.unwrap();
-    let mut changed = selected.clone();
-    changed.credentials.access_token = "changed-access".into();
-    let refused = serde_json::from_slice(&payload).unwrap();
-    assert!(matches!(
-        publish_model_check_at(&state, &workspace, &changed, refused),
-        Err(AuthorizationError::SelectedAccountChanged)
-    ));
-    publish_model_check_at(&state, &workspace, &selected, record).unwrap();
-    assert_eq!(
-        checked_model_window(
-            &state,
-            &AccountIndex::read(&state).unwrap(),
-            &selected,
-            "model-one",
-            now
-        )
-        .unwrap(),
-        None
-    );
-    check
-        .finish(arany::CheckDisposition::Cancelled)
-        .await
-        .unwrap();
-    let delayed = serde_json::from_slice(&payload).unwrap();
-    assert!(publish_model_check_at(&state, &workspace, &selected, delayed).is_err());
-    assert_eq!(
-        check.close().await.unwrap().replay_disposition(),
-        arany::CheckDisposition::Uncertain
-    );
-    let (_, window) = admitted_model_at(
-        &state,
-        &workspace,
-        &selected,
-        RunModel {
-            slug: "model-one",
-            effort: Effort::High,
-            now,
-        },
-        Err(&AuthorizationError::Unavailable),
-    )
-    .unwrap();
-    assert_eq!(window, None);
-}
-
-async fn model_check_fixture(
-    state: &StateRoot,
-    selected: &SelectedAccount,
-    selection: (&str, Effort),
-) -> arany::ChatGptCheck {
-    let mut check = arany::ChatGptCheck::start(
-        StateRoot::open_existing(state.path()).unwrap(),
-        arany::ChatGptCheckRequest {
-            account: selected.id,
-            model: selection.0.into(),
-            effort: selection.1,
-            fingerprint: model_check_fingerprint(selected, selection.0, selection.1).unwrap(),
-        },
-        retained_checks,
-        arany::RunCancellation::new(),
-    )
-    .await
-    .unwrap();
-    check.evidence_cleared().await.unwrap();
-    let token = check.begin_catalog().await.unwrap();
-    check
-        .record_catalog(token, arany::CheckDisposition::Succeeded)
-        .await
-        .unwrap();
-    arany::test_support::complete_chatgpt_probe_fixture(&mut check)
-        .await
-        .unwrap();
-    check
 }

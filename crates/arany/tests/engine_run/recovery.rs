@@ -109,11 +109,9 @@ async fn escape_heavy_guidance_does_not_refuse_goal_compaction() {
     .await;
 }
 
-// The Anthropic route that reports the window reports Anthropic rate dimensions.
+// The ChatGPT route that reports the window reports plan windows.
 fn compaction_sample(index: usize) -> arany::RateLimits {
-    let mut sample = api_sample(1000 + index as i64);
-    sample.api.as_mut().expect("API sample").dialect = arany::ApiLimitDialect::Anthropic;
-    sample
+    plan_sample(1000 + index as i64)
 }
 
 async fn compact_read_only_goal_prefix(objective: &str, cleared: bool, window_tokens: u32) {
@@ -179,7 +177,8 @@ async fn compact_with_guidance(
             .chain((1..READS).map(|_| good_compaction()))
             .collect(),
         )
-        .with_anthropic_window(window_tokens);
+        .with_context_window(window_tokens)
+        .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32]);
     let samples = provider.compact_rate_limits.get_mut().unwrap();
     samples.extend((0..READS).map(|index| Some(compaction_sample(index))));
     let requests = Arc::clone(&provider.requests);
@@ -409,10 +408,7 @@ async fn compact_with_guidance(
     for (index, (_, record)) in compacted.iter().enumerate() {
         assert_eq!(record.rate_limits, Some(compaction_sample(index)));
     }
-    let group = &view.usage.api_limits[0];
-    assert_eq!(group.role, arany::ProviderRole::Compaction);
-    let latest = compaction_sample(compacted.len() - 1);
-    assert_eq!(group.rows, latest.api.unwrap().rows);
+    assert!(view.usage.api_limits.is_empty());
     assert_eq!(
         view.usage
             .groups
@@ -1566,7 +1562,7 @@ async fn interrupted_compaction_sample(sample: arany::RateLimits, append_failure
         Arc::new(ScriptedProvider::new(vec![]).with_profile("openai", "compact-fallback"));
     let primary = Arc::new(
         ScriptedProvider::new(paged_read_outcomes())
-            .with_profile("anthropic", "primary")
+            .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32])
             .with_context_window(SMALL_WINDOW_TOKENS),
     );
     let mut bindings = AdmittedProviders::single(primary.clone());

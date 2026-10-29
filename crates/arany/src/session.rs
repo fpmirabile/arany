@@ -100,7 +100,7 @@ pub use events::{
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_RESULT_BYTES, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
-    MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS, payload_version,
+    MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS,
     requested_command_resources, run_started_fits,
 };
 pub(crate) use lineage::prefix_digest;

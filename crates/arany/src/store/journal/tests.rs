@@ -4,7 +4,6 @@ use super::super::replay::{
 };
 use super::*;
 use crate::session::WorkspaceIdentity;
-use crate::session::payload_version;
 
 #[test]
 fn append_refuses_event_past_replay_limit() {
@@ -33,8 +32,8 @@ fn append_refuses_event_past_replay_limit() {
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                "INSERT INTO events (sequence, session_id, kind, payload, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, 0)",
             )
             .expect("seed statement");
         for sequence in 2..=MAX_SESSION_EVENTS {
@@ -43,7 +42,6 @@ fn append_refuses_event_past_replay_limit() {
                     sequence as i64,
                     session_id.to_string(),
                     rename.kind(),
-                    rename.version(),
                     payload,
                 ])
                 .expect("valid Event row");
@@ -88,17 +86,18 @@ async fn setup_store_with_remaining_slots(
     let payload = rename.payload().unwrap();
     let transaction = connection.transaction().unwrap();
     {
-        let mut insert = transaction.prepare(
-            "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-        ).unwrap();
+        let mut insert = transaction
+            .prepare(
+                "INSERT INTO events (sequence, session_id, kind, payload, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            )
+            .unwrap();
         for sequence in 2..=MAX_SESSION_EVENTS - remaining {
             insert
                 .execute(params![
                     sequence as i64,
                     session.to_string(),
                     rename.kind(),
-                    rename.version(),
                     payload
                 ])
                 .unwrap();
@@ -282,9 +281,7 @@ async fn publish_setup_profile(
             },
         )
         .await?;
-    let bytes = crate::CustomProfile::write_profiles(root, None, &[draft])
-        .await
-        .unwrap();
+    let bytes = crate::CustomProfile::write_profiles(root, None, &[draft]).unwrap();
     store
         .append(
             session,
@@ -701,17 +698,11 @@ fn failed_insert_drops_hot_projection_before_recovery() {
 }
 
 #[test]
-fn run_start_admission_reserves_the_current_version_payload_exceptions() {
-    let message = payload_version("MessageAccepted").expect("payload version");
-    let goal = payload_version("GoalStarted").expect("payload version");
+fn run_start_admission_reserves_the_payload_exceptions() {
     assert_eq!(
         crate::store::RUN_START_EXTRA_BYTES,
-        event_payload_limit("MessageAccepted", message) + event_payload_limit("GoalStarted", goal)
+        event_payload_limit("MessageAccepted") + event_payload_limit("GoalStarted")
             - 2 * crate::store::MAX_EVENT_BYTES
-    );
-    assert_eq!(
-        event_payload_limit("MessageAccepted", message - 1),
-        crate::store::MAX_EVENT_BYTES
     );
 }
 
@@ -841,7 +832,7 @@ fn assert_tool_tail_capacity(prepared: bool) {
             .chain([("ToolStarted", &started), ("ToolFinished", &finished)])
         {
             t.execute(
-                "INSERT INTO events (session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms) VALUES (?1, 'run', 'agent', ?2, 1, ?3, 0)",
+                "INSERT INTO events (session_id, run_id, agent_run_id, kind, payload, created_at_ms) VALUES (?1, 'run', 'agent', ?2, ?3, 0)",
                 params![session_id.to_string(), kind, payload],
             )
             .unwrap();
@@ -871,59 +862,38 @@ fn assert_tool_tail_capacity(prepared: bool) {
 
 #[test]
 fn every_event_slot_admits_a_current_tool_observation() {
-    let supervisor = payload_version("SupervisorVerdictRecorded").unwrap();
+    assert_eq!(event_payload_limit("SupervisorVerdictRecorded"), 2048);
     assert_eq!(
-        event_payload_limit("SupervisorVerdictRecorded", supervisor),
-        2048
-    );
-    assert_eq!(
-        event_payload_limit("SupervisorVerdictRecorded", supervisor + 1),
-        crate::store::MAX_EVENT_BYTES
-    );
-    let finished = payload_version("ToolFinished").expect("payload version");
-    assert_eq!(
-        event_payload_limit("ToolFinished", finished),
+        event_payload_limit("ToolFinished"),
         crate::tools::types::MAX_TOOL_OBSERVATION_BYTES + 512
     );
     assert_eq!(
-        event_payload_limit("ToolFinished", finished - 1),
-        crate::store::MAX_EVENT_BYTES
-    );
-    let started = payload_version("ToolStarted").expect("payload version");
-    assert_eq!(
-        event_payload_limit("ToolStarted", started - 1),
+        event_payload_limit("SessionRenamed"),
         crate::store::MAX_EVENT_BYTES
     );
     let payload = largest_tool_started_payload();
     assert!(payload.len() > crate::store::MAX_EVENT_BYTES);
-    assert!(payload.len() <= event_payload_limit("ToolStarted", started));
+    assert!(payload.len() <= event_payload_limit("ToolStarted"));
     let host = crate::session::session_host_protocol_fixture();
     let host_start = host.events.iter().rev().find(|event| matches!(event,
         Event::ToolStarted { verdict: Some(verdict), .. }
             if verdict.host.as_ref().is_some_and(|approval| approval.source_intent.is_some())
     )).expect("host start with a session approval source");
-    assert!(host_start.payload().unwrap().len() <= event_payload_limit("ToolStarted", started));
-    assert_eq!(payload_version("ToolPermissionDecided"), None);
-    let proposed = payload_version("ToolProposed").expect("proposal version");
+    assert!(host_start.payload().unwrap().len() <= event_payload_limit("ToolStarted"));
     assert_eq!(
-        event_payload_limit("ToolProposed", proposed),
-        event_payload_limit("ToolStarted", started)
+        event_payload_limit("ToolProposed"),
+        event_payload_limit("ToolStarted")
     );
     for kind in ["ContextCompacted", "GoalContextCompacted"] {
-        let version = payload_version(kind).expect("compaction payload version");
         assert_eq!(
-            event_payload_limit(kind, version),
+            event_payload_limit(kind),
             crate::store::MAX_COMPACTION_EVENT_BYTES
-        );
-        assert_eq!(
-            event_payload_limit(kind, version - 1),
-            crate::store::MAX_EVENT_BYTES
         );
     }
 }
 
 #[test]
-fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
+fn worker_protocol_store_cold_prefixes_replay() {
     for f in [crate::session::worker_protocol_fixture()] {
         let temp = tempfile::tempdir().unwrap();
         let root = StateRoot::admit(&temp.path().join("state")).expect("private worker State root");
@@ -936,54 +906,11 @@ fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
             let expected = SessionView::replay(f.session, &f.envelopes()[..=index]).unwrap();
             assert_eq!(view, expected, "cold prefix {index}");
         }
-        drop(hot);
-        for kind in [
-            "RunStarted",
-            "AgentSpawned",
-            "ProviderCallRecorded",
-            "AgentFinished",
-            "ToolStarted",
-            "ToolFinished",
-            "WorkerLeaseReleased",
-            "WorkerVerificationRecorded",
-        ] {
-            let current = payload_version(kind).unwrap();
-            // A version-1 kind has no previous version; a foreign version must reject just the same.
-            let stale = if current > 1 {
-                current - 1
-            } else {
-                current + 1
-            };
-            connection
-                .execute(
-                    "UPDATE events SET event_version=?1 WHERE kind=?2",
-                    params![stale, kind],
-                )
-                .unwrap();
-            let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
-            let cold = open_connection(&root, true).unwrap();
-            assert!(
-                resolve_view(&cold, f.session, 0, &mut 0).is_err(),
-                "old {kind}"
-            );
-            drop(cold);
-            assert_eq!(
-                std::fs::read(root.path().join(DATABASE_FILE)).unwrap(),
-                before,
-                "unchanged {kind}"
-            );
-            connection
-                .execute(
-                    "UPDATE events SET event_version=?1 WHERE kind=?2",
-                    params![current, kind],
-                )
-                .unwrap();
-        }
     }
 }
 
 #[test]
-fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
+fn rewind_store_cold_prefixes_replay_the_outcome() {
     let temp = tempfile::tempdir().unwrap();
     let root = StateRoot::admit(&temp.path().join("state")).expect("private rewind State root");
     let f = crate::session::worker_protocol_fixture();
@@ -1009,31 +936,6 @@ fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
     );
     append(&mut connection, &mut hot, f.session, event).unwrap();
     drop(hot);
-    for kind in ["WorkspaceRewindStarted", "WorkspaceRewindFinished"] {
-        let current = payload_version(kind).unwrap();
-        for unsupported in (1..current).chain(std::iter::once(current + 1)) {
-            connection
-                .execute(
-                    "UPDATE events SET event_version=?1 WHERE kind=?2",
-                    params![unsupported, kind],
-                )
-                .unwrap();
-            let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
-            let cold = open_connection(&root, true).unwrap();
-            assert!(resolve_view(&cold, f.session, 0, &mut 0).is_err());
-            drop(cold);
-            assert_eq!(
-                std::fs::read(root.path().join(DATABASE_FILE)).unwrap(),
-                before
-            );
-            connection
-                .execute(
-                    "UPDATE events SET event_version=?1 WHERE kind=?2",
-                    params![current, kind],
-                )
-                .unwrap();
-        }
-    }
     let cold = open_connection(&root, true).unwrap();
     let (_, view) = resolve_view(&cold, f.session, 0, &mut 0).unwrap();
     assert_eq!(
@@ -1239,14 +1141,9 @@ fn seed_session(
     let start_payload = start.payload().expect("bounded Event payload");
     connection
         .execute(
-            "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-             VALUES ((SELECT COALESCE(MAX(sequence), 0) + 1 FROM events), ?1, ?2, ?3, ?4, 0)",
-            params![
-                session_id.to_string(),
-                start.kind(),
-                start.version(),
-                start_payload
-            ],
+            "INSERT INTO events (sequence, session_id, kind, payload, created_at_ms)
+             VALUES ((SELECT COALESCE(MAX(sequence), 0) + 1 FROM events), ?1, ?2, ?3, 0)",
+            params![session_id.to_string(), start.kind(), start_payload],
         )
         .expect("first Event");
     let rename = Event::SessionRenamed { title: "x".into() };
@@ -1255,9 +1152,9 @@ fn seed_session(
     for _ in 0..renames {
         transaction
             .execute(
-                "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-                 VALUES ((SELECT MAX(sequence) + 1 FROM events), ?1, ?2, ?3, ?4, 0)",
-                params![session_id.to_string(), rename.kind(), rename.version(), payload],
+                "INSERT INTO events (sequence, session_id, kind, payload, created_at_ms)
+                 VALUES ((SELECT MAX(sequence) + 1 FROM events), ?1, ?2, ?3, 0)",
+                params![session_id.to_string(), rename.kind(), payload],
             )
             .expect("valid Event row");
     }
@@ -1855,7 +1752,7 @@ fn fork_rejects_ambiguous_run_owners() {
         .execute(
             "INSERT INTO events
          SELECT (SELECT MAX(sequence) + 1 FROM events), ?1, run_id, agent_run_id, kind,
-                event_version, payload, created_at_ms
+                payload, created_at_ms
          FROM events WHERE run_id=?2 ORDER BY sequence LIMIT 1",
             params![SessionId::new().to_string(), run.id.to_string()],
         )
@@ -1921,8 +1818,8 @@ fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() 
     };
     let transaction = connection.transaction().unwrap();
     for next in events.len() + 1..MAX_SESSION_EVENTS {
-        transaction.execute("INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![next as i64, f.session.to_string(), rename.kind(), rename.version(), rename.payload().unwrap()]).unwrap();
+        transaction.execute("INSERT INTO events (sequence, session_id, kind, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4, 0)",
+            params![next as i64, f.session.to_string(), rename.kind(), rename.payload().unwrap()]).unwrap();
     }
     transaction.commit().unwrap();
     assert_eq!(
@@ -2001,268 +1898,4 @@ fn listing_reads_earlier_boundary_forks_at_the_watermark() {
     assert!(ids.contains(&child) && ids.contains(&source));
     let listed = page.items.iter().find(|item| item.id == child).unwrap();
     assert_eq!(listed.title, "Earlier");
-}
-
-#[tokio::test]
-async fn check_evidence_requires_atomic_publication_and_the_latest_successful_attempt() {
-    use crate::journal::check::{
-        CheckDisposition, CheckEvent, CheckJournal,
-        tests::{fixture, start_fixture},
-    };
-    use crate::provider::evidence::ProviderEvidenceRecord;
-    use crate::store::Store;
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("state");
-    let mut journal = CheckJournal::start(StateRoot::admit(&path).unwrap(), start_fixture())
-        .await
-        .unwrap();
-    let id = journal.view().id;
-    for event in &fixture().1[2..8] {
-        journal.append(event.clone()).await.unwrap();
-    }
-    let now = crate::journal::check::now_ms().unwrap();
-    let record = ProviderEvidenceRecord {
-        name: "local".into(),
-        digest: [1; 32],
-        addresses: vec!["127.0.0.1:9321".parse().unwrap()],
-        checked_at_ms: now,
-        expires_at_ms: now + 60_000,
-    };
-    let digest = crate::store::check::provider_digest(&record).unwrap();
-    journal
-        .evidence_started(digest, record.digest)
-        .await
-        .unwrap();
-    journal.publish_provider(record.clone()).await.unwrap();
-    let view = journal.close().await.unwrap();
-    assert_eq!(view.disposition, Some(CheckDisposition::Succeeded));
-    let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-    assert_eq!(store.load_check(id).await.unwrap(), Some(view));
-    assert_eq!(
-        store.load_provider_evidence("local".into()).await.unwrap(),
-        Some(record.clone())
-    );
-    store.close().await.unwrap();
-
-    let mut next = CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start_fixture())
-        .await
-        .unwrap();
-    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    // A resurrected cache row cannot overrule the newer attempt.
-    connection.execute("INSERT INTO provider_evidence VALUES ('local', ?1, '[\"127.0.0.1:9321\"]', ?2, ?3, ?4)", params![record.digest.as_slice(), record.checked_at_ms, record.expires_at_ms, id.to_string()]).unwrap();
-    drop(connection);
-    let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-    assert!(
-        store
-            .load_provider_evidence("local".into())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    store.close().await.unwrap();
-    next.finish(CheckDisposition::Cancelled).await.unwrap();
-    next.close().await.unwrap();
-
-    for forged in [
-        CheckEvent::ProviderCheckEvidenceCleared,
-        CheckEvent::ProviderCheckFinished {
-            disposition: CheckDisposition::Succeeded,
-            evidence: Some(digest),
-        },
-    ] {
-        let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
-        connection.execute("UPDATE provider_check_events SET kind=?1, event_version=?2, payload=?3 WHERE sequence=(SELECT MAX(sequence) FROM provider_check_events)", params![forged.kind(), forged.version(), serde_json::to_string(&forged).unwrap()]).unwrap();
-        drop(connection);
-        assert!(matches!(
-            Store::open_read_only(StateRoot::open_existing(&path).unwrap()),
-            Err(StoreError::InvalidHistory)
-        ));
-    }
-}
-
-#[tokio::test]
-async fn check_capacity_and_refused_appends_preserve_the_committed_prefix() {
-    use crate::journal::check::{
-        CheckDisposition, CheckEvent, CheckId, CheckJournal, CheckOp, CheckOpenError, MAX_CHECKS,
-        tests::start_fixture,
-    };
-    use crate::store::Store;
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("state");
-    let mut journal = CheckJournal::start(StateRoot::admit(&path).unwrap(), start_fixture())
-        .await
-        .unwrap();
-    let id = journal.view().id;
-    let before = journal.view().clone();
-    assert!(
-        journal
-            .append(CheckEvent::ProviderCheckEvidenceStarted {
-                digest: [3; 32],
-                snapshot: [1; 32]
-            })
-            .await
-            .is_err()
-    );
-    assert!(journal.receipt().disposition.is_none());
-    assert!(
-        matches!(
-            journal.call_started(crate::CheckCallKind::Answer).await,
-            Err(StoreError::Closed)
-        ),
-        "an unconfirmed journal refuses further dispatch"
-    );
-    drop(journal);
-    let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
-    assert_eq!(store.load_check(id).await.unwrap(), Some(before));
-    store.check(CheckOp::Recover).await.unwrap();
-    let now = crate::journal::check::now_ms().unwrap();
-    let retained = crate::provider::evidence::ProviderEvidenceRecord {
-        name: "retained".into(),
-        digest: [7; 32],
-        addresses: vec!["127.0.0.1:9321".parse().unwrap()],
-        checked_at_ms: now,
-        expires_at_ms: now + 60_000,
-    };
-    store
-        .record_provider_evidence(retained.clone())
-        .await
-        .unwrap();
-    store.close().await.unwrap();
-    let mut connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
-    let transaction = connection.transaction().unwrap();
-    let start = start_fixture();
-    let key = start.target.key().unwrap();
-    let events = [
-        CheckEvent::ProviderCheckStarted { start },
-        CheckEvent::ProviderCheckFinished {
-            disposition: CheckDisposition::Failed,
-            evidence: None,
-        },
-    ];
-    for _ in 2..MAX_CHECKS {
-        let id = CheckId::new().to_string();
-        for event in &events {
-            transaction.execute("INSERT INTO provider_check_events (check_id,target_key,kind,event_version,payload,created_at_ms) VALUES (?1,?2,?3,?4,?5,1)", params![id, key.as_slice(), event.kind(), event.version(), serde_json::to_string(event).unwrap()]).unwrap();
-        }
-    }
-    transaction.commit().unwrap();
-    let count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM provider_check_events", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    let mut invalid = start_fixture();
-    invalid.cost_consent = false;
-    assert!(matches!(
-        CheckJournal::start(StateRoot::open_existing(&path).unwrap(), invalid).await,
-        Err(CheckOpenError {
-            source: StoreError::InvalidHistory,
-            receipt: None,
-        })
-    ));
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM provider_check_events", [], |row| row
-                .get::<_, i64>(
-                0
-            ))
-            .unwrap(),
-        count,
-        "refused Start rolls back pruning"
-    );
-    for _ in 0..2 {
-        let mut next =
-            CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start_fixture())
-                .await
-                .unwrap();
-        assert_eq!(next.view().completed_calls, 0);
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(DISTINCT check_id) FROM provider_check_events",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            MAX_CHECKS as i64
-        );
-        next.finish(CheckDisposition::Cancelled).await.unwrap();
-        next.close().await.unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-        assert!(
-            store.load_check(id).await.unwrap().is_none(),
-            "oldest unreferenced check was pruned"
-        );
-        assert_eq!(
-            store
-                .load_provider_evidence("retained".into())
-                .await
-                .unwrap(),
-            Some(retained.clone()),
-            "referenced proof survives pruning and reopen"
-        );
-        store.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_new_native_attempt_invalidates_prior_credentials_for_the_same_target() {
-    use crate::journal::check::{CheckDisposition, CheckJournal};
-    use crate::provider::evidence::NativeEvidenceRecord;
-    use crate::store::Store;
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("state");
-    let store = Store::open(StateRoot::admit(&path).unwrap()).unwrap();
-    let now = crate::journal::check::now_ms().unwrap();
-    let record = NativeEvidenceRecord {
-        fingerprint: [7; 32],
-        checked_at_ms: now,
-        expires_at_ms: now + 60_000,
-
-        context_window_tokens: None,
-    };
-    store.record_native_evidence(record.clone()).await.unwrap();
-    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
-    let id: String = connection
-        .query_row("SELECT check_id FROM native_provider_evidence", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    let mut start = store
-        .load_check(id.parse().unwrap())
-        .await
-        .unwrap()
-        .unwrap()
-        .start;
-    start.fingerprint = [8; 32];
-    store.close().await.unwrap();
-    let mut next = CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start)
-        .await
-        .unwrap();
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM native_provider_evidence", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
-        0
-    );
-    next.finish(CheckDisposition::Failed).await.unwrap();
-    next.close().await.unwrap();
-    let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
-    assert!(
-        store
-            .load_native_evidence(record.fingerprint)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    store.close().await.unwrap();
 }

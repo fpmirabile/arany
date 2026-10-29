@@ -1,4 +1,4 @@
-use crate::loopback::{ChildGuard, check_profile, send_response_for, wait_product, write_profile};
+use crate::loopback::{ChildGuard, wait_product, write_profile};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, kill_process};
 use std::{
@@ -90,92 +90,78 @@ fn resident_memory_two_includes_on_named_host() {
     let (half_response_ready, half_response_received) = mpsc::sync_channel(1);
     let (finish_response, finish_response_received) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
-        for index in 0..4 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "synthetic request missing");
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("loopback accept failed: {error}"),
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "synthetic request missing");
+                    thread::yield_now();
                 }
-            };
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .expect("response write deadline");
-            let body = crate::loopback::read_request_within(
-                &mut stream,
-                "/v1/responses",
-                "authorization: bearer test-key",
-                REQUEST_LIMIT,
-            );
-            let wire: serde_json::Value =
-                serde_json::from_slice(&body).expect("synthetic Responses request");
-            assert_eq!(wire["model"], "model-1");
-            let input: serde_json::Value = crate::semantic::input(&wire);
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    assert_eq!(input["phase"], "root_plan");
-                    assert_eq!(input["objective"], "Synthetic memory question");
-                    let includes = input["includes"].as_array().expect("included input");
-                    assert_eq!(includes.len(), 2);
-                    for (include, byte) in includes.iter().zip(*b"AB") {
-                        let content = include.as_str().expect("included text");
-                        assert_eq!(content.len(), FILE_BYTES);
-                        assert!(content.bytes().all(|actual| actual == byte));
-                    }
-                    request_ready.send(()).expect("memory sample gate");
-                    released
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("release synthetic response");
-                    let text = serde_json::json!("memory answer");
-                    let mut response = serde_json::json!({
-                        "id": format!("resp_{}", index + 1),
-                        "status": "completed",
-                        "model": "model-1",
-                        "output": arany::semantic::responses_output(&text),
-                        "usage": {"input_tokens":20,"output_tokens":10},
-                        "padding": ""
-                    });
-                    let padding = RESPONSE_BYTES
-                        .checked_sub(response.to_string().len())
-                        .expect("response under cap before padding");
-                    response["padding"] = serde_json::json!("x".repeat(padding));
-                    let response = response.to_string();
-                    assert_eq!(response.len(), RESPONSE_BYTES);
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        response.len()
-                    )
-                    .expect("bounded response headers");
-                    let midpoint = RESPONSE_BYTES / 2;
-                    stream
-                        .write_all(&response.as_bytes()[..midpoint])
-                        .expect("first response half");
-                    half_response_ready
-                        .send(())
-                        .expect("mid-response sample gate");
-                    finish_response_received
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("complete synthetic response");
-                    stream
-                        .write_all(&response.as_bytes()[midpoint..])
-                        .expect("second response half");
-                    continue;
-                }
-            };
-            send_response_for(&mut stream, index, text, wire["stream"] == true);
+                Err(error) => panic!("loopback accept failed: {error}"),
+            }
+        };
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .expect("response write deadline");
+        let body = crate::loopback::read_request_within(
+            &mut stream,
+            "/v1/responses",
+            "authorization: bearer test-key",
+            REQUEST_LIMIT,
+        );
+        let wire: serde_json::Value =
+            serde_json::from_slice(&body).expect("synthetic Responses request");
+        assert_eq!(wire["model"], "model-1");
+        let input: serde_json::Value = crate::semantic::input(&wire);
+        assert_eq!(input["phase"], "root_plan");
+        assert_eq!(input["objective"], "Synthetic memory question");
+        let includes = input["includes"].as_array().expect("included input");
+        assert_eq!(includes.len(), 2);
+        for (include, byte) in includes.iter().zip(*b"AB") {
+            let content = include.as_str().expect("included text");
+            assert_eq!(content.len(), FILE_BYTES);
+            assert!(content.bytes().all(|actual| actual == byte));
         }
+        request_ready.send(()).expect("memory sample gate");
+        released
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release synthetic response");
+        let text = serde_json::json!("memory answer");
+        let mut response = serde_json::json!({
+            "id": "resp_1",
+            "status": "completed",
+            "model": "model-1",
+            "output": arany::semantic::responses_output(&text),
+            "usage": {"input_tokens":20,"output_tokens":10},
+            "padding": ""
+        });
+        let padding = RESPONSE_BYTES
+            .checked_sub(response.to_string().len())
+            .expect("response under cap before padding");
+        response["padding"] = serde_json::json!("x".repeat(padding));
+        let response = response.to_string();
+        assert_eq!(response.len(), RESPONSE_BYTES);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response.len()
+        )
+        .expect("bounded response headers");
+        let midpoint = RESPONSE_BYTES / 2;
+        stream
+            .write_all(&response.as_bytes()[..midpoint])
+            .expect("first response half");
+        half_response_ready
+            .send(())
+            .expect("mid-response sample gate");
+        finish_response_received
+            .recv_timeout(Duration::from_secs(10))
+            .expect("complete synthetic response");
+        stream
+            .write_all(&response.as_bytes()[midpoint..])
+            .expect("second response half");
     });
-    check_profile(&workspace, &state);
 
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));

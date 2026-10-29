@@ -14,7 +14,6 @@ fn live_editor_lifecycle_and_every_cold_prefix_keep_workspace_facts() {
             .map(|e| EventEnvelope {
                 event: Event::decode(
                     e.event.kind(),
-                    e.event.version(),
                     &e.event.payload().unwrap(),
                     e.run_id,
                     e.agent_run_id,
@@ -87,14 +86,13 @@ fn live_replay_refuses_private_targets_and_old_release_fields() {
     })
     .to_string();
     assert!(matches!(
-        Event::decode("WorkerDataChunk", 1, &data, Some(f.run), Some(f.child)),
+        Event::decode("WorkerDataChunk", &data, Some(f.run), Some(f.child)),
         Err(ReplayError::UnknownEvent)
     ));
     let release = serde_json::json!({"assignment_id":f.child,"cause_sequence":1,"handover_sequence":null,"reason":"integrated"}).to_string();
     assert!(
         Event::decode(
             "WorkerLeaseReleased",
-            2,
             &release,
             Some(f.run),
             Some(f.primary)

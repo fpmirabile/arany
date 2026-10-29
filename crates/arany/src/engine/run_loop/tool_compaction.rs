@@ -858,12 +858,10 @@ impl RunLoop<'_> {
             recent_files: recent_files.clone(),
             provider: identity.profile.clone(),
             model: identity.model.clone(),
-            prompt_version: 1,
             prompt: request
                 .input
                 .prompts
                 .pin(crate::provider::PromptFile::Compaction),
-            schema_version: 1,
             compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
             source_bytes: summary.source_bytes,
             source_tokens_estimate: summary.source_bytes.div_ceil(4),

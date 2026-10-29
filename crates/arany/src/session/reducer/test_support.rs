@@ -1004,10 +1004,8 @@ pub(super) fn failed_compaction_record(run: RunId, covered_sequence: u64) -> Com
         recent_files: Vec::new(),
         provider: "openai".into(),
         model: "gpt-5.4".into(),
-        prompt_version: 1,
         prompt: crate::provider::EffectivePrompts::default()
             .pin(crate::provider::PromptFile::Compaction),
-        schema_version: 1,
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 1,
         source_tokens_estimate: 1,

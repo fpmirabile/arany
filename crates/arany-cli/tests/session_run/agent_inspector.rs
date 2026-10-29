@@ -1,6 +1,4 @@
-use super::loopback::{
-    ChildGuard, check_profile, read_request, send_response, wait_product, write_profile,
-};
+use super::loopback::{ChildGuard, read_request, send_response, wait_product, write_profile};
 use super::session_picker::{checkpoint_screen, pump, screen_rows, tail, wait_for_screen};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -194,7 +192,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let (release_run, released) = mpsc::channel();
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..5 {
+        for index in 3..5 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -218,23 +216,10 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
             let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
             assert_eq!(wire["model"], "model-1");
             assert!(wire.get("text").is_none());
-            if index == 2 {
-                crate::loopback::assert_compaction_request(&wire);
-            }
-            assert_eq!(
-                wire["max_output_tokens"],
-                if index == 1 || index == 2 { 128 } else { 4096 }
-            );
+            assert_eq!(wire["max_output_tokens"], 4096);
             let input: serde_json::Value = crate::semantic::input(&wire);
             assert!(!input.to_string().contains("/agents"));
             match index {
-                0..=2 => {
-                    assert!(
-                        input
-                            .get("workspace_guidance")
-                            .is_none_or(serde_json::Value::is_null)
-                    );
-                }
                 3 => assert_eq!(input["objective"], "prior"),
                 _ => {
                     assert_eq!(input["objective"], "current");
@@ -245,11 +230,6 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                 }
             }
             let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
                 3 => {
                     serde_json::json!("prior answer")
                 }
@@ -257,14 +237,9 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                     serde_json::json!("current answer")
                 }
             };
-            if index == 2 {
-                assert_eq!(text, "synthetic summary", "plain-text compaction reply");
-            }
             send_response(&mut stream, index, text);
         }
     });
-
-    check_profile(&workspace, &state);
 
     let mut first = Command::new(env!("CARGO_BIN_EXE_arany"));
     first
@@ -615,10 +590,10 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
         &state,
         listener.local_addr().expect("listener address").port(),
     );
-    // Three conformance calls, then a Run whose primary delegates to two children.
+    // A Run whose primary delegates to two children.
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..7 {
+        for index in 0..4 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -633,16 +608,11 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
             let wire: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
             let input = crate::semantic::input(&wire);
-            let text = match (index, input["phase"].as_str()) {
-                (0, _) => serde_json::json!("ok"),
-                (1, _) => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                (2, _) => serde_json::json!(r#"synthetic summary"#),
-                (_, Some("root_plan")) => {
+            let text = match input["phase"].as_str() {
+                Some("root_plan") => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})
                 }
-                (_, Some("child_work")) => serde_json::json!(format!(
+                Some("child_work") => serde_json::json!(format!(
                     "result of {}\n\n> - nested **result**\n>\n>   ~~~\n>   nested code\n>   ~~~",
                     input["objective"].as_str().expect("child objective")
                 )),
@@ -651,7 +621,6 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
             send_response(&mut stream, index, text);
         }
     });
-    check_profile(&workspace, &state);
     let mut team = Command::new(env!("CARGO_BIN_EXE_arany"));
     team.env_clear()
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
@@ -1109,7 +1078,7 @@ fn gated_team_server(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..4 + journeys * 4 {
+        for index in 0..1 + journeys * 4 {
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut stream = loop {
                 match listener.accept() {
@@ -1147,12 +1116,7 @@ fn gated_team_server(
                     .expect("released response");
             };
             let text = match (index, input["phase"].as_str()) {
-                (0, _) => serde_json::json!("ok"),
-                (1, _) => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                (2, _) => serde_json::json!(r#"synthetic summary"#),
-                (3, _) => serde_json::json!("prior answer"),
+                (0, _) => serde_json::json!("prior answer"),
                 (_, Some("root_plan")) => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})
                 }
@@ -1189,7 +1153,6 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 5, false, requests, released);
-    check_profile(&workspace, &state);
     let mut prior = Command::new(env!("CARGO_BIN_EXE_arany"));
     prior
         .env_clear()
@@ -1245,7 +1208,6 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 1, false, requests, released);
-    check_profile(&workspace, &state);
     let prior = wait_product(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
@@ -1300,7 +1262,6 @@ fn selected_child_messaging_journey() {
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 3, true, requests, released);
-    check_profile(&workspace, &state);
     let prior = wait_product(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()

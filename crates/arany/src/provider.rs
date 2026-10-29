@@ -11,14 +11,12 @@ mod custom;
 mod decode;
 pub(crate) mod diagnostics;
 mod effort;
-pub(crate) mod evidence;
 mod image;
 #[cfg(any(test, feature = "test-support"))]
 pub use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
 mod limits;
 mod native;
-mod native_check;
 pub use limits::{
     ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, LimitFailure, LimitSource,
     LimitUnavailable, MAX_API_LIMIT_ROWS, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES, PlanWindow,
@@ -53,25 +51,20 @@ pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
 };
+pub(crate) use custom::PROVIDER_PROFILES;
 pub(crate) use custom::resolve_admitted;
 pub use custom::{
-    CustomCheckStatus, CustomProfile, CustomProfileCheck, CustomProfileDraft, CustomProfileError,
-    CustomProtocol, CustomProvider, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
-    MAX_CUSTOM_PROFILE_EFFORTS_BYTES, MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
-    MAX_CUSTOM_PROFILE_MODEL_BYTES, MAX_CUSTOM_PROFILE_NAME_BYTES, MessagesAuth,
-    check_custom_profile, check_custom_profile_value_with_cancellation,
-    check_custom_profile_with_cancellation,
+    CustomProfile, CustomProfileDraft, CustomProfileError, CustomProtocol, CustomProvider,
+    MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES, MAX_CUSTOM_PROFILE_EFFORTS_BYTES,
+    MAX_CUSTOM_PROFILE_ENDPOINT_BYTES, MAX_CUSTOM_PROFILE_MODEL_BYTES,
+    MAX_CUSTOM_PROFILE_NAME_BYTES, MessagesAuth,
 };
-pub(crate) use custom::{MAX_ADDRESSES, PROVIDER_PROFILES};
 pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
 pub use image::{
     ImageAttachment, ImageOrigin, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES,
     ProviderImage,
 };
-pub use native_check::{
-    NativeCheckError, NativeCheckRequest, check_native_model, check_native_model_from_env,
-};
-pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
+pub use openai::{ChatGptProvider, OpenAiProvider};
 pub(crate) use render::instructions_text;
 #[cfg(feature = "test-support")]
 pub use render::semantic;
@@ -340,8 +333,8 @@ fn max_stream_bytes(max_output_tokens: u32) -> usize {
     MAX_STREAM_ENVELOPE_BYTES_PER_EVENT * max_stream_events(max_output_tokens)
 }
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
-pub(crate) const PROBE_TOTAL_DEADLINE: Duration = Duration::from_secs(180);
-pub(crate) const PROBE_OUTPUT_CAP: u32 = 1024;
+#[cfg(test)]
+pub(crate) const SMALL_OUTPUT_CAP: u32 = 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_RESPONSE_JSON_NODES: usize = MAX_RESPONSE_BYTES / 4;
 const MAX_RESPONSE_JSON_DEPTH: usize = 64;
@@ -1296,8 +1289,7 @@ impl ProviderError {
 #[serde(deny_unknown_fields)]
 pub struct CustomProfileProvenance {
     pub endpoint: String,
-    pub evidence_digest: [u8; 32],
-    pub capability_evidence_version: u32,
+    pub profile_digest: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1323,7 +1315,7 @@ impl OutputTokenBound {
 #[serde(deny_unknown_fields)]
 pub struct ChatGptProvenance {
     pub account_id: Uuid,
-    pub evidence_fingerprint: [u8; 32],
+    pub admission_fingerprint: [u8; 32],
     pub admission: ChatGptAdmission,
 }
 
@@ -1336,7 +1328,7 @@ pub enum ChatGptAdmission {
 impl ChatGptProvenance {
     pub(crate) fn valid(&self) -> bool {
         self.account_id.get_version() == Some(Version::SortRand)
-            && self.evidence_fingerprint != [0; 32]
+            && self.admission_fingerprint != [0; 32]
     }
 }
 
@@ -1345,7 +1337,6 @@ impl CustomProfileProvenance {
         !self.endpoint.is_empty()
             && self.endpoint.len() <= 512
             && !self.endpoint.chars().any(char::is_control)
-            && self.capability_evidence_version == 2
     }
 }
 
@@ -1365,14 +1356,9 @@ impl CustomProfileProvenance {
 pub trait Provider: Send + Sync {
     fn identity(&self) -> &ProviderIdentity;
 
-    /// The input window from this route's authenticated catalog evidence; `None` keeps the default bounds.
+    /// The input window from this route's authenticated catalog; `None` keeps the default bounds.
     fn context_window_tokens(&self) -> Option<u32> {
         None
-    }
-
-    /// Refreshes this route's window evidence for a new Run admission.
-    async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        self.context_window_tokens()
     }
 
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
@@ -1426,9 +1412,6 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
     }
     fn context_window_tokens(&self) -> Option<u32> {
         (**self).context_window_tokens()
-    }
-    async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        (**self).context_window_tokens_for_run().await
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         (**self).invoke(request).await
@@ -1491,8 +1474,7 @@ mod tests {
                 "custom:local",
                 Provenance::Custom(CustomProfileProvenance {
                     endpoint: "https://example.com/v1/responses".into(),
-                    evidence_digest: [7; 32],
-                    capability_evidence_version: 2,
+                    profile_digest: [7; 32],
                 }),
                 None,
             ),
@@ -1500,7 +1482,7 @@ mod tests {
                 "chatgpt",
                 Provenance::ChatGpt(ChatGptProvenance {
                     account_id: Uuid::now_v7(),
-                    evidence_fingerprint: [7; 32],
+                    admission_fingerprint: [7; 32],
                     admission: ChatGptAdmission::AccountConsent,
                 }),
                 Some(RetryCause::StreamCut),
@@ -1515,7 +1497,7 @@ mod tests {
     fn stream_bounds_follow_the_declared_output_cap() {
         for cap in [
             1,
-            PROBE_OUTPUT_CAP,
+            SMALL_OUTPUT_CAP,
             DEFAULT_OUTPUT_TOKEN_CAP,
             MAX_OUTPUT_TOKEN_CAP,
         ] {
@@ -1529,8 +1511,8 @@ mod tests {
             );
         }
         assert_eq!(max_stream_events(1), MIN_STREAM_EVENTS);
-        assert_eq!(max_stream_events(PROBE_OUTPUT_CAP), MIN_STREAM_EVENTS);
-        assert!(max_stream_bytes(PROBE_OUTPUT_CAP) < max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP));
+        assert_eq!(max_stream_events(SMALL_OUTPUT_CAP), MIN_STREAM_EVENTS);
+        assert!(max_stream_bytes(SMALL_OUTPUT_CAP) < max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP));
         assert!(
             max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP) < max_stream_bytes(MAX_OUTPUT_TOKEN_CAP)
         );

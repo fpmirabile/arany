@@ -55,7 +55,6 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     let path = state.join("provider-profiles.json");
     let mut profile: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("profile file")).expect("profile JSON");
-    profile["profiles"][0]["capability_evidence_version"] = serde_json::json!(2);
     profile["profiles"][0]["efforts"] = serde_json::json!(["low", "high"]);
     std::fs::write(&path, serde_json::to_vec(&profile).expect("profile JSON"))
         .expect("updated profile file");
@@ -371,7 +370,6 @@ fn inline_model_catalog_at_width(width: u16) {
     let mut profile: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&profile_path).expect("profile file"))
             .expect("profile JSON");
-    profile["profiles"][0]["capability_evidence_version"] = serde_json::json!(2);
     profile["profiles"][0]["efforts"] = serde_json::json!(["low", "high"]);
     std::fs::write(
         &profile_path,

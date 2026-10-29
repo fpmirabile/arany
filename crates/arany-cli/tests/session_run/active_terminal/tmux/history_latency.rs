@@ -1,8 +1,5 @@
 use super::{TmuxServer, capture_pane, decline_initial_consent, redacted_tail};
-use crate::loopback::{
-    check_profile_with_binary, read_request, send_response, send_response_for, wait_product,
-    write_profile,
-};
+use crate::loopback::{read_request, send_response_for, wait_product, write_profile};
 use arany::WorkspaceIdentity;
 use arany::{
     AgentDisposition, AgentRole, AgentRunId, Event, GoalBudget, GoalId, GoalPhase, GoalReport,
@@ -374,12 +371,10 @@ async fn run_history_fixture() {
     let (runtime_ready_sender, runtime_ready_receiver) = mpsc::channel();
     let provider = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..5 {
-            if index == 3 {
-                runtime_ready_receiver
-                    .recv_timeout(PREPARE_HISTORY_TIMEOUT)
-                    .expect("bounded history preparation before runtime requests");
-            }
+        runtime_ready_receiver
+            .recv_timeout(PREPARE_HISTORY_TIMEOUT)
+            .expect("bounded history preparation before runtime requests");
+        for index in 3..5 {
             let deadline = Instant::now() + Duration::from_secs(30);
             let (mut stream, _) = loop {
                 match listener.accept() {
@@ -391,19 +386,7 @@ async fn run_history_fixture() {
                     Err(error) => panic!("synthetic accept: {error}"),
                 }
             };
-            if index < 3 {
-                read_request(&mut stream);
-                let text = match index {
-                    0 => {
-                        serde_json::json!("ok")
-                    }
-                    1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
-                    }
-                    _ => serde_json::json!(r#"summary"#),
-                };
-                send_response(&mut stream, index, text);
-            } else if index == 3 {
+            if index == 3 {
                 read_bounded_request(&mut stream);
                 request_sender.send(()).expect("active Run request");
                 release_ready
@@ -424,7 +407,6 @@ async fn run_history_fixture() {
             }
         }
     });
-    check_profile_with_binary(&workspace, &state, &executable);
     let (session_id, run_text_bytes) = seed_history(&state, &workspace).await;
     assert_eq!(
         run_text_bytes, 32_764_000,

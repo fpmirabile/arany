@@ -107,7 +107,6 @@ fn permission_verdict_replay_requires_pending_intent_and_blocks_denied_effects()
         assert_eq!(
             Event::decode(
                 "ToolStarted",
-                crate::session::payload_version("ToolStarted").unwrap(),
                 &verdict.payload().unwrap(),
                 Some(run),
                 Some(agent)

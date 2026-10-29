@@ -2505,7 +2505,7 @@ mod call_bound_tests {
             "synthetic-subscription-token".into(),
             ChatGptProvenance {
                 account_id: uuid::Uuid::now_v7(),
-                evidence_fingerprint: [7; 32],
+                admission_fingerprint: [7; 32],
                 admission: ChatGptAdmission::AccountConsent,
             },
         )

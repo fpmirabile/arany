@@ -242,12 +242,11 @@ fn seed_long_custom_profiles(state: &Path) -> String {
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
-            "capability_evidence_version": 2,
             "efforts": []
         })
     };
     let document = serde_json::json!({
-        "version": 2,
+        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
         "profiles": [
             profile("first-route", "first-model", "ARANY_PROVIDER_FIRST_ROUTE_KEY"),
             profile(&long_name, "second-model", "ARANY_PROVIDER_SECOND_ROUTE_KEY")

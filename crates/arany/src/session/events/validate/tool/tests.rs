@@ -52,13 +52,7 @@ fn tool_events_reject_internal_rewind_sources() {
         }
         assert!(matches!(event.validate(), Err(ReplayError::InvalidPayload)));
         assert!(matches!(
-            Event::decode(
-                event.kind(),
-                event.version(),
-                &payload.to_string(),
-                Some(run),
-                Some(agent),
-            ),
+            Event::decode(event.kind(), &payload.to_string(), Some(run), Some(agent),),
             Err(ReplayError::InvalidPayload)
         ));
     }
@@ -92,7 +86,6 @@ fn a_tool_finished_bump_rejects_its_previous_version() {
         assert_eq!(
             Event::decode(
                 stopped.kind(),
-                stopped.version(),
                 &stopped.payload().unwrap(),
                 Some(run),
                 Some(agent)
@@ -102,11 +95,8 @@ fn a_tool_finished_bump_rejects_its_previous_version() {
         );
     }
     let payload = finished.payload().expect("payload");
-    let current = finished.version();
-    assert_eq!(payload_version("ToolFinished"), Some(current));
-
     assert_eq!(
-        Event::decode("ToolFinished", current, &payload, Some(run), Some(agent)).expect("current"),
+        Event::decode("ToolFinished", &payload, Some(run), Some(agent)).expect("current"),
         finished
     );
     let mut missing_cause: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -117,7 +107,6 @@ fn a_tool_finished_bump_rejects_its_previous_version() {
     assert!(
         Event::decode(
             finished.kind(),
-            finished.version(),
             &missing_cause.to_string(),
             Some(run),
             Some(agent)
@@ -126,58 +115,25 @@ fn a_tool_finished_bump_rejects_its_previous_version() {
     );
     let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
     missing.as_object_mut().unwrap().remove("checkpoint");
-    assert!(
-        Event::decode(
-            "ToolFinished",
-            current,
-            &missing.to_string(),
-            Some(run),
-            Some(agent)
-        )
-        .is_err()
-    );
+    assert!(Event::decode("ToolFinished", &missing.to_string(), Some(run), Some(agent)).is_err());
     for invalid in [
         payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"checkpoint\":null", 1),
         payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
         payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
     ] {
-        assert!(Event::decode("ToolFinished", current, &invalid, Some(run), Some(agent)).is_err());
+        assert!(Event::decode("ToolFinished", &invalid, Some(run), Some(agent)).is_err());
     }
     let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
     missing.as_object_mut().unwrap().remove("limit_cause");
-    assert!(
-        Event::decode(
-            "ToolFinished",
-            current,
-            &missing.to_string(),
-            Some(run),
-            Some(agent)
-        )
-        .is_err()
-    );
+    assert!(Event::decode("ToolFinished", &missing.to_string(), Some(run), Some(agent)).is_err());
     let mut unknown: serde_json::Value = serde_json::from_str(&payload).unwrap();
     unknown["disposition"] = "limit".into();
     unknown["limit_cause"] = "invented".into();
-    assert!(
-        Event::decode(
-            "ToolFinished",
-            current,
-            &unknown.to_string(),
-            Some(run),
-            Some(agent)
-        )
-        .is_err()
-    );
-    for previous in 1..current {
-        assert!(matches!(
-            Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
-            Err(ReplayError::UnknownEvent)
-        ));
-    }
+    assert!(Event::decode("ToolFinished", &unknown.to_string(), Some(run), Some(agent)).is_err());
 }
 
 #[test]
-fn the_unguarded_format_bumps_reject_their_previous_versions() {
+fn unguarded_tool_payloads_round_trip() {
     let run = RunId::new();
     let agent = AgentRunId::new();
     let mut intent = read_observation(run, agent).intent;
@@ -221,19 +177,15 @@ fn the_unguarded_format_bumps_reject_their_previous_versions() {
     };
     for event in [&started, &verdict, &reservation] {
         let payload = event.payload().expect("payload");
-        let version = payload_version(event.kind()).expect("known kind");
         assert_eq!(
-            Event::decode(event.kind(), version, &payload, Some(run), Some(agent))
-                .expect("current"),
+            Event::decode(event.kind(), &payload, Some(run), Some(agent)).expect("current"),
             *event
         );
-        assert!(matches!(
-            Event::decode(event.kind(), version - 1, &payload, Some(run), Some(agent)),
-            Err(ReplayError::UnknownEvent)
-        ));
     }
-    assert_eq!(payload_version("ToolStarted"), Some(started.version()));
-    assert_eq!(payload_version("ToolPermissionDecided"), None);
+    assert!(matches!(
+        Event::decode("ToolPermissionDecided", "{}", Some(run), Some(agent)),
+        Err(ReplayError::UnknownEvent)
+    ));
 }
 
 #[test]
@@ -265,32 +217,19 @@ fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
         intent.limits.cache_candidate_bytes = 0;
     }
     let bytes = build.payload().unwrap();
-    let (kind, version) = (build.kind(), build.version());
+    let kind = build.kind();
     assert_eq!(
-        Event::decode(kind, version, &bytes, Some(run), Some(agent)).unwrap(),
+        Event::decode(kind, &bytes, Some(run), Some(agent)).unwrap(),
         build
     );
     assert_eq!(
-        Event::decode(
-            proposed.kind(),
-            proposed.version(),
-            &payload,
-            Some(run),
-            Some(agent)
-        )
-        .unwrap(),
+        Event::decode(proposed.kind(), &payload, Some(run), Some(agent)).unwrap(),
         proposed
     );
     let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
     extra["verdict"] = serde_json::Value::Null;
     assert!(matches!(
-        Event::decode(
-            proposed.kind(),
-            proposed.version(),
-            &extra.to_string(),
-            Some(run),
-            Some(agent)
-        ),
+        Event::decode(proposed.kind(), &extra.to_string(), Some(run), Some(agent)),
         Err(ReplayError::InvalidPayload)
     ));
 }
@@ -357,7 +296,7 @@ fn tool_preflight_refusal_payload_is_closed_and_keeps_its_fixed_reason() {
     };
     let payload = event.payload().unwrap();
     assert_eq!(
-        Event::decode(event.kind(), 1, &payload, Some(run), Some(agent)).unwrap(),
+        Event::decode(event.kind(), &payload, Some(run), Some(agent)).unwrap(),
         event
     );
     for case in ["cause", "reason", "digest", "extra"] {
@@ -370,7 +309,7 @@ fn tool_preflight_refusal_payload_is_closed_and_keeps_its_fixed_reason() {
             _ => unreachable!(),
         }
         assert!(
-            Event::decode(event.kind(), 1, &forged.to_string(), Some(run), Some(agent)).is_err(),
+            Event::decode(event.kind(), &forged.to_string(), Some(run), Some(agent)).is_err(),
             "{case}"
         );
     }
@@ -403,14 +342,7 @@ fn command_resource_fields_preserve_omitted_event_bytes_and_intent_digests() {
         r#""cwd":""}"#,
         r#""cwd":"","resource_class":null,"timeout_ms":null}"#,
     );
-    let decoded = Event::decode(
-        event.kind(),
-        event.version(),
-        &explicit_null,
-        Some(run),
-        Some(agent),
-    )
-    .unwrap();
+    let decoded = Event::decode(event.kind(), &explicit_null, Some(run), Some(agent)).unwrap();
     assert_eq!(decoded.payload().unwrap(), historical);
     let Event::ToolProposed {
         intent: decoded, ..
@@ -443,14 +375,7 @@ fn command_resource_fields_preserve_omitted_event_bytes_and_intent_digests() {
     let bytes = selected.payload().unwrap();
     assert_ne!(bytes, historical);
     assert_eq!(
-        Event::decode(
-            selected.kind(),
-            selected.version(),
-            &bytes,
-            Some(run),
-            Some(agent),
-        )
-        .unwrap(),
+        Event::decode(selected.kind(), &bytes, Some(run), Some(agent),).unwrap(),
         selected
     );
 }

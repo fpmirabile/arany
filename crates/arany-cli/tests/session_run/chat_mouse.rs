@@ -625,19 +625,6 @@ fn active_hover_journey(graphics: GraphicsPeer) {
         let accept = |context| {
             crate::process::accept_with_deadline(&listener, Duration::from_secs(30), context)
         };
-        for index in 0..3 {
-            let mut stream = accept("provider conformance request");
-            read_request(&mut stream);
-            let text = match index {
-                0 => json!("ok"),
-                1 => {
-                    json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                _ => json!("synthetic summary"),
-            };
-            send_response(&mut stream, index, text);
-        }
-
         let mut run = accept("Run request");
         read_request(&mut run);
         run_ready_sender.send(()).expect("Run request observed");
@@ -658,7 +645,6 @@ fn active_hover_journey(graphics: GraphicsPeer) {
             .expect("release compaction response");
         send_response(&mut compact, 1, json!("synthetic summary"));
     });
-    crate::loopback::check_profile(&workspace, &state);
 
     let png = STANDARD
         .decode(arany::test_support::test_image().base64())
@@ -1178,7 +1164,6 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     let state = temp.path().join("state");
     let id = crate::seed_transcript_session(&state, &workspace);
     let provider = super::loopback::held_stream_provider(&state, ANSWER);
-    super::loopback::check_profile(&workspace, &state);
     let mut chat = Chat::launch(
         temp.path(),
         &state,

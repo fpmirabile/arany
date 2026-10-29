@@ -156,7 +156,7 @@ fn pad_capacity_history(path: &Path, session: SessionId, prefix: i64, branch: bo
         (first, prefix)
     };
     for sequence in first_padding_sequence..=last_padding_sequence {
-        transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
+        transaction.execute("INSERT INTO events (sequence,session_id,kind,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed','{\"title\":\"x\"}',0)", rusqlite::params![sequence, session.to_string()]).unwrap();
     }
     transaction.commit().unwrap();
 }

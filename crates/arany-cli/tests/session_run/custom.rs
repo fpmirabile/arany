@@ -86,30 +86,11 @@ impl RouteCase {
 }
 
 #[derive(Clone, Copy)]
-enum RecheckFailure {
-    CompactionRejected,
-    EmptySummary,
-    EffortRejected,
-    Unauthorized,
-    Redirect,
-    WrongModel,
+enum RunFailure {
+    None,
     ChatTwoChoices,
     ChatLength,
-    ChatMissingUsage,
-    ChatSse,
-    ChatRunTwoChoices,
-    ChatRunLength,
-    ChatRunOutcomeCorrection,
-}
-
-fn malformed_chat_failure(failure: RecheckFailure) -> bool {
-    matches!(
-        failure,
-        RecheckFailure::ChatTwoChoices
-            | RecheckFailure::ChatLength
-            | RecheckFailure::ChatMissingUsage
-            | RecheckFailure::ChatSse
-    )
+    ChatOutcomeCorrection,
 }
 
 fn assert_chat_request_semantics(body: &serde_json::Value, index: usize) {
@@ -149,50 +130,37 @@ fn assert_chat_request_semantics(body: &serde_json::Value, index: usize) {
 }
 
 #[test]
-fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
-    custom_profile_process_gate(RESPONSES, RecheckFailure::CompactionRejected);
+fn custom_profile_runs_are_durable_and_validate_each_response() {
+    custom_profile_process_gate(RESPONSES, RunFailure::None);
 }
 
 #[test]
-fn messages_custom_profile_process_gate_proves_conformance_and_durable_runs() {
+fn messages_custom_profile_runs_are_durable_and_validate_each_response() {
     for case in MESSAGES_ROUTES {
-        for failure in [
-            RecheckFailure::CompactionRejected,
-            RecheckFailure::EmptySummary,
-            RecheckFailure::EffortRejected,
-            RecheckFailure::Unauthorized,
-            RecheckFailure::Redirect,
-            RecheckFailure::WrongModel,
-        ] {
-            custom_profile_process_gate(case, failure);
-        }
+        custom_profile_process_gate(case, RunFailure::None);
         #[cfg(target_os = "linux")]
         messages_attached_case(false, case);
     }
 }
 
 #[test]
-fn chat_completions_custom_profile_process_gate_proves_conformance_and_durable_runs() {
-    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::CompactionRejected);
+fn chat_completions_custom_profile_runs_are_durable_and_validate_each_response() {
     for failure in [
-        RecheckFailure::ChatTwoChoices,
-        RecheckFailure::ChatLength,
-        RecheckFailure::ChatMissingUsage,
-        RecheckFailure::ChatSse,
+        RunFailure::None,
+        RunFailure::ChatTwoChoices,
+        RunFailure::ChatLength,
+        RunFailure::ChatOutcomeCorrection,
     ] {
         custom_profile_process_gate(CHAT_COMPLETIONS, failure);
     }
-    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunTwoChoices);
-    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunLength);
-    custom_profile_process_gate(CHAT_COMPLETIONS, RecheckFailure::ChatRunOutcomeCorrection);
 }
 
-fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
+fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
     let chat = case.chat;
     let messages = (!chat).then_some(case.auth).flatten();
     use std::{
         io::{Read, Write},
-        net::{SocketAddr, TcpListener},
+        net::TcpListener,
         os::unix::fs::PermissionsExt,
         path::Path,
         process::{Output, Stdio},
@@ -204,40 +172,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     fn run_product(command: &mut Command) -> Output {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         super::loopback::wait_product(command.spawn().expect("product process"))
-    }
-
-    fn run_check(
-        case: RouteCase,
-        cwd: &Path,
-        state: &Path,
-        key: Option<&str>,
-        proxy: Option<SocketAddr>,
-    ) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-        command
-            .env_clear()
-            .current_dir(cwd)
-            .args([
-                "provider",
-                "check",
-                if proxy.is_some() {
-                    "custom:local"
-                } else {
-                    "local"
-                },
-                "--state-dir",
-            ])
-            .arg(state);
-        case.keys(&mut command, key);
-        if let Some(proxy) = proxy {
-            let proxy = format!("http://{proxy}");
-            command
-                .env("HTTP_PROXY", &proxy)
-                .env("http_proxy", &proxy)
-                .env("ALL_PROXY", &proxy)
-                .env("NO_PROXY", "");
-        }
-        run_product(&mut command)
     }
 
     fn run_exec(
@@ -304,13 +238,8 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     }
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
-    let hostile_proxy = TcpListener::bind("127.0.0.1:0").expect("hostile proxy");
-    hostile_proxy
-        .set_nonblocking(true)
-        .expect("nonblocking proxy observation");
-    let proxy_addr = hostile_proxy.local_addr().expect("proxy address");
     let mut profile = serde_json::json!({
-        "version": 2,
+        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
         "profiles": [{
             "name": "local",
             "protocol": "openai-responses",
@@ -320,7 +249,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
-            "capability_evidence_version": 2, "efforts": []
+            "efforts": []
         }]
     });
     if chat {
@@ -333,7 +262,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         );
         entry.insert("auth".into(), "bearer".into());
     } else if let Some(auth) = messages {
-        profile["version"] = serde_json::json!(2);
         let entry = profile["profiles"][0].as_object_mut().unwrap();
         entry.remove("endpoint");
         entry.insert("protocol".into(), "anthropic-messages".into());
@@ -343,9 +271,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         );
         entry.insert("auth".into(), auth.into());
         entry.insert("outcome_encoding".into(), "native_tools".into());
-        if matches!(failure, RecheckFailure::EffortRejected) {
-            entry.insert("efforts".into(), serde_json::json!(["low", "high"]));
-        }
     }
     let profile_path = state_path.join("provider-profiles.json");
     std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("profile file");
@@ -353,59 +278,20 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         .expect("private profile file");
 
     let mutation_path = state_path.join("provider-roster.json");
-    let check_database = state_path.join("events.sqlite3");
-    let check_database_for_server = check_database.clone();
+    let database_for_server = state_path.join("events.sqlite3");
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        let malformed_chat_probe = chat
-            && matches!(
-                failure,
-                RecheckFailure::ChatTwoChoices
-                    | RecheckFailure::ChatLength
-                    | RecheckFailure::ChatMissingUsage
-                    | RecheckFailure::ChatSse
-            );
-        let malformed_chat_run = chat
-            && matches!(
-                failure,
-                RecheckFailure::ChatRunTwoChoices | RecheckFailure::ChatRunLength
-            );
-        let corrective_chat_run =
-            chat && matches!(failure, RecheckFailure::ChatRunOutcomeCorrection);
-        for wire_index in 0..if malformed_chat_probe {
-            1
-        } else if malformed_chat_run {
+        let malformed_chat_run =
+            chat && matches!(failure, RunFailure::ChatTwoChoices | RunFailure::ChatLength);
+        let corrective_chat_run = chat && matches!(failure, RunFailure::ChatOutcomeCorrection);
+        // The single Run (3), the team Run (4-6), the continued Run (7) and the roster Run (8).
+        for index in 3..if malformed_chat_run {
             4
         } else if corrective_chat_run {
             5
-        } else if chat {
-            12
-        } else if messages.is_some() {
-            if matches!(failure, RecheckFailure::EffortRejected) {
-                20
-            } else if matches!(
-                failure,
-                RecheckFailure::Unauthorized
-                    | RecheckFailure::Redirect
-                    | RecheckFailure::WrongModel
-            ) {
-                10
-            } else {
-                12
-            }
         } else {
-            10
+            9
         } {
-            let effort_case =
-                messages.is_some() && matches!(failure, RecheckFailure::EffortRejected);
-            let initial_effort = effort_case && (3..7).contains(&wire_index);
-            let index = if initial_effort {
-                wire_index + 9
-            } else if effort_case && wire_index >= 7 {
-                wire_index - 4
-            } else {
-                wire_index
-            };
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -420,27 +306,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     Err(error) => panic!("accept failed: {error}"),
                 }
             };
-            if wire_index < if effort_case { 7 } else { 3 } {
-                let database = rusqlite::Connection::open_with_flags(
-                    &check_database_for_server,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                )
-                .expect("journal before received request");
-                let (kind, payload): (String, String) = database.query_row("SELECT kind,payload FROM provider_check_events ORDER BY sequence DESC LIMIT 1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-                assert_eq!(kind, "ProviderCheckCallStarted");
-                let event: arany::CheckEvent = serde_json::from_str(&payload).unwrap();
-                assert!(
-                    matches!(event, arany::CheckEvent::ProviderCheckCallStarted { ordinal, .. } if usize::from(ordinal) == wire_index)
-                );
-                assert_eq!(database.query_row("SELECT COUNT(*) FROM provider_check_events WHERE kind='ProviderCheckCallFinished'", [], |row| row.get::<_,i64>(0)).unwrap(), i64::try_from(wire_index).unwrap());
-                assert_eq!(
-                    database
-                        .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                            .get::<_, i64>(0))
-                        .unwrap(),
-                    0
-                );
-            }
             stream
                 .set_nonblocking(false)
                 .expect("blocking accepted stream");
@@ -496,7 +361,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("synthetic JSON");
             assert_eq!(body["model"], case.model);
-            let compact = matches!(index, 2 | 11 | 13 | 15);
             if chat {
                 assert_eq!(body["stream"], false);
                 let offers_tools = body["tools"]
@@ -509,21 +373,8 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 assert!(body.get("store").is_none());
                 assert_chat_request_semantics(&body, index);
             } else if messages.is_some() {
-                assert_eq!(body.get("output_config").is_some(), index >= 12);
-                assert_eq!(
-                    body["output_config"]
-                        .get("effort")
-                        .and_then(|value| value.as_str()),
-                    match index {
-                        12 | 13 => Some("low"),
-                        14 | 15 => Some("high"),
-                        _ => None,
-                    }
-                );
+                assert!(body.get("output_config").is_none());
                 assert!(body.get("thinking").is_none());
-                if compact {
-                    assert!(body["output_config"].get("format").is_none());
-                }
             } else {
                 assert!(body.get("text").is_none());
             }
@@ -535,18 +386,14 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 } else {
                     "max_output_tokens"
                 }],
-                if index == 0 || (3..=9).contains(&index) {
-                    4096
-                } else {
-                    128
-                }
+                4096
             );
             let input: serde_json::Value = if chat {
                 serde_json::json!({})
             } else {
                 crate::semantic::input(&body)
             };
-            if !chat && (3..9).contains(&index) {
+            if !chat {
                 assert_eq!(
                     input["phase"],
                     match index {
@@ -568,12 +415,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                         serde_json::json!([{"user": "answer", "assistant": "verified answer"}])
                     );
                 }
-            } else if !chat {
-                assert!(
-                    input
-                        .get("workspace_guidance")
-                        .is_none_or(|value| value.is_null())
-                );
             }
             assert!(
                 !request
@@ -595,40 +436,10 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     );
                 }
             }
-            if index == 9 && messages.is_some() {
-                let status = match failure {
-                    RecheckFailure::Unauthorized => Some("401 Unauthorized"),
-                    RecheckFailure::Redirect => Some("302 Found"),
-                    _ => None,
-                };
-                if let Some(status) = status {
-                    write!(stream, "HTTP/1.1 {status}\r\nLocation: http://{proxy_addr}/coding/v1/messages\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                    continue;
-                }
-            }
-            if index == 9 && messages.is_none() && !chat {
-                write!(
-                    stream,
-                    "HTTP/1.1 302 Found\r\nLocation: http://{proxy_addr}/v1/responses\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                .expect("synthetic redirect");
-                continue;
-            }
-            if (index == 11 && matches!(failure, RecheckFailure::CompactionRejected))
-                || (index == 15 && !initial_effort)
-            {
-                stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                continue;
-            }
             if index == 4 && !corrective_chat_run {
                 std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
-                0 | 9 | 12 | 14 => serde_json::json!("ok"),
-                1 | 10 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                }
-                2 | 11 | 13 | 15 => serde_json::json!(r#"plausible summary"#),
                 3 => {
                     serde_json::json!("verified answer")
                 }
@@ -649,16 +460,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 }
                 _ => unreachable!(),
             };
-            let text = if index == 11 && matches!(failure, RecheckFailure::EmptySummary) {
-                serde_json::json!(" \n\t")
-            } else {
-                text
-            };
-            if compact {
-                for field in ["text", "tools", "tool_choice", "parallel_tool_calls"] {
-                    assert!(body.get(field).is_none());
-                }
-            }
             let mut response = serde_json::json!({
                 "id": format!("resp_{}", index + 1),
                 "status": "completed",
@@ -689,9 +490,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     "usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}
                 });
             }
-            if index == 9 && matches!(failure, RecheckFailure::WrongModel) {
-                response["model"] = "mistyped-highspeed-fallback".into();
-            }
             if corrective_chat_run {
                 let has_correction = body["messages"].as_array().unwrap().iter().any(|message| {
                     message["content"].as_str().is_some_and(|text| {
@@ -706,7 +504,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                         "tool_calls":[{"id":"call_unoffered","type":"function","function":{"name":"arany_delegate","arguments":"{}"}}]}
                     });
                 } else if index == 4 {
-                    let database = rusqlite::Connection::open(&check_database_for_server).unwrap();
+                    let database = rusqlite::Connection::open(&database_for_server).unwrap();
                     let payload: String = database.query_row("SELECT payload FROM events WHERE kind='ProviderCallRecorded' ORDER BY sequence DESC LIMIT 1", [], |row| row.get(0)).unwrap();
                     let record: arany::ProviderCallRecord = serde_json::from_str(&payload).unwrap();
                     assert_eq!(
@@ -718,7 +516,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     });
                 }
             }
-            let (mut content_type, mut response) = if body["stream"] == true {
+            let (content_type, mut response) = if body["stream"] == true {
                 (
                     "text/event-stream",
                     if messages.is_some() {
@@ -730,9 +528,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             } else {
                 ("application/json", response.to_string())
             };
-            if malformed_chat_probe || malformed_chat_run && index == 3 {
+            if malformed_chat_run {
                 match failure {
-                    RecheckFailure::ChatTwoChoices | RecheckFailure::ChatRunTwoChoices => {
+                    RunFailure::ChatTwoChoices => {
                         let mut response_value: serde_json::Value =
                             serde_json::from_str(&response).unwrap();
                         let choice = response_value["choices"][0].clone();
@@ -742,27 +540,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                             .push(choice);
                         response = response_value.to_string();
                     }
-                    RecheckFailure::ChatLength => {
+                    RunFailure::ChatLength => {
                         let mut response_value: serde_json::Value =
                             serde_json::from_str(&response).unwrap();
                         response_value["choices"][0]["finish_reason"] = "length".into();
                         response = response_value.to_string();
-                    }
-                    RecheckFailure::ChatRunLength => {
-                        let mut response_value: serde_json::Value =
-                            serde_json::from_str(&response).unwrap();
-                        response_value["choices"][0]["finish_reason"] = "length".into();
-                        response = response_value.to_string();
-                    }
-                    RecheckFailure::ChatMissingUsage => {
-                        let mut response_value: serde_json::Value =
-                            serde_json::from_str(&response).unwrap();
-                        response_value.as_object_mut().unwrap().remove("usage");
-                        response = response_value.to_string();
-                    }
-                    RecheckFailure::ChatSse => {
-                        content_type = "text/event-stream";
-                        response = format!("data: {response}\n\n");
                     }
                     _ => unreachable!(),
                 }
@@ -789,221 +571,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         listener
     });
 
-    let unverified = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
-    assert!(!unverified.status.success());
-    assert_eq!(unverified.stdout, b"");
-    assert_eq!(
-        unverified.stderr,
-        b"error: custom Provider evidence unavailable\n"
-    );
-    let current_profile: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
-    assert_eq!(current_profile["version"], 2);
-    if messages.is_none() {
-        assert_eq!(current_profile["profiles"], profile["profiles"]);
-        profile = current_profile;
-    }
-    let checked = run_check(
-        case,
-        &workspace,
-        &state_path,
-        Some(case.key),
-        Some(proxy_addr),
-    );
-    if chat && malformed_chat_failure(failure) {
-        server.join().expect("malformed probe server completed");
-        assert!(!checked.status.success());
-        assert_eq!(checked.stdout, b"");
-        assert_eq!(
-            check_output(
-                &checked.stderr,
-                &state_path,
-                arany::CheckDisposition::Failed
-            ),
-            b"error: custom Provider conformance failed\n"
-        );
-        let database = rusqlite::Connection::open(&check_database).unwrap();
-        let events: Vec<arany::CheckEvent> = database
-            .prepare("SELECT payload FROM provider_check_events ORDER BY sequence")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
-            .collect();
-        assert!(matches!(
-            events.last(),
-            Some(arany::CheckEvent::ProviderCheckFinished {
-                disposition: arany::CheckDisposition::Failed,
-                ..
-            })
-        ));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, arany::CheckEvent::ProviderCheckCallStarted { .. }))
-                .count(),
-            1
-        );
-        assert_eq!(
-            database
-                .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-        return;
-    }
-    assert!(checked.status.success());
-    assert_check_privacy(
-        &checked,
-        &state_path,
-        &[
-            case.key,
-            "OMITTED_WORKSPACE_CANARY",
-            "EXPECTED_WORKSPACE_GUIDANCE",
-        ],
-    );
-    assert_eq!(
-        check_output(
-            &checked.stdout,
-            &state_path,
-            arany::CheckDisposition::Succeeded
-        ),
-        b"Provider: local\nStatus: custom verified\n"
-    );
-    assert_eq!(checked.stderr, b"");
-    assert!(matches!(
-        hostile_proxy.accept(),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-    ));
-
-    let mut changed_profile = profile.clone();
-    changed_profile["profiles"][0][if messages.is_some() || chat {
-        "base_url"
-    } else {
-        "endpoint"
-    }] = if messages.is_some() || chat {
-        format!("http://127.0.0.1:{port}/other")
-    } else {
-        format!("http://127.0.0.1:{port}/other/responses")
-    }
-    .into();
-    std::fs::write(&profile_path, serde_json::to_vec(&changed_profile).unwrap())
-        .expect("changed profile");
-    let changed = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
-    assert!(!changed.status.success());
-    assert_eq!(changed.stdout, b"");
-    assert_eq!(
-        changed.stderr,
-        b"error: custom Provider evidence unavailable\n"
-    );
-    std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("restore profile");
-
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("inspect evidence tuple");
-    let (addresses, expiry): (String, i64) = connection
-        .query_row(
-            "SELECT addresses, expires_at_ms FROM provider_evidence WHERE profile_name='local'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("current evidence tuple");
-    connection
-        .execute(
-            "UPDATE provider_evidence SET addresses=?1 WHERE profile_name='local'",
-            [format!("[\"127.0.0.2:{port}\"]")],
-        )
-        .expect("changed address evidence");
-    drop(connection);
-    let changed_address = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
-    assert!(!changed_address.status.success());
-    assert_eq!(changed_address.stdout, b"");
-    assert_eq!(
-        changed_address.stderr,
-        b"error: custom Provider evidence unavailable\n"
-    );
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("restore evidence tuple");
-    connection
-        .execute(
-            "UPDATE provider_evidence SET addresses=?1, expires_at_ms=1 WHERE profile_name='local'",
-            [addresses],
-        )
-        .expect("expired evidence");
-    drop(connection);
-    let expired = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
-    assert!(!expired.status.success());
-    assert_eq!(expired.stdout, b"");
-    assert_eq!(
-        expired.stderr,
-        b"error: custom Provider evidence unavailable\n"
-    );
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("restore evidence expiry");
-    connection
-        .execute(
-            "UPDATE provider_evidence SET expires_at_ms=?1 WHERE profile_name='local'",
-            [expiry],
-        )
-        .expect("restore expiry");
-    let event_count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-        .expect("pre-Run Event count");
-    assert_eq!(event_count, 0);
-    drop(connection);
-
-    use sha2::Digest;
-    let mut old = sha2::Sha256::new();
-    let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
-    for field in [
-        env!("CARGO_PKG_VERSION"),
-        "openai-responses-goal-contract-conformance-effort-stream-v30",
-        "local",
-        &endpoint,
-        case.model,
-        "ARANY_PROVIDER_LOCAL_KEY",
-        "openai-responses",
-        "json_schema",
-        "user_authorized",
-        "4096",
-    ] {
-        old.update(u64::try_from(field.len()).unwrap().to_be_bytes());
-        old.update(field.as_bytes());
-    }
-    old.update(2_u32.to_be_bytes());
-    let old: [u8; 32] = old.finalize().into();
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
-    let current: Vec<u8> = connection
-        .query_row(
-            "SELECT profile_digest FROM provider_evidence WHERE profile_name='local'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_ne!(current, old);
-    connection
-        .execute(
-            "UPDATE provider_evidence SET profile_digest=?1 WHERE profile_name='local'",
-            [old.as_slice()],
-        )
-        .unwrap();
-    drop(connection);
-    let stale_without_key = run_exec(case, &workspace, &state_path, None, case.model);
-    assert!(!stale_without_key.status.success());
-    assert_eq!(stale_without_key.stdout, b"");
-    assert_eq!(
-        stale_without_key.stderr,
-        b"error: custom Provider evidence unavailable\n"
-    );
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
-    connection
-        .execute(
-            "UPDATE provider_evidence SET profile_digest=?1 WHERE profile_name='local'",
-            [current],
-        )
-        .unwrap();
-    drop(connection);
-
     let wrong_model = run_exec(case, &workspace, &state_path, Some(case.key), "model-2");
     assert!(!wrong_model.status.success());
     assert_eq!(wrong_model.stdout, b"");
@@ -1020,16 +587,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     );
 
     let success = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
-    if chat
-        && matches!(
-            failure,
-            RecheckFailure::ChatRunTwoChoices
-                | RecheckFailure::ChatRunLength
-                | RecheckFailure::ChatRunOutcomeCorrection
-        )
-    {
+    if !matches!(failure, RunFailure::None) {
         server.join().expect("Chat Run server completed");
-        let corrected = matches!(failure, RecheckFailure::ChatRunOutcomeCorrection);
+        let corrected = matches!(failure, RunFailure::ChatOutcomeCorrection);
         assert_eq!(success.status.success(), corrected);
         assert_eq!(
             success.stdout,
@@ -1171,69 +731,8 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         .collect();
     let jsonl_session =
         SessionId::from_str(jsonl_lines[0]["session_id"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        jsonl_lines
-            .iter()
-            .find(|line| line["kind"] == "RunStarted")
-            .unwrap()["event_version"],
-        arany::test_support::payload_version("RunStarted")
-    );
     std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("inspect pre-recheck Events");
-    let events_before_recheck: i64 = connection
-        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-        .expect("pre-recheck Event count");
-    let evidence_before_recheck: i64 = connection
-        .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| {
-            row.get(0)
-        })
-        .expect("pre-recheck evidence count");
-    assert_eq!(evidence_before_recheck, 1);
-    drop(connection);
-    let redirected = run_check(
-        case,
-        &workspace,
-        &state_path,
-        Some(case.key),
-        Some(proxy_addr),
-    );
     let listener = server.join().expect("synthetic server completed");
-    assert!(!redirected.status.success());
-    assert_eq!(redirected.stdout, b"");
-    assert_eq!(
-        check_output(
-            &redirected.stderr,
-            &state_path,
-            arany::CheckDisposition::Failed
-        ),
-        b"error: custom Provider conformance failed\n"
-    );
-    assert!(matches!(
-        hostile_proxy.accept(),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-    ));
-    let denied_after_recheck = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
-    assert!(!denied_after_recheck.status.success());
-    assert_eq!(denied_after_recheck.stdout, b"");
-    assert_eq!(
-        denied_after_recheck.stderr,
-        b"error: custom Provider evidence unavailable\n"
-    );
-    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("inspect post-recheck Events");
-    let events_after_recheck: i64 = connection
-        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-        .expect("post-recheck Event count");
-    assert_eq!(events_after_recheck, events_before_recheck);
-    let remaining: i64 = connection
-        .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(remaining, 0);
-
-    drop(connection);
     assert!(success.status.success());
     assert_eq!(success.stdout, b"Answer:\n  verified answer\n");
     let receipt = std::str::from_utf8(&success.stderr).expect("receipt UTF-8");
@@ -1243,13 +742,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         SessionId::from_str(receipt[0].strip_prefix("Session: ").unwrap()).expect("Session ID");
     let run_id = RunId::from_str(receipt[1].strip_prefix("Run: ").unwrap()).expect("Run ID");
     assert_eq!(receipt[2], "Status: finished");
-    assert_eq!(receipt[3], "Provider: custom verified");
+    assert_eq!(receipt[3], "Provider: custom");
     assert_eq!(
         success.stderr,
-        format!(
-            "Session: {session_id}\nRun: {run_id}\nStatus: finished\nProvider: custom verified\n"
-        )
-        .as_bytes()
+        format!("Session: {session_id}\nRun: {run_id}\nStatus: finished\nProvider: custom\n")
+            .as_bytes()
     );
     assert!(team.status.success());
     assert_eq!(team.stdout, b"Answer:\n  team answer\n");
@@ -1268,7 +765,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     let team_session_id = SessionId::from_str(team_receipt[0].strip_prefix("Session: ").unwrap())
         .expect("team Session ID");
     assert_eq!(team_receipt[2], "Status: finished");
-    assert_eq!(team_receipt[3], "Provider: custom verified");
+    assert_eq!(team_receipt[3], "Provider: custom");
     assert!(!reflected.status.success());
     assert_eq!(reflected.stdout, b"");
     let reflected_receipt = std::str::from_utf8(&reflected.stderr).expect("failure receipt UTF-8");
@@ -1283,7 +780,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     assert_eq!(
         reflected.stderr,
         format!(
-            "Session: {reflected_session_id}\nRun: {reflected_run_id}\nStatus: failed\nProvider: custom verified\n"
+            "Session: {reflected_session_id}\nRun: {reflected_run_id}\nStatus: failed\nProvider: custom\n"
         )
         .as_bytes()
     );
@@ -1363,7 +860,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             format!("http://127.0.0.1:{port}/v1/responses")
         }
     );
-    assert_eq!(provenance.capability_evidence_version, 2);
+    assert_ne!(provenance.profile_digest, [0; 32]);
     let team_events = runtime
         .block_on(store.load_session(team_session_id))
         .expect("team Events");
@@ -1528,17 +1025,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             == journal_before,
         "show changed the canonical journal"
     );
-    let connection =
-        rusqlite::Connection::open(state_path.join("events.sqlite3")).expect("inspect evidence");
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM provider_evidence WHERE profile_name='local'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("persisted evidence");
-    assert_eq!(count, 0);
-    drop(connection);
     let database_bytes = std::fs::read(state_path.join("events.sqlite3")).expect("database bytes");
     for artifact in [
         success.stdout.as_slice(),
@@ -1571,27 +1057,8 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
         "replay must make no HTTP requests"
     );
-    std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
-    let unavailable = run_check(case, &workspace, &state_path, None, None);
-    assert!(!unavailable.status.success());
-    assert_eq!(unavailable.stdout, b"");
-    assert_eq!(
-        check_output(
-            &unavailable.stderr,
-            &state_path,
-            arany::CheckDisposition::Failed
-        ),
-        b"error: selected custom Provider credential is not set\n"
-    );
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-        .expect("inspect invalidated evidence");
-    let count: i64 = connection
-        .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| {
-            row.get(0)
-        })
-        .expect("evidence count");
-    assert_eq!(count, 0);
-
+        .expect("inject shared Run ID");
     connection
         .execute(
             "UPDATE events SET run_id=?1 WHERE session_id=?2 AND run_id=?3",
@@ -1706,7 +1173,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
+fn custom_effort_profile_pins_the_selected_effort() {
     use super::loopback::{read_request, wait_product, write_profile};
     use std::{
         net::TcpListener,
@@ -1726,72 +1193,30 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
     let path = state.join("provider-profiles.json");
     let mut profile: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    profile["profiles"][0]["capability_evidence_version"] = serde_json::json!(2);
     profile["profiles"][0]["efforts"] = serde_json::json!(["low", "high"]);
     std::fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
-        for index in 0..8 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "request {index} missing");
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("accept: {error}"),
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "Run request missing");
+                    thread::yield_now();
                 }
-            };
-            let body: serde_json::Value =
-                serde_json::from_slice(&read_request(&mut stream)).unwrap();
-            assert_eq!(body["model"], "model-1");
-            assert!(body.get("text").is_none());
-            if matches!(index, 2 | 4 | 6) {
-                crate::loopback::assert_compaction_request(&body);
+                Err(error) => panic!("accept: {error}"),
             }
-            assert_eq!(
-                body.get("reasoning")
-                    .map(|value| value["effort"].as_str().unwrap()),
-                match index {
-                    3 | 4 => Some("low"),
-                    5..=7 => Some("high"),
-                    _ => None,
-                }
-            );
-            let outcome = match index {
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
-                }
-                2 | 4 | 6 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    serde_json::json!("answer")
-                }
-            };
-            if matches!(index, 2 | 4 | 6) {
-                assert_eq!(outcome, "synthetic summary", "plain-text compaction reply");
-            }
-            super::loopback::send_response_for(&mut stream, index, outcome, body["stream"] == true);
-        }
+        };
+        let body: serde_json::Value = serde_json::from_slice(&read_request(&mut stream)).unwrap();
+        assert_eq!(body["model"], "model-1");
+        assert!(body.get("text").is_none());
+        assert_eq!(body["reasoning"]["effort"], "high");
+        let streaming = body["stream"] == true;
+        super::loopback::send_response_for(&mut stream, 0, serde_json::json!("answer"), streaming);
     });
-
-    let mut check = Command::new(env!("CARGO_BIN_EXE_arany"));
-    check
-        .env_clear()
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .current_dir(&workspace)
-        .args(["provider", "check", "local", "--state-dir"])
-        .arg(&state)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let checked = wait_product(check.spawn().unwrap());
-    assert!(
-        checked.status.success(),
-        "{}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
 
     let mut rejected = Command::new(env!("CARGO_BIN_EXE_arany"));
     rejected
@@ -1818,7 +1243,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
     assert_eq!(rejected.stdout, b"");
     assert_eq!(
         rejected.stderr,
-        b"error: selected custom Provider effort is not conformed for its profile\n"
+        b"error: selected custom Provider effort is not declared by its profile\n"
     );
 
     let mut run = Command::new(env!("CARGO_BIN_EXE_arany"));
@@ -1871,12 +1296,8 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
         let config = view.runs[0].config.as_ref().unwrap();
         assert_eq!(config.effort, Some(arany::Effort::High));
         assert_eq!(
-            config
-                .custom_profile_provenance
-                .as_ref()
-                .unwrap()
-                .capability_evidence_version,
-            2
+            config.custom_profile_provenance.as_ref().unwrap().endpoint,
+            profile["profiles"][0]["endpoint"]
         );
         store.close().await.unwrap();
     });
@@ -1949,14 +1370,15 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let path = state.join("provider-profiles.json");
-    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":2,"profiles":[{
+    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":arany::test_support::record_version(arany::RecordKind::ProviderProfiles),"profiles":[{
         "name":"local","protocol":"anthropic-messages","base_url":format!("http://127.0.0.1:{port}{}", case.base_path),
         "auth":case.auth.unwrap(),"model":case.model,"credential_env":case.credential_env,
-        "outcome_encoding":"native_tools","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]
+        "outcome_encoding":"native_tools","privacy":"user_authorized","max_output_tokens":4096,"efforts":[]
     }]})).unwrap()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let peer = thread::spawn(move || {
-        for index in 0..if cancel { 4 } else { 9 } {
+        // The first Run, then a team Run, its child and synthesis, a compaction and the continued Run.
+        for index in 3..if cancel { 4 } else { 9 } {
             let mut stream = crate::process::accept_with_deadline(
                 &listener,
                 Duration::from_secs(10),
@@ -1978,7 +1400,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             .unwrap();
             assert_eq!(body["model"], case.model);
             assert!(body.get("output_config").is_none());
-            if index == 2 || index == 7 {
+            if index == 7 {
                 for field in ["text", "tools", "tool_choice", "parallel_tool_calls"] {
                     assert!(body.get(field).is_none());
                 }
@@ -2017,10 +1439,10 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                 );
             } else {
                 let text = match index {
-                    1 | 4 => {
+                    4 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"inspect","profile":null}]}})
                     }
-                    2 | 7 => serde_json::json!("saved summary"),
+                    7 => serde_json::json!("saved summary"),
                     5 => serde_json::json!("child result"),
                     6 => serde_json::json!("team answer"),
                     8 => serde_json::json!("continued after compaction"),
@@ -2037,22 +1459,6 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         }
         listener
     });
-    let mut check = Command::new(env!("CARGO_BIN_EXE_arany"));
-    check
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "local", "--state-dir"])
-        .arg(&state)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    case.keys(&mut check, Some(case.key));
-    let checked = wait_product(check.spawn().unwrap());
-    assert!(checked.status.success());
-    assert_eq!(
-        check_output(&checked.stdout, &state, arany::CheckDisposition::Succeeded),
-        b"Provider: local\nStatus: custom verified\n"
-    );
-    assert!(checked.stderr.is_empty());
     let mut command = crate::isolation::account_isolated_script(temp.path());
     command.env_clear().env("ARANY_TEST_EXE",env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE",&state).env("ARANY_TEST_WORKSPACE",&workspace)
@@ -2276,222 +1682,4 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
         );
     });
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-fn interrupted_provider_check_never_retries_and_a_live_owner_cannot_be_recovered() {
-    use super::loopback::{ChildGuard, read_request, wait_product, write_profile};
-    use std::{
-        net::TcpListener,
-        process::Stdio,
-        time::{Duration, Instant},
-    };
-    for graceful in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        let state = temp.path().join("state");
-        std::fs::create_dir(&workspace).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        write_profile(&state, listener.local_addr().unwrap().port());
-        let command = |with_key: bool| {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-            command
-                .env_clear()
-                .current_dir(&workspace)
-                .args(["provider", "check", "local", "--state-dir"])
-                .arg(&state)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            if with_key {
-                command.env("ARANY_PROVIDER_LOCAL_KEY", "test-key");
-            }
-            command
-        };
-        let mut child = ChildGuard::new(command(true).spawn().unwrap());
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline);
-                    assert!(child.child().try_wait().unwrap().is_none());
-                    std::thread::yield_now();
-                }
-                Err(error) => panic!("fixture accept failed: {error}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        read_request(&mut stream);
-        let database = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
-        let id: String = database
-            .query_row(
-                "SELECT check_id FROM provider_check_events ORDER BY sequence DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            database
-                .query_row("SELECT COUNT(*) FROM provider_check_events", [], |row| row
-                    .get::<_, i64>(
-                    0
-                ))
-                .unwrap(),
-            3
-        );
-        drop(database);
-        let concurrent = wait_product(command(true).spawn().unwrap());
-        assert!(!concurrent.status.success());
-        assert_eq!(concurrent.stdout, b"");
-        assert_eq!(
-            concurrent.stderr,
-            b"error: Provider check could not start: another Provider check is active\n"
-        );
-        if graceful {
-            rustix::process::kill_process(
-                rustix::process::Pid::from_raw(i32::try_from(child.child().id()).unwrap()).unwrap(),
-                rustix::process::Signal::INT,
-            )
-            .unwrap();
-            let output = wait_product(child.take());
-            assert!(!output.status.success());
-            assert_eq!(output.stdout, b"");
-            assert_eq!(
-                check_output(&output.stderr, &state, arany::CheckDisposition::Uncertain),
-                b"error: custom Provider conformance failed\n"
-            );
-        } else {
-            child.child().kill().unwrap();
-            assert!(!child.child().wait().unwrap().success());
-        }
-        drop(stream);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-            let view = store
-                .load_check(id.parse().unwrap())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                view.replay_disposition(),
-                arany::CheckDisposition::Uncertain
-            );
-            assert_eq!(view.disposition.is_some(), graceful);
-            store.close().await.unwrap();
-        });
-        let fresh = wait_product(command(false).spawn().unwrap());
-        assert!(!fresh.status.success());
-        assert_eq!(
-            check_output(&fresh.stderr, &state, arany::CheckDisposition::Failed),
-            b"error: selected custom Provider credential is not set\n"
-        );
-        runtime.block_on(async {
-            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-            assert_eq!(
-                store
-                    .load_check(id.parse().unwrap())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .disposition,
-                Some(arany::CheckDisposition::Uncertain)
-            );
-            store.close().await.unwrap();
-        });
-        assert!(
-            listener
-                .accept()
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
-        );
-    }
-}
-
-#[test]
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-fn provider_check_refuses_a_declaration_changed_during_its_probes() {
-    use super::loopback::{read_request, send_response, wait_product, write_profile};
-    use std::{
-        net::TcpListener,
-        process::Stdio,
-        time::{Duration, Instant},
-    };
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    let state = temp.path().join("state");
-    std::fs::create_dir(&workspace).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    write_profile(&state, listener.local_addr().unwrap().port());
-    let declaration = state.join("provider-profiles.json");
-    let server = std::thread::spawn(move || {
-        for index in 0..3 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline);
-                        std::thread::yield_now();
-                    }
-                    Err(error) => panic!("fixture accept failed: {error}"),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            read_request(&mut stream);
-            if index == 2 {
-                let mut value: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(&declaration).unwrap()).unwrap();
-                value["profiles"][0]["model"] = serde_json::json!("changed-model");
-                std::fs::write(&declaration, serde_json::to_vec(&value).unwrap()).unwrap();
-            }
-            let text = if index == 1 {
-                serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"One question","profile":null}]}})
-            } else {
-                serde_json::json!("synthetic answer")
-            };
-            send_response(&mut stream, index, text);
-        }
-        listener
-    });
-    let child = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .current_dir(&workspace)
-        .args(["provider", "check", "local", "--state-dir"])
-        .arg(&state)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let output = wait_product(child);
-    let listener = server.join().unwrap();
-    assert!(!output.status.success());
-    assert_eq!(output.stdout, b"");
-    assert_eq!(
-        check_output(&output.stderr, &state, arany::CheckDisposition::Failed),
-        b"error: custom Provider evidence unavailable\n"
-    );
-    let database = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
-    for table in ["provider_evidence", "events"] {
-        assert_eq!(
-            database
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-    }
-    assert!(
-        listener
-            .accept()
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
-    );
 }

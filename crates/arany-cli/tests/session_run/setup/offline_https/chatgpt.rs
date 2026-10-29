@@ -904,8 +904,6 @@ fn isolated_stage(checked_turn: bool) {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         let index: serde_json::Value = serde_json::from_slice(&record).expect("account index JSON");
         assert_eq!(index["accounts"].as_array().expect("accounts").len(), 1);
-        let checks = index["model_checks"].as_array().expect("model checks");
-        assert_eq!(checks.len(), if checked_turn { 1 } else { 0 });
         let entry = &index["accounts"][0];
         assert_eq!(entry["storage"], "private_file");
         assert_eq!(entry["client_id"], CLIENT);
@@ -968,7 +966,7 @@ fn isolated_stage(checked_turn: bool) {
         }
         if checked_turn {
             let view = session(state);
-            checked_turn::assert_runs(&view, account_id, &checks[0]);
+            checked_turn::assert_runs(&view, account_id);
             assert!(!text.contains(checked_turn::FAILURE_BODY_CANARY));
             assert_eq!(view.defaults.provider.as_deref(), Some("chatgpt"));
             assert_eq!(view.defaults.account_id, Some(account_id));
@@ -997,18 +995,7 @@ fn isolated_stage(checked_turn: bool) {
             );
         }
         if permission_disabled {
-            for args in [
-                &["provider", "models", "chatgpt"][..],
-                &[
-                    "provider",
-                    "check",
-                    "chatgpt",
-                    "gpt-6.1-sol",
-                    "--effort",
-                    "medium",
-                    "--accept-cost",
-                ][..],
-            ] {
+            for args in [&["provider", "models", "chatgpt"][..]] {
                 let output = Command::new("/arany")
                     .args(args)
                     .env_clear()
@@ -1188,7 +1175,6 @@ fn isolated_stage(checked_turn: bool) {
             assert_eq!(index["accounts"][0]["client_id"], CLIENT);
             assert_eq!(index["accounts"][0]["disconnected"], true);
             assert!(index["accounts"][0]["token"].is_null());
-            assert!(index["model_checks"].as_array().unwrap().is_empty());
             let output = Command::new("/arany")
                 .args(["provider", "models", "chatgpt"])
                 .env_clear()
@@ -1214,7 +1200,7 @@ fn isolated_stage(checked_turn: bool) {
                 );
             }
             let view = session("/root/state-chatgpt");
-            checked_turn::assert_runs(&view, account_id, &checks[0]);
+            checked_turn::assert_runs(&view, account_id);
             let after_logout = run_pty(SIGNED_OUT_SHELL, &[], None);
             assert!(!String::from_utf8_lossy(&after_logout).contains("Choose saved access"));
             unsaved("/root/state-after-logout");

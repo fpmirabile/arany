@@ -61,21 +61,7 @@ fn replays(root: &StateRoot, sessions: &[SessionId]) {
 #[test]
 fn history_at_any_other_version_is_archived_intact_and_replaced_by_a_fresh_store() {
     type Case = (&'static str, fn(&Connection));
-    let cases: [Case; 5] = [
-        ("older Event version", |connection| {
-            connection
-                .execute_batch(
-                    "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
-                )
-                .unwrap();
-        }),
-        ("newer Event version", |connection| {
-            connection
-                .execute_batch(
-                    "UPDATE events SET event_version = event_version + 1 WHERE kind = 'SessionStarted'",
-                )
-                .unwrap();
-        }),
+    let cases: [Case; 3] = [
         ("removed Event kind", |connection| {
             connection
                 .execute_batch(
@@ -148,7 +134,9 @@ fn unsupported_history_in_an_uncheckpointed_wal_is_archived_byte_for_byte() {
             .unwrap();
         if file == DATABASE_FILE {
             writer
-                .execute_batch("UPDATE events SET event_version = 4 WHERE kind = 'SessionStarted'")
+                .execute_batch(
+                    "UPDATE events SET kind = 'ToolPermissionDecided' WHERE sequence = 1",
+                )
                 .unwrap();
         } else {
             writer.pragma_update(None, "user_version", 0).unwrap();

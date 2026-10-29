@@ -1229,7 +1229,7 @@ fn emit_outcome(
                 "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
             }
             Some(config) if config.custom_profile_provenance.is_some() => {
-                "Provider: custom verified\n"
+                "Provider: custom\n"
             }
             _ => "",
         }

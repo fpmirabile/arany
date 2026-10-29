@@ -80,8 +80,13 @@ pub async fn record_setup_edit_state(
     operation_id
 }
 
-pub fn payload_version(kind: &str) -> i64 {
-    crate::session::payload_version(kind).expect("known Event kind")
+// The current version of a library-owned record, so fixtures never copy the number.
+pub fn record_version(kind: crate::RecordKind) -> u64 {
+    crate::RECORD_FORMATS
+        .iter()
+        .find(|format| format.kind == kind)
+        .expect("library-owned record")
+        .current
 }
 
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
@@ -604,31 +609,6 @@ fn host_admission_tool(
         hook_sequence: None,
         finished_sequence: Some(1),
     }
-}
-
-pub async fn complete_chatgpt_probe_fixture(
-    check: &mut crate::ChatGptCheck,
-) -> Result<(), crate::StoreError> {
-    for kind in [
-        crate::CheckCallKind::Answer,
-        crate::CheckCallKind::Delegate,
-        crate::CheckCallKind::Compaction,
-    ] {
-        let token = check.journal.call_started(kind).await?;
-        check
-            .journal
-            .call_finished(
-                token,
-                crate::CheckDisposition::Succeeded,
-                Some(crate::CheckUsage {
-                    input_tokens: 12,
-                    output_tokens: 8,
-                }),
-                false,
-            )
-            .await?;
-    }
-    Ok(())
 }
 
 pub fn run_config() -> crate::RunConfig {

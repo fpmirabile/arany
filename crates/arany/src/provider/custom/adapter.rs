@@ -1,12 +1,11 @@
 use super::{
-    CustomProfile, CustomProfileError, check::fingerprint, transport::CustomTransport,
-    transport::TransportError,
+    CustomProfile, CustomProfileError, transport::CustomTransport, transport::TransportError,
 };
 use crate::provider::{
     CompactionRequest, CompactionResponse, CustomProfileProvenance, Effort, Provenance, Provider,
     ProviderError, ProviderIdentity, ProviderKind, ProviderRequest, ProviderResponse,
 };
-use crate::store::{StateRoot, Store};
+use crate::store::StateRoot;
 
 pub struct CustomProvider {
     identity: ProviderIdentity,
@@ -28,22 +27,6 @@ impl CustomProvider {
             return Err(CustomProfileError::EffortUnavailable);
         }
         let destination = profile.resolve_destination().await?;
-        let store = Store::open_read_only(
-            root.try_clone()
-                .map_err(|_| CustomProfileError::EvidenceUnavailable)?,
-        )
-        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        let evidence = store
-            .load_provider_evidence(profile.name().to_owned())
-            .await;
-        let closed = store.close().await;
-        let evidence = evidence.map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        closed.map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        let expected_digest = fingerprint(&profile);
-        let evidence = evidence.ok_or(CustomProfileError::EvidenceUnavailable)?;
-        if evidence.digest != expected_digest || evidence.addresses != destination.addresses() {
-            return Err(CustomProfileError::EvidenceUnavailable);
-        }
         let key = std::env::var(profile.credential_env())
             .map_err(|_| CustomProfileError::CredentialUnavailable)?;
         let transport = CustomTransport::new(&profile, &destination, key)?;
@@ -52,8 +35,7 @@ impl CustomProvider {
             profile.model(),
             Provenance::Custom(CustomProfileProvenance {
                 endpoint: profile.endpoint().to_owned(),
-                evidence_digest: expected_digest,
-                capability_evidence_version: profile.capability_evidence_version(),
+                profile_digest: profile.digest(),
             }),
         );
         identity.effort = selected_effort;
@@ -194,7 +176,6 @@ mod tests {
             endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: 2,
             efforts: Vec::new(),
         };
         if messages {
@@ -212,8 +193,7 @@ mod tests {
                 "model-1",
                 Provenance::Custom(CustomProfileProvenance {
                     endpoint: profile.endpoint().into(),
-                    evidence_digest: fingerprint(&profile),
-                    capability_evidence_version: 2,
+                    profile_digest: profile.digest(),
                 }),
             ),
             transport: CustomTransport::new(&profile, &destination, "synthetic-key".into())

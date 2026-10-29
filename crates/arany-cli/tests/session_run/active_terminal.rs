@@ -1,6 +1,4 @@
-use super::loopback::{
-    ChildGuard, check_profile, read_request, send_response, wait_product, write_profile,
-};
+use super::loopback::{ChildGuard, read_request, wait_product, write_profile};
 use super::process::BoundedOutput;
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, kill_process};
@@ -261,83 +259,55 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     };
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..4 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "synthetic request {index} missing"
-                        );
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("accept failed: {error}"),
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "synthetic request missing");
+                    thread::yield_now();
                 }
-            };
-            let body = read_request(&mut stream);
-            assert!(
-                !body
-                    .windows(b"OMITTED_CANARY".len())
-                    .any(|part| part == b"OMITTED_CANARY")
-            );
-            let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
-            assert_eq!(wire["model"], "model-1");
-            assert!(wire.get("text").is_none());
-            if index == 2 {
-                crate::loopback::assert_compaction_request(&wire);
+                Err(error) => panic!("accept failed: {error}"),
             }
-            let input: serde_json::Value = crate::semantic::input(&wire);
-            if index == 3 {
-                assert_eq!(input["objective"], "cancel");
-                request_sender.send(()).expect("active request gate");
-                if expect_resume || matches!(exit, ActiveExit::ProviderFailure) {
-                    release_ready
-                        .recv_timeout(peer_gate_timeout)
-                        .expect("release held Provider call");
-                }
-                if matches!(exit, ActiveExit::ProviderFailure) {
-                    // A Retry-After past the action deadline ends the call without a same-route retry.
-                    stream
-                        .write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntest-key")
-                        .expect("synthetic failure response");
-                    return;
-                }
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .expect("cancel deadline");
-                let mut byte = [0];
-                assert_eq!(
-                    stream
-                        .read_exact(&mut byte)
-                        .expect_err("cancelled socket returned response bytes")
-                        .kind(),
-                    std::io::ErrorKind::UnexpectedEof,
-                    "cancelled socket must close"
-                );
-                closed_sender.send(()).expect("socket closure observation");
-                return;
-            }
-            assert!(
-                input
-                    .get("workspace_guidance")
-                    .is_none_or(serde_json::Value::is_null)
-            );
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                _ => serde_json::json!(r#"synthetic summary"#),
-            };
-            if index == 2 {
-                assert_eq!(text, "synthetic summary", "plain-text compaction reply");
-            }
-            send_response(&mut stream, index, text);
+        };
+        let body = read_request(&mut stream);
+        assert!(
+            !body
+                .windows(b"OMITTED_CANARY".len())
+                .any(|part| part == b"OMITTED_CANARY")
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
+        assert_eq!(wire["model"], "model-1");
+        assert!(wire.get("text").is_none());
+        let input: serde_json::Value = crate::semantic::input(&wire);
+        assert_eq!(input["objective"], "cancel");
+        request_sender.send(()).expect("active request gate");
+        if expect_resume || matches!(exit, ActiveExit::ProviderFailure) {
+            release_ready
+                .recv_timeout(peer_gate_timeout)
+                .expect("release held Provider call");
         }
+        if matches!(exit, ActiveExit::ProviderFailure) {
+            // A Retry-After past the action deadline ends the call without a same-route retry.
+            stream
+                    .write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntest-key")
+                    .expect("synthetic failure response");
+            return;
+        }
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("cancel deadline");
+        let mut byte = [0];
+        assert_eq!(
+            stream
+                .read_exact(&mut byte)
+                .expect_err("cancelled socket returned response bytes")
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "cancelled socket must close"
+        );
+        closed_sender.send(()).expect("socket closure observation");
     });
-    check_profile(&workspace, &state);
 
     let command = if inline {
         "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
@@ -1204,7 +1174,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         );
     }
     let receipt = format!(
-        "Session: {session_id}\r\nRun: {}\r\nStatus: {expected_status}\r\nProvider: custom verified\r\n",
+        "Session: {session_id}\r\nRun: {}\r\nStatus: {expected_status}\r\nProvider: custom\r\n",
         view.runs[0].id
     );
     assert_eq!(

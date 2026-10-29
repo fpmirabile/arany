@@ -1,4 +1,4 @@
-use super::checks::{Presentation, acknowledge_result, assert_result_contains, inline_frame};
+use super::manager::{Presentation, acknowledge_result, assert_result_contains, inline_frame};
 use super::routing::confirm;
 use super::*;
 use arany::{Event, ProviderSetupDisposition, ProviderSetupTargetKind};

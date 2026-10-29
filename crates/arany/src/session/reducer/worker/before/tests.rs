@@ -198,7 +198,6 @@ fn refused(f: &Fixture, event: Event, name: &str) {
     if let Ok(payload) = event.payload() {
         let decoded = Event::decode(
             event.kind(),
-            event.version(),
             &payload,
             envelope.run_id,
             envelope.agent_run_id,

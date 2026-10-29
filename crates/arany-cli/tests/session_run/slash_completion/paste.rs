@@ -726,7 +726,7 @@ esac
 #[test]
 #[cfg_attr(not(arany_ci), ignore = "requires bubblewrap user namespaces and PTY")]
 fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes() {
-    use super::loopback::{check_profile, read_request, send_response, write_profile};
+    use super::loopback::{read_request, send_response, write_profile};
     use std::net::TcpListener;
     use std::os::unix::net::UnixListener;
 
@@ -746,24 +746,19 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         );
         let expected_request = expected.clone();
         let (submit, submitted) = std::sync::mpsc::sync_channel(1);
-        let (requests_sent, requests) = std::sync::mpsc::sync_channel(4);
+        let (requests_sent, requests) = std::sync::mpsc::sync_channel(1);
         let server = thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
-            for index in 0..4 {
-                if index == 3 {
-                    submitted
-                        .recv_timeout(Duration::from_secs(30))
-                        .expect("attachment submission gate");
-                }
+            submitted
+                .recv_timeout(Duration::from_secs(30))
+                .expect("attachment submission gate");
+            {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 let mut stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(
-                                Instant::now() < deadline,
-                                "missing synthetic request {index}"
-                            );
+                            assert!(Instant::now() < deadline, "missing synthetic request");
                             thread::yield_now();
                         }
                         Err(error) => panic!("loopback accept: {error}"),
@@ -771,34 +766,14 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 };
                 let body = read_request(&mut stream);
                 assert!(!String::from_utf8_lossy(&body).contains("OMITTED_ATTACHMENT_CANARY"));
-                if index == 3 {
-                    let wire = serde_json::from_slice(&body).unwrap();
-                    let input = crate::semantic::input(&wire);
-                    assert_eq!(input["objective"], expected_request);
-                    assert_eq!(input["includes"], serde_json::json!([]));
-                }
-                let response = match index {
-                    0 => serde_json::json!("ok"),
-                    1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                    }
-                    2 => serde_json::json!("synthetic summary"),
-                    _ => serde_json::json!("Attachment received"),
-                };
-                send_response(&mut stream, index, response);
-                requests_sent
-                    .send(index)
-                    .expect("synthetic request completed");
+                let wire = serde_json::from_slice(&body).unwrap();
+                let input = crate::semantic::input(&wire);
+                assert_eq!(input["objective"], expected_request);
+                assert_eq!(input["includes"], serde_json::json!([]));
+                send_response(&mut stream, 0, serde_json::json!("Attachment received"));
+                requests_sent.send(()).expect("synthetic request completed");
             }
         });
-        check_profile(&workspace, &state);
-        for index in 0..3 {
-            assert_eq!(
-                requests.recv_timeout(Duration::from_secs(10)).unwrap(),
-                index,
-                "conformance request order"
-            );
-        }
         let id = saved_conversation(&state, &workspace, SessionDefaults::default());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -1132,11 +1107,9 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             from,
             "Attachment received",
         );
-        assert_eq!(
-            requests.recv_timeout(Duration::from_secs(10)).unwrap(),
-            3,
-            "attachment request order"
-        );
+        requests
+            .recv_timeout(Duration::from_secs(10))
+            .expect("attachment request");
         server.join().unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);

@@ -15,13 +15,7 @@ fn child_grant_round_trips_and_rejects_missing_or_misplaced_pins() {
         grant,
     };
     let decode = |event: &Event, payload: &str| {
-        Event::decode(
-            event.kind(),
-            payload_version(event.kind()).expect("payload version"),
-            payload,
-            Some(run_id),
-            Some(agent_run_id),
-        )
+        Event::decode(event.kind(), payload, Some(run_id), Some(agent_run_id))
     };
     for grant in [
         ChildGrant::NoTools,
@@ -62,16 +56,6 @@ fn child_grant_round_trips_and_rejects_missing_or_misplaced_pins() {
         invalid["profile"] = profile;
         assert!(decode(&child, &invalid.to_string()).is_err());
     }
-    assert!(
-        Event::decode(
-            child.kind(),
-            child.version() - 1,
-            &payload,
-            Some(run_id),
-            Some(agent_run_id)
-        )
-        .is_err_and(|error| matches!(error, ReplayError::UnknownEvent))
-    );
     let mut missing = value.clone();
     missing.as_object_mut().expect("object").remove("profile");
     assert!(decode(&child, &missing.to_string()).is_err());

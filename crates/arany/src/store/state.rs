@@ -27,7 +27,7 @@ pub use inventory::{
     collect_storage,
 };
 pub(crate) use lock::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
-pub(crate) use lock::{ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
+pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
@@ -1142,8 +1142,9 @@ mod tests {
     fn typed_provider_edit_rechecks_snapshot_and_keeps_ordinary_writes_read_only() {
         let temp = tempfile::tempdir().expect("test root");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private state");
-        let empty = br#"{"version":2,"profiles":[]}"#;
         let format = &crate::provider::PROVIDER_PROFILES;
+        let empty = format!(r#"{{"version":{},"profiles":[]}}"#, format.current);
+        let empty = empty.as_bytes();
         state
             .edit_provider_record(
                 ProviderRecordTarget::Profiles,
@@ -1578,7 +1579,6 @@ mod tests {
             RecordKind::ChatgptRegistration.pending(),
             RecordKind::ChatgptAccounts.pending(),
             "account-credentials.lock",
-            "provider-check.lock",
             "model-preferences.pending",
             "ui-preferences.pending",
         ] {
@@ -1608,10 +1608,6 @@ mod tests {
         ));
         assert!(matches!(
             state.with_account_replacement_lock(&workspace, || ()),
-            Err(StoreError::StateNotPrivate)
-        ));
-        assert!(matches!(
-            state.lock_provider_check(),
             Err(StoreError::StateNotPrivate)
         ));
 

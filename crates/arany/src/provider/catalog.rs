@@ -102,22 +102,6 @@ pub async fn list_native_models_with_credentials(
     profile: &str,
     credentials: &NativeApiCredentials,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
-    list_selected_models(profile, credentials, None).await
-}
-
-pub(super) async fn list_native_models_checked(
-    profile: &str,
-    credentials: &NativeApiCredentials,
-    journal: &mut crate::CheckJournal,
-) -> Result<Vec<ModelEntry>, ProviderError> {
-    list_selected_models(profile, credentials, Some(journal)).await
-}
-
-async fn list_selected_models(
-    profile: &str,
-    credentials: &NativeApiCredentials,
-    journal: Option<&mut crate::CheckJournal>,
-) -> Result<Vec<ModelEntry>, ProviderError> {
     let kind = ProviderKind::parse(profile).ok_or(ProviderError::Rejected)?;
     let endpoint = match kind {
         ProviderKind::OpenAi => OPENAI_MODELS,
@@ -130,7 +114,7 @@ async fn list_selected_models(
         .build()
         .map_err(|_| ProviderError::Unavailable)?;
     let endpoint = Url::parse(endpoint).map_err(|_| ProviderError::Unavailable)?;
-    list_at(&client, kind, endpoint, credentials, journal).await
+    list_at(&client, kind, endpoint, credentials).await
 }
 
 async fn list_at(
@@ -138,7 +122,6 @@ async fn list_at(
     kind: ProviderKind,
     endpoint: Url,
     credentials: &NativeApiCredentials,
-    mut journal: Option<&mut crate::CheckJournal>,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
     let profile = kind.native_name().ok_or(ProviderError::Rejected)?;
     credentials.require_profile(profile)?;
@@ -172,15 +155,6 @@ async fn list_at(
         let request = match credentials.anthropic_workspace_id() {
             Some(id) => request.header("anthropic-workspace-id", id),
             None => request,
-        };
-        let token = match journal.as_deref_mut() {
-            Some(journal) => Some(
-                journal
-                    .call_started(crate::CheckCallKind::Catalog)
-                    .await
-                    .map_err(|_| ProviderError::Unavailable)?,
-            ),
-            None => None,
         };
         let result = async {
             let mut response = request
@@ -259,21 +233,6 @@ async fn list_at(
             Ok::<_, ProviderError>(next)
         }
         .await;
-        if let (Some(journal), Some(token)) = (journal.as_deref_mut(), token) {
-            let disposition = match &result {
-                Ok(_) => crate::CheckDisposition::Succeeded,
-                Err(error) => super::native_check::disposition(error),
-            };
-            journal
-                .call_finished(
-                    token,
-                    disposition,
-                    None,
-                    result.as_ref().is_ok_and(Option::is_none),
-                )
-                .await
-                .map_err(|_| ProviderError::Unavailable)?;
-        }
         match result? {
             None => {
                 entries.sort_by(|left, right| left.id.cmp(&right.id));
@@ -426,7 +385,7 @@ mod tests {
             NativeApiCredentials::new(profile, "fixture-key".into(), workspace.map(str::to_owned))
                 .unwrap();
         let kind = ProviderKind::parse(profile).unwrap();
-        let result = list_at(&client, kind, endpoint, &credentials, None).await;
+        let result = list_at(&client, kind, endpoint, &credentials).await;
         (result, server.await.expect("fixture server"))
     }
 

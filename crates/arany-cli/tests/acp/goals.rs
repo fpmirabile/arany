@@ -61,7 +61,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             });
         }
         let event = json!({"sequence":10,"session_id":adapter.session,"run_id":adapter.run,
-            "agent_run_id":null,"kind":"GoalPlanContractRecorded","event_version":arany::test_support::payload_version("GoalPlanContractRecorded"),
+            "agent_run_id":null,"kind":"GoalPlanContractRecorded",
             "payload":{"goal_id":goal,"run_id":adapter.run,"contract":contract},"created_at_ms":0});
         let mut preview = event.clone();
         preview["kind"] = json!("AssistantDisplayRecorded");
@@ -141,7 +141,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
         adapter.events.send(Message::Response(Response {
             jsonrpc:Default::default(),id:request.id,
             result:json!({"events":[event, {"sequence":11,"session_id":adapter.session,
-                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),
+                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted",
                 "payload":{"run_id":adapter.run,"text":"Committed answer"},"created_at_ms":0}],"nextSince":null}),
         })).await.unwrap();
         let answer = adapter.next().await;

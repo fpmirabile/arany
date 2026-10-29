@@ -114,14 +114,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut payload = serde_json::json!({"config":ordinary,"active_deadline_ms":null});
         payload["config"]["provider"] = provider;
         assert!(
-            Event::decode(
-                "RunStarted",
-                payload_version("RunStarted").unwrap(),
-                &payload.to_string(),
-                Some(RunId::new()),
-                None
-            )
-            .is_err()
+            Event::decode("RunStarted", &payload.to_string(), Some(RunId::new()), None).is_err()
         );
     }
     let mut roster_config = ordinary.clone();
@@ -288,7 +281,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     config.effort = Some(crate::provider::Effort::High);
     config.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
         account_id: Uuid::now_v7(),
-        evidence_fingerprint: [7; 32],
+        admission_fingerprint: [7; 32],
         admission: crate::provider::ChatGptAdmission::AccountConsent,
     });
     assert!(config.validate().is_err());
@@ -304,13 +297,13 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         .chatgpt_provenance
         .as_mut()
         .unwrap()
-        .evidence_fingerprint = [0; 32];
+        .admission_fingerprint = [0; 32];
     assert!(config.validate().is_err());
     config
         .chatgpt_provenance
         .as_mut()
         .unwrap()
-        .evidence_fingerprint = [7; 32];
+        .admission_fingerprint = [7; 32];
     config.provider_concurrency = 2;
     assert!(config.validate().is_err());
     config.provider_concurrency = 1;
@@ -324,7 +317,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         ("chatgpt", Some(2_000_001), 64 * 1024, false),
         ("chatgpt", Some(32_767), 64 * 1024, false),
         ("openai", Some(272_000), 64 * 1024, false),
-        ("anthropic", Some(272_000), 64 * 1024, true),
+        ("anthropic", Some(272_000), 64 * 1024, false),
     ] {
         let mut pinned = if provider == "chatgpt" {
             config.clone()
@@ -377,8 +370,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     custom.provenance =
         crate::provider::Provenance::Custom(crate::provider::CustomProfileProvenance {
             endpoint: "https://example.invalid/v1".into(),
-            evidence_digest: [1; 32],
-            capability_evidence_version: 2,
+            profile_digest: [1; 32],
         });
     let mut anthropic = ordinary.identity().unwrap();
     anthropic.profile = "anthropic".into();
@@ -387,7 +379,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         (fallback, true),
         (ordinary.identity().unwrap(), false),
         (custom, false),
-        (anthropic, true),
+        (anthropic, false),
     ] {
         let mut pinned = config.clone();
         pinned.providers = Some(crate::provider::Providers::all(vec![
@@ -401,7 +393,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     }
     let encoded = serde_json::to_value(&config).unwrap();
     assert_eq!(encoded["output_token_bound"], "local_acceptance_only");
-    assert_eq!(encoded["chatgpt_provenance"]["evidence_fingerprint"][0], 7);
+    assert_eq!(encoded["chatgpt_provenance"]["admission_fingerprint"][0], 7);
     assert_eq!(
         encoded["chatgpt_provenance"]["admission"],
         "account_consent"

@@ -398,15 +398,7 @@ fn assert_valid_show_output(
     }
 }
 
-type StoredEvent = (
-    i64,
-    String,
-    i64,
-    String,
-    Option<String>,
-    Option<String>,
-    i64,
-);
+type StoredEvent = (i64, String, String, Option<String>, Option<String>, i64);
 
 fn show_session(
     workspace: &std::path::Path,
@@ -436,7 +428,7 @@ fn show_selector(
 fn stored_events(state_path: &std::path::Path, session: SessionId) -> Vec<StoredEvent> {
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
     let mut statement = connection
-        .prepare("SELECT sequence, kind, event_version, payload, run_id, agent_run_id, created_at_ms FROM events WHERE session_id = ?1 ORDER BY sequence")
+        .prepare("SELECT sequence, kind, payload, run_id, agent_run_id, created_at_ms FROM events WHERE session_id = ?1 ORDER BY sequence")
         .unwrap();
     statement
         .query_map([session.to_string()], |row| {
@@ -447,7 +439,6 @@ fn stored_events(state_path: &std::path::Path, session: SessionId) -> Vec<Stored
                 row.get(3)?,
                 row.get(4)?,
                 row.get(5)?,
-                row.get(6)?,
             ))
         })
         .unwrap()
@@ -614,8 +605,8 @@ fn assert_mixed_reference_and_transition(
         .unwrap();
     connection
         .execute(
-            "UPDATE events SET kind = ?1, event_version = ?2, payload = ?3 WHERE session_id = ?4 AND sequence = ?5",
-            rusqlite::params![events[0].1, events[0].2, events[0].3, session.to_string(), last.0],
+            "UPDATE events SET kind = ?1, payload = ?2 WHERE session_id = ?3 AND sequence = ?4",
+            rusqlite::params![events[0].1, events[0].2, session.to_string(), last.0],
         )
         .unwrap();
     drop(connection);
@@ -811,8 +802,8 @@ fn restore_event(state_path: &std::path::Path, session: SessionId, event: &Store
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
     connection
         .execute(
-            "UPDATE events SET kind = ?1, event_version = ?2, payload = ?3 WHERE session_id = ?4 AND sequence = ?5",
-            rusqlite::params![event.1, event.2, event.3, session.to_string(), event.0],
+            "UPDATE events SET kind = ?1, payload = ?2 WHERE session_id = ?3 AND sequence = ?4",
+            rusqlite::params![event.1, event.2, session.to_string(), event.0],
         )
         .unwrap();
 }
@@ -877,9 +868,7 @@ async fn append_test_compaction(state_path: &std::path::Path, session: SessionId
         recent_files: Vec::new(),
         provider: config.provider.profile(),
         model: config.model.clone(),
-        prompt_version: 1,
         prompt: arany::EffectivePrompts::default().pin(arany::PromptFile::Compaction),
-        schema_version: 1,
         compiler_version: 5,
         source_bytes: 1,
         source_tokens_estimate: 1,

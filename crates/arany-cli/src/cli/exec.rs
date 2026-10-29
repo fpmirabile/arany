@@ -686,7 +686,7 @@ fn text_receipt(committed: &CommittedOutcome) -> Result<String, String> {
                 "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
             }
             Some(config) if config.custom_profile_provenance.is_some() => {
-                "Provider: custom verified\n"
+                "Provider: custom\n"
             }
             _ => "",
         },
@@ -2242,8 +2242,7 @@ mod tests {
                     text: "Bounded answer".into(),
                 }),
             ])
-            .with_profile("anthropic", "claude-sonnet-5")
-            .with_effort(Effort::Low)
+            .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32])
             .with_context_window(CONTEXT_WINDOW_TOKENS),
         );
         let mut input = arany::test_support::scenario::request(&workspace, "Prior question");
@@ -2503,7 +2502,6 @@ mod tests {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             assert_eq!(line["kind"], event.event.kind());
-            assert_eq!(line["event_version"], event.event.version());
         }
         store.close().await.expect("closed store");
 
