@@ -12,8 +12,8 @@ use std::os::unix::fs::PermissionsExt;
 #[tokio::test]
 async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     use arany::{
-        AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, OutputTokenBound,
-        ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
+        AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ProviderCallDisposition,
+        ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
     };
     let session = SessionId::new();
     let goal = arany::GoalId::new();
@@ -44,35 +44,9 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     };
     let config = RunConfig {
         supervisor: Some(arany::supervisor::SupervisorPolicy::all_off()),
-        worker_policy: None,
-        agent_definitions: None,
-        roster: None,
-        providers: None,
-        provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
         model: "replay-model".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
-        effective_context_window_tokens: None,
-        policy: CollaborationPolicy::Single,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        prompts: arany::EffectivePrompts::default().pins(),
-        launch_directory: String::new(),
-        include_sources: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
         tool_policy: Some(Box::new(policy)),
+        ..arany::test_support::run_config()
     };
     let call = ToolCall::Command {
         program: "shell".into(),
@@ -124,20 +98,9 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         run_id: run,
         agent_run_id: primary,
         record: ProviderCallRecord {
-            context_bytes: None,
-            rate_limits: None,
-            delegation: None,
-            phase: AgentPhase::RootPlan,
             disposition,
-            response_id: None,
-            input_tokens: None,
-            output_tokens: None,
-            wire_provenance: None,
-            refusal: None,
-            failure_reason: None,
             requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            ..arany::test_support::provider_call_record()
         },
     };
     let prefix = [

@@ -2377,41 +2377,16 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
-            supervisor: None,
-            worker_policy: None,
-            agent_definitions: None,
-            roster: None,
-            providers: None,
-            provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
             model: "test-model".into(),
-            effort: None,
-            custom_profile_provenance: None,
-            saved_api_account_id: None,
-            chatgpt_provenance: None,
-            output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-            context_window_tokens: None,
-            effective_context_window_tokens: None,
-            policy: CollaborationPolicy::Single,
-            output_token_cap: 4096,
-            provider_concurrency: 1,
             workspace_device,
             workspace_inode,
-            user_instruction_digest: None,
-            instruction_sources: Vec::new(),
-            prompts: arany::EffectivePrompts::default().pins(),
-            launch_directory: String::new(),
-            include_sources: Vec::new(),
-            history_run_ids: Vec::new(),
-            excluded_history_runs: 0,
             context_usage: Some(ContextUsage {
                 used_bytes: 101,
                 budget_bytes: 100,
                 compactable_bytes: 10,
                 tool_history_bytes: 0,
             }),
-            compaction_event_sequence: None,
-            compaction_content_digest: None,
-            tool_policy: None,
+            ..arany::test_support::run_config()
         };
         let encoded_config = serde_json::to_value(&config).expect("current Run config JSON");
         assert!(encoded_config["effort"].is_null());
@@ -2984,36 +2959,10 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
-                supervisor: None,
-                worker_policy: None,
-                agent_definitions: None,
-                roster: None,
-                providers: None,
-                provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                 model: "test-model".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                context_window_tokens: None,
-                effective_context_window_tokens: None,
-                policy: CollaborationPolicy::Single,
-                output_token_cap: 4096,
-                provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
-                user_instruction_digest: None,
-                instruction_sources: Vec::new(),
-                prompts: arany::EffectivePrompts::default().pins(),
-                launch_directory: String::new(),
-                include_sources: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
-                context_usage: None,
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
+                ..arany::test_support::run_config()
             };
             let mut store =
                 Store::open(StateRoot::admit(&state_path).expect("private state")).expect("store");
@@ -3070,20 +3019,10 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     record: arany::ProviderCallRecord {
-                        context_bytes: None,
-                        rate_limits: None,
-                        delegation: None,
-                        phase: arany::AgentPhase::RootPlan,
-                        disposition: arany::ProviderCallDisposition::Finished,
                         response_id: Some("synthetic-response".into()),
                         input_tokens: Some(7),
                         output_tokens: Some(3),
-                        wire_provenance: None,
-                        refusal: None,
-                        failure_reason: None,
-                        requested_tools: 0,
-                        cache_read_input_tokens: None,
-                        cache_creation_input_tokens: None,
+                        ..arany::test_support::provider_call_record()
                     },
                 },
                 Event::AgentFinished {

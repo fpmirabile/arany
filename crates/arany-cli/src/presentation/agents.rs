@@ -902,20 +902,10 @@ pub(crate) mod tests {
             (Some(u32::MAX), Some(u32::MAX)),
         ] {
             let first = arany::ProviderCallRecord {
-                context_bytes: None,
-                rate_limits: None,
-                delegation: None,
-                phase: arany::AgentPhase::RootPlan,
                 disposition: arany::ProviderCallDisposition::Delegated,
-                response_id: None,
                 input_tokens: Some(111),
                 output_tokens: Some(222),
-                wire_provenance: None,
-                refusal: None,
-                failure_reason: None,
-                requested_tools: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                ..arany::test_support::provider_call_record()
             };
             let last = arany::ProviderCallRecord {
                 delegation: None,

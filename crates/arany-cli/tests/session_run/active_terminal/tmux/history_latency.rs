@@ -5,9 +5,9 @@ use crate::loopback::{
 };
 use arany::WorkspaceIdentity;
 use arany::{
-    AgentDisposition, AgentPhase, AgentRole, AgentRunId, CollaborationPolicy, Event, GoalBudget,
-    GoalId, GoalPhase, GoalReport, GoalStatus, ProviderCallDisposition, ProviderCallRecord,
-    RunConfig, RunDisposition, RunId, RunStatus, SessionId, StateRoot, Store, resume_session,
+    AgentDisposition, AgentRole, AgentRunId, Event, GoalBudget, GoalId, GoalPhase, GoalReport,
+    GoalStatus, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus, SessionId,
+    StateRoot, Store, resume_session,
 };
 use rustix::process::Pid;
 use std::{
@@ -219,35 +219,10 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunStarted {
                     run_id,
                     config: RunConfig {
-                        supervisor: None,
-                        worker_policy: None,
-                        agent_definitions: None,
-                        roster: None,
-                        providers: None,
-                        provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                         model: "test-model".into(),
-                        effort: None,
-                        custom_profile_provenance: None,
-                        saved_api_account_id: None,
-                        chatgpt_provenance: None,
-                        output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                        context_window_tokens: None,
-                        policy: CollaborationPolicy::Single,
-                        output_token_cap: 4096,
-                        provider_concurrency: 1,
                         workspace_device: metadata.dev(),
                         workspace_inode: metadata.ino(),
-                        user_instruction_digest: None,
-                        instruction_sources: Vec::new(),
-                        prompts: arany::EffectivePrompts::default().pins(),
-                        launch_directory: String::new(),
-                        include_sources: Vec::new(),
-                        history_run_ids: Vec::new(),
-                        excluded_history_runs: 0,
-                        context_usage: None,
-                        compaction_event_sequence: None,
-                        compaction_content_digest: None,
-                        tool_policy: None,
+                        ..arany::test_support::run_config()
                     },
                     active_deadline_ms: None,
                 },
@@ -272,19 +247,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     run_id,
                     agent_run_id,
                     record: ProviderCallRecord {
-                        rate_limits: None,
-                        delegation: None,
-                        phase: AgentPhase::RootPlan,
-                        disposition: ProviderCallDisposition::Finished,
-                        response_id: None,
-                        input_tokens: None,
-                        output_tokens: None,
-                        wire_provenance: None,
-                        refusal: None,
-                        failure_reason: None,
-                        requested_tools: 0,
-                        cache_read_input_tokens: None,
-                        cache_creation_input_tokens: None,
+                        ..arany::test_support::provider_call_record()
                     },
                 },
                 Event::AgentFinished {

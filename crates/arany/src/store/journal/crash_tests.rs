@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::{
-    AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, RunConfig, RunDisposition, RunId,
-    RunStatus, WorkspaceIdentity,
+    AgentDisposition, AgentRole, AgentRunId, RunConfig, RunDisposition, RunId, RunStatus,
+    WorkspaceIdentity,
 };
 use crate::store::Store;
 use std::{
@@ -91,35 +91,9 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
             Event::RunStarted {
                 run_id,
                 config: RunConfig {
-                    supervisor: None,
-                    worker_policy: None,
-                    agent_definitions: None,
-                    roster: None,
-                    providers: None,
-                    provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
                     model: "test-model".into(),
-                    effort: None,
-                    custom_profile_provenance: None,
-                    saved_api_account_id: None,
-                    chatgpt_provenance: None,
-                    output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-                    context_window_tokens: None,
-                    effective_context_window_tokens: None,
-                    policy: CollaborationPolicy::Single,
-                    output_token_cap: 4096,
-                    provider_concurrency: 1,
-                    workspace_device: 1,
                     workspace_inode: 1,
-                    user_instruction_digest: None,
-                    instruction_sources: Vec::new(),
-                    launch_directory: String::new(),
-                    include_sources: Vec::new(),
-                    history_run_ids: Vec::new(),
-                    excluded_history_runs: 0,
-                    context_usage: None,
-                    compaction_event_sequence: None,
-                    compaction_content_digest: None,
-                    tool_policy: None,
+                    ..crate::test_support::run_config()
                 },
                 active_deadline_ms: None,
             },

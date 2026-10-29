@@ -154,34 +154,7 @@ pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> Session
 pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
     RunConfig {
         supervisor: tools.then(crate::supervisor::SupervisorPolicy::all_off),
-        worker_policy: None,
-        agent_definitions: None,
-        roster: None,
-        providers: None,
-        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
-        model: "gpt-5.4".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
-        effective_context_window_tokens: None,
         policy,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        prompts: crate::provider::EffectivePrompts::default().pins(),
-        launch_directory: String::new(),
-        include_sources: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
         tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
             host_epoch: None,
             command_tools_digest: None,
@@ -195,6 +168,7 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
         })),
+        ..crate::test_support::run_config()
     }
 }
 
@@ -204,8 +178,6 @@ pub(super) fn record(
     tokens: Option<u32>,
 ) -> ProviderCallRecord {
     ProviderCallRecord {
-        context_bytes: None,
-        rate_limits: None,
         delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
             vec![crate::session::worker::ChildAssignment::Researcher {
                 objective: "Check the child result".into(),
@@ -215,15 +187,10 @@ pub(super) fn record(
         }),
         phase,
         disposition,
-        response_id: None,
         input_tokens: tokens,
         output_tokens: tokens,
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
         requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
+        ..crate::test_support::provider_call_record()
     }
 }
 

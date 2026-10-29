@@ -6,20 +6,12 @@ fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
     let run = RunId::new();
     let agent = AgentRunId::new();
     let mut record = ProviderCallRecord {
-        context_bytes: None,
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
-        disposition: ProviderCallDisposition::Finished,
-        requested_tools: 0,
         response_id: Some("response-1".into()),
         input_tokens: Some(100),
         output_tokens: Some(10),
         cache_read_input_tokens: Some(40),
         cache_creation_input_tokens: Some(20),
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
+        ..crate::test_support::provider_call_record()
     };
     assert!(record.validate().is_ok());
     record.cache_read_input_tokens = Some(81);
@@ -84,20 +76,10 @@ fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
 fn rejects_unbounded_or_unearned_provider_metadata() {
     let current = payload_version("ProviderCallRecorded").expect("payload version");
     let mut record = ProviderCallRecord {
-        context_bytes: None,
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
-        disposition: ProviderCallDisposition::Finished,
         response_id: Some("response-1".into()),
         input_tokens: Some(100),
         output_tokens: Some(10),
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
-        requested_tools: 0,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
+        ..crate::test_support::provider_call_record()
     };
     assert!(record.validate().is_ok());
     record.response_id = Some("bad\nidentifier".into());
@@ -233,20 +215,9 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
             ProviderCallDisposition::TaskPanic,
         ] {
             let record = ProviderCallRecord {
-                context_bytes: None,
-                rate_limits: None,
-                delegation: None,
-                phase: crate::provider::AgentPhase::RootPlan,
                 disposition,
-                response_id: None,
-                input_tokens: None,
-                output_tokens: None,
-                wire_provenance: None,
-                refusal: None,
                 failure_reason: Some(reason),
-                requested_tools: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                ..crate::test_support::provider_call_record()
             };
             assert_eq!(
                 record.validate().is_ok(),
@@ -357,20 +328,11 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
 #[test]
 fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     let record = ProviderCallRecord {
-        context_bytes: None,
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
         disposition: ProviderCallDisposition::PlanRecorded,
-        requested_tools: 0,
         response_id: Some("response_plan".into()),
         input_tokens: Some(8),
         output_tokens: Some(4),
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
-        wire_provenance: None,
-        failure_reason: None,
-        refusal: None,
+        ..crate::test_support::provider_call_record()
     };
     let value = serde_json::to_value(&record).unwrap();
     let current = payload_version("ProviderCallRecorded").expect("known kind");

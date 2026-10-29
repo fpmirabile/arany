@@ -376,23 +376,15 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             record: crate::session::ProviderCallRecord {
-                context_bytes: None,
-                rate_limits: None,
-                delegation: None,
                 phase: crate::provider::AgentPhase::RootSynthesis,
                 disposition: crate::session::ProviderCallDisposition::Rejected,
                 response_id: Some(CANARY.into()),
-                input_tokens: None,
-                output_tokens: None,
-                wire_provenance: None,
                 refusal: Some(crate::session::ProposalRefusal {
                     operation: "arany_write".into(),
                     cause: crate::session::ProposalRefusalCause::PlanInvalid,
                 }),
                 failure_reason: Some(crate::provider::ProviderFailureReason::ProposalRefused),
-                requested_tools: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                ..crate::test_support::provider_call_record()
             },
         });
         event_failure(&crate::session::Event::ToolFinished {

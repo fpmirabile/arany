@@ -225,7 +225,7 @@ impl arany::Provider for ExactTokenTool {
             turn: arany::ProviderTurn::scripted(),
             outcome: crate::tool_outcome(ToolCall::Edit {
                 path: "src/current.txt".into(),
-                expected_digest: hash(b"current"),
+                expected_digest: Some(hash(b"current")),
                 old: "current".into(),
                 new: "after".into(),
             }),

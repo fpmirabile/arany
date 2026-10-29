@@ -1954,41 +1954,15 @@ mod tests {
                 .contains("Context left: unknown (not reported)")
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
-            supervisor: None,
-            worker_policy: None,
-            agent_definitions: None,
-            roster: None,
-            providers: None,
-            provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
-            model: "gpt-5.4".into(),
-            effort: None,
-            custom_profile_provenance: None,
-            saved_api_account_id: None,
-            chatgpt_provenance: None,
-            output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-            context_window_tokens: None,
-            effective_context_window_tokens: None,
-            policy: CollaborationPolicy::Single,
             output_token_cap: 1024,
-            provider_concurrency: 1,
-            workspace_device: 1,
             workspace_inode: 1,
-            user_instruction_digest: None,
-            instruction_sources: Vec::new(),
-            prompts: arany::EffectivePrompts::default().pins(),
-            launch_directory: String::new(),
-            include_sources: Vec::new(),
-            history_run_ids: Vec::new(),
-            excluded_history_runs: 0,
             context_usage: Some(ContextUsage {
                 used_bytes: 32_000,
                 budget_bytes: 65_536,
                 compactable_bytes: 20_000,
                 tool_history_bytes: 0,
             }),
-            compaction_event_sequence: None,
-            compaction_content_digest: None,
-            tool_policy: None,
+            ..arany::test_support::run_config()
         });
         let notice =
             crate::presentation::usage_pages(&view, true, Some(starting_sequence)).concat();

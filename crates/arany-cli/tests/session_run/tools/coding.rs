@@ -31,12 +31,12 @@ impl Provider for Journey {
                 limit: None,
             },
             2 => ToolCall::Edit {
-                path: "src/main.c".into(), expected_digest: hash(b"int main(void) { return 1; }\n"),
+                path: "src/main.c".into(), expected_digest: Some(hash(b"int main(void) { return 1; }\n")),
                 old: "return 1".into(), new: "return 2".into(),
             },
             3 => ToolCall::MultiEdit {
                 file_path: "src/main.c".into(),
-                expected_digest: hash(b"int main(void) { return 2; }\n"),
+                expected_digest: Some(hash(b"int main(void) { return 2; }\n")),
                 edits: vec![
                     arany::LiteralEdit { old_string: "return 2".into(), new_string: "return 3".into(), replace_all: false },
                     arany::LiteralEdit { old_string: "return 3".into(), new_string: "return 0".into(), replace_all: false },

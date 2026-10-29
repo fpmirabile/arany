@@ -114,36 +114,7 @@ fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
     let agent = AgentRunId::new();
     let goal_id = GoalId::new();
     let config = RunConfig {
-        supervisor: None,
-        worker_policy: None,
-        agent_definitions: None,
-        roster: None,
-        providers: None,
-        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
-        model: "gpt-5.4".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
-        effective_context_window_tokens: None,
-        policy: CollaborationPolicy::Single,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        prompts: crate::provider::EffectivePrompts::default().pins(),
-        launch_directory: String::new(),
-        include_sources: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
-        tool_policy: None,
+        ..crate::test_support::run_config()
     };
     let bumped = [
         Event::RunStarted {
@@ -589,23 +560,13 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     let agent_id = Some(AgentRunId::new());
 
     let record = ProviderCallRecord {
-        context_bytes: None,
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
         disposition: ProviderCallDisposition::Rejected,
-        requested_tools: 0,
-        response_id: None,
-        input_tokens: None,
-        output_tokens: None,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
-        wire_provenance: None,
         failure_reason: Some(ProviderFailureReason::ProposalRefused),
         refusal: Some(ProposalRefusal {
             operation: "arany_write".into(),
             cause: ProposalRefusalCause::PlanInvalid,
         }),
+        ..crate::test_support::provider_call_record()
     };
     let valid = serde_json::to_value(record).unwrap();
     let current = payload_version("ProviderCallRecorded").expect("known kind");

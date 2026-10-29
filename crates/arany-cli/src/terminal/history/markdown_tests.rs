@@ -735,20 +735,8 @@ fn checkpoint_view(source: &str) -> SessionView {
     active.status = arany::RunStatus::Active;
     active.agents.truncate(1);
     active.agents[0].provider_calls = vec![arany::ProviderCallRecord {
-        context_bytes: None,
-        phase: arany::AgentPhase::RootPlan,
         disposition: ProviderCallDisposition::Cancelled,
-        rate_limits: None,
-        delegation: None,
-        requested_tools: 0,
-        response_id: None,
-        input_tokens: None,
-        output_tokens: None,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
-        wire_provenance: None,
-        failure_reason: None,
-        refusal: None,
+        ..arany::test_support::provider_call_record()
     }];
     active.display = vec![DisplayChunk {
         call_index: 0,

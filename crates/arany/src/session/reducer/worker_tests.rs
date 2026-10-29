@@ -162,13 +162,10 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: actor,
             record: ProviderCallRecord {
-                context_bytes: None,
-                rate_limits: None,
                 delegation,
                 phase,
                 disposition,
                 requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
-                response_id: None,
                 input_tokens: matches!(
                     disposition,
                     ProviderCallDisposition::Finished
@@ -185,11 +182,7 @@ impl Fixture {
                         | ProviderCallDisposition::PlanRecorded
                 )
                 .then_some(0),
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
-                wire_provenance: None,
-                refusal: None,
-                failure_reason: None,
+                ..crate::test_support::provider_call_record()
             },
         });
     }
@@ -452,34 +445,10 @@ fn fixture_with_grant(
             digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
             files,
         }),
-        roster: None,
-        providers: None,
-        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
-        model: "gpt-5.4".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
-        effective_context_window_tokens: None,
         policy: CollaborationPolicy::Team {
             max_active_children: 8,
         },
-        output_token_cap: 4096,
         provider_concurrency: 4,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        prompts: crate::provider::EffectivePrompts::default().pins(),
-        launch_directory: String::new(),
-        include_sources: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
         tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
             host_epoch: None,
             command_tools_digest: None,
@@ -493,6 +462,7 @@ fn fixture_with_grant(
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
         })),
+        ..crate::test_support::run_config()
     };
     let mut f = Fixture {
         session,

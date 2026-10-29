@@ -1568,20 +1568,10 @@ mod goal_status_tests {
             "Stopped after 64 Provider calls (limit set in /settings). Send a message to continue."
         );
         view.runs[0].agents[0].provider_calls = vec![ProviderCallRecord {
-            context_bytes: None,
-            rate_limits: None,
-            delegation: None,
-            phase: arany::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::InvalidResponse,
-            response_id: None,
             input_tokens: Some(100),
             output_tokens: Some(36),
-            wire_provenance: None,
-            refusal: None,
-            failure_reason: None,
-            requested_tools: 0,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            ..arany::test_support::provider_call_record()
         }];
         assert_eq!(
             interactive_run_feedback(&view, &view.runs[0]).unwrap(),

@@ -32,7 +32,7 @@ impl Provider for BoundedLoop {
                 }),
                 2 => crate::tool_outcome(ToolCall::Edit {
                     path: "src/current.txt".into(),
-                    expected_digest: hash(b"current"),
+                    expected_digest: Some(hash(b"current")),
                     old: "current".into(),
                     new: "current\n2026-10-06\n".into(),
                 }),
@@ -112,7 +112,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
             let failed_provider = Arc::new(Proposal {
                 call: ToolCall::Edit {
                     path: "src/current.txt".into(),
-                    expected_digest: hash(b"current"),
+                    expected_digest: Some(hash(b"current")),
                     old: "current".into(),
                     new: "must not run".into(),
                 },
@@ -495,7 +495,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             "stale",
             ToolCall::Edit {
                 path: "src/current.txt".into(),
-                expected_digest: hash(b"stale"),
+                expected_digest: Some(hash(b"stale")),
                 old: "current".into(),
                 new: "overwritten".into(),
             },

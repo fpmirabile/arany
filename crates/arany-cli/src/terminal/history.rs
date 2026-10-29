@@ -1977,8 +1977,8 @@ mod tests {
         assert_eq!(kinds.get(note + 1), Some(&MessageKind::Notice));
     }
     use arany::{
-        AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event, RunConfig,
-        RunDisposition, RunStatus, RunView, SessionDefaults, WorkspaceIdentity,
+        AgentDisposition, AgentRole, AgentRunId, Event, RunConfig, RunDisposition, RunStatus,
+        RunView, SessionDefaults, WorkspaceIdentity,
     };
     use arany::{StateRoot, Store};
     use std::time::Instant;
@@ -3338,37 +3338,9 @@ mod tests {
                     Event::RunStarted {
                         run_id,
                         config: RunConfig {
-                            supervisor: None,
-                            worker_policy: None,
-                            agent_definitions: None,
-                            roster: None,
-                            providers: None,
-                            provider: arany::ProviderRecord::parse("openai")
-                                .expect("Provider record"),
                             model: "test-model".into(),
-                            effort: None,
-                            custom_profile_provenance: None,
-                            saved_api_account_id: None,
-                            chatgpt_provenance: None,
-                            output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                            context_window_tokens: None,
-                            effective_context_window_tokens: None,
-                            policy: CollaborationPolicy::Single,
-                            output_token_cap: 4096,
-                            provider_concurrency: 1,
-                            workspace_device: 1,
                             workspace_inode: 1,
-                            user_instruction_digest: None,
-                            instruction_sources: Vec::new(),
-                            prompts: arany::EffectivePrompts::default().pins(),
-                            launch_directory: String::new(),
-                            include_sources: Vec::new(),
-                            history_run_ids: Vec::new(),
-                            excluded_history_runs: 0,
-                            context_usage: None,
-                            compaction_event_sequence: None,
-                            compaction_content_digest: None,
-                            tool_policy: None,
+                            ..arany::test_support::run_config()
                         },
                         active_deadline_ms: None,
                     },
