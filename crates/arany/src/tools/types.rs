@@ -1594,10 +1594,12 @@ impl ToolObservation {
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
-    // Only `unstarted_observation` pins a Guard stage, so a failed Guard-site result carrying one dispatched nothing.
+    // Only `unstarted_observation` pins a Guard stage, so a failed or limited Guard-site result carrying one dispatched nothing.
     pub(crate) fn guard_failed_before_dispatch(&self) -> bool {
-        self.disposition == ToolDisposition::Failed
-            && self.attestation.is_none()
+        matches!(
+            self.disposition,
+            ToolDisposition::Failed | ToolDisposition::Limit
+        ) && self.attestation.is_none()
             && self.guard_stage.is_some()
             && self.cache_update != CacheUpdate::Uncertain
     }

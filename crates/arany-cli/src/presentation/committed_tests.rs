@@ -468,6 +468,41 @@ async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
 }
 
 #[tokio::test]
+async fn limited_tool_feedback_names_the_limit() {
+    let (root, workspace, engine) = fixture();
+    let provider = Arc::new(ScriptedProvider::new(vec![finish("seed")]));
+    let outcome = run_to_end(&engine, &provider, request(&workspace, "Seed presentation"))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let (view, _) = committed(root.path(), outcome.session_id).await;
+    let mut run = view.runs[0].clone();
+    run.status = RunStatus::Failed;
+    run.failure = Some(arany::RunFailure::ToolStopped);
+    run.assistant_message = None;
+    let mut tool = tool_fixture(
+        arany::ToolCall::Command {
+            program: "sh".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
+        },
+        "Guard resource limit reached",
+    );
+    let observation = tool.observation.as_mut().unwrap();
+    observation.disposition = arany::ToolDisposition::Limit;
+    observation.limit_cause = Some(arany::LimitCause::Resource);
+    run.tools = vec![tool];
+    let feedback = run_feedback(&run).unwrap();
+    assert!(
+        feedback.starts_with("Error: Tool stopped: resource limit reached."),
+        "{feedback}"
+    );
+    assert!(!feedback.contains("continuation budget"), "{feedback}");
+}
+
+#[tokio::test]
 async fn preflight_refusal_feedback_and_exports_use_the_reopened_receipt() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();

@@ -565,10 +565,7 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
         assert_eq!(observation.disposition, disposition);
         assert_eq!(observation.limit_cause, limit_cause);
         assert_eq!(observation.stops_run(), stops_run);
-        assert!(
-            observation.guard_failed_before_dispatch() == stops_run
-                && !observation.stops_tool_step()
-        );
+        assert!(observation.guard_failed_before_dispatch() && !observation.stops_tool_step());
         assert!(
             observation
                 .output
@@ -657,7 +654,7 @@ fn undispatched_resource_limit_remains_a_stopping_limit() {
     assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
     assert!(observation.attestation.is_none());
     assert!(observation.valid());
-    assert!(observation.stops_run());
+    assert!(observation.stops_run() && !observation.stops_tool_step());
     assert!(observation.output.contains("resource limit"));
     assert!(observation.output.contains("no operation was dispatched"));
     observation.limit_cause = Some(super::LimitCause::RequestedTime);

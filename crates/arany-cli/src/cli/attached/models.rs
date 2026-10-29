@@ -173,25 +173,29 @@ pub(crate) fn last_saved_defaults(
     else {
         return Ok(None);
     };
-    root.with_account_replacement_lock(workspace, || {
-        let preferences = read_preferences(&root)?;
-        Ok(preferences
-            .selected
-            .as_ref()
-            .and_then(|selected| {
-                preferences.sources.iter().find(|source| {
-                    source.profile == selected.profile && source.account_id == selected.account_id
-                })
+    let preferences = read_saved_selection(&root, workspace)?;
+    Ok(preferences
+        .selected
+        .as_ref()
+        .and_then(|selected| {
+            preferences.sources.iter().find(|source| {
+                source.profile == selected.profile && source.account_id == selected.account_id
             })
-            .map(|source| arany::SessionDefaults {
-                provider: Some(source.profile.clone()),
-                model: source.model.clone(),
-                effort: source.effort,
-                account_id: Some(source.account_id),
-                ..arany::SessionDefaults::default()
-            }))
-    })
-    .map_err(|_| "saved selection unavailable".to_owned())?
+        })
+        .map(|source| arany::SessionDefaults {
+            provider: Some(source.profile.clone()),
+            model: source.model.clone(),
+            effort: source.effort,
+            account_id: Some(source.account_id),
+            ..arany::SessionDefaults::default()
+        }))
+}
+
+// A read-only lookup never waits on the account lock another Arany process may hold.
+fn read_saved_selection(root: &StateRoot, workspace: &Path) -> Result<ModelPreferences, String> {
+    root.check_outside_workspace(workspace)
+        .map_err(|_| "saved selection unavailable")?;
+    read_preferences(root)
 }
 
 pub(crate) fn saved_effort(
@@ -205,20 +209,17 @@ pub(crate) fn saved_effort(
     else {
         return Ok(None);
     };
-    root.with_account_replacement_lock(workspace, || {
-        let preferences = read_preferences(&root)?;
-        let selected = preferences
-            .selected
-            .as_ref()
-            .map(|selected| selected.account_id);
-        Ok(preferences
-            .sources
-            .iter()
-            .filter(|source| source.profile == profile && source.model.as_deref() == Some(model))
-            .max_by_key(|source| Some(source.account_id) == selected)
-            .and_then(|source| source.effort))
-    })
-    .map_err(|_| "saved selection unavailable".to_owned())?
+    let preferences = read_saved_selection(&root, workspace)?;
+    let selected = preferences
+        .selected
+        .as_ref()
+        .map(|selected| selected.account_id);
+    Ok(preferences
+        .sources
+        .iter()
+        .filter(|source| source.profile == profile && source.model.as_deref() == Some(model))
+        .max_by_key(|source| Some(source.account_id) == selected)
+        .and_then(|source| source.effort))
 }
 
 pub(super) async fn restore_saved_models(
@@ -1183,5 +1184,28 @@ mod preference_tests {
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources.len(), 1, "byte quota evicts older sources");
         assert_eq!(current.sources[0].account_id, large.account_id);
+    }
+
+    #[test]
+    fn saved_selection_lookup_ignores_a_held_account_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let reader = StateRoot::open_existing(root.path()).unwrap();
+        let source = SavedModels {
+            profile: "chatgpt".into(),
+            account_id: uuid::Uuid::now_v7(),
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some(Effort::High),
+            catalog: Vec::new(),
+        };
+        write_preferences(&root, source, true, true).unwrap();
+        let preferences = root
+            .with_account_replacement_lock(&workspace, || read_saved_selection(&reader, &workspace))
+            .unwrap()
+            .unwrap();
+        assert_eq!(preferences.sources[0].effort, Some(Effort::High));
+        assert!(read_saved_selection(&reader, reader.path()).is_err());
     }
 }

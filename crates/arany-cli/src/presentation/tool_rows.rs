@@ -178,7 +178,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     summary
 }
 
-fn limit_summary(observation: &arany::ToolObservation) -> String {
+pub(super) fn limit_summary(observation: &arany::ToolObservation) -> String {
     use arany::LimitCause;
     match observation.limit_cause.unwrap_or(LimitCause::Resource) {
         LimitCause::Timeout => format!(

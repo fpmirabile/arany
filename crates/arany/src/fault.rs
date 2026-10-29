@@ -240,8 +240,8 @@ pub(crate) fn file_parent_sync(intent: Option<uuid::Uuid>) -> Result<(), ToolErr
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_before_dispatch(call: &crate::tools::ToolCall) -> Result<(), ToolError> {
     #[cfg(any(test, feature = "test-support"))]
-    if FaultPlan::guard_unavailable(call) {
-        return Err(ToolError::Operation);
+    if let Some(error) = FaultPlan::guard_before_dispatch(call) {
+        return Err(error);
     }
     Ok(())
 }
@@ -473,6 +473,7 @@ mod injection {
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
         GuardUnavailable(String),
+        GuardLimit(String),
         #[cfg(target_os = "linux")]
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
@@ -879,14 +880,25 @@ mod injection {
             plan().push(Fault::GuardUnavailable(program.to_owned()));
         }
 
-        pub(crate) fn guard_unavailable(call: &crate::tools::ToolCall) -> bool {
+        /// Limits the next Guard command running `program` before dispatch, as an over-limit project snapshot would.
+        pub fn limit_guard_before_dispatch(program: &str) {
+            plan().push(Fault::GuardLimit(program.to_owned()));
+        }
+
+        pub(crate) fn guard_before_dispatch(
+            call: &crate::tools::ToolCall,
+        ) -> Option<crate::tools::ToolError> {
             let crate::tools::ToolCall::Command { program, .. } = call else {
-                return false;
+                return None;
             };
-            take(
-                |fault| matches!(fault, Fault::GuardUnavailable(candidate) if candidate == program),
-            )
-            .is_some()
+            take(|fault| {
+                matches!(fault, Fault::GuardUnavailable(candidate) | Fault::GuardLimit(candidate)
+                    if candidate == program)
+            })
+            .map(|fault| match fault {
+                Fault::GuardLimit(_) => crate::tools::ToolError::Limit,
+                _ => crate::tools::ToolError::Operation,
+            })
         }
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {

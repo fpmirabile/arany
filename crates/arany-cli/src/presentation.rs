@@ -580,6 +580,15 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             {
                 return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());
             }
+            if let Some(observation) = tool
+                .and_then(|tool| tool.observation.as_ref())
+                .filter(|observation| observation.disposition == arany::ToolDisposition::Limit)
+            {
+                return Some(format!(
+                    "Error: Tool stopped: {}. No answer was committed; earlier completed actions remain. Use /agents to inspect this Run.",
+                    tool_rows::limit_summary(observation)
+                ));
+            }
             if run.primary_tool_limit_reached() {
                 return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
             }

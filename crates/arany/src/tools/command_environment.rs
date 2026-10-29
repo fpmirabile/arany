@@ -116,6 +116,22 @@ fn valid_entry(entry: &str) -> bool {
     Path::new(entry).is_absolute() && entry.len() <= MAX_PATH_BYTES && !entry.contains(['\0', ':'])
 }
 
+fn pinnable_path(value: &str) -> Result<Vec<String>, CommandEnvironmentError> {
+    let entries: Vec<String> = std::env::split_paths(value)
+        .filter_map(|entry| entry.into_os_string().into_string().ok())
+        .collect();
+    if value.len() > PATH_LIMIT_BYTES
+        || entries.len() > MAX_PATH_ENTRIES
+        || entries.iter().any(|entry| entry.len() > MAX_PATH_BYTES)
+    {
+        return Err(CommandEnvironmentError::TooLarge("PATH"));
+    }
+    Ok(entries
+        .into_iter()
+        .filter(|entry| valid_entry(entry))
+        .collect())
+}
+
 impl CommandEnvironment {
     pub(super) fn for_discovery(path: &Path) -> Result<Self, ToolError> {
         let found = match StateRoot::open_existing(path) {
@@ -218,7 +234,14 @@ impl CommandEnvironment {
     }
 
     pub fn process_path_differs(&self) -> bool {
-        std::env::var_os("PATH").unwrap_or_default() != std::ffi::OsString::from(self.path_string())
+        self.path_differs_from(std::env::var("PATH").ok().as_deref())
+    }
+
+    // Compares what a fresh capture would pin, so entries capture drops never count as a difference.
+    fn path_differs_from(&self, process: Option<&str>) -> bool {
+        !process
+            .map_or(Ok(Vec::new()), pinnable_path)
+            .is_ok_and(|path| path == self.path)
     }
 
     pub(crate) fn replace_captured(
@@ -335,19 +358,7 @@ impl CommandEnvironment {
                 continue;
             };
             if name == "PATH" {
-                let entries: Vec<String> = std::env::split_paths(&value)
-                    .filter_map(|entry| entry.into_os_string().into_string().ok())
-                    .collect();
-                if value.len() > PATH_LIMIT_BYTES
-                    || entries.len() > MAX_PATH_ENTRIES
-                    || entries.iter().any(|entry| entry.len() > MAX_PATH_BYTES)
-                {
-                    return Err(CommandEnvironmentError::TooLarge(name));
-                }
-                path = entries
-                    .into_iter()
-                    .filter(|entry| valid_entry(entry))
-                    .collect();
+                path = pinnable_path(&value)?;
             } else if valid_value(&value) {
                 names.push(Variable {
                     name: name.to_owned(),
@@ -513,6 +524,18 @@ mod tests {
             inode: 2,
             sha256: "1".repeat(64),
         }
+    }
+
+    #[test]
+    fn process_path_difference_ignores_entries_capture_cannot_pin() {
+        let record = CommandEnvironment::for_path("/usr/bin:/bin");
+        assert!(!record.path_differs_from(Some("/usr/bin:~/.dotnet/tools:relative:/bin")));
+        assert!(record.path_differs_from(Some("/usr/bin:/opt/bin:/bin")));
+        assert!(record.path_differs_from(Some("/bin:/usr/bin")));
+        assert!(record.path_differs_from(None));
+        assert!(!CommandEnvironment::empty().path_differs_from(None));
+        let oversized = vec!["/bin"; MAX_PATH_ENTRIES + 1].join(":");
+        assert!(record.path_differs_from(Some(&oversized)));
     }
 
     #[test]

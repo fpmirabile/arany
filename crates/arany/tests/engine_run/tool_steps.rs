@@ -548,6 +548,28 @@ async fn line_paged_read_returns_all_eighty_lines_after_twenty_steps() {
 
 #[tokio::test]
 async fn guard_failure_before_dispatch_returns_to_the_model_and_the_answer_commits() {
+    use arany::ToolDisposition;
+    for (inject, disposition, output) in [
+        (
+            arany::FaultPlan::fail_guard_before_dispatch as fn(&str),
+            ToolDisposition::Failed,
+            "Guard execution unavailable before dispatch; no operation was dispatched.",
+        ),
+        (
+            arany::FaultPlan::limit_guard_before_dispatch,
+            ToolDisposition::Limit,
+            "Guard resource limit reached before dispatch; no operation was dispatched.",
+        ),
+    ] {
+        guard_failure_before_dispatch_case(inject, disposition, output).await;
+    }
+}
+
+async fn guard_failure_before_dispatch_case(
+    inject: fn(&str),
+    disposition: arany::ToolDisposition,
+    output: &str,
+) {
     use arany::test_support::goals::finish_with;
     use std::os::unix::fs::PermissionsExt;
     const PROGRAM: &str = "guard_probe";
@@ -568,7 +590,7 @@ async fn guard_failure_before_dispatch_returns_to_the_model_and_the_answer_commi
     let permissions = state_path.join("permissions.json");
     std::fs::write(&permissions, br#"{"permissions":{"allow":["Bash"]}}"#).unwrap();
     std::fs::set_permissions(&permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
-    arany::FaultPlan::fail_guard_before_dispatch(PROGRAM);
+    inject(PROGRAM);
     let provider = Arc::new(ScriptedProvider::new(vec![
         crate::tool_outcome(arany::ToolCall::Command {
             program: PROGRAM.into(),
@@ -604,12 +626,10 @@ async fn guard_failure_before_dispatch_returns_to_the_model_and_the_answer_commi
         panic!("the failed command is never retried");
     };
     let observation = tool.observation.as_ref().expect("observation");
-    assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
+    assert_eq!(observation.disposition, disposition);
     assert!(observation.attestation.is_none());
     assert!(
-        observation.output.starts_with(
-            "Guard execution unavailable before dispatch; no operation was dispatched."
-        ),
+        observation.output.starts_with(output),
         "{}",
         observation.output
     );

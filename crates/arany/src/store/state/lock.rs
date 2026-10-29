@@ -193,16 +193,29 @@ impl StateRoot {
         workspace: &Path,
         operation: impl FnOnce() -> T,
     ) -> Result<T, StoreError> {
+        self.check_outside_workspace(workspace)?;
         #[cfg(unix)]
         {
-            let workspace = Dir::open_ambient_dir(workspace, ambient_authority())?;
-            self.ensure_outside_workspace(&workspace)?;
             let _lock = HeldAccountLock::acquire(self)?;
             Ok(operation())
         }
         #[cfg(not(unix))]
         {
-            let _ = (workspace, operation);
+            let _ = operation;
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+
+    // Records publish by synced rename, so read-only lookups need this check but not the account lock.
+    pub fn check_outside_workspace(&self, workspace: &Path) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            let workspace = Dir::open_ambient_dir(workspace, ambient_authority())?;
+            self.ensure_outside_workspace(&workspace)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = workspace;
             Err(StoreError::InvalidStateDirectory)
         }
     }
