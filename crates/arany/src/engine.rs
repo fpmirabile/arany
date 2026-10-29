@@ -57,16 +57,22 @@ use report::goal_report;
 use routing::CallScope;
 use run_loop::{LoopControls, RunIdentity, RunLoop};
 
-/// Checks bounded Workspace input before an attached draft becomes a saved Session.
+/// Checks bounded Workspace input before an attached draft becomes a saved Session and
+/// returns the includes that will be attached only in part or by reference.
 /// Run admission reads and validates the inputs again before disclosure.
 pub fn validate_workspace_inputs(
     state: &StateRoot,
     workspace: &std::path::Path,
     launch_directory: Option<&std::path::Path>,
     include_paths: &[PathBuf],
-) -> Result<(), EngineError> {
-    WorkspaceInputs::load(workspace, state, launch_directory, include_paths)?;
-    Ok(())
+) -> Result<Vec<crate::session::PartialInclude>, EngineError> {
+    Ok(
+        WorkspaceInputs::load(workspace, state, launch_directory, include_paths)?
+            .includes
+            .iter()
+            .filter_map(crate::session::input::InputSnapshot::partial)
+            .collect(),
+    )
 }
 
 // GoalStarted or GoalResumed, GoalRunLinked, MessageAccepted, RunStarted and AgentSpawned.
@@ -155,7 +161,10 @@ pub enum EngineError {
     InputNotUtf8,
     #[error("explicit include does not exist")]
     MissingInclude,
-    #[error("too many explicit includes")]
+    #[error(
+        "too many explicit includes; a message takes at most {} @ files or directories",
+        crate::session::input::MAX_INCLUDES
+    )]
     TooManyIncludes,
     #[error("state directory overlaps the Workspace")]
     StateOverlap,
@@ -181,6 +190,8 @@ pub enum EngineError {
     CoordinatorFailed,
     #[error("Run was cancelled before admission")]
     CancelledBeforeStart,
+    #[error(transparent)]
+    PromptOverride(#[from] crate::provider::PromptOverrideError),
     #[error("state storage failed")]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -229,6 +240,8 @@ pub struct GoalRequest {
     pub phase: Option<crate::session::GoalPhase>,
     pub budget: Option<crate::session::GoalBudget>,
     pub resource_settings: crate::tools::ToolResourceSettings,
+    /// Resolved against the model's window at each Run's admission.
+    pub context_window: crate::session::ContextWindow,
     /// Ignored for autonomous Goals, which finish only at a Goal stop condition.
     pub finish_after_run: bool,
     /// Set only by `autonomous`; a resumed Goal keeps the flag it was started with.
@@ -249,6 +262,7 @@ impl GoalRequest {
                 build_cpu_cores: None,
                 ..Default::default()
             },
+            context_window: crate::session::ContextWindow::default(),
             finish_after_run: true,
             autonomous: false,
             continues: None,
@@ -267,6 +281,7 @@ impl GoalRequest {
             phase: None,
             budget: Some(budget),
             resource_settings,
+            context_window: crate::session::ContextWindow::default(),
             finish_after_run: true,
             autonomous: false,
             continues: Some(source),
@@ -292,6 +307,7 @@ impl GoalRequest {
             phase: None,
             budget: None,
             resource_settings: crate::tools::ToolResourceSettings::default(),
+            context_window: crate::session::ContextWindow::default(),
             finish_after_run,
             autonomous: false,
             continues: None,
@@ -434,6 +450,7 @@ struct RootInput<'a> {
     images: Vec<crate::provider::ProviderImage>,
     history: Vec<crate::provider::HistoryTurn>,
     summary: Option<String>,
+    prompts: crate::provider::EffectivePrompts,
 }
 
 struct PreparedTurn {
@@ -443,6 +460,7 @@ struct PreparedTurn {
     images: Vec<crate::provider::ProviderImage>,
     history: Vec<crate::provider::HistoryTurn>,
     summary: Option<String>,
+    prompts: crate::provider::EffectivePrompts,
     config: RunConfig,
     context_window_tokens: Option<u32>,
     context_started: SystemTime,
@@ -1393,6 +1411,7 @@ impl Engine {
         let launch_directory = request.launch_directory.clone();
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
+        let context_window = request.goal.context_window;
         let mut leases = SubmissionLeases::default();
         let entry = if request.goal.id.is_some() {
             GoalEntry::Resume
@@ -1422,7 +1441,10 @@ impl Engine {
                 launch_directory: launch_directory.clone(),
                 include_paths: include_paths.clone(),
                 policy,
-                goal: GoalRequest::resume(turn.outcome.goal_id, false),
+                goal: GoalRequest {
+                    context_window,
+                    ..GoalRequest::resume(turn.outcome.goal_id, false)
+                },
             };
             // Settlement left the Goal open under the same admits_next_run check, so this cannot be refused for budget.
             turn = match Box::pin(self.run_turn(
@@ -1542,6 +1564,7 @@ impl Engine {
             images,
             history,
             summary,
+            prompts,
             config,
             context_window_tokens,
             context_started,
@@ -1640,6 +1663,7 @@ impl Engine {
                         images,
                         history,
                         summary,
+                        prompts,
                     },
                 );
                 provider_request.input.previous_run_failure = previous_run_failure;
@@ -2064,6 +2088,7 @@ impl Engine {
             .iter()
             .map(PathBuf::from)
             .collect::<Vec<_>>();
+        let prompts = crate::provider::EffectivePrompts::load(&self.state)?;
         let inputs = match &tools {
             Some(runtime) => WorkspaceInputs::load_pinned(
                 &request.workspace,
@@ -2111,7 +2136,12 @@ impl Engine {
         )?
         .checked_add(feedback_reserved)
         .ok_or(EngineError::ContextTooLarge)?;
-        let context_window_tokens = submission.providers.context_window_tokens_for_run().await;
+        let model_context_window_tokens =
+            submission.providers.context_window_tokens_for_run().await;
+        let context_window_tokens = request
+            .goal
+            .context_window
+            .resolve(model_context_window_tokens);
         let context = CompiledContext::compile(
             history.as_ref(),
             objective,
@@ -2180,7 +2210,8 @@ impl Engine {
             saved_api_account_id: identity.saved_api_account_id(),
             chatgpt_provenance: identity.chatgpt_provenance().cloned(),
             output_token_bound: identity.limits.output_token_bound,
-            context_window_tokens,
+            context_window_tokens: model_context_window_tokens,
+            effective_context_window_tokens: context_window_tokens,
             policy: request.policy,
             output_token_cap: identity.limits.max_output_tokens,
             provider_concurrency,
@@ -2199,11 +2230,18 @@ impl Engine {
                     digest: snapshot.digest,
                 })
                 .collect(),
+            prompts: prompts.pins(),
             launch_directory: inputs.launch_directory.clone(),
-            include_digests: inputs
+            include_sources: inputs
                 .includes
                 .iter()
-                .map(|snapshot| snapshot.digest)
+                .filter(|snapshot| {
+                    !matches!(snapshot.fit, crate::session::IncludeFit::Reference { .. })
+                })
+                .map(|snapshot| crate::session::IncludeSource {
+                    path: snapshot.path.clone(),
+                    digest: snapshot.digest,
+                })
                 .collect(),
             history_run_ids: context.history_run_ids,
             excluded_history_runs: context.excluded_history_runs,
@@ -2227,6 +2265,7 @@ impl Engine {
             images: context.images,
             history: context.history,
             summary: context.summary,
+            prompts,
             config,
             context_window_tokens,
             context_started,
@@ -2363,6 +2402,7 @@ impl Engine {
                 .is_some_and(|title| title.is_empty() || title.len() > 128)
             || request.policy.validate().is_err()
             || !request.goal.resource_settings.valid()
+            || !request.goal.context_window.valid()
             || match (&request.goal.id, &request.goal.budget) {
                 (Some(_), Some(_)) | (None, None) => true,
                 (Some(_), None) => false,
@@ -2474,6 +2514,7 @@ fn root_request(
             assignment_profiles: input.assignment_profiles,
             images: input.images,
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
+            plan_offered: policy.offers_plan(goal.autonomous),
             pinned_budget: budget,
             goal_plan_contract: goal.plan_contract.clone(),
             workspace_guidance: input
@@ -2494,6 +2535,7 @@ fn root_request(
             history: input.history,
             context_summary: input.summary,
             tools,
+            prompts: input.prompts,
             ..RunInput::new(role, objective)
         },
     }

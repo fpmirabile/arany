@@ -602,7 +602,7 @@ impl LinearState {
         if !unchanged {
             writeln!(
                 writer,
-                "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels"
+                "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels"
             )?;
             for (index, row) in rows.iter().enumerate() {
                 writeln!(
@@ -1117,7 +1117,7 @@ mod tests {
         let mut output = Vec::new();
         let rows = vec![
             "Slash menu: tabs (tabs|combined)".to_owned(),
-            "Goal tokens: unlimited (number or unlimited)".to_owned(),
+            "Tokens per task: unlimited (number or unlimited)".to_owned(),
         ];
         state.disarm();
         state.write_settings(&mut output, &rows, None).unwrap();
@@ -1140,20 +1140,20 @@ mod tests {
         state.line_open = false;
         let changed = vec![
             "Slash menu: combined (tabs|combined)".to_owned(),
-            "Goal tokens: unlimited (number or unlimited)".to_owned(),
+            "Tokens per task: unlimited (number or unlimited)".to_owned(),
         ];
         state.write_settings(&mut output, &changed, None).unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\n\
+            "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\n\
              Choice 1: Slash menu: tabs (tabs|combined)\n\
-             Choice 2: Goal tokens: unlimited (number or unlimited)\n\
+             Choice 2: Tokens per task: unlimited (number or unlimited)\n\
              Input:\n\
              Notice: Type NUMBER VALUE from the list; q cancels\n\
              Input:\n\
-             Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\n\
+             Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\n\
              Choice 1: Slash menu: combined (tabs|combined)\n\
-             Choice 2: Goal tokens: unlimited (number or unlimited)\n\
+             Choice 2: Tokens per task: unlimited (number or unlimited)\n\
              Input:\n"
         );
     }
@@ -1322,7 +1322,7 @@ mod tests {
                  Model: unset\n\
                  Setup: type /setup to choose an account\n\
                  Permissions: read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox\n\
-                 Collaboration: auto; max children: 3\n\
+                 Collaboration: single\n\
                  Notice: ready\\u{{001b}}[2J\n\
                  Input:\n",
                 view.id
@@ -1406,7 +1406,7 @@ mod tests {
                  Provider: unset\n\
                  Model: unset\n\
                  Permissions: read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox\n\
-                 Collaboration: auto; max children: 3\n\
+                 Collaboration: single\n\
                  Run: {run_id}\n\
                  Agent: primary; state: active\n\
                  Notice: Run is active; Ctrl+C cancels\n",
@@ -1505,7 +1505,7 @@ mod tests {
             format!(
                 "Current Run: 1 agent; children: 0\n\
                  History: 1 agents in 1 recent Runs; 0 older Runs\n\
-                 Next Run: auto · up to 3 children\n\
+                 Next Run: single\n\
                  Current Run: admission in progress; topology locked\n\
                  Type to search 1 agent\n\
                  Choices 1-1 of 1:\n\

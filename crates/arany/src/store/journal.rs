@@ -58,17 +58,9 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
             ) STRICT;
             CREATE INDEX provider_checks_by_id ON provider_check_events (check_id, sequence);
             CREATE INDEX provider_checks_by_target ON provider_check_events (target_key, sequence);
-            CREATE TABLE migrations (
-                id TEXT PRIMARY KEY CHECK (length(id) = 36),
-                from_schema INTEGER NOT NULL,
-                to_schema INTEGER NOT NULL,
-                rewritten_events INTEGER NOT NULL CHECK (rewritten_events >= 0),
-                backup TEXT NOT NULL,
-                recorded_at_ms INTEGER NOT NULL
-            ) STRICT;
-            PRAGMA user_version=7;
+            PRAGMA user_version=8;
             COMMIT;";
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 pub(super) struct HotSession {
     session_id: SessionId,

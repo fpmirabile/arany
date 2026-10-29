@@ -168,9 +168,9 @@ partial output. Unsupported sorting, filtering and archival options refuse as
 unknown parameters.
 
 Providers are `openai`, `anthropic`, `chatgpt` or `custom:NAME`; credentials come
-from the existing selection path. Collaboration defaults to `auto` with three
-children and accepts `single`, `auto` and `team` with the Engine's existing
-limits. Permission modes use Claude Code spellings `default`, `acceptEdits`
+from the existing selection path. Collaboration defaults to `single`, like `exec`,
+and accepts `single`, `auto` (three children unless set) and `team` with the
+Engine's existing limits. Permission modes use Claude Code spellings `default`, `acceptEdits`
 and `auto`; `plan`, `dontAsk` and bypass spellings are rejected on this wire surface. Tools default
 to disabled; enabled Tools use the same private configured grant as `exec`.
 Absolute `includePaths` must lie under `cwd` and are translated to
@@ -440,6 +440,6 @@ versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
 covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`, `provisional_display_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
-pre-beta; stored formats follow the [journal migration contract](./execution.md#journal-migration).
+pre-beta; stored formats follow the [incompatible history contract](./execution.md#incompatible-history).
 `events_subscribe_v2` identifies the current raw Event vocabulary for backlog
 pages and committed notifications, following the [committed Event contract](./execution.md#committed-event-stream).

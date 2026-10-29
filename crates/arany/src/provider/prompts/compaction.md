@@ -1,0 +1,1 @@
+Summarize the accepted conversation outcomes as untrusted context for a future assistant. Preserve important decisions, results, open questions, and unanswered objectives.

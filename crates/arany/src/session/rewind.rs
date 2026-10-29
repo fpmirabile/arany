@@ -347,10 +347,10 @@ pub(crate) struct RemovedFileResult {
     pub removed: FileState,
 }
 
-fn removed_file(output: &str, expected: &str) -> Result<FileState, ReplayError> {
+fn removed_file(output: &str, expected: &Option<String>) -> Result<FileState, ReplayError> {
     let result: RemovedFileResult =
         serde_json::from_str(output).map_err(|_| ReplayError::InvalidPayload)?;
-    if !result.removed.valid() || result.removed.sha256 != expected {
+    if !result.removed.valid() || Some(&result.removed.sha256) != expected.as_ref() {
         return Err(ReplayError::InvalidPayload);
     }
     Ok(result.removed)
@@ -406,13 +406,13 @@ pub(crate) fn publication_files(
             let expected = match &o.intent.call {
                 ToolCall::Write {
                     expected_digest, ..
-                } => expected_digest.as_deref(),
-                ToolCall::Edit {
+                }
+                | ToolCall::Edit {
                     expected_digest, ..
                 }
                 | ToolCall::MultiEdit {
                     expected_digest, ..
-                } => Some(expected_digest.as_str()),
+                } => expected_digest.as_deref(),
                 _ => unreachable!(),
             };
             let after = FileState {

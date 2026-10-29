@@ -602,6 +602,17 @@ impl GoalLedger {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
     }
 
+    pub(super) fn children_active(&self) -> Result<bool, EngineError> {
+        self.view(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.agents
+                    .iter()
+                    .skip(1)
+                    .any(|agent| agent.status == crate::session::AgentStatus::Active)
+            })
+        })
+    }
+
     // Admission holds nothing back, so a primary step reserves every lease-holding editor's drain.
     pub(super) fn drain_headroom(&self) -> usize {
         self.view(|view| {

@@ -11,7 +11,7 @@
 | <a id="max_command_tool_candidates"></a>[`MAX_COMMAND_TOOL_CANDIDATES`](#max_command_tool_candidates) | 256 | directory entries | `crates/arany/src/tools/command_tools.rs` |
 | <a id="max_editor_change_report_bytes"></a>[`MAX_EDITOR_CHANGE_REPORT_BYTES`](#max_editor_change_report_bytes) | 2048 | bytes | `crates/arany/src/session/worker.rs` |
 | <a id="max_context_content_bytes"></a>[`MAX_CONTEXT_CONTENT_BYTES`](#max_context_content_bytes) | 385024 | bytes | `crates/arany/src/session.rs` |
-| <a id="max_window_content_bytes"></a>[`MAX_WINDOW_CONTENT_BYTES`](#max_window_content_bytes) | 1048576 | bytes | `crates/arany/src/session.rs` |
+| <a id="max_window_content_bytes"></a>[`MAX_WINDOW_CONTENT_BYTES`](#max_window_content_bytes) | 7600000 | bytes | `crates/arany/src/session.rs` |
 | <a id="max_user_message_bytes"></a>[`MAX_USER_MESSAGE_BYTES`](#max_user_message_bytes) | 65536 | bytes | `crates/arany/src/session.rs` |
 | <a id="max_history_runs"></a>[`MAX_HISTORY_RUNS`](#max_history_runs) | 32 | Runs | `crates/arany/src/session.rs` |
 | <a id="max_compaction_input_bytes"></a>[`MAX_COMPACTION_INPUT_BYTES`](#max_compaction_input_bytes) | 258048 | bytes | `crates/arany/src/session/compaction.rs` |
@@ -22,8 +22,11 @@
 | <a id="compaction_input_expansion"></a>[`COMPACTION_INPUT_EXPANSION`](#compaction_input_expansion) | 2 | times | `crates/arany/src/provider.rs` |
 | <a id="compaction_request_envelope_bytes"></a>[`COMPACTION_REQUEST_ENVELOPE_BYTES`](#compaction_request_envelope_bytes) | 8192 | bytes | `crates/arany/src/provider.rs` |
 | <a id="max_provider_request_bytes"></a>[`MAX_PROVIDER_REQUEST_BYTES`](#max_provider_request_bytes) | 524288 | bytes | `crates/arany/src/provider.rs` |
-| <a id="max_goal_provider_calls"></a>[`MAX_GOAL_PROVIDER_CALLS`](#max_goal_provider_calls) | 64 | Provider calls | `crates/arany/src/session/events/goal.rs` |
-| <a id="max_goal_active_ms"></a>[`MAX_GOAL_ACTIVE_MS`](#max_goal_active_ms) | 1800000 | ms | `crates/arany/src/session/events/goal.rs` |
+| <a id="max_window_request_bytes"></a>[`MAX_WINDOW_REQUEST_BYTES`](#max_window_request_bytes) | 7862144 | bytes | `crates/arany/src/provider.rs` |
+| <a id="max_prompt_override_bytes"></a>[`MAX_PROMPT_OVERRIDE_BYTES`](#max_prompt_override_bytes) | 32768 | bytes | `crates/arany/src/provider/prompts.rs` |
+| <a id="max_compaction_prompt_override_bytes"></a>[`MAX_COMPACTION_PROMPT_OVERRIDE_BYTES`](#max_compaction_prompt_override_bytes) | 1024 | bytes | `crates/arany/src/provider/prompts.rs` |
+| <a id="max_goal_provider_calls"></a>[`MAX_GOAL_PROVIDER_CALLS`](#max_goal_provider_calls) | 1024 | Provider calls | `crates/arany/src/session/events/goal.rs` |
+| <a id="max_goal_active_ms"></a>[`MAX_GOAL_ACTIVE_MS`](#max_goal_active_ms) | 28800000 | ms | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_goal_runs"></a>[`MAX_GOAL_RUNS`](#max_goal_runs) | 16 | Runs | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_event_bytes"></a>[`MAX_EVENT_BYTES`](#max_event_bytes) | 65536 | bytes | `crates/arany/src/store.rs` |
 | <a id="max_compaction_event_bytes"></a>[`MAX_COMPACTION_EVENT_BYTES`](#max_compaction_event_bytes) | 409600 | bytes | `crates/arany/src/store.rs` |
@@ -34,7 +37,7 @@
 | <a id="max_verdict_bytes"></a>[`MAX_VERDICT_BYTES`](#max_verdict_bytes) | 2048 | bytes | `crates/arany/src/supervisor.rs` |
 | <a id="max_verdicts"></a>[`MAX_VERDICTS`](#max_verdicts) | 256 | verdicts per Run | `crates/arany/src/supervisor.rs` |
 | <a id="max_session_events"></a>[`MAX_SESSION_EVENTS`](#max_session_events) | 10000 | Events | `crates/arany/src/store/replay.rs` |
-| <a id="max_step_tool_calls"></a>[`MAX_STEP_TOOL_CALLS`](#max_step_tool_calls) | 4 | Tool calls | `crates/arany/src/session/events.rs` |
+| <a id="max_step_tool_calls"></a>[`MAX_STEP_TOOL_CALLS`](#max_step_tool_calls) | 8 | Tool calls | `crates/arany/src/session/events.rs` |
 | <a id="max_steering_note_bytes"></a>[`MAX_STEERING_NOTE_BYTES`](#max_steering_note_bytes) | 8192 | bytes | `crates/arany/src/session.rs` |
 | <a id="max_goal_report_bytes"></a>[`MAX_GOAL_REPORT_BYTES`](#max_goal_report_bytes) | 8192 | bytes | `crates/arany/src/session/events/goal.rs` |
 | <a id="max_budget_refusal_bytes"></a>[`MAX_BUDGET_REFUSAL_BYTES`](#max_budget_refusal_bytes) | 1024 | bytes | `crates/arany/src/session/events/goal.rs` |

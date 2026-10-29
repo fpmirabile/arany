@@ -1,14 +1,12 @@
 use crate::provider::compaction_input;
 use crate::provider::conversation::{Block, Conversation, Role};
 use crate::provider::decode::{argument_limit, review_outcome, tool_function};
-use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
     ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -660,11 +658,7 @@ pub(in crate::provider) fn run_body_with_optional_effort(
         }
     }
     // Plan-contract unions exceed strict Tool-schema limits; the Engine validates calls instead.
-    let exhausted = request
-        .input
-        .tools
-        .as_ref()
-        .is_some_and(ToolContext::answer_only);
+    let exhausted = request.input.answer_only();
     if request.input.role != crate::provider::PromptRole::ToolReview {
         let tools = conversation.tools.as_deref().unwrap_or_default();
         let specs: Vec<Value> = tools.iter().cloned().chain(outcome_specs(&conversation.outcome))
@@ -757,6 +751,9 @@ fn user_blocks(block: &Block) -> Result<Vec<Value>, ProviderError> {
     Ok(match block {
         Block::Text(text) if text.is_empty() => Vec::new(),
         Block::Text(text) => vec![json!({"type": "text", "text": text})],
+        Block::Harness { scope, data } => {
+            vec![json!({"type": "text", "text": crate::provider::render::data_text(scope, data)})]
+        }
         Block::Image { label, image } => vec![
             json!({"type": "text", "text": label}),
             json!({
@@ -789,7 +786,7 @@ pub(in crate::provider) fn compaction_body_with_optional_effort(
     let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_output_tokens,
-        "system": [{"type": "text", "text": COMPACTION_INSTRUCTIONS}],
+        "system": [{"type": "text", "text": request.prompts.compaction_instructions()}],
         "messages": [{"role": "user", "content": [{"type": "text", "text": compaction_input(request).to_string()}]}],
         "stream": false,
     });

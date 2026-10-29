@@ -677,8 +677,22 @@ fn private_file(path: &std::path::Path, bytes: &[u8]) {
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
+    ui_preferences(&[
+        ("completion", completion, "tabs"),
+        ("view", view, "fullscreen"),
+    ])
+}
+
+// `/settings` saves only `(key, value, default)` pairs whose value differs from the default.
+fn ui_preferences(fields: &[(&str, &str, &str)]) -> Vec<u8> {
+    let changed: serde_json::Map<String, serde_json::Value> = fields
+        .iter()
+        .filter(|(_, value, default)| value != default)
+        .map(|(key, value, _)| ((*key).to_owned(), (*value).into()))
+        .collect();
     format!(
-        r#"{{"version":8,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_cpu_cores":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}},"copy_on_select":true,"newline":"shift_enter"}}}}"#
+        r#"{{"version":9,"preferences":{}}}"#,
+        serde_json::Value::Object(changed)
     )
     .into_bytes()
 }
@@ -1426,8 +1440,7 @@ fn unsupported_journal_versions_reject_without_changing_existing_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    let migration_floor = 4;
-    for version in (0..migration_floor).chain(std::iter::once(current_version + 1)) {
+    for version in (0..current_version).chain(std::iter::once(current_version + 1)) {
         let temp = tempfile::tempdir().expect("private test root");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -1642,6 +1655,29 @@ fn model_catalog_command_reads_only_selected_configuration() {
         assert!(!account_root.exists());
         assert!(!state_dir.exists());
 
+        let unsaved_selection = Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+            .current_dir(&workspace)
+            .args([
+                "exec",
+                "--state-dir",
+                state_dir.to_str().expect("test path"),
+                "objective",
+            ])
+            .bounded_output()
+            .expect("exec without a saved selection");
+        assert!(!unsaved_selection.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&unsaved_selection.stderr),
+            "error: no saved model selection; pass --provider and --model, or choose a model with /model in attached mode\n"
+        );
+        assert!(!account_root.exists());
+        assert!(!state_dir.exists());
+
         let unselected_run = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
             .env("HOME", &fixture_home)
@@ -1818,7 +1854,7 @@ fn model_catalog_command_reads_only_selected_configuration() {
 
     let root = StateRoot::admit(&state_dir).expect("private state root");
     let profile_file = root.path().join("provider-profiles.json");
-    std::fs::write(&profile_file, r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#).expect("profile file");
+    std::fs::write(&profile_file, r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#).expect("profile file");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2354,6 +2390,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             chatgpt_provenance: None,
             output_token_bound: arany::OutputTokenBound::ProviderEnforced,
             context_window_tokens: None,
+            effective_context_window_tokens: None,
             policy: CollaborationPolicy::Single,
             output_token_cap: 4096,
             provider_concurrency: 1,
@@ -2361,8 +2398,9 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             workspace_inode,
             user_instruction_digest: None,
             instruction_sources: Vec::new(),
+            prompts: arany::EffectivePrompts::default().pins(),
             launch_directory: String::new(),
-            include_digests: Vec::new(),
+            include_sources: Vec::new(),
             history_run_ids: Vec::new(),
             excluded_history_runs: 0,
             context_usage: Some(ContextUsage {
@@ -2869,7 +2907,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     assert_eq!(no_provider.stdout, b"");
     assert_eq!(
         no_provider.stderr,
-        b"error: invalid arguments; run arany --help\n"
+        b"error: --provider is required with --model\n"
     );
     assert!(!state.exists());
 }
@@ -2959,6 +2997,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
                 context_window_tokens: None,
+                effective_context_window_tokens: None,
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
@@ -2966,8 +3005,9 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 workspace_inode: identity.inode,
                 user_instruction_digest: None,
                 instruction_sources: Vec::new(),
+                prompts: arany::EffectivePrompts::default().pins(),
                 launch_directory: String::new(),
-                include_digests: Vec::new(),
+                include_sources: Vec::new(),
                 history_run_ids: Vec::new(),
                 excluded_history_runs: 0,
                 context_usage: None,
@@ -3030,6 +3070,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     record: arany::ProviderCallRecord {
+                        context_bytes: None,
                         rate_limits: None,
                         delegation: None,
                         phase: arany::AgentPhase::RootPlan,
@@ -3803,8 +3844,8 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     private_file(
         &state.join("provider-roster.json"),
         &serde_json::to_vec(&serde_json::json!({
-            "version":1,
-            "profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]}],
+            "version":2,
+            "profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}]}],
             "presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]
         })).unwrap(),
     );

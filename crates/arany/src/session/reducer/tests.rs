@@ -821,6 +821,8 @@ fn roster_resume_and_unused_candidates_cannot_widen_pinned_routing() {
                 provider: "openai".into(),
                 model: if drifted { "different" } else { "gpt-5.4" }.into(),
                 prompt_version: 1,
+                prompt: crate::provider::EffectivePrompts::default()
+                    .pin(crate::provider::PromptFile::Compaction),
                 schema_version: 1,
                 compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,

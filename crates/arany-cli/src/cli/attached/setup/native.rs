@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub(super) fn saved_account_presence(path: &Path) -> Result<(bool, bool), SetupError> {
-    let Some(state) = crate::files::open_optional_state(path).map_err(SetupError::recoverable)?
+    let Some(state) = arany::StateRoot::open_optional(path).map_err(SetupError::recoverable)?
     else {
         return Ok((false, false));
     };

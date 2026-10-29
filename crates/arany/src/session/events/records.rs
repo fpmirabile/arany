@@ -79,22 +79,24 @@ impl From<ToolIntentRecord> for EffectIntent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CollaborationPolicy {
+    #[default]
     Single,
-    Auto { max_active_children: u8 },
-    Team { max_active_children: u8 },
+    Auto {
+        max_active_children: u8,
+    },
+    Team {
+        max_active_children: u8,
+    },
 }
 
-impl Default for CollaborationPolicy {
-    fn default() -> Self {
-        Self::Auto {
-            max_active_children: 3,
-        }
-    }
-}
 impl CollaborationPolicy {
+    // Only autonomous Goals and an explicit team are offered the binding plan contract.
+    pub(crate) fn offers_plan(self, autonomous: bool) -> bool {
+        autonomous || matches!(self, Self::Team { .. })
+    }
     pub fn max_children(self) -> u8 {
         match self {
             Self::Single => 0,
@@ -226,6 +228,9 @@ pub struct RunConfig {
     pub output_token_bound: crate::provider::OutputTokenBound,
     #[serde(deserialize_with = "Option::deserialize")]
     pub context_window_tokens: Option<u32>,
+    // The user's context window setting resolved against `context_window_tokens`; every budget uses it.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub effective_context_window_tokens: Option<u32>,
     pub policy: CollaborationPolicy,
     pub output_token_cap: u32,
     pub provider_concurrency: u8,
@@ -234,8 +239,9 @@ pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
     pub user_instruction_digest: Option<[u8; 32]>,
     pub instruction_sources: Vec<InstructionSource>,
+    pub prompts: Vec<crate::provider::PromptPin>,
     pub launch_directory: String,
-    pub include_digests: Vec<[u8; 32]>,
+    pub include_sources: Vec<IncludeSource>,
     pub history_run_ids: Vec<RunId>,
     pub excluded_history_runs: u32,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -252,9 +258,17 @@ pub struct RunConfig {
 #[serde(deny_unknown_fields)]
 pub struct InstructionSource {
     pub directory: String,
-    // Null only for a source migrated from version 18, which journaled the digest alone.
+    // Null was produced only by the retired version-18 journal migration.
     #[serde(deserialize_with = "Option::deserialize")]
     pub file: Option<InstructionFile>,
+    pub digest: [u8; 32],
+}
+
+// A directory include's path ends with '/', so it never matches a file precondition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncludeSource {
+    pub path: String,
     pub digest: [u8; 32],
 }
 
@@ -317,23 +331,35 @@ impl RunConfig {
     }
 
     fn context_window_valid(&self) -> bool {
-        let ceiling = super::content_ceiling(self.context_window_tokens);
-        self.context_window_tokens.is_none_or(|tokens| {
-            crate::provider::admitted_context_window(u64::from(tokens)).is_some()
-                && self.custom_profile_provenance.is_none()
-                && self
-                    .identity()
-                    .is_some_and(|identity| supports_context_window_evidence(&identity))
-                && self.providers.as_ref().is_none_or(|providers| {
-                    providers
-                        .primary
-                        .iter()
-                        .all(supports_context_window_evidence)
-                })
-        }) && self
-            .context_usage
-            .as_ref()
-            .is_none_or(|usage| usage.budget_bytes as usize <= ceiling)
+        let ceiling = super::content_ceiling(self.effective_context_window_tokens);
+        let effective_valid = match (
+            self.context_window_tokens,
+            self.effective_context_window_tokens,
+        ) {
+            (None, None) => true,
+            (Some(window), Some(effective)) => (crate::provider::MIN_CONTEXT_WINDOW_TOKENS
+                .min(window)..=window)
+                .contains(&effective),
+            _ => false,
+        };
+        effective_valid
+            && self.context_window_tokens.is_none_or(|tokens| {
+                crate::provider::admitted_context_window(u64::from(tokens)).is_some()
+                    && self.custom_profile_provenance.is_none()
+                    && self
+                        .identity()
+                        .is_some_and(|identity| supports_context_window_evidence(&identity))
+                    && self.providers.as_ref().is_none_or(|providers| {
+                        providers
+                            .primary
+                            .iter()
+                            .all(supports_context_window_evidence)
+                    })
+            })
+            && self
+                .context_usage
+                .as_ref()
+                .is_none_or(|usage| usage.budget_bytes as usize <= ceiling)
             && self
                 .tool_policy
                 .as_ref()
@@ -446,7 +472,12 @@ impl RunConfig {
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
-            || self.include_digests.len() > 16
+            || self.include_sources.len() > 16
+            || self
+                .include_sources
+                .iter()
+                .any(|source| !crate::session::input::valid_include_path(&source.path))
+            || !crate::provider::PromptPin::pins_valid(&self.prompts)
             || !self.instruction_scope_valid()
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS
             || self.compaction_event_sequence.is_some() != self.compaction_content_digest.is_some()
@@ -538,6 +569,7 @@ pub enum RunFailure {
 pub enum ProposalRefusalCause {
     InvalidArguments,
     InvalidPath,
+    DigestUnknown,
     Phase,
     PlanInvalid,
     PlanBudgetOutsideGoal,
@@ -691,6 +723,7 @@ pub struct CompactionRecord {
     pub provider: String,
     pub model: String,
     pub prompt_version: u16,
+    pub prompt: crate::provider::PromptPin,
     pub schema_version: u16,
     pub compiler_version: u16,
     pub source_bytes: u32,
@@ -750,6 +783,7 @@ impl CompactionRecord {
             })
             || self.covered_sequence == 0
             || self.prompt_version != 1
+            || self.prompt.file != crate::provider::PromptFile::Compaction
             || self.schema_version != 1
             || !(crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION
                 ..=crate::session::COMPACTION_COMPILER_VERSION)
@@ -839,6 +873,9 @@ pub struct ProviderCallRecord {
     pub response_id: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub input_tokens: Option<u32>,
+    // The Engine's count of a primary request's content bytes; with `input_tokens` it calibrates the ceiling.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub context_bytes: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub output_tokens: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -886,6 +923,14 @@ impl ProviderCallRecord {
                     crate::provider::AgentPhase::RootPlan
                         | crate::provider::AgentPhase::RootSynthesis
                 )
+            || self.context_bytes.is_some_and(|bytes| {
+                bytes as usize > super::MAX_WINDOW_CONTENT_BYTES
+                    || !matches!(
+                        self.phase,
+                        crate::provider::AgentPhase::RootPlan
+                            | crate::provider::AgentPhase::RootSynthesis
+                    )
+            })
             || self.requested_tools > MAX_STEP_TOOL_CALLS
             || (self.disposition == ProviderCallDisposition::ToolRequested)
                 != (self.requested_tools > 0)

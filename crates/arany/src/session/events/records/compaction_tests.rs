@@ -11,6 +11,8 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
         provider: "openai".into(),
         model: "gpt-5.4".into(),
         prompt_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         schema_version: 1,
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 4,
@@ -28,6 +30,9 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
         cache_creation_input_tokens: None,
     };
     assert!(record.validate().is_ok());
+    let mut misfiled = record.clone();
+    misfiled.prompt.file = crate::provider::PromptFile::Primary;
+    assert!(misfiled.validate().is_err());
     let encoded = serde_json::to_value(&record).unwrap();
     assert!(encoded.get("recent_files").is_none());
     let mut legacy = encoded.clone();

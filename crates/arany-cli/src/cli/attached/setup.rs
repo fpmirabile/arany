@@ -215,7 +215,7 @@ pub(super) async fn admit_history(
     let mut reset_attempted = false;
     let mut uncertain = false;
     loop {
-        let root = match crate::files::open_optional_state(state_dir) {
+        let root = match arany::StateRoot::open_optional(state_dir) {
             Ok(None) => return Ok(ready(reset_attempted)),
             Ok(Some(_)) => StateRoot::admit(state_dir),
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -249,9 +249,6 @@ pub(super) async fn admit_history(
                 HistoryRecovery::Damaged => "Saved history is damaged.",
                 HistoryRecovery::ArchiveConflict => {
                     "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
-                }
-                HistoryRecovery::MigrationConflict => {
-                    "An interrupted history migration no longer matches its files; inspect the migrations folder in the state directory."
                 }
                 HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
                 HistoryRecovery::Changed => "History changed during recovery; retry.",

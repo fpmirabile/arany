@@ -54,9 +54,7 @@ impl ExactCommandRule {
 pub(crate) const UNGUARDED_COMMANDS: RecordFormat = RecordFormat {
     kind: RecordKind::UnguardedCommands,
     field: "version",
-    floor: 1,
     current: 1,
-    steps: &[],
     accepts: |bytes| ExactCommandRules::parse(bytes).is_ok(),
 };
 

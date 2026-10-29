@@ -42,6 +42,7 @@ pub(crate) async fn run(
     telemetry: Telemetry,
 ) -> Result<super::CommandOutput, String> {
     let state_dir = super::state_dir(args.state_dir).map_err(str::to_owned)?;
+    super::admit_headless_records(&state_dir)?;
     let state = StateRoot::admit(&state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     super::admit_headless_history(&state)?;

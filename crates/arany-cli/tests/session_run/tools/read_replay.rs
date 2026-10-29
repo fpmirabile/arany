@@ -149,6 +149,7 @@ impl Provider for InProcessReads {
             _ => crate::tool_outcome(ToolCall::Glob {
                 pattern: "**".into(),
                 path: "src".into(),
+                offset: 0,
                 limit: 100,
             }),
         };
@@ -204,7 +205,7 @@ fn assert_read_observations(run: &arany::RunView) {
     for tool in globbed {
         assert_eq!(
             tool.observation.as_ref().unwrap().output,
-            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false}"#
+            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false,"next_offset":null}"#
         );
     }
 }

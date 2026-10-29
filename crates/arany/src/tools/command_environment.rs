@@ -1,6 +1,6 @@
 use super::ToolError;
 use crate::session::LoginShellIdentity;
-use crate::store::{RecordFormat, RecordKind, RecordStep, StateRoot, StoreError};
+use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
 use crate::validate::{MAX_PATH_BYTES, digest, hex_digest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -75,18 +75,7 @@ pub enum CommandEnvironmentError {
 pub(crate) const COMMAND_ENVIRONMENT: RecordFormat = RecordFormat {
     kind: RecordKind::CommandEnvironment,
     field: "version",
-    floor: 1,
     current: VERSION as u64,
-    steps: &[
-        RecordStep {
-            from: 1,
-            transform: upgrade_v1,
-        },
-        RecordStep {
-            from: 2,
-            transform: upgrade_v2,
-        },
-    ],
     accepts: |bytes| CommandEnvironment::parse(bytes).is_ok(),
 };
 
@@ -134,16 +123,12 @@ impl CommandEnvironment {
                 .record(RecordKind::CommandEnvironment)
                 .read()
                 .map_err(|_| ToolError::Configuration)?,
-            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::symlink_metadata(path) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    _ => return Err(ToolError::Configuration),
-                }
-            }
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(ToolError::Configuration),
         };
-        match found {
-            Some(bytes) => Self::parse(&COMMAND_ENVIRONMENT.upgrade(&bytes).unwrap_or(bytes)),
+        // Discovery writes nothing, so an unadmitted State or a record awaiting archive previews as a fresh one.
+        match found.filter(|bytes| !COMMAND_ENVIRONMENT.mismatched(bytes)) {
+            Some(bytes) => Self::parse(&bytes),
             None => Self::from_process().map_err(|error| match error {
                 CommandEnvironmentError::TooLarge(_) => ToolError::Limit,
                 _ => ToolError::Configuration,
@@ -153,7 +138,8 @@ impl CommandEnvironment {
 
     pub fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let found = state
-            .read_current(&COMMAND_ENVIRONMENT)
+            .record(COMMAND_ENVIRONMENT.kind)
+            .read()
             .map_err(|_| ToolError::Configuration)?;
         match found {
             Some(bytes) => Self::parse(&bytes),
@@ -185,7 +171,8 @@ impl CommandEnvironment {
 
     fn current_or_init(state: &StateRoot) -> Result<Self, CommandEnvironmentError> {
         match state
-            .read_current(&COMMAND_ENVIRONMENT)
+            .record(COMMAND_ENVIRONMENT.kind)
+            .read()
             .map_err(|_| CommandEnvironmentError::Store)?
         {
             Some(bytes) => Self::parse(&bytes).map_err(|_| CommandEnvironmentError::Invalid),
@@ -515,66 +502,6 @@ impl CommandEnvironment {
     }
 }
 
-fn upgrade_v1(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let fields = value.as_object()?;
-    if fields.len() != 7 || fields.get("source")?.as_str()? != "process" {
-        return None;
-    }
-    let canonical = serde_json::to_vec(&(
-        1_u8,
-        Source::Process,
-        fields.get("path")?,
-        fields.get("names")?,
-        fields.get("excluded")?,
-    ))
-    .ok()?;
-    let timestamped = serde_json::to_vec(&(
-        1_u8,
-        Source::Process,
-        fields.get("captured_at")?.as_u64()?,
-        fields.get("path")?,
-        fields.get("names")?,
-        fields.get("excluded")?,
-    ))
-    .ok()?;
-    let sha256 = fields.get("sha256")?.as_str()?;
-    if sha256 != hex_digest(&canonical) && sha256 != hex_digest(&timestamped) {
-        return None;
-    }
-    value["version"] = 2.into();
-    value["shell"] = serde_json::Value::Null;
-    let record: CommandEnvironment = serde_json::from_value(value).ok()?;
-    let sha256 = hex_digest(&timestamped_canonical(&record));
-    let mut value = serde_json::to_value(record).ok()?;
-    value["sha256"] = sha256.into();
-    Some(value)
-}
-
-fn timestamped_canonical(record: &CommandEnvironment) -> Vec<u8> {
-    serde_json::to_vec(&(
-        record.version,
-        record.source,
-        &record.shell,
-        record.captured_at,
-        &record.path,
-        &record.names,
-        &record.excluded,
-    ))
-    .expect("typed record is serializable")
-}
-
-fn upgrade_v2(value: serde_json::Value) -> Option<serde_json::Value> {
-    let mut record: CommandEnvironment = serde_json::from_value(value).ok()?;
-    if record.version != 2 || record.sha256 != hex_digest(&timestamped_canonical(&record)) {
-        return None;
-    }
-    record.version = VERSION;
-    record.seal();
-    let bytes = serde_json::to_vec(&record).ok()?;
-    CommandEnvironment::parse(&bytes).ok()?;
-    serde_json::to_value(record).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,12 +614,14 @@ mod tests {
         assert_eq!(CommandEnvironment::for_discovery(&path).unwrap(), selected);
         assert_eq!(record.read().unwrap(), saved);
 
-        let mut previous = selected.clone();
-        previous.version = 2;
-        previous.sha256 = hex_digest(&timestamped_canonical(&previous));
+        let mut previous = serde_json::to_value(&selected).unwrap();
+        previous["version"] = (VERSION - 1).into();
         let previous_bytes = serde_json::to_vec(&previous).unwrap();
         record.replace(&previous_bytes).unwrap();
-        assert_eq!(CommandEnvironment::for_discovery(&path).unwrap(), selected);
+        assert_eq!(
+            CommandEnvironment::for_discovery(&path).unwrap().source(),
+            "process"
+        );
         assert_eq!(record.read().unwrap().unwrap(), previous_bytes);
 
         record.replace(b"invalid saved environment").unwrap();
@@ -707,10 +636,16 @@ mod tests {
 
         selected.save(&state).unwrap();
         std::fs::remove_file(path.join("events.sqlite3")).unwrap();
-        assert!(matches!(
-            CommandEnvironment::for_discovery(&path),
-            Err(ToolError::Configuration)
-        ));
+        let seeded = entries();
+        assert_eq!(
+            CommandEnvironment::for_discovery(&path).unwrap().source(),
+            "process"
+        );
+        assert_eq!(
+            entries(),
+            seeded,
+            "an unadmitted State previews as a new one"
+        );
         assert_eq!(record.read().unwrap(), saved);
     }
 

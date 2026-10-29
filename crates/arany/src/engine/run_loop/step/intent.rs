@@ -410,9 +410,16 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         step: &ToolStep,
-        call: ToolCall,
+        mut call: ToolCall,
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
+        let actor = match grant {
+            Grant::Primary { .. } => self.primary_id,
+            Grant::Researcher { child, .. } => child.agent_run_id,
+        };
+        self.ledger().view(|view| {
+            crate::session::fill_expected_digest(view, self.run_id, actor, &mut call);
+        })?;
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
             Grant::Researcher {

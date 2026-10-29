@@ -6,7 +6,7 @@ use crate::accounts::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
     write_chatgpt_keyring_record,
 };
-use arany::{CheckId, RecordFormat, RecordKind, RecordStep};
+use arany::{CheckId, RecordFormat, RecordKind};
 use arany::{Effort, StateRoot, validate_native_model_id};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -26,7 +26,7 @@ const MAX_MODEL_CHECKS: usize = 64;
 const MAX_ACCOUNT_ID_BYTES: usize = 128;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
 const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-journal-v40";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v39";
+const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v40";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
@@ -337,82 +337,9 @@ fn bounded_model_checks<'de, D: Deserializer<'de>>(
 pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptAccounts,
     field: "schema",
-    floor: 1,
     current: 3,
-    steps: &[
-        RecordStep {
-            from: 1,
-            transform: migrate_account_index,
-        },
-        RecordStep {
-            from: 2,
-            transform: migrate_account_slots,
-        },
-    ],
     accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
 };
-
-fn migrate_account_index(mut record: serde_json::Value) -> Option<serde_json::Value> {
-    let checks = record.get_mut("model_checks")?.as_array_mut()?;
-    if checks.len() > MAX_MODEL_CHECKS {
-        return None;
-    }
-    for check in checks.iter_mut() {
-        let object = check.as_object_mut()?;
-        if object.contains_key("check_id") {
-            return None;
-        }
-        object.insert(
-            "check_id".into(),
-            "01a15ecf-a92a-7707-8af6-ce3d36320b67".into(),
-        );
-    }
-    // Validate the complete source index before discarding checks that cannot prove a journal link.
-    let mut candidate = record.clone();
-    candidate.as_object_mut()?.insert("schema".into(), 2.into());
-    let candidate = migrate_account_slots(candidate)?;
-    AccountIndex::decode(&serde_json::to_vec(&candidate).ok()?).ok()?;
-    record.get_mut("model_checks")?.as_array_mut()?.clear();
-    record.as_object_mut()?.insert("schema".into(), 2.into());
-    Some(record)
-}
-
-// Existing keyring entries keep the client-derived slot their token was written at.
-fn migrate_account_slots(mut record: serde_json::Value) -> Option<serde_json::Value> {
-    let mut clients = Vec::new();
-    for entry in record.get_mut("accounts")?.as_array_mut()? {
-        let object = entry.as_object_mut()?;
-        // Source schemas allow one account per client; only schema 3 admits several.
-        let client = object.get("client_id")?.as_str()?.to_owned();
-        if clients.contains(&client) {
-            return None;
-        }
-        clients.push(client);
-        if object.contains_key("keyring_slot") || object.contains_key("chatgpt_account_id") {
-            return None;
-        }
-        let slot = match object.get("storage")?.as_str()? {
-            "keyring" => Some(legacy_keyring_slot(object.get("client_id")?.as_str()?)),
-            "private_file" => None,
-            _ => return None,
-        };
-        object.insert("keyring_slot".into(), slot.into());
-        object.insert("chatgpt_account_id".into(), serde_json::Value::Null);
-        if let Some(token) = object
-            .get_mut("token")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            let legacy = u64::from(LEGACY_TOKEN_RECORD_SCHEMA);
-            if token.get("schema")?.as_u64()? != legacy || token.contains_key("slot") {
-                return None;
-            }
-            token.insert("schema".into(), TOKEN_RECORD_SCHEMA.into());
-            token.insert("slot".into(), serde_json::Value::Null);
-        }
-    }
-    record.as_object_mut()?.insert("schema".into(), 3.into());
-    Some(record)
-}
 
 pub(super) fn retained_checks(state: &StateRoot) -> Result<Vec<CheckId>, arany::StoreError> {
     AccountIndex::read(state)
@@ -559,7 +486,8 @@ impl AccountIndex {
 
     fn read(state: &StateRoot) -> Result<Self, AuthorizationError> {
         let Some(bytes) = state
-            .read_current(&CHATGPT_ACCOUNTS)
+            .record(CHATGPT_ACCOUNTS.kind)
+            .read()
             .map_err(|_| AuthorizationError::Unavailable)?
         else {
             return Ok(Self::empty());
@@ -1503,7 +1431,8 @@ pub(super) fn saved_account_index(
     state
         .with_account_replacement_lock(workspace, || {
             let bytes = state
-                .read_current(&CHATGPT_ACCOUNTS)
+                .record(CHATGPT_ACCOUNTS.kind)
+                .read()
                 .map_err(|_| AuthorizationError::InvalidSavedState)?
                 .ok_or(AuthorizationError::NoSelectedAccount)?;
             let index = AccountIndex::decode(&bytes)?;
@@ -1791,7 +1720,7 @@ fn selected_id_at(state: &StateRoot) -> Result<Uuid, AuthorizationError> {
 
 fn open_account_state() -> Result<StateRoot, AuthorizationError> {
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-    crate::files::open_optional_state(&path)
+    arany::StateRoot::open_optional(&path)
         .map_err(|_| AuthorizationError::Unavailable)?
         .ok_or(AuthorizationError::NoSelectedAccount)
 }

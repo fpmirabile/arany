@@ -545,3 +545,235 @@ async fn line_paged_read_returns_all_eighty_lines_after_twenty_steps() {
     );
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn guard_failure_before_dispatch_returns_to_the_model_and_the_answer_commits() {
+    use arany::test_support::goals::finish_with;
+    use std::os::unix::fs::PermissionsExt;
+    const PROGRAM: &str = "guard_probe";
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let engine = super::goals::facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let executable = std::fs::canonicalize("/bin/sh").unwrap();
+    let digest: String = Sha256::digest(std::fs::read(&executable).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+        "commands":[{"name":PROGRAM,"executable":executable,"sha256":digest,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+    let config_path = state_path.join("tools.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let permissions = state_path.join("permissions.json");
+    std::fs::write(&permissions, br#"{"permissions":{"allow":["Bash"]}}"#).unwrap();
+    std::fs::set_permissions(&permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
+    arany::FaultPlan::fail_guard_before_dispatch(PROGRAM);
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        crate::tool_outcome(arany::ToolCall::Command {
+            program: PROGRAM.into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            resource_class: None,
+            timeout_ms: None,
+        }),
+        finish_with("The command sandbox is unavailable; answered without it."),
+    ]));
+    let mut input = request(&workspace, "Run the check");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("answered Run");
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(outcome.run.failure, None);
+    assert_eq!(
+        provider.requests.lock().expect("requests").len(),
+        2,
+        "the failure is delivered once to a fresh model decision"
+    );
+    let [tool] = outcome.run.tools.as_slice() else {
+        panic!("the failed command is never retried");
+    };
+    let observation = tool.observation.as_ref().expect("observation");
+    assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
+    assert!(observation.attestation.is_none());
+    assert!(
+        observation.output.starts_with(
+            "Guard execution unavailable before dispatch; no operation was dispatched."
+        ),
+        "{}",
+        observation.output
+    );
+}
+
+fn facts_edit(expected_digest: Option<String>, old: &str, new: &str) -> arany::ToolCall {
+    arany::ToolCall::Edit {
+        path: "notes/facts.txt".into(),
+        expected_digest,
+        old: old.into(),
+        new: new.into(),
+    }
+}
+
+fn edit_engine(state_path: &Path) -> Engine {
+    use std::os::unix::fs::PermissionsExt;
+    let engine =
+        super::goals::facts_engine(StateRoot::admit(state_path).expect("state"), state_path);
+    for (name, bytes) in [
+        (
+            "tools.json",
+            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+        ),
+        (
+            "permissions.json",
+            &br#"{"permissions":{"defaultMode":"acceptEdits"}}"#[..],
+        ),
+    ] {
+        let path = state_path.join(name);
+        std::fs::write(&path, bytes).expect("settings");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+    }
+    engine
+}
+
+fn edit_digests(view: &SessionView) -> Vec<Option<String>> {
+    view.runs[0]
+        .tools
+        .iter()
+        .filter_map(|tool| match &tool.intent.call {
+            arany::ToolCall::Edit {
+                expected_digest, ..
+            } => Some(expected_digest.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn omitted_edit_digest_is_filled_from_the_latest_read_or_edit_and_refused_without_one() {
+    use super::goals::{facts_digest, facts_read};
+    use arany::test_support::goals::{finish_with, replayed};
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let engine = edit_engine(&state_path);
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(facts_edit(None, "v1", "v2")),
+        tool_outcome(facts_read()),
+        tool_outcome(facts_edit(None, "v1", "v2")),
+        tool_outcome(facts_edit(None, "v2", "v3")),
+        tool_outcome(facts_edit(Some(facts_digest("stale")), "v3", "v4")),
+        finish_with("Edited the facts"),
+    ]));
+    let mut input = request(&workspace, "Edit the facts");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("edit Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("shutdown");
+    assert!(provider.responses.lock().expect("responses").is_empty());
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+        "v3"
+    );
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(
+        view.runs[0].agents[0].provider_calls[0].refusal,
+        Some(arany::ProposalRefusal {
+            operation: "arany_edit".into(),
+            cause: arany::ProposalRefusalCause::DigestUnknown,
+        }),
+        "an unread file has no digest to fill"
+    );
+    assert_eq!(
+        edit_digests(&view),
+        [
+            Some(facts_digest("v1")),
+            Some(facts_digest("v2")),
+            Some(facts_digest("stale")),
+        ]
+    );
+    let dispositions: Vec<_> = view.runs[0]
+        .tools
+        .iter()
+        .map(|tool| tool.observation.as_ref().expect("observation").disposition)
+        .collect();
+    assert_eq!(
+        dispositions,
+        [
+            arany::ToolDisposition::Succeeded,
+            arany::ToolDisposition::Succeeded,
+            arany::ToolDisposition::Succeeded,
+            arany::ToolDisposition::Conflict,
+        ]
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.event,
+            Event::ToolProposed { intent, .. } | Event::ToolStarted { intent, .. }
+                if matches!(
+                    intent.call,
+                    arany::ToolCall::Edit {
+                        expected_digest: None,
+                        ..
+                    }
+                )
+        )),
+        "committed intents carry the concrete digest"
+    );
+}
+
+#[tokio::test]
+async fn omitted_edit_digest_uses_the_runs_explicit_include_snapshot() {
+    use super::goals::facts_digest;
+    use arany::test_support::goals::{finish_with, replayed};
+
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let engine = edit_engine(&state_path);
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(facts_edit(None, "v1", "v2")),
+        finish_with("Edited the included facts"),
+    ]));
+    let outcome = run_with(
+        &engine,
+        &provider,
+        request(&workspace, "Edit the included facts"),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("edit Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("shutdown");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+        "v2"
+    );
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(edit_digests(&view), [Some(facts_digest("v1"))]);
+    assert!(view.runs[0].agents[0].provider_calls[0].refusal.is_none());
+}

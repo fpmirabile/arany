@@ -1,7 +1,7 @@
 use super::select::{ProviderArg, Selection, SelectionError, select_provider};
 use arany::{
     AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderKind, ProviderRecord,
-    ProviderRole, Providers, RecordFormat, RecordKind, RecordStep, StateRoot,
+    ProviderRole, Providers, RecordFormat, RecordKind, StateRoot,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, str::FromStr, sync::Arc};
@@ -108,7 +108,8 @@ pub(crate) struct RoutingDraft {
 impl RoutingDraft {
     pub(crate) fn load(state: &StateRoot) -> Result<Self, RoutingError> {
         let expected = state
-            .read_current(&PROVIDER_ROUTING)
+            .record(PROVIDER_ROUTING.kind)
+            .read()
             .map_err(|_| RoutingError::RoutingUnavailable)?;
         let providers = match &expected {
             Some(bytes) => parse(bytes)?.providers,
@@ -193,32 +194,9 @@ impl Route {
 pub(crate) const PROVIDER_ROUTING: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRouting,
     field: "version",
-    floor: 1,
     current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_routing,
-    }],
     accepts: |bytes| parse(bytes).is_ok(),
 };
-
-pub(super) fn migrate_route(route: &mut serde_json::Value) -> Option<()> {
-    let provider = ProviderRecord::parse(route.get("provider")?.as_str()?)?;
-    route["provider"] = serde_json::to_value(provider).ok()?;
-    Some(())
-}
-
-fn migrate_routing(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    for chain in value.get_mut("providers")?.as_object_mut()?.values_mut() {
-        if !chain.is_null() {
-            for route in chain.as_array_mut()? {
-                migrate_route(route)?;
-            }
-        }
-    }
-    value["version"] = PROVIDER_ROUTING.current.into();
-    Some(value)
-}
 
 pub(crate) fn references_custom_profile(
     state_dir: &Path,
@@ -226,7 +204,8 @@ pub(crate) fn references_custom_profile(
 ) -> Result<bool, RoutingError> {
     let state = StateRoot::open_existing(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
     let Some(bytes) = state
-        .read_current(&PROVIDER_ROUTING)
+        .record(PROVIDER_ROUTING.kind)
+        .read()
         .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
         return Ok(false);
@@ -268,7 +247,8 @@ pub(crate) async fn configured_providers(
 ) -> Result<AdmittedProviders, RoutingError> {
     let root = StateRoot::admit(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
     let Some(bytes) = root
-        .read_current(&PROVIDER_ROUTING)
+        .record(PROVIDER_ROUTING.kind)
+        .read()
         .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
         return Ok(AdmittedProviders::single(primary));
@@ -492,14 +472,9 @@ mod tests {
         let mut legacy = valid.clone();
         legacy["version"] = 1.into();
         legacy["providers"]["child"][0]["provider"] = "custom:exact-name".into();
-        let upgraded = PROVIDER_ROUTING
-            .upgrade(&serde_json::to_vec(&legacy).unwrap())
-            .unwrap();
-        let reopened = parse(&upgraded).unwrap();
-        assert_eq!(
-            reopened.providers.child.unwrap()[0].provider.profile(),
-            "custom:exact-name"
-        );
+        let legacy = serde_json::to_vec(&legacy).unwrap();
+        assert!(PROVIDER_ROUTING.mismatched(&legacy));
+        assert!(parse(&legacy).is_err());
         for provider in [
             serde_json::json!({"kind":"custom","custom_name":null}),
             serde_json::json!({"kind":"openai","custom_name":"exact-name"}),

@@ -608,7 +608,7 @@ impl ToolView {
     pub(crate) fn settled_without_stop(&self) -> bool {
         self.observation
             .as_ref()
-            .is_some_and(|observation| !observation.stops_run())
+            .is_some_and(|observation| !observation.stops_tool_step())
             && self.hooks_settled()
     }
 
@@ -818,7 +818,7 @@ impl RunView {
             .rev()
             .find(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
-                    observation.stops_run()
+                    observation.stops_tool_step()
                         || tool.active_time_reserved
                             && observation.disposition == crate::tools::ToolDisposition::Limit
                         || matches!(

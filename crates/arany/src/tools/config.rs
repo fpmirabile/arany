@@ -193,9 +193,7 @@ impl Server {
 pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
     kind: RecordKind::ToolsConfig,
     field: "version",
-    floor: 1,
     current: 1,
-    steps: &[],
     accepts: |bytes| Config::parse(bytes).is_ok(),
 };
 
@@ -207,7 +205,8 @@ impl Config {
 
     pub(crate) fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let bytes = state
-            .read_current(&TOOLS_CONFIG)
+            .record(TOOLS_CONFIG.kind)
+            .read()
             .map_err(|_| ToolError::Configuration)?
             .ok_or(ToolError::MissingConfiguration)?;
         Self::parse(&bytes)

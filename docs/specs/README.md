@@ -30,6 +30,10 @@ Every spec is edited under the [security](../../agents/security.md) and [testing
 
 When contract, code and tests disagree, name the discrepancy and resolve it at the owner; neither an old research recommendation nor current faulty behavior silently overrides an agreed spec. Surface a conflict that recorded decisions cannot settle before changing the contract. Create a new spec only when a real behavior change or an overloaded contract earns it; replace normative copies with links, update the domain index, the AGENTS.md loading trigger and inbound links together, and close the execution plan under the [planning lifecycle](../../planning/README.md#lifecycle).
 
+## Auto-learning
+
+Record a found invariant, failure or ownership decision once: behavior, limits and decisions in the owning spec; an implementation invariant as a test, or a non-obvious reason as one `//` line beside its code; a working practice in its general rule under `agents/`. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
+
 ## Spec structure
 
 Use these sections when they have substance; short prose or tables suffice:

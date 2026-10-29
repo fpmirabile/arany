@@ -43,6 +43,7 @@ pub(crate) fn primary_request(model: &str) -> ProviderRequest {
         AgentPhase::RootPlan,
         RunInput {
             goal_budget: Some(GoalBudget::default()),
+            plan_offered: true,
             tools: Some(tool_context(catalog())),
             ..RunInput::new(PromptRole::Primary, "objective canary".into())
         },
@@ -291,6 +292,10 @@ pub(crate) fn compaction_bound_request(
             assistant: String::new(),
         })],
         max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+        prompts: crate::provider::EffectivePrompts::default().with_override(
+            crate::provider::PromptFile::Compaction,
+            &"\u{1}".repeat(crate::provider::MAX_COMPACTION_PROMPT_OVERRIDE_BYTES),
+        ),
     };
     let base = crate::provider::compaction_input_bytes(&request(String::new())).expect("input");
     let slack = crate::session::MAX_COMPACTION_INPUT_BYTES - base;

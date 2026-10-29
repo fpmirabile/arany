@@ -426,7 +426,7 @@ fn valid_origin(
                 .tools
                 .iter()
                 .filter_map(|tool| tool.observation.as_ref())
-                .all(|observation| !observation.stops_run())
+                .all(|observation| !observation.stops_tool_step())
     }
 }
 

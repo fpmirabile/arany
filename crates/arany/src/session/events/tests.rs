@@ -127,6 +127,7 @@ fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
         chatgpt_provenance: None,
         output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
         context_window_tokens: None,
+        effective_context_window_tokens: None,
         policy: CollaborationPolicy::Single,
         output_token_cap: 4096,
         provider_concurrency: 1,
@@ -134,8 +135,9 @@ fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
         workspace_inode: 2,
         user_instruction_digest: None,
         instruction_sources: Vec::new(),
+        prompts: crate::provider::EffectivePrompts::default().pins(),
         launch_directory: String::new(),
-        include_digests: Vec::new(),
+        include_sources: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
         context_usage: None,
@@ -309,19 +311,6 @@ fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
         )
         .is_err()
     );
-    let migrated = goal_started_v7_to_v8(missing).expect("unknown legacy inputs");
-    assert!(migrated["include_paths"].is_null());
-    assert!(
-        Event::decode(
-            "GoalStarted",
-            started.version(),
-            &migrated.to_string(),
-            None,
-            None
-        )
-        .is_ok()
-    );
-    assert!(goal_started_v7_to_v8(current.clone()).is_none());
     for paths in [
         serde_json::json!(["../private"]),
         serde_json::json!(["/absolute"]),
@@ -600,6 +589,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     let agent_id = Some(AgentRunId::new());
 
     let record = ProviderCallRecord {
+        context_bytes: None,
         rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
@@ -758,7 +748,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
 
 #[test]
 fn remaining_borrowed_payloads_match_fixed_bytes() {
-    const RECORD: &str = r#"{"covered_run_id":"01900000-0000-7000-8000-000000000001","covered_sequence":1,"source_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"provider":"openai","model":"model","prompt_version":1,"schema_version":1,"compiler_version":3,"source_bytes":4,"source_tokens_estimate":1,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"response_id":null,"wire_provenance":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","status":{"status":"failed","reason":"provider_unavailable"}}"#;
+    const RECORD: &str = r#"{"covered_run_id":"01900000-0000-7000-8000-000000000001","covered_sequence":1,"source_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"provider":"openai","model":"model","prompt_version":1,"prompt":{"file":"compaction","source":"override","digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]},"schema_version":1,"compiler_version":3,"source_bytes":4,"source_tokens_estimate":1,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"response_id":null,"wire_provenance":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","status":{"status":"failed","reason":"provider_unavailable"}}"#;
     let (run, agent) = (Some(RunId::new()), Some(AgentRunId::new()));
     let cases = [
         ("SessionStarted", r#"{"title":"started","workspace_device":1,"workspace_inode":2}"#.into(), None, None),

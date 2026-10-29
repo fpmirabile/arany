@@ -75,9 +75,7 @@ pub struct CommandTools {
 pub(crate) const COMMAND_TOOLS: RecordFormat = RecordFormat {
     kind: RecordKind::CommandTools,
     field: "version",
-    floor: 1,
     current: 1,
-    steps: &[],
     accepts: |bytes| CommandTools::parse(bytes).is_ok(),
 };
 
@@ -109,7 +107,8 @@ impl Default for CommandTools {
 impl CommandTools {
     pub fn load(state: &StateRoot) -> Result<Self, ToolError> {
         state
-            .read_current(&COMMAND_TOOLS)
+            .record(COMMAND_TOOLS.kind)
+            .read()
             .map_err(|_| ToolError::Configuration)?
             .map_or_else(|| Ok(Self::default()), |bytes| Self::parse(&bytes))
     }

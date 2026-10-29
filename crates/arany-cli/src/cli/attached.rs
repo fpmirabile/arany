@@ -600,8 +600,18 @@ async fn reconcile_failed_submission(
 const INTERRUPTED_GOAL_NOTICE: &str = "Goal paused; use /goal resume to continue.";
 const OUT_OF_BUDGET_GOAL_NOTICE: &str =
     "Goal paused and out of budget; /goal resume will close it.";
+const INTERRUPTED_CHAT_NOTICE: &str = "Interrupted. Send a message to continue.";
 
-fn paused_goal_notice(resume_admitted: bool) -> &'static str {
+// Only a Goal started with /goal speaks of resuming it; a plain message continues with the next one.
+fn paused_goal_notice(goal: &arany::GoalView, view: &SessionView) -> &'static str {
+    if goal.autonomous {
+        goal_resume_notice(goal.admits_resume(view))
+    } else {
+        INTERRUPTED_CHAT_NOTICE
+    }
+}
+
+fn goal_resume_notice(resume_admitted: bool) -> &'static str {
     if resume_admitted {
         INTERRUPTED_GOAL_NOTICE
     } else {
@@ -1521,12 +1531,13 @@ mod tests {
 
     #[test]
     fn paused_goal_notice_offers_resume_only_while_a_run_is_admitted() {
-        assert_eq!(paused_goal_notice(true), INTERRUPTED_GOAL_NOTICE);
-        assert_eq!(paused_goal_notice(false), OUT_OF_BUDGET_GOAL_NOTICE);
+        assert_eq!(goal_resume_notice(true), INTERRUPTED_GOAL_NOTICE);
+        assert_eq!(goal_resume_notice(false), OUT_OF_BUDGET_GOAL_NOTICE);
         assert!(!OUT_OF_BUDGET_GOAL_NOTICE.contains("use /goal resume to continue"));
+        assert!(!INTERRUPTED_CHAT_NOTICE.contains("/goal"));
         assert_eq!(
             submission_notice(
-                Some(paused_goal_notice(false)),
+                Some(goal_resume_notice(false)),
                 RunStatus::Cancelled,
                 Some("Run cancelled.".to_owned()),
                 None

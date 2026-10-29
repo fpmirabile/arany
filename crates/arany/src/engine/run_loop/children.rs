@@ -19,7 +19,7 @@ use crate::provider::{
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
-    MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
+    MAX_CHILD_RESULT_BYTES, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
 };
 use crate::tools::{ToolCall, ToolContext, ToolRequest, ToolStep};
 use crate::worker::WorkerCause;
@@ -29,7 +29,6 @@ use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::Instant;
 
-const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const MAX_CHILD_TOOL_FACTS: usize = 8;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
 pub(crate) const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
@@ -2840,6 +2839,7 @@ impl RunLoop<'_> {
                 assignment_context: context,
                 includes: root.includes.clone(),
                 tools: child.tools.clone(),
+                prompts: root.prompts.clone(),
                 ..RunInput::new(
                     if child.kind.is_editor() {
                         PromptRole::Editor
@@ -2993,6 +2993,17 @@ impl RunLoop<'_> {
                         self.proposed_editor(child.agent_run_id)
                             .and_then(|a| self.editor_grant(&a))
                             .is_ok_and(|g| g.allows(&request.call))
+                            && self
+                                .ledger()
+                                .view(|view| {
+                                    crate::session::digest_known(
+                                        view,
+                                        self.run_id,
+                                        child.agent_run_id,
+                                        &request.call,
+                                    )
+                                })
+                                .is_ok_and(|known| known)
                     } else {
                         request.call.is_child_research()
                             && (!request.call.is_web()

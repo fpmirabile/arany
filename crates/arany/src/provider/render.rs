@@ -1,5 +1,5 @@
 use super::conversation::{Block, Conversation, Message, Role, SystemBlock};
-use super::prompts;
+use super::prompts::{self, PromptFile};
 use super::tool_specs::specs;
 use super::{
     AgentPhase, HistoryTurn, PromptRole, ProviderError, ProviderRequest, outcome_schema,
@@ -27,9 +27,13 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         crate::tools::parse_json(tools.catalog().as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or_else(|_| json!(tools.catalog()))
     });
-    let tools = catalog
-        .as_ref()
-        .map(|catalog| specs(catalog, input.role, &input.pinned_budget));
+    let tools = catalog.as_ref().map(|catalog| {
+        specs(
+            catalog,
+            input.role,
+            input.plan_offered.then_some(&input.pinned_budget),
+        )
+    });
     let instructions = input
         .workspace_guidance
         .iter()
@@ -74,22 +78,33 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
             "remediation": "This is the single corrective call for the preceding rejected Provider outcome. Return a permitted native function call with valid arguments, or plain assistant text for the final answer. Rejected output was not accepted; never repeat prior effects.",
         }),
     ));
-    let correction_bytes = correction.as_ref().map_or(0, |block| match block {
-        Block::Text(text) => text.len(),
-        Block::Image { .. } | Block::AssistantTurn(_) | Block::ToolResult { .. } => 0,
-    });
+    let final_call = input.final_call.then(|| data_block(
+        "harness_final_call",
+        json!("This is the last Provider call of this Goal's budget and Tools are disabled. Start no new work. Answer in plain text: say the Provider-call budget was reached, what was done, what remains and the next step."),
+    ));
+    let feedback = correction.into_iter().chain(final_call).collect::<Vec<_>>();
+    let feedback_bytes = feedback
+        .iter()
+        .map(|block| match block {
+            Block::Text(text) => text.len(),
+            Block::Image { .. }
+            | Block::AssistantTurn(_)
+            | Block::ToolResult { .. }
+            | Block::Harness { .. } => 0,
+        })
+        .sum::<usize>();
     if system
         .iter()
         .filter(|block| matches!(block, SystemBlock::PreviousRunFailure(_)))
         .map(|block| block.text().len())
         .sum::<usize>()
-        + correction_bytes
+        + feedback_bytes
         > super::conversation::MAX_HARNESS_FEEDBACK_BYTES
     {
         return Err(ProviderError::Rejected);
     }
-    if let Some(correction) = correction {
-        messages.push(user(vec![correction]));
+    if !feedback.is_empty() {
+        messages.push(user(feedback));
     }
     Ok(Conversation {
         system,
@@ -126,21 +141,54 @@ fn append_stop_feedback(messages: &mut Vec<Message>, request: &ProviderRequest, 
 }
 
 fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
-    let prompt = match request.input.role {
-        PromptRole::Primary => prompts::PRIMARY_INSTRUCTIONS,
-        PromptRole::Editor => prompts::EDITOR_INSTRUCTIONS,
-        PromptRole::Researcher => prompts::RESEARCH_INSTRUCTIONS,
-        PromptRole::ReadOnly => prompts::READ_ONLY_INSTRUCTIONS,
-        PromptRole::ToolReview => prompts::TOOL_REVIEW_INSTRUCTIONS,
+    let input = &request.input;
+    let style = |file| SystemBlock::Prompt(input.prompts.text(file).to_owned());
+    let mut system = match input.role {
+        PromptRole::Primary => vec![
+            style(PromptFile::Primary),
+            SystemBlock::Fixed(prompts::PRIMARY_AUTHORITY),
+        ],
+        PromptRole::Editor => vec![
+            style(PromptFile::Editor),
+            SystemBlock::Fixed(prompts::EDITOR_AUTHORITY),
+        ],
+        PromptRole::Researcher => vec![
+            style(PromptFile::Researcher),
+            SystemBlock::Fixed(prompts::RESEARCH_AUTHORITY),
+        ],
+        PromptRole::ReadOnly => vec![SystemBlock::Fixed(prompts::READ_ONLY_INSTRUCTIONS)],
+        PromptRole::ToolReview => vec![SystemBlock::Fixed(prompts::TOOL_REVIEW_INSTRUCTIONS)],
     };
-    let mut system = vec![SystemBlock::Prompt(prompt)];
+    if input.role == PromptRole::Primary && input.plan_offered {
+        system.push(SystemBlock::Fixed(prompts::PLAN_INSTRUCTIONS));
+    }
+    match input.role {
+        PromptRole::Primary => system.push(SystemBlock::Limits {
+            step_tool_calls: crate::session::MAX_STEP_TOOL_CALLS,
+            answer_bytes: None,
+        }),
+        PromptRole::Researcher => system.push(SystemBlock::Limits {
+            step_tool_calls: crate::session::MAX_STEP_TOOL_CALLS,
+            answer_bytes: Some(crate::session::MAX_CHILD_RESULT_BYTES),
+        }),
+        PromptRole::Editor => system.push(SystemBlock::Limits {
+            step_tool_calls: 1,
+            answer_bytes: None,
+        }),
+        PromptRole::ReadOnly | PromptRole::ToolReview => {}
+    }
     if matches!(
         request.phase,
         AgentPhase::RootPlan | AgentPhase::RootSynthesis
     ) {
         system.push(SystemBlock::Policy(request.collaboration));
     }
-    if let Some(failure) = request.input.previous_run_failure {
+    // Single mode offers no Delegate function, so it needs no team guidance.
+    if input.role == PromptRole::Primary && request.collaboration.max_children() > 0 {
+        system.push(style(PromptFile::Team));
+        system.push(SystemBlock::Fixed(prompts::TEAM_AUTHORITY));
+    }
+    if let Some(failure) = input.previous_run_failure {
         system.push(SystemBlock::PreviousRunFailure(failure));
     }
     system
@@ -173,7 +221,11 @@ pub(crate) fn instructions_text(path: &str, text: &str) -> String {
 }
 
 pub(crate) fn data_block(scope: &str, data: Value) -> Block {
-    Block::Text(json!({"scope": scope, "data": data}).to_string())
+    Block::Text(data_text(scope, &data))
+}
+
+pub(crate) fn data_text(scope: &str, data: &Value) -> String {
+    json!({"scope": scope, "data": data}).to_string()
 }
 
 fn user(blocks: Vec<Block>) -> Message {
@@ -381,10 +433,16 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         blocks.push(steering_block(&step.steering_notes));
     }
     if let Some(facts) = step.facts {
-        blocks.push(data_block("goal_context_facts", json!(facts)));
+        blocks.push(Block::Harness {
+            scope: "goal_context_facts",
+            data: json!(facts),
+        });
     }
     if let Some(remaining) = step.calls_remaining {
-        blocks.push(data_block("tool_calls_remaining", json!(remaining)));
+        blocks.push(Block::Harness {
+            scope: "tool_calls_remaining",
+            data: json!(remaining),
+        });
     }
     Ok(blocks)
 }
@@ -402,6 +460,9 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
         InvalidArguments => arguments.as_str(),
         InvalidPath => {
             "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Leading ./ and one trailing directory / are normalized; file trailing /, absolute paths, empty components, traversal and private paths are forbidden."
+        }
+        DigestUnknown => {
+            "Read the file first; no current digest is known for the offending path in this Run."
         }
         Phase => "Choose an outcome allowed in this phase; team planning requires Delegate.",
         PlanInvalid => "Send a valid arany_plan; do not replace a recorded contract.",

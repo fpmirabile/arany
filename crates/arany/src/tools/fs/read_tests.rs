@@ -230,15 +230,6 @@ async fn in_process_results_fit_their_budget_before_serialization() {
     assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
 }
 
-#[test]
-fn the_primary_prompt_states_the_read_page_limit() {
-    assert!(
-        include_str!("../../provider/prompts/primary.txt").contains(&format!(
-            "a nullable line limit from 1 to {MAX_READ_PAGE_LINES},"
-        ))
-    );
-}
-
 #[tokio::test]
 async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
     use std::time::{Duration, Instant};

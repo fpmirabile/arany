@@ -125,9 +125,18 @@ History recovery is separate. Unsupported or damaged history offers Retry,
 Reset history and Exit. Reset requires explicit warning confirmation and discards
 conversations and derived Provider evidence in that StateRoot, preserving
 accounts, model choices and folder trust. Unsafe files or active/concurrent use
-refuse reset. No reset migrates unsupported records or automatically resubmits an
+refuse reset. No reset converts unsupported records or automatically resubmits an
 objective. See [credential recovery](./specs/credentials.md#storage-replacement-and-recovery)
 and [history recovery](./specs/terminal.md#setup-and-account-choices).
+
+## Customize the working-style prompts
+
+To change how the agent works, put `primary.md`, `team.md`, `researcher.md`,
+`editor.md` or `compaction.md` in `STATE/prompts/`. Each file replaces only that role's default
+working-style text; Arany's trust and authority rules always stay. Keep the
+directory `0700` and the files `0600`. Delete a file to return to the default.
+An unsafe, empty or oversized file stops the next turn with a message naming it.
+The [prompt override contract](./specs/session.md#prompt-overrides) owns the details.
 
 ## Headless API-key use
 
@@ -160,8 +169,9 @@ Keep the State directory outside the Workspace and the file private (`0600` on
 Unix). Each profile names one `ARANY_PROVIDER_*` environment key; supply it
 privately in Arany's launching environment. Native accounts, workspace headers,
 other vendors' keys and other clients' OAuth identities never supply its
-credentials, and Arany always identifies itself as `arany/<version>`. Existing
-valid version-1 Responses profiles migrate automatically and need a fresh check.
+credentials, and Arany always identifies itself as `arany/<version>`. A profile
+file from another version is archived at startup; recreate the profiles and check
+them again.
 
 Every route must pass its exact [text-compaction conformance check](./specs/provider.md#custom-destinations-and-routing)
 before use; each model needs its own check.

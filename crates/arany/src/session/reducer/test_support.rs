@@ -166,6 +166,7 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         chatgpt_provenance: None,
         output_token_bound: OutputTokenBound::ProviderEnforced,
         context_window_tokens: None,
+        effective_context_window_tokens: None,
         policy,
         output_token_cap: 4096,
         provider_concurrency: 1,
@@ -173,8 +174,9 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         workspace_inode: 2,
         user_instruction_digest: None,
         instruction_sources: Vec::new(),
+        prompts: crate::provider::EffectivePrompts::default().pins(),
         launch_directory: String::new(),
-        include_digests: Vec::new(),
+        include_sources: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
         context_usage: None,
@@ -202,6 +204,7 @@ pub(super) fn record(
     tokens: Option<u32>,
 ) -> ProviderCallRecord {
     ProviderCallRecord {
+        context_bytes: None,
         rate_limits: None,
         delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
             vec![crate::session::worker::ChildAssignment::Researcher {
@@ -643,13 +646,13 @@ pub(super) fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObser
         let expected = match &intent.call {
             ToolCall::Write {
                 expected_digest, ..
-            } => expected_digest.clone(),
-            ToolCall::Edit {
+            }
+            | ToolCall::Edit {
                 expected_digest, ..
             }
             | ToolCall::MultiEdit {
                 expected_digest, ..
-            } => Some(expected_digest.clone()),
+            } => expected_digest.clone(),
             _ => unreachable!(),
         };
         serde_json::to_string(&crate::session::rewind::FilePublicationResult {
@@ -1035,6 +1038,8 @@ pub(super) fn failed_compaction_record(run: RunId, covered_sequence: u64) -> Com
         provider: "openai".into(),
         model: "gpt-5.4".into(),
         prompt_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         schema_version: 1,
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 1,

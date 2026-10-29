@@ -1076,7 +1076,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
     let settings = vec![
         "Slash menu: tabs".to_owned(),
         "Chat view: classic".to_owned(),
-        "Goal tokens: unlimited".to_owned(),
+        "Tokens per task: unlimited".to_owned(),
         "Build cache: 8.0 GB".to_owned(),
     ];
     let agents = inspector_model(

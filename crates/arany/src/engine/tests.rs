@@ -257,6 +257,7 @@ mod goal_workspace_lease_tests {
                 phase: None,
                 budget: None,
                 resource_settings: crate::tools::ToolResourceSettings::default(),
+                context_window: crate::session::ContextWindow::default(),
                 finish_after_run: true,
                 autonomous: false,
                 continues: None,

@@ -210,6 +210,7 @@ fn compaction_request() -> CompactionRequest {
             },
         ],
         max_output_tokens: 64,
+        prompts: Default::default(),
     }
 }
 
@@ -513,12 +514,15 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 .feed(stream.as_bytes())
                 .unwrap()
                 .unwrap();
-            assert!(
-                wire::decode_streamed_run(&body, &scope_for(&request())).is_err(),
+            let accepted = label == "commentary only";
+            assert_eq!(
+                wire::decode_streamed_run(&body, &scope_for(&request())).is_ok(),
+                accepted,
                 "{label}"
             );
-            assert!(
-                wire::decode_streamed_compaction(&body, "model-a").is_err(),
+            assert_eq!(
+                wire::decode_streamed_compaction(&body, "model-a").is_ok(),
+                accepted,
                 "{label}"
             );
         }
@@ -2645,4 +2649,33 @@ fn openai_routes_pin_cached_function_selection_bytes() {
         rendered,
         include_str!("../../snapshots/openai_selection.json")
     );
+}
+
+#[test]
+fn commentary_without_a_call_or_final_message_previews_as_the_answer() {
+    let commentary = json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Hecho."}]});
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_1","model":"model-a"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","phase":"commentary","status":"in_progress","content":[]}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":commentary}),
+        json!({"type":"response.completed","response":{"id":"resp_1","model":"model-a","status":"completed","output":[commentary],"usage":{"input_tokens":8,"output_tokens":4}}}),
+    ];
+    let (publisher, observed) = ResponsePreview::new();
+    let mut decoder =
+        StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher), DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut accepted = None;
+    for event in &events {
+        accepted = decoder
+            .feed(format!("data: {event}\n\n").as_bytes())
+            .unwrap()
+            .or(accepted);
+    }
+    assert_eq!(observed.borrow().answer, "Hecho.");
+    assert!(observed.borrow().commentary.is_empty());
+    assert!(matches!(
+        wire::decode_streamed_run(&accepted.unwrap(), &scope_for(&request()))
+            .unwrap()
+            .outcome,
+        ProviderOutcome::Answer(ref answer) if answer.text == "Hecho."
+    ));
 }

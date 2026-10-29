@@ -12,6 +12,7 @@ fn compiled_bytes(view: &SessionView, items: &[crate::provider::CompactionItem])
             previous_summary: None,
             items: items.to_vec(),
             max_output_tokens: 1024,
+            prompts: Default::default(),
         },
     ))
     .unwrap()
@@ -641,7 +642,7 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
             let digest = "a".repeat(64);
             tool.intent.call = ToolCall::Delete {
                 path: format!("src/{index:04}"),
-                expected_digest: digest.clone(),
+                expected_digest: Some(digest.clone()),
             };
             let observation = tool.observation.as_mut().unwrap();
             observation.intent = tool.intent.clone();
@@ -703,6 +704,8 @@ fn compaction_record(
         provider: "openai".into(),
         model: "test".into(),
         prompt_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         schema_version: 1,
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 1,

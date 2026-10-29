@@ -8,6 +8,8 @@ Plans live under `planning/`; scoped audits and open findings live under `docs/s
 
 Review startup ordering and untrusted-input handling against [Workspace admission and authority](../docs/specs/session.md#workspace-admission-and-authority), [private-directory admission](../docs/specs/credentials.md#account-scope-and-identity) and [Tool path admission](../docs/specs/tools.md#folder-trust-and-approvals). Trace the opened identity through use; a path string or UI label is not evidence of admission. Check each platform's link, mount, case, Unicode and replacement behavior at the owning contract.
 
+State-directory [prompt overrides](../docs/specs/session.md#prompt-overrides) are user authority over working style, not untrusted Workspace data. When prompt assembly changes, verify that every compiled authority-and-trust block still renders beside an override, that only the listed files are read under private admission, and that no Workspace, repository, client, Tool or model path can supply or select one.
+
 ## Effectful execution gate
 
 Before shipping an effectful path, require an adversarial conformance suite for the [effect-admission contract](../docs/specs/tools.md#authority-and-effect-admission). Trace intent normalization, deterministic authorization, approval, effective-capability attestation, dispatch, cancellation and cleanup. Review [child authority](../docs/specs/execution.md#collaboration) and [Provider egress](../docs/specs/provider.md#configuration-and-egress) at their own boundaries.

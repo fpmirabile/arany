@@ -1,11 +1,6 @@
 {
   "version": 1,
   "skills": {
-    "arany-terminal-design": {
-      "source": "./agents/skills/arany-terminal-design",
-      "sourceType": "local",
-      "computedHash": "4f8bd2e90e6ae6bf7651d29174dc8554738b98db9ca023610a7e385e16131e6d"
-    },
     "ask-matt": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -184,6 +179,11 @@
       "sourceType": "github",
       "skillPath": "skills/productivity/teach/SKILL.md",
       "computedHash": "81c196426808c270a9d4688be291405c038bba11f020b9fe10098ad0f1d8c132"
+    },
+    "terminal-ui-design": {
+      "source": "./agents/skills/terminal-ui-design",
+      "sourceType": "local",
+      "computedHash": "4f8bd2e90e6ae6bf7651d29174dc8554738b98db9ca023610a7e385e16131e6d"
     },
     "to-questionnaire": {
       "source": "mattpocock/skills",

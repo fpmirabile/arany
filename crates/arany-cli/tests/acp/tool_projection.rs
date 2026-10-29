@@ -81,7 +81,7 @@ async fn move_live_and_permission_projection_preserves_file_change_details() {
     let intent = adapter.intent(arany::ToolCall::Move {
         source: "source\nname.txt".into(),
         destination: "destination.txt".into(),
-        expected_digest: "a".repeat(64),
+        expected_digest: Some("a".repeat(64)),
     });
 
     adapter.item(&intent, None).await;
@@ -143,7 +143,7 @@ async fn move_completion_preserves_denial_projection() {
     let intent = adapter.intent(arany::ToolCall::Move {
         source: "denied.txt".into(),
         destination: "denied-new.txt".into(),
-        expected_digest: "b".repeat(64),
+        expected_digest: Some("b".repeat(64)),
     });
     adapter.item(&intent, None).await;
     let _ = adapter.next().await;
@@ -179,7 +179,7 @@ async fn move_history_projection_preserves_file_change_details() {
     let intent = replay.intent(arany::ToolCall::Move {
         source: "old.txt".into(),
         destination: "new.txt".into(),
-        expected_digest: "b".repeat(64),
+        expected_digest: Some("b".repeat(64)),
     });
     replay
         .call(
@@ -353,6 +353,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
             arany::ToolCall::Glob {
                 pattern: "*.md".into(),
                 path: "notes".into(),
+                offset: 0,
                 limit: 100,
             },
             "search",

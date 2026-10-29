@@ -450,3 +450,56 @@ fn an_expired_selection_names_the_selection_boundary() {
         ))
     ));
 }
+
+#[test]
+fn command_selection_prunes_nested_repositories_and_discards_their_outputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    for (path, content) in [
+        ("visible", "kept"),
+        ("worktree/.git", "gitdir: elsewhere"),
+        ("worktree/inner", "nested worktree"),
+        ("repo/.git/HEAD", "ref: refs/heads/main"),
+        ("repo/file", "nested repository"),
+    ] {
+        std::fs::create_dir_all(source.join(path).parent().unwrap()).unwrap();
+        std::fs::write(source.join(path), content).unwrap();
+    }
+    for (roots, copied) in [
+        (json!(["."]), "visible"),
+        (json!(["worktree"]), "worktree/inner"),
+    ] {
+        let target = tempfile::tempdir().unwrap();
+        let resources = tempfile::tempdir().unwrap();
+        let mut config = config_value();
+        config["workspace_paths"] = roots.clone();
+        let selection = super::fs::prepare_command(
+            &super::fs::open_directory(&source).unwrap(),
+            &super::fs::open_directory(target.path()).unwrap(),
+            &super::fs::open_directory(resources.path()).unwrap(),
+            &serde_json::from_value(config).unwrap(),
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
+        )
+        .unwrap();
+        assert!(target.path().join(copied).is_file(), "{roots}");
+        if roots != json!(["."]) {
+            continue;
+        }
+        assert_eq!(selection.summary.pruned_directories, 2);
+        assert!(!target.path().join("worktree").exists() && !target.path().join("repo").exists());
+        let before = super::fs::command_snapshot(target.path()).unwrap();
+        std::fs::create_dir(target.path().join("worktree")).unwrap();
+        std::fs::write(target.path().join("worktree/generated"), b"output").unwrap();
+        std::fs::write(target.path().join("fresh"), b"output").unwrap();
+        let (changes, summary) = super::fs::selected_command_changeset(
+            target.path(),
+            &before,
+            &selection,
+            std::time::Instant::now() + super::selection::TEST_RUNTIME,
+        )
+        .unwrap();
+        assert_eq!(summary.discarded_outputs, 1);
+        assert_eq!(changes.files.len(), 1);
+        assert_eq!(changes.files[0].path, "fresh");
+    }
+}

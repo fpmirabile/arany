@@ -674,8 +674,8 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 account
                     .record(arany::RecordKind::SavedAccount).replace(
                         &serde_json::to_vec(&serde_json::json!({
-                            "schema":1,"storage":"private_file","account":{
-                                "schema":2,"id":uuid::Uuid::now_v7(),"provider":"openai",
+                            "schema":2,"storage":"private_file","account":{
+                                "schema":3,"id":uuid::Uuid::now_v7(),"provider":{"kind":"openai","custom_name":null},
                                 "model":"gpt-5.4","effort":null,"api_key":"synthetic-never-sent-key","anthropic_workspace_id":null
                             }
                         }))
@@ -1654,13 +1654,14 @@ fn consent_probe(
 
 #[cfg(target_os = "linux")]
 fn seed_command_environment(state: &std::path::Path, path: Vec<String>) {
-    let canonical = serde_json::to_vec(&serde_json::json!([1, "process", path, [], []])).unwrap();
+    let canonical =
+        serde_json::to_vec(&serde_json::json!([3, "process", null, path, [], []])).unwrap();
     StateRoot::admit(state)
         .unwrap()
         .record(arany::RecordKind::CommandEnvironment)
         .replace(
             &serde_json::to_vec(&serde_json::json!({
-                "version": 1, "source": "process", "captured_at": 0, "path": path,
+                "version": 3, "source": "process", "shell": null, "captured_at": 0, "path": path,
                 "names": [], "excluded": [], "sha256": hash(&canonical)
             }))
             .unwrap(),

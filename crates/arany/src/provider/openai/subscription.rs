@@ -226,6 +226,7 @@ async fn probe_model_at(
             assistant: "Synthetic conformance answer".into(),
         })],
         max_output_tokens: PROBE_OUTPUT_CAP,
+        prompts: Default::default(),
     };
     journal_probe(check, crate::CheckCallKind::Compaction, async {
         let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
@@ -716,7 +717,7 @@ fn subscription_compaction_body(
     let mut body = wire::compaction_body_with_effort(request, effort);
     body["instructions"] = json!(format!(
         "{} Keep the summary under {COMPACTION_TARGET_BYTES} UTF-8 bytes; a non-ASCII character takes up to 4 bytes.",
-        crate::provider::prompts::COMPACTION_INSTRUCTIONS
+        request.prompts.compaction_instructions()
     ));
     streaming_body(body, crate::provider::MAX_PROVIDER_REQUEST_BYTES)
 }

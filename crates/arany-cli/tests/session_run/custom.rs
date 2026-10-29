@@ -310,7 +310,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         .expect("nonblocking proxy observation");
     let proxy_addr = hostile_proxy.local_addr().expect("proxy address");
     let mut profile = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "profiles": [{
             "name": "local",
             "protocol": "openai-responses",
@@ -324,7 +324,6 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         }]
     });
     if chat {
-        profile["version"] = serde_json::json!(2);
         let entry = profile["profiles"][0].as_object_mut().unwrap();
         entry.remove("endpoint");
         entry.insert("protocol".into(), "openai-chat-completions".into());
@@ -1119,9 +1118,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             .expect("first Session ID"),
     )
     .expect("first Session ID format");
-    let roster = serde_json::json!({"version":1,"profiles":[
-        {"name":"main","routes":[{"provider":"custom:local","model":case.model,"effort":null,"account_id":null}]},
-        {"name":"inspect","routes":[{"provider":"custom:local","model":case.model,"effort":null,"account_id":null}]}
+    let roster = serde_json::json!({"version":2,"profiles":[
+        {"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":case.model,"effort":null,"account_id":null}]},
+        {"name":"inspect","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":case.model,"effort":null,"account_id":null}]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":"inspect","review":null,"compaction":null},"child_profiles":["inspect","main"]}]});
     let roster_path = state_path.join("provider-roster.json");
     std::fs::write(&roster_path, serde_json::to_vec(&roster).unwrap()).unwrap();
@@ -2111,6 +2110,8 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             "verified answer",
         );
         let from = transcript.len();
+        // New conversations default to single; delegation needs an explicit opt-in.
+        input.write_all(b"/agents auto\r").unwrap();
         input.write_all(b"delegate once\r").unwrap();
         wait_settled(
             &mut output,
@@ -2132,7 +2133,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         &mut answered,
         (from, 100, 30),
         if cancel {
-            "Goal paused"
+            "Interrupted. Send a message to continue."
         } else {
             "Compaction saved"
         },

@@ -1,5 +1,5 @@
 use crate::provider::{Effort, valid_profile_name as valid_name};
-use crate::store::{RecordFormat, RecordKind, RecordStep, StateRoot, StoreError};
+use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
 use reqwest::Url;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -185,26 +185,9 @@ enum Privacy {
 pub(crate) const PROVIDER_PROFILES: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderProfiles,
     field: "version",
-    floor: 1,
     current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: profiles_v1_to_v2,
-    }],
     accepts: |bytes| CustomProfile::parse_document(bytes).is_ok(),
 };
-
-fn profiles_v1_to_v2(mut document: serde_json::Value) -> Option<serde_json::Value> {
-    if document.get("version")?.as_u64()? != 1
-        || document.get("profiles")?.as_array()?.iter().any(|entry| {
-            entry.get("protocol").and_then(serde_json::Value::as_str) != Some("openai-responses")
-        })
-    {
-        return None;
-    }
-    document["version"] = 2.into();
-    Some(document)
-}
 
 impl CustomProfile {
     pub fn validate_drafts(profiles: &[CustomProfileDraft]) -> Result<(), CustomProfileError> {
@@ -213,7 +196,8 @@ impl CustomProfile {
 
     pub fn snapshot(state: &StateRoot) -> Result<Option<Vec<u8>>, CustomProfileError> {
         state
-            .read_current(&PROVIDER_PROFILES)
+            .record(PROVIDER_PROFILES.kind)
+            .read()
             .map_err(|error| match error {
                 StoreError::StateNotPrivate => CustomProfileError::UnsafeFile,
                 _ => CustomProfileError::Unavailable,
@@ -289,7 +273,8 @@ impl CustomProfile {
             return Err(CustomProfileError::InvalidConfiguration);
         }
         let bytes = state
-            .read_current(&PROVIDER_PROFILES)
+            .record(PROVIDER_PROFILES.kind)
+            .read()
             .map_err(|error| match error {
                 StoreError::StateNotPrivate => CustomProfileError::UnsafeFile,
                 _ => CustomProfileError::Unavailable,
@@ -1370,19 +1355,16 @@ mod tests {
     }
 
     #[test]
-    fn provider_profiles_v1_migrates_without_authorizing_new_protocols() {
+    fn provider_profiles_from_another_version_are_refused_unchanged() {
         let temp = tempfile::tempdir().unwrap();
         let v1 = VALID.replace("\"version\":2", "\"version\":1");
         let state = state_with_file(temp.path(), v1.as_bytes());
-        CustomProfile::load_named(&state, "local").unwrap();
+        assert!(PROVIDER_PROFILES.mismatched(v1.as_bytes()));
+        assert!(CustomProfile::load_named(&state, "local").is_err());
         let path = state.path().to_path_buf();
-        drop(state);
-        let state = StateRoot::open_existing(&path).unwrap();
-        CustomProfile::load_named(&state, "local").unwrap();
-        let current = std::fs::read(path.join("provider-profiles.json")).unwrap();
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&current).unwrap()["version"],
-            2
+            std::fs::read(path.join("provider-profiles.json")).unwrap(),
+            v1.as_bytes()
         );
         assert!(CustomProfile::parse_document(v1.as_bytes()).is_err());
         let messages = VALID

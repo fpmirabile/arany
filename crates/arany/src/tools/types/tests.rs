@@ -82,7 +82,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         },
         ToolCall::Edit {
             path: "src/new".into(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             old: "x".repeat(MAX_EDIT_CONTENT_BYTES / 2),
             new: "y".repeat(MAX_EDIT_CONTENT_BYTES / 2 + 1),
         },
@@ -126,13 +126,13 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         },
         ToolCall::Edit {
             path: escaped_path.clone(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             old: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
             new: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
         },
         ToolCall::MultiEdit {
             file_path: escaped_path,
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             edits: vec![LiteralEdit {
                 old_string: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
                 new_string: "\u{2}".repeat(MAX_EDIT_CONTENT_BYTES / 2),

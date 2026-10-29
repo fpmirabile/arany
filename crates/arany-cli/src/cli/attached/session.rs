@@ -62,7 +62,8 @@ enum Routed {
 }
 
 enum SubmissionAdmission {
-    Ready,
+    // Carries a notice for includes attached only in part or by reference.
+    Ready(Option<String>),
     Rejected,
 }
 
@@ -441,7 +442,15 @@ impl AttachedSession {
             return Ok(IdleAction::Continue);
         }
         match self.validate_submission() {
-            SubmissionAdmission::Ready => {}
+            SubmissionAdmission::Ready(None) => {}
+            SubmissionAdmission::Ready(Some(notice)) => self
+                .terminal
+                .draw_notice(
+                    &self.view,
+                    &self.composer,
+                    Some(crate::terminal::TerminalNotice::History(&notice)),
+                )
+                .map_err(|error| error.to_string())?,
             SubmissionAdmission::Rejected => {
                 self.ui.empty_interrupt = None;
                 return Ok(IdleAction::Continue);
@@ -513,6 +522,7 @@ impl AttachedSession {
                     Err("Error: Submit or clear image attachments before switching Sessions".into())
                 } else {
                     controls::validate_idle_command(&self.view, command, argument)
+                        .map(|()| None)
                         .map_err(|error| format!("Error: {error}"))
                 }
             }
@@ -526,7 +536,7 @@ impl AttachedSession {
             ),
         };
         match validation {
-            Ok(()) => SubmissionAdmission::Ready,
+            Ok(notice) => SubmissionAdmission::Ready(notice),
             Err(message) => {
                 self.ui.notice = Some(Feedback::History(message));
                 self.discard_linear_command();

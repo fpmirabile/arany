@@ -1703,7 +1703,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let account_root = StateRoot::admit(&account_path).expect("isolated account marker");
     account_root
         .record(RecordKind::SavedAccount)
-        .replace(br#"{"schema":1,"storage":"keyring","account":null}"#)
+        .replace(br#"{"schema":2,"storage":"keyring","account":null}"#)
         .expect("keyring marker without credential");
     drop(account_root);
     let state = temp.path().join("resumed-state");

@@ -70,9 +70,9 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
     let choices = [
         (1, "Slash menu"),
         (2, "Chat view"),
-        (3, "Goal provider calls"),
-        (4, "Goal tokens"),
-        (5, "Goal active time"),
+        (3, "Provider calls per task"),
+        (4, "Tokens per task"),
+        (5, "Active time per task"),
         (6, "Default command timeout"),
         (7, "Maximum command timeout"),
         (8, "Build memory"),
@@ -119,7 +119,11 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
             .map(|y| buffer_row(terminal.backend().buffer(), y))
             .collect();
         assert!(rows.iter().any(|row| row.contains("Shift+Enter")));
-        assert!(rows[7].contains("↑↓ ←→ Enter") || rows[7].contains("Enter saves"));
+        let footer = rows[7].trim_end();
+        assert!(
+            SETTINGS_FOOTERS.contains(&footer) && footer.ends_with("Esc"),
+            "{width}: {footer}"
+        );
         let guidance = rows
             .iter()
             .map(|row| row.trim())

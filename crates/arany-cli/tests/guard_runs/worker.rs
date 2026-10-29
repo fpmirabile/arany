@@ -69,7 +69,7 @@ pub(super) async fn worker_case(case: &'static str) {
     assert_eq!(bundle.exit, Some(0));
     assert!(bundle.stderr.is_empty());
     assert!(!bundle.stdout.is_empty());
-    if case == "success" {
+    if matches!(case, "success" | "omitted_digest") {
         assert!(
             bundle.view.runs[0].agents[1]
                 .tools
@@ -137,6 +137,11 @@ async fn no_change_editor_still_requires_primary_verification_and_missing_approv
 async fn foreground_editor_discovery_and_writes_share_active_time_without_overlapping_reservations()
 {
     worker_case("discovery").await;
+}
+
+#[tokio::test]
+async fn editor_null_digest_write_replaces_the_file_its_own_read_observed() {
+    worker_case("omitted_digest").await;
 }
 
 #[tokio::test]

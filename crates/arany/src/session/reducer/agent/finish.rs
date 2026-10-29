@@ -96,7 +96,7 @@ fn validate_finish(
                 && run.agents[index].tools.iter().any(|tool| {
                     tool.observation
                         .as_ref()
-                        .is_some_and(|observation| observation.stops_run())
+                        .is_some_and(|observation| observation.stops_tool_step())
                 }))
     {
         return Err(ReplayError::InvalidTransition);
@@ -107,7 +107,7 @@ fn validate_finish(
                 || tool
                     .observation
                     .as_ref()
-                    .is_some_and(|observation| observation.stops_run())
+                    .is_some_and(|observation| observation.stops_tool_step())
         })
     {
         return Err(ReplayError::InvalidTransition);

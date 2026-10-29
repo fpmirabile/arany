@@ -238,6 +238,15 @@ pub(crate) fn file_parent_sync(intent: Option<uuid::Uuid>) -> Result<(), ToolErr
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn guard_before_dispatch(call: &crate::tools::ToolCall) -> Result<(), ToolError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if FaultPlan::guard_unavailable(call) {
+        return Err(ToolError::Operation);
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_result(
     intent: uuid::Uuid,
     result: Result<ToolObservation, ToolError>,
@@ -463,6 +472,7 @@ mod injection {
         SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
         GuardReceipt(uuid::Uuid),
+        GuardUnavailable(String),
         #[cfg(target_os = "linux")]
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
@@ -862,6 +872,21 @@ mod injection {
 
         pub(crate) fn file_parent_sync_fails(intent: uuid::Uuid) -> bool {
             take(|fault| matches!(fault, Fault::FileParentSync(id) if *id == intent)).is_some()
+        }
+
+        /// Fails the next Guard command running `program` before dispatch, as an unavailable Guard would.
+        pub fn fail_guard_before_dispatch(program: &str) {
+            plan().push(Fault::GuardUnavailable(program.to_owned()));
+        }
+
+        pub(crate) fn guard_unavailable(call: &crate::tools::ToolCall) -> bool {
+            let crate::tools::ToolCall::Command { program, .. } = call else {
+                return false;
+            };
+            take(
+                |fault| matches!(fault, Fault::GuardUnavailable(candidate) if candidate == program),
+            )
+            .is_some()
         }
 
         pub fn lose_guard_receipt(intent: uuid::Uuid) {

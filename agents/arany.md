@@ -1,8 +1,24 @@
 # Library practice
 
-Load for work in `crates/arany/`. Read the affected [domain contract](../docs/specs/README.md) and [security rules](./security.md) when triggered; the [system overview](../docs/architecture/system-overview.md#2-runtime-architecture) owns dependency direction and runtime responsibilities.
+Practice for `crates/arany/`; read only the section your edit needs. Open the affected [spec](../docs/specs/README.md) section and [security rules](./security.md) only when triggered; the [system overview](../docs/architecture/system-overview.md#2-runtime-architecture) owns dependency direction and runtime responsibilities.
 
 [Testing](./testing.md#corpus-placement) owns corpus placement and shared support; [development checks](../docs/development.md#verification) own commands.
+
+## Skills
+
+Load the `rust-clean-code` skill after Ponytail for Rust choices and `clean-architecture-review` for architecture reviews, as [priority 3](../AGENTS.md#product-and-implementation-priorities) says; [global rules](../AGENTS.md#global-rules) override softer skill wording. Where they bite Rust:
+
+- Comments follow [global rule 2](../AGENTS.md#global-rules), including no `///` in internal code, so Clippy's `missing_errors_doc`/`missing_panics_doc` stay allowed; `// SAFETY:` is one line, spilling to a second only for a distinct obligation.
+- Errors use `thiserror`, never `anyhow`; `Provider` is held as `Arc<dyn Provider>` and stays on `async-trait`.
+- A new Clippy allowance is `#[expect(..., reason = "...")]` and needs review. Code targets the `rust-version` and edition 2024 in `Cargo.toml`; CI runs the toolchain pinned in `rust-toolchain.toml`.
+- Test helpers live in `crates/arany/src/test_support/`; [testing](./testing.md) owns determinism and test ownership over the skill's test advice.
+- Architecture reviews load the owning spec section and the tests that pin the module, and use the deep-module vocabulary of [global rule 3](../AGENTS.md#global-rules) beside the skill's lenses. SQLite ownership and the separate credential and Guard processes have real lifecycle and privilege reasons, and Provider already has several adapters.
+
+The owner is learning Rust while building: when a Rust mechanism decides a change, explain it in one plain sentence, and for a significant choice say what was chosen, why it fits and when the alternative would. Keep the lesson in the conversation, never in source comments; routine edits need none.
+
+## Module boundaries
+
+Before changing a boundary, read the [system overview](../docs/architecture/system-overview.md#2-runtime-architecture) section that owns crate and process shape, dependency direction and state ownership, and the owning spec section. Create a module only once it has depth; a crate needs measured dependency, release, privilege, ownership or compile pressure. Add a daemon only for a second Client or detached execution. Effectful Tools require deterministic Policy and the separate Guard, except for the primary host operations the [per-effect isolation guarantee](../AGENTS.md#non-negotiable-guarantees) authorizes.
 
 ## Engine loop decisions
 

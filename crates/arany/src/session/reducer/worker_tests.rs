@@ -162,6 +162,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: actor,
             record: ProviderCallRecord {
+                context_bytes: None,
                 rate_limits: None,
                 delegation,
                 phase,
@@ -307,6 +308,8 @@ impl Fixture {
                 provider: "openai".into(),
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
+                prompt: crate::provider::EffectivePrompts::default()
+                    .pin(crate::provider::PromptFile::Compaction),
                 schema_version: 1,
                 compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,
@@ -459,6 +462,7 @@ fn fixture_with_grant(
         chatgpt_provenance: None,
         output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
         context_window_tokens: None,
+        effective_context_window_tokens: None,
         policy: CollaborationPolicy::Team {
             max_active_children: 8,
         },
@@ -468,8 +472,9 @@ fn fixture_with_grant(
         workspace_inode: 2,
         user_instruction_digest: None,
         instruction_sources: Vec::new(),
+        prompts: crate::provider::EffectivePrompts::default().pins(),
         launch_directory: String::new(),
-        include_digests: Vec::new(),
+        include_sources: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
         context_usage: None,

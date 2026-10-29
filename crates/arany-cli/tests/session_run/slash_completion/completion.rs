@@ -144,7 +144,14 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
             assert_eq!(view.runs[0].objective, draft);
             assert_eq!(view.runs[0].status, arany::RunStatus::Finished);
             assert_eq!(
-                view.runs[0].config.as_ref().unwrap().include_digests,
+                view.runs[0]
+                    .config
+                    .as_ref()
+                    .unwrap()
+                    .include_sources
+                    .iter()
+                    .map(|source| source.digest)
+                    .collect::<Vec<_>>(),
                 listings.map(|listing| <[u8; 32]>::from(sha2::Sha256::digest(listing.as_bytes())))
             );
             let events = store.load_session(id).await.unwrap();
@@ -305,22 +312,23 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        format!("Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
-          Choice 1: Slash menu: tabs (tabs|combined)\r\n\
-          Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
-          Choice 3: Goal provider calls: unlimited (number or unlimited)\r\n\
-          Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
-          Choice 5: Goal active time: unlimited (duration or unlimited)\r\n\
-          Choice 6: Default command timeout: 2 min (duration, e.g. 30s)\r\n\
-          Choice 7: Maximum command timeout: 10 min (duration, e.g. 5m)\r\n\
-          Choice 8: Build memory: 4.0 GB (size, e.g. 512MB)\r\n\
-          Choice 9: Build processes/threads: 256 (number)\r\n\
-          Choice 10: Build writable project: 1.0 GB (size, e.g. 1GB)\r\n\
-          Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)\r\n\
-          Choice 12: Copy on select: on (on|off)\r\n\
-          Choice 13: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
-          Choice 14: Build jobs: {build_jobs} (automatic or 1..cores)\r\n\
-          Choice 15: Build CPU cores: {build_cpu} (automatic or 1..cores; Linux quota)\r\n\
+        format!("Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
+          Choice 1: Slash menu: tabs (default) (tabs|combined)\r\n\
+          Choice 2: Chat view: fullscreen (default) (fullscreen|classic)\r\n\
+          Choice 3: Provider calls per task: unlimited (default) (number or unlimited)\r\n\
+          Choice 4: Tokens per task: unlimited (default) (number or unlimited)\r\n\
+          Choice 5: Active time per task: unlimited (default) (duration or unlimited)\r\n\
+          Choice 6: Default command timeout: 2 min (default) (duration, e.g. 30s)\r\n\
+          Choice 7: Maximum command timeout: 10 min (default) (duration, e.g. 5m)\r\n\
+          Choice 8: Build memory: 4.0 GB (default) (size, e.g. 512MB)\r\n\
+          Choice 9: Build processes/threads: 256 (default) (number)\r\n\
+          Choice 10: Build writable project: 1.0 GB (default) (size, e.g. 1GB)\r\n\
+          Choice 11: Build cache: 8.0 GB (default) (size, e.g. 8GB)\r\n\
+          Choice 12: Copy on select: on (default) (on|off)\r\n\
+          Choice 13: Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)\r\n\
+          Choice 14: Build jobs: {build_jobs} (default) (automatic or 1..cores)\r\n\
+          Choice 15: Build CPU cores: {build_cpu} (default) (automatic or 1..cores; Linux quota)\r\n\
+          Choice 16: Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)\r\n\
           Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
           Input:\r\n").as_bytes(),
     );
@@ -348,11 +356,11 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     for (value, row) in [
         (
             "5 5m",
-            "Choice 5: Goal active time: 5 min (duration or unlimited)",
+            "Choice 5: Active time per task: 5 min (duration or unlimited)",
         ),
         (
             "5 unlimited",
-            "Choice 5: Goal active time: unlimited (duration or unlimited)",
+            "Choice 5: Active time per task: unlimited (default) (duration or unlimited)",
         ),
         (
             "6 30s",
@@ -360,15 +368,21 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         ),
         (
             "6 2min",
-            "Choice 6: Default command timeout: 2 min (duration, e.g. 30s)",
+            "Choice 6: Default command timeout: 2 min (default) (duration, e.g. 30s)",
         ),
         (
             "8 512MB",
             "Choice 8: Build memory: 512.0 MB (size, e.g. 512MB)",
         ),
-        ("8 4GB", "Choice 8: Build memory: 4.0 GB (size, e.g. 512MB)"),
+        (
+            "8 4GB",
+            "Choice 8: Build memory: 4.0 GB (default) (size, e.g. 512MB)",
+        ),
         ("11 0B", "Choice 11: Build cache: 0 B (size, e.g. 8GB)"),
-        ("11 8GB", "Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)"),
+        (
+            "11 8GB",
+            "Choice 11: Build cache: 8.0 GB (default) (size, e.g. 8GB)",
+        ),
     ] {
         let changed_at = transcript.len();
         input
@@ -1797,10 +1811,11 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         3,
     );
     let record = |view: &str| {
-        String::from_utf8(saved_ui_preferences("tabs", view))
-            .unwrap()
-            .replace("shift_enter", "ctrl_enter")
-            .into_bytes()
+        ui_preferences(&[
+            ("completion", "tabs", "tabs"),
+            ("newline", "ctrl_enter", "shift_enter"),
+            ("view", view, "fullscreen"),
+        ])
     };
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -2288,7 +2303,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     }
     let profile_path = state.join("provider-profiles.json");
     let mut profile = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "profiles": [{
             "name": "synthetic", "protocol": "openai-responses",
             "endpoint": "http://127.0.0.1:9/responses", "model": "different-model",

@@ -26,6 +26,10 @@ pub use limits::{
 };
 mod openai;
 pub(crate) mod prompts;
+pub use prompts::{
+    EffectivePrompts, MAX_COMPACTION_PROMPT_OVERRIDE_BYTES, MAX_PROMPT_OVERRIDE_BYTES, PromptFile,
+    PromptOverrideError, PromptPin, PromptSource,
+};
 mod render;
 mod roster;
 pub use roster::{AdmittedRoster, NamedProviderRoutes, RosterSnapshot, valid_profile_name};
@@ -192,6 +196,9 @@ impl ProviderRecord {
     }
 }
 
+const IDLE_CONNECTIONS_PER_HOST: usize = 1;
+const IDLE_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
@@ -205,7 +212,8 @@ pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilde
         .retry(reqwest::retry::never())
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(timeout)
-        .pool_max_idle_per_host(0)
+        .pool_max_idle_per_host(IDLE_CONNECTIONS_PER_HOST)
+        .pool_idle_timeout(IDLE_CONNECTION_TIMEOUT)
 }
 
 async fn read_identity_body(
@@ -391,8 +399,9 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
 }
 
 pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
-pub(crate) const MAX_WINDOW_REQUEST_BYTES: usize = 1280 * 1024;
 const WINDOW_REQUEST_HEADROOM_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_WINDOW_REQUEST_BYTES: usize =
+    crate::session::MAX_WINDOW_CONTENT_BYTES + WINDOW_REQUEST_HEADROOM_BYTES;
 pub const MIN_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
 pub const MAX_CONTEXT_WINDOW_TOKENS: u32 = 2_000_000;
 
@@ -407,7 +416,8 @@ pub fn admitted_context_window(tokens: u64) -> Option<u32> {
 pub(crate) fn request_ceiling(context_window_tokens: Option<u32>) -> usize {
     match context_window_tokens {
         None => MAX_PROVIDER_REQUEST_BYTES,
-        Some(_) => (crate::session::content_ceiling(context_window_tokens)
+        // Calibration may raise the content ceiling during a Run, up to its maximum ratio.
+        Some(window) => (crate::session::max_calibrated_content_ceiling(window)
             + WINDOW_REQUEST_HEADROOM_BYTES)
             .min(MAX_WINDOW_REQUEST_BYTES),
     }
@@ -734,6 +744,7 @@ impl ProviderRequest {
         }
         if !role_fits
             || !root && (input.outcome_correction || input.previous_run_failure.is_some())
+            || input.final_call && input.role != PromptRole::Primary
             || self.phase == AgentPhase::ChildWork
                 && (self.collaboration != CollaborationPolicy::Single
                     || input.goal_context_facts.is_some())
@@ -892,6 +903,8 @@ pub struct CompactionRequest {
     pub previous_summary: Option<String>,
     pub items: Vec<CompactionItem>,
     pub max_output_tokens: u32,
+    /// Supplies the compaction working style; its authority block stays compiled.
+    pub prompts: EffectivePrompts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -883,6 +883,17 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         .await
         .expect("durable failed Run");
         assert_eq!(failed.run.status, RunStatus::Failed);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let prompts = state_path.join("prompts");
+            std::fs::create_dir(&prompts).expect("prompt directory");
+            std::fs::set_permissions(&prompts, std::fs::Permissions::from_mode(0o700))
+                .expect("prompt directory mode");
+            let file = prompts.join("compaction.md");
+            std::fs::write(&file, "Keep it short.").expect("compaction override");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                .expect("compaction override mode");
+        }
         let record = engine
             .compact_session(
                 &AdmittedProviders::single(provider.clone()),
@@ -892,9 +903,18 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
             .await
             .expect("compaction over failed Run");
         assert_eq!(record.covered_run_id, failed.run.id);
+        assert_eq!(record.prompt.source, arany::PromptSource::Override);
+        assert_eq!(
+            record.prompt.digest,
+            <[u8; 32]>::from(Sha256::digest(b"Keep it short."))
+        );
         {
             let requests = compact_requests.lock().expect("compaction request lock");
             assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0].prompts.text(arany::PromptFile::Compaction),
+                "Keep it short."
+            );
             assert!(matches!(
                 &requests[0].items[..],
                 [CompactionItem::Unanswered { user, status: UnansweredStatus::Failed }]

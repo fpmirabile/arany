@@ -90,13 +90,13 @@ pub(crate) fn before_versions(_run: &RunView, call: &ToolCall) -> Vec<(String, O
         ToolCall::Delete {
             path,
             expected_digest,
-        } => vec![(path.clone(), Some(expected_digest.clone()))],
+        } => vec![(path.clone(), expected_digest.clone())],
         ToolCall::Move {
             source,
             destination,
             expected_digest,
         } => vec![
-            (source.clone(), Some(expected_digest.clone())),
+            (source.clone(), expected_digest.clone()),
             (destination.clone(), None),
         ],
         ToolCall::Edit {
@@ -108,7 +108,7 @@ pub(crate) fn before_versions(_run: &RunView, call: &ToolCall) -> Vec<(String, O
             file_path: path,
             expected_digest,
             ..
-        } => vec![(path.clone(), Some(expected_digest.clone()))],
+        } => vec![(path.clone(), expected_digest.clone())],
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt { changeset, .. },
         } => changeset
@@ -160,7 +160,7 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
                 if source == path {
                     Some(None)
                 } else if destination == path {
-                    Some(Some(expected_digest.clone()))
+                    Some(expected_digest.clone())
                 } else {
                     None
                 }

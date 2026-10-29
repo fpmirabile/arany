@@ -554,6 +554,7 @@ mod tests {
                 run_id: run,
                 agent_run_id: agent,
                 record: crate::ProviderCallRecord {
+                    context_bytes: None,
                     phase: crate::AgentPhase::RootPlan,
                     disposition: ProviderCallDisposition::ToolRequested,
                     requested_tools: 2,
@@ -670,7 +671,7 @@ mod tests {
         for call in [
             ToolCall::Edit {
                 path: "src/main.rs".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
                 old: "before".into(),
                 new: "after".into(),
             },

@@ -2592,7 +2592,9 @@ done
             permissions: None,
             result_filter: None,
             unguarded_rules: None,
-            context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
+            context_limit_bytes: std::sync::Arc::new(
+                crate::tools::types::MAX_TOOL_CONTEXT_BYTES.into(),
+            ),
             queue_progress: None,
             active_action_gate: None,
             checkpoint_gate: None,

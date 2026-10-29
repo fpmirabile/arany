@@ -728,7 +728,7 @@ mod tests {
     fn agent_definition_multiedit_requires_an_editor_and_never_expands_its_grant() {
         let call = ToolCall::MultiEdit {
             file_path: "owned/a".into(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             edits: vec![crate::LiteralEdit {
                 old_string: "a".into(),
                 new_string: "b".into(),
@@ -1221,6 +1221,7 @@ mod tests {
         let glob = ToolCall::Glob {
             pattern: "**".into(),
             path: ".".into(),
+            offset: 0,
             limit: 100,
         };
         assert!(definition("tools: Glob\n").allows(&glob));

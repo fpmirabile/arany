@@ -750,7 +750,7 @@ fn bind_runtime_grants(
     if runtime_grants.is_empty() {
         return Ok(profile);
     }
-    let mut bytes = b"arany-runtime-profile-v3:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+    let mut bytes = b"arany-runtime-profile-v4:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
     if runtime_grants
         .iter()
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
@@ -2242,11 +2242,11 @@ pub(super) fn payload(
         .iter()
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
     {
-        command.env("CARGO_ENCODED_RUSTFLAGS", RUST_GUARD_FLAGS);
+        command
+            .env("CARGO_ENCODED_RUSTFLAGS", RUST_GUARD_FLAGS)
+            .env("CARGO_BUILD_JOBS", limits.build_jobs.to_string());
         if limits.resource_class == ToolResourceClass::Build {
-            command
-                .env("CARGO_NET_OFFLINE", "true")
-                .env("CARGO_BUILD_JOBS", limits.build_jobs.to_string());
+            command.env("CARGO_NET_OFFLINE", "true");
         }
     }
     if cfg!(target_os = "macos")
@@ -2556,7 +2556,7 @@ mod tests {
                 );
                 assert_eq!(
                     environment.get("CARGO_BUILD_JOBS").copied(),
-                    build.then_some("2")
+                    selected.then_some(if build { "2" } else { "1" })
                 );
                 for absent in [
                     "RUSTUP_HOME",
@@ -2575,7 +2575,7 @@ mod tests {
         }
         let profile = [7; 32];
         assert_eq!(bind_runtime_grants(profile, &[], 1).unwrap(), profile);
-        let mut expected = b"arany-runtime-profile-v3:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+        let mut expected = b"arany-runtime-profile-v4:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
         expected.extend_from_slice(b";selected-rust:build-offline=true;build-jobs=1;encoded-rustflags=--cfg\x1farany_guard;private-output-capture-v1");
         expected
             .extend_from_slice(&(super::super::spill::MAX_SPILL_RESULT_BYTES as u64).to_le_bytes());

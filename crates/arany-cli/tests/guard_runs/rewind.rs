@@ -76,7 +76,7 @@ async fn case(case: &str) {
         arany::test_support::scenario::plan_outcome(plan),
         tool_outcome(arany::ToolCall::MultiEdit {
             file_path: "notes/facts.txt".into(),
-            expected_digest: hash(b"original"),
+            expected_digest: Some(hash(b"original")),
             edits: vec![
                 arany::LiteralEdit {
                     old_string: "original".into(),

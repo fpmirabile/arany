@@ -678,12 +678,12 @@ async fn native_file_journey_helper() {
             limit: None,
         },
         ToolCall::Edit {
-            path: "src/main.txt".into(), expected_digest: hash(b"before\n"),
+            path: "src/main.txt".into(), expected_digest: Some(hash(b"before\n")),
             old: "before".into(), new: "first".into(),
         },
         ToolCall::MultiEdit {
             file_path: "src/main.txt".into(),
-            expected_digest: hash(b"first\n"),
+            expected_digest: Some(hash(b"first\n")),
             edits: vec![
                 arany::LiteralEdit { old_string: "first".into(), new_string: "middle".into(), replace_all: false },
                 arany::LiteralEdit { old_string: "middle".into(), new_string: "after".into(), replace_all: false },
@@ -747,7 +747,7 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Edit {
             path: "src/main.txt".into(),
-            expected_digest: hash(b"before\n"),
+            expected_digest: Some(hash(b"before\n")),
             old: "after".into(),
             new: "must not apply".into(),
         },

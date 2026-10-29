@@ -620,18 +620,18 @@ fn scoped_path_entries(
     if path.is_some_and(|path| path.len() > MAX_DISCOVERY_PATH_BYTES) {
         return Err(ToolError::Limit);
     }
-    let entries = path
-        .map(std::env::split_paths)
-        .into_iter()
-        .flatten()
-        .filter(|entry| {
-            entry
-                .components()
-                .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-                && (entry.starts_with(home)
-                    || prefixes.iter().any(|prefix| entry.starts_with(prefix)))
-        })
-        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    // Nested shells repeat PATH entries; the first occurrence keeps its search order.
+    for entry in path.map(std::env::split_paths).into_iter().flatten() {
+        if entry
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+            && (entry.starts_with(home) || prefixes.iter().any(|prefix| entry.starts_with(prefix)))
+            && !entries.contains(&entry)
+        {
+            entries.push(entry);
+        }
+    }
     if entries.len() > MAX_DISCOVERY_PATH_ENTRIES {
         return Err(ToolError::Limit);
     }
@@ -1499,6 +1499,17 @@ mod user_environment_tests {
         ));
         let at_bound = std::env::join_paths(&many[..MAX_DISCOVERY_PATH_ENTRIES]).unwrap();
         discover_user_programs(&home, Some(&at_bound), &[]).unwrap();
+        let repeated = std::env::join_paths(
+            many[..MAX_DISCOVERY_PATH_ENTRIES]
+                .iter()
+                .chain(&many[..MAX_DISCOVERY_PATH_ENTRIES]),
+        )
+        .unwrap();
+        assert_eq!(
+            scoped_path_entries(&home, Some(&repeated), &[]).unwrap(),
+            many[..MAX_DISCOVERY_PATH_ENTRIES],
+            "duplicates count once and keep first-occurrence order"
+        );
 
         let volta = directory(&home.join(".volta/bin"));
         assert!(matches!(

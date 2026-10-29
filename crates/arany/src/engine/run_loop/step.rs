@@ -622,7 +622,7 @@ impl RunLoop<'_> {
                 Ok(changeset) => changeset,
                 Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
-            let stop = (observation.stops_run()
+            let stop = (observation.stops_tool_step()
                 || step.requests.len() > 1 && observation.disposition == ToolDisposition::Limit
                 || self.controls.cancellation.is_cancelled())
             .then(|| {

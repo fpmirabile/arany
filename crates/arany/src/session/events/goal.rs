@@ -2,8 +2,8 @@ use super::*;
 use crate::tools::types::{MAX_COMMAND_TIMEOUT_MS, MIN_COMMAND_TIMEOUT_MS};
 use std::path::Path;
 
-pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
-pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
+pub const MAX_GOAL_PROVIDER_CALLS: u32 = 1024;
+pub const MAX_GOAL_ACTIVE_MS: u64 = 8 * 60 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
 pub const MAX_GOAL_PLAN_COMMANDS: usize = 8;
@@ -571,7 +571,7 @@ fn file_observation_digest(
             if source == path {
                 None
             } else if destination == path {
-                Some(expected_digest.clone())
+                expected_digest.clone()
             } else {
                 return None;
             }
@@ -722,7 +722,11 @@ impl GoalPlanContract {
         bounded(&self.mission, 2048)?;
         match &self.success_criterion {
             GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                if !call.valid() || !call.facts().goal_success {
+                // Committed intents carry a concrete digest, so an omitted one could never match.
+                if !call.valid()
+                    || !call.facts().goal_success
+                    || call.pending_precondition().is_some()
+                {
                     return Err(ReplayError::InvalidPayload);
                 }
             }

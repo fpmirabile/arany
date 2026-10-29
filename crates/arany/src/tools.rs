@@ -390,7 +390,8 @@ pub(crate) struct ToolRuntime {
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
-    context_limit_bytes: usize,
+    // Shared by clones within a Run; admission replaces it, so a raise never reaches another Run.
+    context_limit_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
     active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
     hook_stdin: Option<std::sync::Arc<str>>,
@@ -876,17 +877,26 @@ impl ToolRuntime {
         {
             return Err(ToolError::Limit);
         }
-        self.context_limit_bytes = limit;
+        self.context_limit_bytes = std::sync::Arc::new(limit.into());
         Ok(())
+    }
+
+    // Calibration only raises the allowance, within the hard window ceiling.
+    pub(crate) fn raise_context_limit(&self, limit: usize) {
+        self.context_limit_bytes.fetch_max(
+            limit.min(crate::session::MAX_WINDOW_CONTENT_BYTES),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn context_limit_bytes(&self) -> usize {
         self.context_limit_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn result_capacity(&self, overhead: usize, reserved: usize) -> Option<usize> {
         let capacity = self
-            .context_limit_bytes
+            .context_limit_bytes()
             .saturating_sub(overhead.saturating_add(reserved));
         (capacity >= 128).then_some(capacity)
     }
@@ -1189,7 +1199,7 @@ impl ToolRuntime {
             guard_executable,
             enforcement_digest,
             process_enforcement_digest,
-            context_limit_bytes: types::MAX_TOOL_CONTEXT_BYTES,
+            context_limit_bytes: std::sync::Arc::new(types::MAX_TOOL_CONTEXT_BYTES.into()),
             #[cfg(target_os = "macos")]
             system_programs,
         })
@@ -1210,7 +1220,7 @@ impl ToolRuntime {
 
     pub(crate) fn receipt(&self) -> ToolPolicyReceipt {
         let mut receipt = self.config.receipt();
-        receipt.max_context_bytes = self.context_limit_bytes as u32;
+        receipt.max_context_bytes = self.context_limit_bytes() as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
         receipt.unguarded_rules_digest = None;
         receipt.command_tools_digest = Some(self.command_tools.digest());
@@ -1360,7 +1370,7 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write && self.guard_available,
-            "file_tools": if self.guard_available { catalog::FILE_TOOLS } else { "" },
+            "file_tools": self.guard_available,
             "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
             "host_commands": true,
@@ -1480,11 +1490,7 @@ impl ToolRuntime {
         catalog["write"] = serde_json::json!(self.guard_available);
         catalog["skills"] = serde_json::json!([]);
         catalog["mcp_servers"] = serde_json::json!([]);
-        catalog["file_tools"] = serde_json::json!(if self.guard_available {
-            catalog::FILE_TOOLS
-        } else {
-            ""
-        });
+        catalog["file_tools"] = serde_json::json!(self.guard_available);
         catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
         if !grant.commands.is_empty() {
             catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
@@ -1513,7 +1519,7 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
-            "file_tools": if self.guard_available { catalog::RESEARCH_FILE_TOOLS } else { "" },
+            "file_tools": self.guard_available,
             "commands": [],
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|server| self.guard_available && server.url.is_none()).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
@@ -1737,14 +1743,19 @@ impl ToolRuntime {
                 .await
             }
             Site::Unguarded => self.run_unguarded(intent, cancellation).await,
-            Site::Guard => match guard::execute(self, &intent, cancellation).await {
-                Ok(observation) => observation,
-                Err(error) => {
-                    let cache_update =
-                        guard_error_cache_update(&intent.call, self.cache_state.is_some());
-                    uncertain_observation(intent, error, cache_update)
+            Site::Guard => {
+                if let Err(error) = crate::fault::guard_before_dispatch(&intent.call) {
+                    return unstarted_observation(intent, error);
                 }
-            },
+                match guard::execute(self, &intent, cancellation).await {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        let cache_update =
+                            guard_error_cache_update(&intent.call, self.cache_state.is_some());
+                        uncertain_observation(intent, error, cache_update)
+                    }
+                }
+            }
         }
     }
 

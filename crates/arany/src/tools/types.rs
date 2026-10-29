@@ -229,26 +229,6 @@ pub enum CacheUpdate {
 }
 
 impl CommandResult {
-    pub(crate) fn fit_migrated(&self, budget: usize) -> Option<String> {
-        if !self.changeset.valid()
-            || !self.selection.is_none_or(CommandSelectionSummary::valid)
-            || !self.network_valid()
-        {
-            return None;
-        }
-        let stdout = super::output::Window::from_recorded(&self.stdout, self.stdout_total)?;
-        let stderr = super::output::Window::from_recorded(&self.stderr, self.stderr_total)?;
-        super::output::fit_streams(&stdout, &stderr, budget, |stdout, stderr| {
-            serde_json::to_string(&Self {
-                stdout: stdout.into(),
-                stderr: stderr.into(),
-                ..self.clone()
-            })
-            .map_err(|_| super::ToolError::Operation)
-        })
-        .ok()
-    }
-
     fn network_valid(&self) -> bool {
         self.network_refusals.len() <= super::network::NETWORK_REFUSAL_ENTRIES
             && self.network_refusals.iter().all(NetworkRefusal::valid)
@@ -336,24 +316,28 @@ pub enum ToolCall {
     },
     Edit {
         path: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
         old: String,
         new: String,
     },
     #[serde(rename = "multiedit")]
     MultiEdit {
         file_path: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
         edits: Vec<LiteralEdit>,
     },
     Delete {
         path: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
     },
     Move {
         source: String,
         destination: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
     },
     Command {
         program: String,
@@ -459,7 +443,7 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
-    // Null or omitted path and limit normalize to their defaults before intent hashing.
+    // Null or omitted path, offset and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
         #[serde(
@@ -467,6 +451,12 @@ pub enum ToolCall {
             deserialize_with = "super::glob::path_or_default"
         )]
         path: String,
+        #[serde(
+            default,
+            skip_serializing_if = "is_zero",
+            deserialize_with = "or_default"
+        )]
+        offset: u32,
         #[serde(
             default = "super::glob::default_limit",
             deserialize_with = "super::glob::limit_or_default"
@@ -653,6 +643,63 @@ impl ToolCall {
             | Self::GhPrView { .. }
             | Self::WebFetch { .. }
             | Self::WebSearch { .. } => None,
+        }
+    }
+
+    // The file whose SHA-256 guards this typed mutation, with its digest slot.
+    pub(crate) fn precondition_mut(&mut self) -> Option<(&str, &mut Option<String>)> {
+        match self {
+            Self::Write {
+                path,
+                expected_digest,
+                ..
+            }
+            | Self::Edit {
+                path,
+                expected_digest,
+                ..
+            }
+            | Self::MultiEdit {
+                file_path: path,
+                expected_digest,
+                ..
+            }
+            | Self::Delete {
+                path,
+                expected_digest,
+            }
+            | Self::Move {
+                source: path,
+                expected_digest,
+                ..
+            } => Some((path, expected_digest)),
+            _ => None,
+        }
+    }
+
+    // An omitted digest that only the Engine may fill; Write without one creates a missing file instead.
+    pub(crate) fn pending_precondition(&self) -> Option<&str> {
+        match self {
+            Self::Edit {
+                path,
+                expected_digest: None,
+                ..
+            }
+            | Self::MultiEdit {
+                file_path: path,
+                expected_digest: None,
+                ..
+            }
+            | Self::Delete {
+                path,
+                expected_digest: None,
+            }
+            | Self::Move {
+                source: path,
+                expected_digest: None,
+                ..
+            } => Some(path),
+            _ => None,
         }
     }
 
@@ -866,6 +913,7 @@ impl EffectIntent {
             && self.workspace_inode > 0
             && self.use_count == 1
             && self.call.valid()
+            && self.call.pending_precondition().is_none()
             && (self.limits.network == NetworkGrant::Host) == self.call.is_host()
             && (self.limits.network != NetworkGrant::Proxy
                 || matches!(
@@ -1546,6 +1594,19 @@ impl ToolObservation {
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
+    // Only `unstarted_observation` pins a Guard stage, so a failed Guard-site result carrying one dispatched nothing.
+    pub(crate) fn guard_failed_before_dispatch(&self) -> bool {
+        self.disposition == ToolDisposition::Failed
+            && self.attestation.is_none()
+            && self.guard_stage.is_some()
+            && self.cache_update != CacheUpdate::Uncertain
+    }
+
+    // A Tool result returns a proven pre-dispatch Guard failure to the model like a denial; hook outcomes keep `stops_run`.
+    pub(crate) fn stops_tool_step(&self) -> bool {
+        self.stops_run() && !self.guard_failed_before_dispatch()
+    }
+
     pub(crate) fn stops_run(&self) -> bool {
         matches!(
             self.disposition,
@@ -1751,6 +1812,9 @@ impl ToolStep {
 pub(crate) const UNDISPATCHED_STEP_OUTPUT: &str =
     "not_dispatched: step stopped before this call; no operation was dispatched";
 pub(crate) const MAX_TOOL_REFUSAL_BYTES: usize = 2048;
+pub(crate) const CARGO_PARALLELISM_ERROR: &str =
+    "failed to determine the amount of parallelism available";
+pub(crate) const COMMAND_CARGO_JOBS_HINT: &str = "Cargo cannot read the CPU count in the Guard; set CARGO_BUILD_JOBS or retry with resource_class build.";
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
 fn skill_context_bytes(skill: &ToolObservation) -> usize {
@@ -1781,9 +1845,25 @@ impl ToolContext {
             && super::catalog::has_git_reads(&super::catalog::catalog_call_schemas(catalog));
     }
 
-    fn command_git_hint(&self, call: &ToolCall) -> Option<String> {
-        (self.git_reads && matches!(call, ToolCall::Command { .. }))
+    fn command_hint(&self, stderr: &str) -> Option<String> {
+        if self.git_reads && stderr.contains("not a git repository") {
+            Some(super::catalog::COMMAND_GIT_HINT.concat())
+        } else {
+            stderr
+                .contains(CARGO_PARALLELISM_ERROR)
+                .then(|| COMMAND_CARGO_JOBS_HINT.to_owned())
+        }
+    }
+
+    fn reserved_command_hint(&self) -> String {
+        let cargo = COMMAND_CARGO_JOBS_HINT.to_owned();
+        match self
+            .git_reads
             .then(|| super::catalog::COMMAND_GIT_HINT.concat())
+        {
+            Some(git) if json!(git).to_string().len() > json!(cargo).to_string().len() => git,
+            _ => cargo,
+        }
     }
 
     pub(crate) fn model_result(&self, step: &ToolStep, index: usize) -> Value {
@@ -1792,13 +1872,13 @@ impl ToolContext {
             cleared_model_result(observation)
         } else {
             let mut value = model_result(observation, step.feedback(index));
-            if let Some(hint) = self.command_git_hint(&observation.intent.call)
+            if matches!(observation.intent.call, ToolCall::Command { .. })
                 && value["output"]["exit_code"]
                     .as_i64()
                     .is_some_and(|code| code != 0)
-                && value["output"]["stderr"]
+                && let Some(hint) = value["output"]["stderr"]
                     .as_str()
-                    .is_some_and(|stderr| stderr.contains("not a git repository"))
+                    .and_then(|stderr| self.command_hint(stderr))
             {
                 value["hint"] = json!(hint);
                 if value.to_string().len() > MAX_TOOL_RESULT_BYTES {
@@ -1920,8 +2000,8 @@ impl ToolContext {
                         effect,
                         CacheUpdate::NotApplicable,
                     );
-                    if let Some(hint) = self.command_git_hint(call) {
-                        value["hint"] = json!(hint);
+                    if matches!(call, ToolCall::Command { .. }) {
+                        value["hint"] = json!(self.reserved_command_hint());
                     }
                     value.to_string().len() + RESULT_ENVELOPE_BYTES
                 })
@@ -1976,9 +2056,11 @@ pub(crate) fn cleared_model_result(observation: &ToolObservation) -> Value {
         "operation": "Result cleared to save context; call the Tool again for current content",
         "call": model_call(&observation.intent.call),
         "disposition": observation.disposition,
-        "effect": original["workspace_effect"],
         "cleared": true,
     });
+    if let Some(effect) = original.get("workspace_effect") {
+        value["effect"] = effect.clone();
+    }
     if observation.disposition == ToolDisposition::Uncertain
         || original["workspace_effect"] == "uncertain"
     {
@@ -2081,8 +2163,15 @@ fn model_projection(
     effect: &str,
     cache_update: CacheUpdate,
 ) -> Value {
-    let call = model_call(call);
-    json!({"call":call,"disposition":disposition,"output":output,"workspace_effect":effect,"cache_update":cache_update})
+    let mut value = json!({"call":model_call(call),"disposition":disposition,"output":output});
+    // Constant inspection fields cost tokens on every read; their absence means none.
+    if effect != "none" {
+        value["workspace_effect"] = json!(effect);
+    }
+    if cache_update != CacheUpdate::NotApplicable {
+        value["cache_update"] = json!(cache_update);
+    }
+    value
 }
 
 #[cfg(test)]
@@ -2120,13 +2209,13 @@ mod model_call_tests {
             },
             ToolCall::Edit {
                 path: "file".into(),
-                expected_digest: hex_digest(b"old"),
+                expected_digest: Some(hex_digest(b"old")),
                 old: "old".into(),
                 new: "new".into(),
             },
             ToolCall::MultiEdit {
                 file_path: "file".into(),
-                expected_digest: hex_digest(b"old"),
+                expected_digest: Some(hex_digest(b"old")),
                 edits: vec![LiteralEdit {
                     old_string: "old".into(),
                     new_string: "new".into(),

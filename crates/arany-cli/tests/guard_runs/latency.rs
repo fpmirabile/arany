@@ -44,7 +44,7 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
         },
         Operation::Edit => arany::ToolCall::Edit {
             path: path.into(),
-            expected_digest: hash(fixture_content(operation).as_bytes()),
+            expected_digest: Some(hash(fixture_content(operation).as_bytes())),
             old: "fn pick".into(),
             new: "fn done".into(),
         },
@@ -944,7 +944,7 @@ fn failing_fixture(
             unreachable!();
         };
         *path = "src/main.rs".into();
-        *expected_digest = "0".repeat(64);
+        *expected_digest = Some("0".repeat(64));
     }
     if invalid {
         let mut responses = provider.responses.lock().unwrap();

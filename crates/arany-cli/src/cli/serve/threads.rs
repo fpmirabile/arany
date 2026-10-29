@@ -38,6 +38,7 @@ pub(super) struct LoadedThread {
     pub policy: CollaborationPolicy,
     pub goal_budget: GoalBudget,
     pub resource_settings: ToolResourceSettings,
+    pub context_window: arany::ContextWindow,
 }
 
 impl Threads {
@@ -101,7 +102,7 @@ impl Threads {
             params
                 .collaboration
                 .as_ref()
-                .unwrap_or(&Collaboration::Auto),
+                .unwrap_or(&Collaboration::Single),
             params.max_active_children,
         ) {
             (Collaboration::Single, None) => CollaborationPolicy::Single,
@@ -160,7 +161,7 @@ impl Threads {
                     Fault::selection("Provider routing unavailable", Reason::ProviderUnavailable)
                 })?
         };
-        let (goal_budget, resource_settings) = execution_limits(state_dir)
+        let (goal_budget, resource_settings, context_window) = execution_limits(state_dir)
             .await
             .map_err(|_| Fault::engine(arany::EngineError::InvalidRequest))?;
         Ok(LoadedThread {
@@ -177,6 +178,7 @@ impl Threads {
             policy,
             goal_budget,
             resource_settings,
+            context_window,
         })
     }
 

@@ -1,6 +1,6 @@
 ---
 name: rust-clean-code
-description: Guide Rust implementation, refactoring, and review with contextual advice on ownership, errors, API design, testing, and concurrency. Explain meaningful Rust tradeoffs for a developer learning while building.
+description: Guide Rust implementation, refactoring, and review with contextual advice on ownership, errors, API design, testing, and concurrency, explaining the meaningful tradeoffs.
 license: MIT
 ---
 
@@ -49,27 +49,6 @@ Load only the reference the current decision needs:
 
 Check version-sensitive claims against the project's toolchain and the primary documentation linked at the end of each reference. External examples inform a decision; they do not authorize new dependencies, upgrades or wider work.
 
-## Arany specifics
-
-[AGENTS.md](../../../AGENTS.md) owns the rules; this skill only names where they bite Rust choices:
-
-- **Ponytail first**, then this skill: reuse existing code, std and installed dependencies before adding anything ([implementation priorities](../../../AGENTS.md#product-and-implementation-priorities)).
-- **Global rules** on comments, deep modules, explicit resource bounds, one current format and isolated `unsafe` ([global rules](../../../AGENTS.md#global-rules)) override any softer wording here. Comments default to none; the [comment rule](references/api-conventions.md#comments-and-documentation) allows at most one short `//` line and no doc-comment blocks in internal code. `// SAFETY:` is the one exception: a single line stating the obligations, spilling to a second `//` line only when a distinct obligation needs it.
-- **Tests** follow [agents/testing.md](../../../agents/testing.md): one owner per claim, deterministic, no wall sleeps or retries, paused Tokio time with explicit gates. Test-support guidance here defers to it.
-- **Verification** is targeted locally and complete in CI with Clippy `-D warnings` ([development guide](../../../docs/development.md#verification)). A new Clippy allowance needs `#[expect(..., reason = "...")]` and a review.
-- **Toolchain**: features available at `rust-version` in `Cargo.toml`, edition 2024 (`let` chains, `unsafe_op_in_unsafe_fn`, `unsafe` `set_var`). The pinned toolchain in `rust-toolchain.toml` is what CI runs.
-- **Platform**: Linux and macOS parity; OS-specific code sits behind a narrow adapter and fails closed when enforcement is unavailable.
-
-## Repository preference: teachable explanations
-
-This section is an Arany preference, not a Rust norm. The reader is learning Rust while building a real product; keep explanations respectful and tied to the change:
-
-- Explain an unfamiliar mechanism in one plain sentence when it decides the change: "borrowing lets this function read the value while the caller stays the owner".
-- For a significant choice, state what was chosen, why it fits here and when the alternative would fit. Distinguish a compiler requirement from a preference.
-- Keep the lesson in the conversation, not in source comments. Routine edits need no lesson.
-
-Example: "This takes `String` because it stores the name after returning. `&str` would force a copy or tie a lifetime to the caller. A function that only reads the name should borrow."
-
 ## Finish with evidence
 
-Run the project's checks for what you touched. A behavior-preserving refactor relies on existing tests; an intentional change is verified at its existing test boundary. Report what changed, the meaningful tradeoff, the checks actually run and their limits. Record a newly discovered project invariant at its owner per [AGENTS.md auto-learning](../../../AGENTS.md#auto-learning); keep reusable Rust advice here.
+Run the project's checks for what you touched. A behavior-preserving refactor relies on existing tests; an intentional change is verified at its existing test boundary. Report what changed, the meaningful tradeoff, the checks actually run and their limits. Record a newly discovered project invariant where the project keeps its rules; keep reusable Rust advice here.

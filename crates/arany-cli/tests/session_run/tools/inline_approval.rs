@@ -377,7 +377,7 @@ impl Driver {
             "APPROVAL_FINAL",
             "Action denied",
             "Run cancelled",
-            "Goal paused",
+            "Interrupted. Send a message to continue.",
             "Run failed",
         ];
         // Ctrl+D does not end active work, so wait until the Run has returned to the idle composer.

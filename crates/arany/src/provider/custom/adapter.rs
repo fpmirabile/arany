@@ -244,6 +244,7 @@ mod tests {
                         assistant: "Synthetic answer".into(),
                     })],
                     max_output_tokens,
+                    prompts: Default::default(),
                 };
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
                     assert!(matches!(

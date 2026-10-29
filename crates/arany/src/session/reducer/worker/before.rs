@@ -264,7 +264,11 @@ pub(super) fn check(
         .tools
         .iter()
         .chain(run.agents.iter().flat_map(|a| &a.tools))
-        .filter(|tool| tool.observation.as_ref().is_some_and(|o| o.stops_run()))
+        .filter(|tool| {
+            tool.observation
+                .as_ref()
+                .is_some_and(|o| o.stops_tool_step())
+        })
         .filter_map(|tool| tool.finished_sequence)
         .chain(run.workers.stop.as_ref().map(|(sequence, _)| *sequence))
         .min();

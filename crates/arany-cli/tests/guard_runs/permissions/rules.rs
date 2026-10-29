@@ -705,6 +705,7 @@ async fn guarded_discovery_replay() {
             arany::ToolCall::Glob {
                 pattern: "**".into(),
                 path: "notes".into(),
+                offset: 0,
                 limit: 100,
             },
             arany::ToolCall::Search {

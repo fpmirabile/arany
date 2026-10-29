@@ -30,8 +30,7 @@ pub(crate) mod exec;
 pub(crate) mod generate_schema;
 pub(crate) mod mcp;
 pub(crate) mod provider;
-#[cfg(test)]
-mod record_formats;
+pub(crate) mod record_formats;
 pub(crate) mod run_outcome;
 pub(crate) mod serve;
 pub(crate) mod storage;
@@ -91,6 +90,16 @@ pub(crate) fn archived_history_notice(path: &std::path::Path) -> String {
     ))
 }
 
+pub(crate) fn admit_headless_records(state_dir: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    for notice in record_formats::archive_incompatible(state_dir)? {
+        std::io::stderr()
+            .write_all(format!("warning: {notice}\n").as_bytes())
+            .map_err(|_| "record notice output failed".to_owned())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn admit_headless_history(state: &StateRoot) -> Result<(), String> {
     use arany::HistoryRecovery;
     let error = match state.archive_incompatible_history() {
@@ -116,9 +125,6 @@ pub(crate) fn admit_headless_history(state: &StateRoot) -> Result<(), String> {
         }
         HistoryRecovery::ArchiveConflict => {
             "an interrupted history archive no longer matches its files; inspect the archive folder in the state directory"
-        }
-        HistoryRecovery::MigrationConflict => {
-            "an interrupted history migration no longer matches its files; inspect the migrations folder in the state directory"
         }
         HistoryRecovery::Busy => "history is in use; close the other Arany and retry",
         HistoryRecovery::Changed => "history changed during recovery; retry",

@@ -2165,19 +2165,23 @@ pub(super) fn draw_settings_frame(
                 ),
             );
         }
-        let (footer, style) = match area.width {
-            0..50 => ("↑↓ ←→ Enter Esc", Style::default()),
-            _ => (
-                "1-9 or ↑↓ select · ←→ change · Enter saves · Esc",
-                Style::default(),
-            ),
-        };
+        // The widest footer that fits keeps Esc visible.
+        let footer = SETTINGS_FOOTERS
+            .into_iter()
+            .find(|footer| footer.width() <= usize::from(area.width))
+            .unwrap_or(SETTINGS_FOOTERS[SETTINGS_FOOTERS.len() - 1]);
         frame.render_widget(
-            Paragraph::new(safe_truncate(footer, usize::from(area.width))).style(style),
+            Paragraph::new(safe_truncate(footer, usize::from(area.width))),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
         );
     }
 }
+
+const SETTINGS_FOOTERS: [&str; 3] = [
+    "1-9 or ↑↓ select · ←→ change · Del default · Enter saves · Esc",
+    "↑↓ ←→ Del Enter Esc",
+    "↑↓ ←→ Enter Esc",
+];
 
 pub(super) fn usage_lines(page: &str, width: u16) -> Vec<String> {
     page.lines()

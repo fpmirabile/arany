@@ -71,14 +71,15 @@ async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths(
 
 #[tokio::test]
 async fn long_read_only_goal_compacts_only_an_acknowledged_run_prefix() {
-    compact_read_only_goal_prefix("Inspect the bounded file in pages").await;
+    compact_read_only_goal_prefix("Inspect the bounded file in pages", true).await;
 }
 
 #[tokio::test]
 async fn prose_objective_at_the_limit_compacts_its_read_only_goal_prefix() {
     // Prose escapes about 1x; the pinned objective and the first turn each carry it once.
     let prose = "Review the module and keep its contract. ".repeat(1_600);
-    compact_read_only_goal_prefix(&prose[..64 * 1024]).await;
+    // Pinned text shrinks the Tool allowance, so clearing would free less than its floor.
+    compact_read_only_goal_prefix(&prose[..64 * 1024], false).await;
 }
 
 #[tokio::test]
@@ -86,6 +87,7 @@ async fn user_and_project_guidance_stay_first_in_the_goal_compaction_input() {
     compact_with_guidance(
         "Inspect the bounded file in pages",
         ("User rule.", "Project rule."),
+        true,
     )
     .await;
 }
@@ -93,16 +95,24 @@ async fn user_and_project_guidance_stay_first_in_the_goal_compaction_input() {
 #[tokio::test]
 async fn escape_heavy_guidance_does_not_refuse_goal_compaction() {
     let hostile = "\"\\\u{1}".repeat(21_000);
-    compact_with_guidance("Inspect the bounded file in pages", (&hostile, &hostile)).await;
+    compact_with_guidance(
+        "Inspect the bounded file in pages",
+        (&hostile, &hostile),
+        false,
+    )
+    .await;
 }
 
-async fn compact_read_only_goal_prefix(objective: &str) {
-    compact_with_guidance(objective, ("", "")).await;
+async fn compact_read_only_goal_prefix(objective: &str, cleared: bool) {
+    compact_with_guidance(objective, ("", ""), cleared).await;
 }
 
-async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
+// `cleared`: whether clearing frees enough to run before the summary.
+async fn compact_with_guidance(objective: &str, (user, project): (&str, &str), cleared: bool) {
     let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = paged_read_workspace(temp.path());
+    // Clearing a page saves about a third of its step, enough to pass the clearing floor while
+    // the retained steps plus the next-turn reserve still overflow, so a summary follows.
+    let workspace = paged_read_workspace_with_lines(temp.path(), 96);
     let state_path = temp.path().join("state");
     let expected_paths: Vec<&str> = [(user, "user AGENTS.md"), (project, "AGENTS.md")]
         .into_iter()
@@ -235,7 +245,10 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
         let input: serde_json::Value =
             serde_json::from_str(&turn.assistant).expect("bounded compaction context JSON");
         let observations = input["tool_observations"].as_array().unwrap();
-        assert!(observations.iter().any(|result| result["cleared"] == true));
+        assert_eq!(
+            observations.iter().any(|result| result["cleared"] == true),
+            cleared
+        );
         assert!(
             observations
                 .iter()
@@ -1424,7 +1437,8 @@ async fn cancellation_after_clearing_refuses_compaction_before_reservation() {
     const GATE_TIMEOUT: Duration = Duration::from_secs(180);
     let _deadline = engine_support::deadline("cancelled compaction admission", GATE_TIMEOUT);
     let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = paged_read_workspace(temp.path());
+    // Longer pages reach the clearing threshold in fewer replayed steps.
+    let workspace = paged_read_workspace_with_lines(temp.path(), 512);
     let state_path = temp.path().join("state");
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let session = engine

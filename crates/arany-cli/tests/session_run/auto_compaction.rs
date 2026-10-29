@@ -371,7 +371,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     let profile = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "profiles": [{
             "name": "local",
             "protocol": "openai-responses",

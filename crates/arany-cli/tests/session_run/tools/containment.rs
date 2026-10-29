@@ -288,7 +288,11 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     );
                     assert_eq!(history["run_status"], "Failed");
                     assert_eq!(history["tool_records"][0]["disposition"], "failed");
-                    assert!(history["tool_records"][0]["cache_update"].is_string());
+                    assert!(history["tool_records"][0].get("cache_update").is_none());
+                    assert_eq!(
+                        history["tool_records"][0]["workspace_effect"],
+                        "not_confirmed"
+                    );
                     assert_eq!(request.input.objective, "Guard corpus");
                     assert_eq!(
                         request.input.tools.as_ref().unwrap().observations().len(),

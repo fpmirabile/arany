@@ -526,7 +526,7 @@ impl crate::store::StateRoot {
         digest: [u8; 32],
         disposition: Option<CheckDisposition>,
     ) -> Result<bool, StoreError> {
-        let _lease = super::migrate::lease_after_recovery(self, false)?;
+        let _lease = self.lock_history(false)?;
         let mut connection = super::journal::open_connection(self, true)?;
         let transaction = connection.transaction()?;
         evidence_matches(

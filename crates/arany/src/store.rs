@@ -14,14 +14,14 @@ pub(crate) mod check;
 mod evidence;
 use crate::journal::check::{CheckId, CheckOp, CheckView};
 pub use replay::{InspectedEvent, InspectionCause, InspectionFailure, SessionInspection};
+mod format;
 mod journal;
-mod migrate;
 mod replay;
 mod state;
 pub(crate) use evidence::{MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_NATIVE_EVIDENCE_ROWS};
+pub use format::{RECORD_FORMATS, RecordFormat};
 pub(crate) use journal::MAX_HOT_SESSION_PAYLOAD_BYTES;
 use journal::{HotSession, append, open_connection};
-pub use migrate::{RECORD_FORMATS, RecordFormat, RecordStep};
 pub(crate) use replay::{MAX_DISCOVERED_SESSIONS, MAX_LIST_SCAN_EVENTS, MAX_SESSION_EVENTS};
 use replay::{
     inspect_session, latest_session_id, list_session_page, load_session, resolve_open_view,
@@ -38,7 +38,7 @@ pub(crate) use state::{
     AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
     MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
 };
-pub use state::{ArchivedHistory, HistoryReset};
+pub use state::{ArchivedHistory, ArchivedRecords, HistoryReset};
 #[cfg(target_os = "linux")]
 pub(crate) use state::{
     CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES, validate_cache_path,
@@ -144,8 +144,6 @@ pub enum StoreError {
     InvalidHistory,
     #[error("an interrupted history archive no longer matches its files")]
     ArchiveConflict,
-    #[error("an interrupted history migration no longer matches its files")]
-    MigrationConflict,
     #[error("invalid compaction snapshot")]
     InvalidSnapshot,
     #[error("store thread closed unexpectedly")]
@@ -169,7 +167,6 @@ pub enum HistoryRecovery {
     InvalidStateDirectory,
     Inaccessible,
     ArchiveConflict,
-    MigrationConflict,
     Busy,
     Changed,
     StorageFull,
@@ -200,7 +197,6 @@ impl StoreError {
             Self::InvalidStateDirectory => HistoryRecovery::InvalidStateDirectory,
             Self::StateNotPrivate | Self::Io(_) => HistoryRecovery::Inaccessible,
             Self::ArchiveConflict => HistoryRecovery::ArchiveConflict,
-            Self::MigrationConflict => HistoryRecovery::MigrationConflict,
             Self::HistoryBusy => HistoryRecovery::Busy,
             Self::HistoryChanged => HistoryRecovery::Changed,
             Self::StorageFull => HistoryRecovery::StorageFull,
@@ -374,7 +370,7 @@ impl Store {
         let thread = std::thread::Builder::new()
             .name("arany-sqlite".into())
             .spawn(move || {
-                let _history = match migrate::lease_after_recovery(&root, !read_only) {
+                let _history = match root.lock_history(false) {
                     Ok(lock) => lock,
                     Err(error) => {
                         let _ = ready_sender.send(Err(error));

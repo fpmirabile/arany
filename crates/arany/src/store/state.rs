@@ -1,18 +1,16 @@
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, RecordFormat, StoreError};
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 mod archive;
-pub use archive::ArchivedHistory;
 #[cfg(test)]
 pub(super) use archive::FAIL_AT;
-pub(super) use archive::{
-    Identity, archive_name, identity_of, private_subdirectory, publish, rename, step, sync,
-    valid_archive_name,
-};
+pub(super) use archive::identity_of;
+pub use archive::{ArchivedHistory, ArchivedRecords};
+use archive::{private_subdirectory, rename, sync};
 mod build_cache;
 #[cfg(target_os = "linux")]
 pub(crate) use build_cache::{
@@ -39,9 +37,9 @@ pub use inventory::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,
 };
-pub(crate) use lock::{HistoryLock, ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
 #[cfg(unix)]
 pub(crate) use lock::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
+pub(crate) use lock::{ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
@@ -93,7 +91,7 @@ impl HistoryReset {
     }
 }
 
-// One list generates both the enum and `ALL`, so no variant can be left out of migration.
+// One list generates both the enum and `ALL`, so no variant can be left out of the format checks.
 macro_rules! record_kinds {
     ($($kind:ident),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,7 +125,7 @@ record_kinds!(
 );
 
 impl RecordKind {
-    // User-authored kinds are read-only to the harness; permissions.json changes only through the typed settings edit, and a record migration may replace any.
+    // User-authored kinds are read-only to the harness; permissions.json changes only through the typed settings edit.
     const fn spec(self) -> (&'static str, &'static str, usize, bool) {
         match self {
             Self::ToolsConfig => ("tools.json", "tools.pending", 64 * 1024, false),
@@ -261,11 +259,6 @@ impl Record<'_> {
         if !self.kind.spec().3 {
             return Err(StoreError::ReadOnly);
         }
-        self.replace_upgraded(record)
-    }
-
-    // Also replaces a user-authored record, so only a record migration calls it.
-    pub(super) fn replace_upgraded(&self, record: &[u8]) -> Result<(), StoreError> {
         let (name, pending, limit, _) = self.kind.spec();
         self.root
             .replace_private_record(name, pending, record, limit)
@@ -374,6 +367,21 @@ impl StateRoot {
 
     pub fn open_existing(path: &Path) -> Result<Self, StoreError> {
         Self::open(path, false)
+    }
+
+    // A missing directory is absent; an existing one without the database is a new root.
+    pub fn open_optional(path: &Path) -> Result<Option<Self>, StoreError> {
+        match Self::open_existing(path) {
+            Ok(root) => Ok(Some(root)),
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(path) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Ok(metadata) if metadata.is_dir() => Self::admit(path).map(Some),
+                    _ => Err(StoreError::Io(error)),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn readmit(&self) -> Result<(), StoreError> {
@@ -569,6 +577,52 @@ impl StateRoot {
             return Err(StoreError::StateNotPrivate);
         }
         Ok(Some(record))
+    }
+
+    // Reads at most `limit + 1` bytes so the caller can name an oversized file.
+    pub(crate) fn read_user_file(
+        &self,
+        directory: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        #[cfg(unix)]
+        {
+            let unsafe_link = |error: io::Error| match error.raw_os_error() {
+                Some(code) if code == nix::libc::ELOOP || code == nix::libc::ENOTDIR => {
+                    StoreError::StateNotPrivate
+                }
+                _ => StoreError::Io(error),
+            };
+            let dir = match self.dir.open_dir_nofollow(directory) {
+                Ok(dir) => dir,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(unsafe_link(error)),
+            };
+            crate::private_fs::check_directory(&dir, true)?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            options.follow(FollowSymlinks::No);
+            nonblocking(&mut options);
+            let mut file = match dir.open_with(name, &options) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(unsafe_link(error)),
+            };
+            crate::private_fs::check_acl(&file, true)?;
+            // Size is the caller's refusal, so only ownership, mode and kind are checked here.
+            check_private_metadata(&file.metadata()?, usize::MAX)?;
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take(limit as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            Ok(Some(bytes))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (directory, name, limit);
+            Err(StoreError::InvalidStateDirectory)
+        }
     }
 
     fn open_private_record(
@@ -779,6 +833,36 @@ mod tests {
         let metadata = std::fs::metadata(&path).expect("test account root");
         assert_eq!(metadata.mode() & 0o777, 0o700);
         assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+    }
+
+    #[test]
+    fn optional_open_skips_only_a_missing_directory_and_admits_an_empty_one() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let missing = temp.path().join("missing/state");
+        assert!(StateRoot::open_optional(&missing).unwrap().is_none());
+        assert!(!temp.path().join("missing").exists());
+        let empty = temp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(empty.join("ui-preferences.json"), b"{}").unwrap();
+        std::fs::set_permissions(
+            empty.join("ui-preferences.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let root = StateRoot::open_optional(&empty)
+            .unwrap()
+            .expect("admitted root");
+        assert!(empty.join(DATABASE_FILE).is_file());
+        assert_eq!(
+            root.record(crate::store::RecordKind::UiPreferences)
+                .read()
+                .unwrap(),
+            Some(b"{}".to_vec())
+        );
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(StateRoot::open_optional(&file).is_err());
     }
 
     #[test]

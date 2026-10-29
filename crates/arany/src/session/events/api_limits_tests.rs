@@ -6,7 +6,7 @@ fn api_limits_preserve_default_bytes_and_validate_all_five_event_families() {
     let actor: AgentRunId = "01900000-0000-7000-8000-000000000002".parse().unwrap();
     let goal = "01900000-0000-7000-8000-000000000003";
     let identity = r#"{"profile":"openai","model":"model-a","effort":null,"provenance":{"kind":"native","saved_api_account_id":null},"limits":{"concurrency":1,"max_output_tokens":4096,"output_token_bound":"provider_enforced","deadline":{"secs":120,"nanos":0}}}"#;
-    let call = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":null,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
+    let call = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":null,"input_tokens":null,"context_bytes":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
     let retry =
         r#"{"role":"primary","call_index":1,"attempt":1,"cause":"rate_limited","delay_ms":2000}"#;
     let fallback = format!(
@@ -14,7 +14,7 @@ fn api_limits_preserve_default_bytes_and_validate_all_five_event_families() {
         identity.replace("model-a", "model-b")
     );
     let compaction = format!(
-        r#"{{"covered_run_id":"{run}","covered_sequence":1,"source_digest":{},"provider":"openai","model":"model-a","prompt_version":1,"schema_version":1,"compiler_version":5,"source_bytes":4,"source_tokens_estimate":1,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"response_id":null,"wire_provenance":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","status":{{"status":"failed","reason":"provider_unavailable"}}}}"#,
+        r#"{{"covered_run_id":"{run}","covered_sequence":1,"source_digest":{},"provider":"openai","model":"model-a","prompt_version":1,"prompt":{{"file":"compaction","source":"default","digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]}},"schema_version":1,"compiler_version":5,"source_bytes":4,"source_tokens_estimate":1,"input_tokens":null,"output_tokens":null,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"response_id":null,"wire_provenance":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","status":{{"status":"failed","reason":"provider_unavailable"}}}}"#,
         serde_json::to_string(&[1_u8; 32]).unwrap()
     );
     let fixtures = [

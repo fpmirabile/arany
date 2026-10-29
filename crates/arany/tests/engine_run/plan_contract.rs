@@ -177,6 +177,78 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
 }
 
 #[tokio::test]
+async fn only_autonomous_goals_and_explicit_teams_are_offered_the_plan() {
+    for (case, autonomous, policy, offered) in [
+        (
+            "plain chat",
+            false,
+            arany::CollaborationPolicy::Single,
+            false,
+        ),
+        (
+            "auto policy",
+            false,
+            arany::CollaborationPolicy::Auto {
+                max_active_children: 1,
+            },
+            false,
+        ),
+        (
+            "explicit team",
+            false,
+            arany::CollaborationPolicy::Team {
+                max_active_children: 1,
+            },
+            true,
+        ),
+        (
+            "autonomous Goal",
+            true,
+            arany::CollaborationPolicy::Single,
+            true,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let team = matches!(policy, arany::CollaborationPolicy::Team { .. });
+        // An explicit team's root must delegate before answering, so its answers are refused.
+        let answers = if team { 3 } else { 1 };
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..answers).map(|_| finish_with("done")).collect(),
+        ));
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let mut input = if autonomous {
+            autonomous_input(&workspace)
+        } else {
+            request(&workspace, "Answer directly")
+        };
+        input.include_paths.clear();
+        input.policy = policy;
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect(case);
+        assert_eq!(
+            outcome.run.failure,
+            team.then_some(arany::RunFailure::RefusalLimit),
+            "{case}"
+        );
+        engine.close().await.expect("engine shutdown");
+        let requests = provider.requests.lock().expect("Provider requests");
+        assert_eq!(requests.len(), answers, "{case}");
+        assert_eq!(requests[0].input.plan_offered, offered, "{case}");
+    }
+}
+
+#[tokio::test]
 async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

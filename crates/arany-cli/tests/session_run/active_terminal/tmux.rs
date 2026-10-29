@@ -1941,7 +1941,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     });
     release_sender.send(()).expect("release held primary call");
     wait_screen(&server, "goal pause notice missing", |screen| {
-        String::from_utf8_lossy(screen).contains("Goal paused; use /goal resume to continue.")
+        String::from_utf8_lossy(screen).contains("Interrupted. Send a message to continue.")
     });
     wait_screen(&server, "idle prompt after pause", |screen| {
         idle_composer(screen) && !status_row(screen).contains("Pausing at the next step")

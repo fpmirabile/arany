@@ -327,6 +327,10 @@ pub fn render_goal_provider_attempts<'a>(
     (!notices.is_empty()).then(|| notices.join("\n"))
 }
 
+const REFUSAL_DETAIL_UNAVAILABLE: &str = " Committed refused reservation detail is unavailable.";
+const UNREAD_TOOL_REQUEST: &str =
+    "The model requested another Tool, but no Provider call remained to read its result.";
+
 pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String> {
     let Some(goal) = view.budget_stop_goal(run) else {
         return run_feedback(run);
@@ -349,30 +353,8 @@ pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String>
             }
         }
     } else {
-        let budget = goal.effective_budget();
-        let (dimension, used, limit) = match view.budget_stop_limit(run)? {
-            arany::GoalLimit::Calls => (
-                "Provider calls",
-                goal.provider_calls.to_string(),
-                budget.max_provider_calls.map(|calls| calls.to_string()),
-            ),
-            arany::GoalLimit::Tokens => (
-                "tokens",
-                goal.known_tokens.to_string(),
-                budget.max_tokens.map(|tokens| tokens.to_string()),
-            ),
-            arany::GoalLimit::ActiveTime => (
-                "active time",
-                format_duration(goal.active_ms),
-                budget.max_active_ms.map(format_duration),
-            ),
-            arany::GoalLimit::Runs => (
-                "Runs",
-                goal.run_ids.len().to_string(),
-                Some(budget.max_runs.to_string()),
-            ),
-        };
-        text.push_str(&format!("Run stopped at a budget boundary: {dimension}; committed usage {used}, pinned limit {}. Committed refused reservation detail is unavailable.", limit?));
+        let (_, dimension, used, limit) = budget_stop_usage(view, run, goal)?;
+        text.push_str(&format!("Run stopped at a budget boundary: {dimension}; committed usage {used}, pinned limit {}.{REFUSAL_DETAIL_UNAVAILABLE}", limit?));
         if goal.token_usage_unknown {
             text.push_str(" Token usage is unknown.");
         }
@@ -380,12 +362,90 @@ pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String>
             text.push_str(" Active time includes conservative crash charges.");
         }
     }
+    if unread_tool_request(run) {
+        text.push('\n');
+        text.push_str(UNREAD_TOOL_REQUEST);
+    }
     text.push_str(if run.assistant_message.is_some() {
         "\nThe committed answer is preserved."
     } else {
         "\nNo answer was committed; completed actions remain in the Session."
     });
     Some(text)
+}
+
+// Attached-chat copy: a plain Goal's budget stop reads as a chat turn limit, and `show` keeps the full projection.
+pub fn interactive_run_feedback(view: &SessionView, run: &RunView) -> Option<String> {
+    let plain_stop = view
+        .budget_stop_goal(run)
+        .filter(|goal| !goal.autonomous)
+        .and_then(|goal| budget_stop_usage(view, run, goal));
+    let Some((limit, dimension, used, _)) =
+        plain_stop.filter(|(limit, ..)| *limit != arany::GoalLimit::Runs)
+    else {
+        return session_run_feedback(view, run)
+            .map(|text| text.replace(REFUSAL_DETAIL_UNAVAILABLE, ""));
+    };
+    let used = match limit {
+        arany::GoalLimit::ActiveTime => format!("{used} of active time"),
+        arany::GoalLimit::Calls | arany::GoalLimit::Tokens | arany::GoalLimit::Runs => {
+            format!("{used} {dimension}")
+        }
+    };
+    let stop =
+        format!("Stopped after {used} (limit set in /settings). Send a message to continue.");
+    Some(if unread_tool_request(run) {
+        format!("{UNREAD_TOOL_REQUEST} {stop}")
+    } else {
+        stop
+    })
+}
+
+fn budget_stop_usage(
+    view: &SessionView,
+    run: &RunView,
+    goal: &arany::GoalView,
+) -> Option<(arany::GoalLimit, &'static str, String, Option<String>)> {
+    let budget = goal.effective_budget();
+    let limit = view.budget_stop_limit(run)?;
+    let (dimension, used, ceiling) = match limit {
+        arany::GoalLimit::Calls => (
+            "Provider calls",
+            goal.provider_calls.to_string(),
+            budget.max_provider_calls.map(|calls| calls.to_string()),
+        ),
+        arany::GoalLimit::Tokens => (
+            "tokens",
+            goal.known_tokens.to_string(),
+            budget.max_tokens.map(|tokens| tokens.to_string()),
+        ),
+        arany::GoalLimit::ActiveTime => (
+            "active time",
+            format_duration(goal.active_ms),
+            budget.max_active_ms.map(format_duration),
+        ),
+        arany::GoalLimit::Runs => (
+            "Runs",
+            goal.run_ids.len().to_string(),
+            Some(budget.max_runs.to_string()),
+        ),
+    };
+    Some((limit, dimension, used, ceiling))
+}
+
+// A decoded proposal refused only by budget admission commits as a null-reason invalid response with usage.
+fn unread_tool_request(run: &RunView) -> bool {
+    run.failure == Some(arany::RunFailure::BudgetExhausted)
+        && run
+            .agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Primary)
+            .and_then(|agent| agent.provider_calls.last())
+            .is_some_and(|call| {
+                call.disposition == ProviderCallDisposition::InvalidResponse
+                    && call.failure_reason.is_none()
+                    && call.output_tokens.is_some()
+            })
 }
 
 pub fn budget_refusal_feedback(view: &SessionView, goal: Option<GoalId>) -> Option<String> {
@@ -581,6 +641,9 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
         }
         Cause::InvalidArguments => {
             "Arany refused invalid operation arguments. The proposed action did not run."
+        }
+        Cause::DigestUnknown => {
+            "Arany refused an edit of a file not read in this Run. The proposed action did not run."
         }
         Cause::Phase => {
             "Arany refused an operation unavailable in this phase. The proposed action did not run."
@@ -1475,6 +1538,60 @@ mod goal_status_tests {
         assert_eq!(
             session_run_feedback(&view, &view.runs[0]).unwrap(),
             "Arany status: Goal budget refused Provider: Provider calls; exhausted; used at refusal 64, pinned limit 64; requested 1; required minimum 1; final settled usage 64.\nThe committed answer is preserved."
+        );
+    }
+
+    #[test]
+    fn interactive_budget_stop_reads_as_a_chat_limit_and_names_an_unread_tool_request() {
+        let mut view = session_with_goal(false);
+        let mut run = crate::presentation::team_view().runs.remove(0);
+        run.status = RunStatus::Failed;
+        run.failure = Some(arany::RunFailure::BudgetExhausted);
+        run.assistant_message = None;
+        let goal = &mut view.goals[0];
+        goal.run_ids = vec![run.id];
+        goal.provider_calls = 64;
+        goal.status = GoalStatus::Failed;
+        goal.budget_closed = true;
+        view.runs = vec![run];
+        assert_eq!(
+            interactive_run_feedback(&view, &view.runs[0]).unwrap(),
+            "Stopped after 64 Provider calls (limit set in /settings). Send a message to continue."
+        );
+        view.runs[0].agents[0].provider_calls = vec![ProviderCallRecord {
+            context_bytes: None,
+            rate_limits: None,
+            delegation: None,
+            phase: arany::AgentPhase::RootPlan,
+            disposition: ProviderCallDisposition::InvalidResponse,
+            response_id: None,
+            input_tokens: Some(100),
+            output_tokens: Some(36),
+            wire_provenance: None,
+            refusal: None,
+            failure_reason: None,
+            requested_tools: 0,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }];
+        assert_eq!(
+            interactive_run_feedback(&view, &view.runs[0]).unwrap(),
+            format!(
+                "{UNREAD_TOOL_REQUEST} Stopped after 64 Provider calls (limit set in /settings). Send a message to continue."
+            )
+        );
+        let recorded = session_run_feedback(&view, &view.runs[0]).unwrap();
+        assert!(
+            recorded.contains(REFUSAL_DETAIL_UNAVAILABLE.trim()),
+            "{recorded}"
+        );
+        assert!(recorded.contains(UNREAD_TOOL_REQUEST), "{recorded}");
+        view.goals[0].autonomous = true;
+        let autonomous = interactive_run_feedback(&view, &view.runs[0]).unwrap();
+        assert!(autonomous.starts_with("Arany status: Run stopped at a budget boundary"));
+        assert!(
+            !autonomous.contains(REFUSAL_DETAIL_UNAVAILABLE.trim()),
+            "{autonomous}"
         );
     }
 

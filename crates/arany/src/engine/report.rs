@@ -1,5 +1,7 @@
 use crate::session::{GoalReport, RunView};
 
+const FINAL_CALL_FACT: &str = "Provider-call budget reached; the final call was answer-only.";
+
 pub(super) fn goal_report(
     view: &crate::session::SessionView,
     run: &RunView,
@@ -22,45 +24,7 @@ pub(super) fn goal_report(
         cached_input_tokens: goal.known_cached_tokens,
     };
     let mut omitted_facts = false;
-    if let Some(fact) = budget_refusal_summary(goal) {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &fact,
-            &mut omitted_facts,
-        );
-    }
-    let uncertain_calls = goal.unobserved_provider_calls.len();
-    if uncertain_calls > 0 {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &format!(
-                "{} reserved Provider call(s) have no committed outcome; their usage remains unknown and charged.",
-                uncertain_calls
-            ),
-            &mut omitted_facts,
-        );
-    }
-    if goal.token_usage_unknown {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "Provider token usage is incomplete.",
-            &mut omitted_facts,
-        );
-    }
-    if goal.uncertain_active_ms > 0 {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &format!(
-                "{} ms of active time were conservatively charged after interruption.",
-                goal.uncertain_active_ms
-            ),
-            &mut omitted_facts,
-        );
-    }
+    push_usage_facts(&mut report, run, goal, &mut omitted_facts);
     if goal.budget_refusal.is_some() {
         push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
     }
@@ -150,6 +114,59 @@ pub(super) fn goal_report(
         append_goal_report_omission(&mut report, protected_unresolved_count);
     }
     report
+}
+
+// Budget and usage facts lead the unresolved section so a full report cannot hide them.
+fn push_usage_facts(
+    report: &mut GoalReport,
+    run: &RunView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
+    if let Some(fact) = budget_refusal_summary(goal) {
+        push_goal_report_item(report, GoalReportSection::Unresolved, &fact, omitted_facts);
+    }
+    if run.status == crate::session::RunStatus::Finished
+        && goal.effective_budget().max_provider_calls == Some(goal.provider_calls)
+    {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            FINAL_CALL_FACT,
+            omitted_facts,
+        );
+    }
+    let uncertain_calls = goal.unobserved_provider_calls.len();
+    if uncertain_calls > 0 {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            &format!(
+                "{} reserved Provider call(s) have no committed outcome; their usage remains unknown and charged.",
+                uncertain_calls
+            ),
+            omitted_facts,
+        );
+    }
+    if goal.token_usage_unknown {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            "Provider token usage is incomplete.",
+            omitted_facts,
+        );
+    }
+    if goal.uncertain_active_ms > 0 {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            &format!(
+                "{} ms of active time were conservatively charged after interruption.",
+                goal.uncertain_active_ms
+            ),
+            omitted_facts,
+        );
+    }
 }
 
 fn fit_report_summary(report: &mut GoalReport, raw_summary: &str, omitted_facts: &mut bool) {

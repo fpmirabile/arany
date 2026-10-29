@@ -1135,7 +1135,7 @@ mod tests {
                 if restore {
                     tool.intent.call = ToolCall::Delete {
                         path: result_path(&observation.intent.call),
-                        expected_digest: result.before.as_ref().unwrap().sha256.clone(),
+                        expected_digest: Some(result.before.as_ref().unwrap().sha256.clone()),
                     };
                     observation.output =
                         serde_json::to_string(&crate::session::rewind::RemovedFileResult {

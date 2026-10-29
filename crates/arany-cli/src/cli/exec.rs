@@ -48,11 +48,10 @@ pub(crate) struct ExecArgs {
     pub workspace: Option<PathBuf>,
     #[arg(
         long,
-        required_unless_present = "profile",
-        help = "openai, anthropic, chatgpt, or custom:NAME"
+        help = "openai, anthropic, chatgpt, or custom:NAME; defaults to the saved selection"
     )]
     pub provider: Option<ProviderArg>,
-    #[arg(long, required_unless_present = "profile")]
+    #[arg(long)]
     pub model: Option<String>,
     #[arg(long)]
     pub profile: Option<String>,
@@ -81,7 +80,7 @@ pub(crate) struct ExecArgs {
     pub goal: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputArg::Text)]
     pub output: OutputArg,
-    #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
+    #[arg(long, value_enum, default_value_t = CollaborationArg::Single)]
     pub collaboration: CollaborationArg,
     #[arg(long)]
     pub max_active_children: Option<u8>,
@@ -98,7 +97,9 @@ fn apply_saved_limits(
     goal: &mut GoalRequest,
     budget: GoalBudget,
     resource_settings: arany::ToolResourceSettings,
+    context_window: arany::ContextWindow,
 ) {
+    goal.context_window = context_window;
     if goal.continues.is_some() {
         return;
     }
@@ -188,6 +189,9 @@ impl ExecArgs {
 }
 
 pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<CommandOutput, String> {
+    let (_, state_dir) = super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+        .map_err(str::to_owned)?;
+    super::admit_headless_records(&state_dir)?;
     if let Some(name) = &args.profile {
         let (workspace, state_dir) =
             super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
@@ -225,6 +229,7 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
         .map_err(|_| "state store unavailable")?;
         return run_on_engine(args, admission, providers, engine, Some(signals)).await;
     }
+    apply_saved_selection(&mut args)?;
     let admission = args.admit().map_err(str::to_owned)?;
     let provider = super::provider::select::select_env_provider(
         args.provider.as_ref().ok_or("--provider is required")?,
@@ -236,6 +241,32 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
     .await
     .map_err(|error| error.to_string())?;
     run_with_provider(args, admission, provider, telemetry).await
+}
+
+const MISSING_SELECTION: &str = "no saved model selection; pass --provider and --model, or choose a model with /model in attached mode";
+
+// Like attached mode, exec without --provider uses the saved selection and a missing effort its saved one.
+fn apply_saved_selection(args: &mut ExecArgs) -> Result<(), String> {
+    let (workspace, _) = super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+        .map_err(str::to_owned)?;
+    if args.provider.is_none() {
+        if args.model.is_some() {
+            return Err("--provider is required with --model".into());
+        }
+        let saved = super::attached::models::last_saved_defaults(&workspace)?
+            .and_then(|defaults| Some((defaults.provider?, defaults.model?, defaults.effort)))
+            .ok_or(MISSING_SELECTION)?;
+        args.provider = Some(ProviderArg::from_str(&saved.0).map_err(str::to_owned)?);
+        args.model = Some(saved.1);
+        args.effort = args.effort.or(saved.2);
+    }
+    if args.effort.is_none()
+        && let (Some(provider), Some(model)) = (&args.provider, &args.model)
+    {
+        args.effort =
+            super::attached::models::saved_effort(&workspace, &provider.profile_label(), model)?;
+    }
+    Ok(())
 }
 
 async fn run_with_provider(
@@ -348,11 +379,11 @@ async fn submit_and_wait(
     } else {
         ToolGrant::None
     };
-    let (goal_budget, resource_settings) =
+    let (goal_budget, resource_settings, context_window) =
         crate::cli::attached::controls::execution_limits(&admission.state_dir).await?;
     let (objective, skill) = invoked_skill(&args, &admission)?;
     let mut goal = admission.goal;
-    apply_saved_limits(&mut goal, goal_budget, resource_settings);
+    apply_saved_limits(&mut goal, goal_budget, resource_settings, context_window);
     let resumed_goal = goal.id;
     let request = RunRequest {
         skill,
@@ -1299,15 +1330,27 @@ mod tests {
             max_runs: 1,
             ..GoalBudget::default()
         };
+        let window = arany::ContextWindow::Tokens(500_000);
         apply_saved_limits(
             &mut continued,
             saved,
             arany::ToolResourceSettings::default(),
+            window,
         );
         assert_eq!(continued.budget, Some(GoalBudget::default()));
+        assert_eq!(
+            continued.context_window, window,
+            "every Run uses the saved window"
+        );
         let mut fresh = GoalRequest::default();
-        apply_saved_limits(&mut fresh, saved, arany::ToolResourceSettings::default());
+        apply_saved_limits(
+            &mut fresh,
+            saved,
+            arany::ToolResourceSettings::default(),
+            window,
+        );
         assert_eq!(fresh.budget, Some(saved));
+        assert_eq!(fresh.context_window, window);
         assert!(parse(&["--continue-goal", &goal_id]).is_err());
         assert!(
             parse(&[
@@ -1413,10 +1456,8 @@ mod tests {
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
                 .expect("private config");
             if finite {
-                let preferences = serde_json::json!({"version":7,"preferences":{
-                    "completion":"tabs","view":"fullscreen",
+                let preferences = serde_json::json!({"version":9,"preferences":{
                     "goal_budget":GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-                    "resources":arany::ToolResourceSettings::default(),"copy_on_select":true,"newline":"shift_enter"
                 }});
                 root.record(arany::RecordKind::UiPreferences)
                     .replace(&serde_json::to_vec(&preferences).expect("settings"))
@@ -1441,7 +1482,7 @@ mod tests {
                 }
             );
             let receipt: Vec<_> = report.stderr.lines().collect();
-            assert_eq!(receipt.len(), if finite { 5 } else { 3 });
+            assert_eq!(receipt.len(), if finite { 6 } else { 3 });
             let id = SessionId::from_str(
                 receipt[0]
                     .strip_prefix("Session: ")
@@ -1755,11 +1796,7 @@ mod tests {
         .expect("Tool configuration");
         std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
             .expect("private Tool configuration");
-        let preferences = serde_json::json!({"version":7,"preferences":{
-            "completion":"tabs","view":"fullscreen","goal_budget":budget,
-            "resources":arany::ToolResourceSettings::default(),
-            "copy_on_select":true,"newline":"shift_enter"
-        }});
+        let preferences = serde_json::json!({"version":9,"preferences":{"goal_budget":budget}});
         root.record(arany::RecordKind::UiPreferences)
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
             .expect("record settings");

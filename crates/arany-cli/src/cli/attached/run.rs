@@ -1472,7 +1472,7 @@ mod tests {
             } else {
                 state
                     .record(RecordKind::SavedAccount)
-                    .replace(br#"{"schema":1,"storage":"keyring","account":null}"#)
+                    .replace(br#"{"schema":2,"storage":"keyring","account":null}"#)
                     .unwrap();
                 let record = serde_json::to_string(&account)
                     .unwrap()
@@ -1497,12 +1497,20 @@ mod tests {
                 }
             }
         } else {
+            use base64::Engine as _;
+            use sha2::{Digest, Sha256};
+            let client_slot = format!(
+                "chatgpt-{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(Sha256::digest("synthetic-client"))
+            );
             state
                 .record(RecordKind::ChatgptAccounts).replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "schema": 1, "selected": id, "accounts": [{
+                        "schema": 3, "selected": id, "accounts": [{
                             "id": id, "host_id": "11111111-1111-4111-8111-111111111111",
                             "client_id": "synthetic-client", "subject": "synthetic-subject",
+                            "chatgpt_account_id": null, "keyring_slot": client_slot,
                             "storage": "keyring", "renewal_pending": false, "signout_pending": false,
                             "disconnected": false, "plan_permission_missing": false, "token": null
                         }], "model_checks": []

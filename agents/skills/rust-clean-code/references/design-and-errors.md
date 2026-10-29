@@ -61,7 +61,7 @@ pub enum StoreError {
 - **`#[from]` only when the mapping is one-to-one and needs no context.** `io::Error` into a variant with a `path` needs `.map_err(|source| StoreError::Open { path, source })?`, not `#[from]`. `#[error(transparent)]` wraps a cause without adding a layer of text.
 - **Attach context once**, at the layer that knows the operation, with `map_err` or a typed variant. Report at the presentation boundary. Logging and returning the same error at each layer prints it N times.
 - **Never `e.to_string()` before the presentation boundary.** `map_err(|e| e.to_string())` or `Result<T, String>` loses the variant and the chain; the terminal and the JSONL writer render, nothing below them does.
-- **`Box<dyn Error + Send + Sync>` or `anyhow` only in a binary's `main`/top-level reporting**, where no caller matches. A library-style module keeps a typed enum. Arany uses `thiserror` and no `anyhow`; keep it that way unless the owner adds it.
+- **`Box<dyn Error + Send + Sync>` or `anyhow` only in a binary's `main`/top-level reporting**, where no caller matches. A library-style module keeps a typed enum. Do not add `anyhow` to a crate that already standardizes on typed errors.
 - **Keep error values small.** Clippy's `result_large_err` fires above 128 bytes; box a large payload rather than widening every `Result`.
 - Error text is output: it must not leak secrets, hostile control bytes or untrusted content unescaped.
 

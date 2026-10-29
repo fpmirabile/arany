@@ -67,12 +67,12 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
         },
         ToolCall::Delete {
             path: path(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
         },
         ToolCall::Move {
             source: path(),
             destination: "destination".into(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
         },
         ToolCall::Mkdir { path: path() },
         ToolCall::Write {
@@ -82,13 +82,13 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
         },
         ToolCall::Edit {
             path: path(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             old: "a".into(),
             new: "b".into(),
         },
         ToolCall::MultiEdit {
             file_path: path(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             edits: Vec::new(),
         },
         ToolCall::Command {
@@ -197,6 +197,7 @@ fn tool_call_display_and_site_facts_cover_every_variant() {
         ToolCall::Glob {
             pattern: "**/*.rs".into(),
             path: path(),
+            offset: 0,
             limit: 1,
         },
         ToolCall::WebFetch {
@@ -429,7 +430,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         permissions: None,
         result_filter: None,
         unguarded_rules: None,
-        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        context_limit_bytes: std::sync::Arc::new(MAX_TOOL_CONTEXT_BYTES.into()),
         cache_state: None,
         command_tools: Default::default(),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
@@ -548,7 +549,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         permissions: None,
         result_filter: None,
         unguarded_rules: None,
-        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        context_limit_bytes: std::sync::Arc::new(MAX_TOOL_CONTEXT_BYTES.into()),
         cache_state: None,
         command_tools: Default::default(),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(

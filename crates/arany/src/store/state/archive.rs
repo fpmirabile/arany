@@ -1,4 +1,4 @@
-use super::super::migrate;
+use super::super::format;
 use super::{
     HISTORY_FILES, StateRoot, StoreError, check_private_record_file, checkpoints, nonblocking,
     prepare_database_file,
@@ -51,17 +51,10 @@ impl ArchivedHistory {
 
 impl StateRoot {
     pub fn archive_incompatible_history(&self) -> Result<Option<ArchivedHistory>, StoreError> {
-        self.upgrade_or_archive_history(&migrate::REGISTRY)
-    }
-
-    pub(in crate::store) fn upgrade_or_archive_history(
-        &self,
-        registry: &migrate::Registry<'_>,
-    ) -> Result<Option<ArchivedHistory>, StoreError> {
-        if self.archive_plan()?.is_none() && !migrate::pending(self)? {
+        if self.archive_plan()?.is_none() {
             let _shared = self.lock_history(false)?;
             let _checkpoints = checkpoints::lock(self)?;
-            if !migrate::checkpoint_journal_present(self)? {
+            if !format::checkpoint_journal_present(self)? {
                 match check_history(self) {
                     Err(StoreError::InvalidHistory) => {}
                     result => return result.map(|()| None),
@@ -77,16 +70,12 @@ impl StateRoot {
         let plan = match self.archive_plan()? {
             Some(plan) => plan,
             None => {
-                migrate::recover(self)?;
-                if migrate::orphan_checkpoint_journal(self)? {
+                if format::orphan_checkpoint_journal(self)? {
                     return Err(StoreError::InvalidStateDirectory);
                 }
                 match check_history(self) {
                     Err(StoreError::InvalidHistory) => {}
                     result => return result.map(|()| None),
-                }
-                if !migrate::checkpoint_below_floor(self)? && migrate::upgrade(self, registry)? {
-                    return Ok(None);
                 }
                 self.write_archive_plan()?
             }
@@ -201,17 +190,17 @@ pub(in crate::store) fn publish(
 fn check_history(root: &StateRoot) -> Result<(), StoreError> {
     use super::super::journal::open_connection;
     // The writable open still finishes SQLite recovery and enforces the journal pragmas.
-    match migrate::inspect_history(root) {
-        migrate::Inspection::Unsupported => Err(StoreError::InvalidHistory),
-        migrate::Inspection::Current => {
-            if migrate::checkpoint_below_floor(root)? {
+    match format::inspect_history(root) {
+        format::Inspection::Unsupported => Err(StoreError::InvalidHistory),
+        format::Inspection::Current => {
+            if format::checkpoint_incompatible(root)? {
                 return Err(StoreError::InvalidHistory);
             }
             open_connection(root, false).map(drop)
         }
-        migrate::Inspection::Inconclusive => {
+        format::Inspection::Inconclusive => {
             super::super::replay::validate_history(&open_connection(root, false)?)?;
-            if migrate::checkpoint_below_floor(root)? {
+            if format::checkpoint_incompatible(root)? {
                 return Err(StoreError::InvalidHistory);
             }
             Ok(())
@@ -300,6 +289,88 @@ pub(in crate::store) fn archive_name(now: SystemTime) -> String {
         of_day % 60,
         elapsed.subsec_millis()
     )
+}
+
+#[derive(Debug)]
+pub struct ArchivedRecords {
+    path: PathBuf,
+    files: Vec<&'static str>,
+}
+
+impl ArchivedRecords {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn files(&self) -> &[&'static str] {
+        &self.files
+    }
+}
+
+impl StateRoot {
+    // Moves each record whose readable version differs from its format into one archive folder.
+    pub fn archive_incompatible_records(
+        &self,
+        formats: &[&super::RecordFormat],
+    ) -> Result<Option<ArchivedRecords>, StoreError> {
+        // The lock is taken only when something may move, so a concurrent account edit never blocks startup.
+        let pending = formats.iter().any(|format| {
+            self.record(format.kind)
+                .read()
+                .ok()
+                .flatten()
+                .is_some_and(|bytes| format.mismatched(&bytes))
+        });
+        if !pending {
+            return Ok(None);
+        }
+        self.with_record_upgrade_lock(|| {
+            let mut target: Option<(Dir, String)> = None;
+            let mut files = Vec::new();
+            for format in formats {
+                let (name, _, limit, _) = format.kind.spec();
+                let Some(file) = self.open_private_record(name, limit)? else {
+                    continue;
+                };
+                let metadata = file.metadata()?;
+                let identity = (metadata.dev(), metadata.ino(), metadata.len());
+                let mut bytes = Vec::new();
+                file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+                if !format.mismatched(&bytes) {
+                    continue;
+                }
+                if target.is_none() {
+                    let archive = private_subdirectory(&self.dir, ARCHIVE_DIR)?;
+                    sync(&self.dir)?;
+                    let folder = records_archive_name(SystemTime::now());
+                    if identity_of(&archive, &folder)?.is_some() {
+                        return Err(StoreError::HistoryChanged);
+                    }
+                    let dir = private_subdirectory(&archive, &folder)?;
+                    sync(&archive)?;
+                    target = Some((dir, folder));
+                }
+                let (dir, _) = target.as_ref().ok_or(StoreError::ArchiveConflict)?;
+                if identity_of(&self.dir, name)? != Some(identity)
+                    || identity_of(dir, name)?.is_some()
+                {
+                    return Err(StoreError::ArchiveConflict);
+                }
+                rename(&self.dir, name, dir, name)?;
+                sync(dir)?;
+                sync(&self.dir)?;
+                files.push(name);
+            }
+            Ok(target.map(|(_, folder)| ArchivedRecords {
+                path: self.path.join(ARCHIVE_DIR).join(folder),
+                files,
+            }))
+        })
+    }
+}
+
+fn records_archive_name(now: SystemTime) -> String {
+    archive_name(now).replacen("history-", "records-", 1)
 }
 
 impl StateRoot {
@@ -447,10 +518,6 @@ mod tests {
             );
         }
         assert!(!path.join("checkpoints.sqlite").exists());
-        assert!(
-            !path.join("migrations").exists(),
-            "history below the floor is never copied"
-        );
         assert_eq!(
             state.record(RecordKind::UiPreferences).read().unwrap(),
             Some(b"ui".to_vec())

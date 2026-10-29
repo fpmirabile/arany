@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v44";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v45";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -428,6 +428,7 @@ async fn probe<P: Provider>(
             assistant: "Synthetic conformance answer".into(),
         })],
         max_output_tokens: PROBE_OUTPUT_CAP,
+        prompts: Default::default(),
     };
     let token = journal
         .call_started(CheckCallKind::Compaction)
@@ -562,11 +563,11 @@ mod tests {
         for (profile, expected) in [
             (
                 "openai",
-                "ab5711964b206551d053f3da1da3ff2b306abf194db749ac9a9423fda885d39b",
+                "29f11895530772c0a677852a7003f41ba724bac9f6bb52573800306b01971ff6",
             ),
             (
                 "anthropic",
-                "edfe554165083886b3c64b717790aa15ca2f238306a850fc47f6a22237a1c9a8",
+                "5444c7f4cec2578005d55ab4baa6f93ab4de2fda28d0155e13ab8bb2271997a0",
             ),
         ] {
             let digest = fingerprint(
@@ -589,6 +590,7 @@ mod tests {
             "native-goal-contract-outcome-conformance-journal-v41",
             "native-goal-contract-outcome-conformance-journal-v42",
             "native-goal-contract-outcome-conformance-journal-v43",
+            "native-goal-contract-outcome-conformance-journal-v44",
         ] {
             let mut legacy = Vec::new();
             for field in [

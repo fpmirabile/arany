@@ -270,8 +270,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .config
                 .as_ref()
                 .expect("pinned config")
-                .include_digests,
-            vec![include_digest]
+                .include_sources,
+            vec![arany::IncludeSource {
+                path: "notes/facts.txt".into(),
+                digest: include_digest
+            }]
         );
 
         std::fs::write(workspace.join("AGENTS.md"), "Changed instruction")
@@ -470,7 +473,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ] {
                 let mut actual = calls[index].clone();
                 let facts = actual.input.goal_context_facts.take();
-                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: vec![arany::WorkspaceGuidance { path: "AGENTS.md".into(), text: "Changed instruction".into() }], includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
+                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: vec![arany::WorkspaceGuidance { path: "AGENTS.md".into(), text: "Changed instruction".into() }], includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, plan_offered: index == 0 || index == 2, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
                 if phase == AgentPhase::ChildWork {
                     assert!(facts.is_none(), "child calls do not receive primary Goal state");
                 } else {
@@ -3566,32 +3569,29 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
     let state = temp.path().join("state");
     let engine = guarded_engine(&state);
     write_notes_tools(&state);
-    let write = || arany::ToolCall::Write {
-        path: "notes/new/file.txt".into(),
-        expected_digest: None,
-        content: "New".into(),
-    };
     let provider = Arc::new(ScriptedProvider::new(vec![
-        tool_outcome(write()),
         tool_outcome(arany::ToolCall::Mkdir {
             path: "notes/new/deeper".into(),
         }),
         tool_outcome(arany::ToolCall::Edit {
             path: "notes/missing.txt".into(),
-            expected_digest: Sha256::digest(b"old")
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            expected_digest: Some(
+                Sha256::digest(b"old")
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            ),
             old: "old".into(),
             new: "new".into(),
         }),
-        tool_outcome(arany::ToolCall::Mkdir {
-            path: "notes/new".into(),
+        tool_outcome(arany::ToolCall::Write {
+            path: "notes/new/file.txt".into(),
+            expected_digest: None,
+            content: "New".into(),
         }),
-        tool_outcome(write()),
-        arany::test_support::goals::finish_with("Created the parent and wrote the file"),
+        arany::test_support::goals::finish_with("Wrote the file and its missing parent"),
     ]));
-    let mut input = request(&workspace, "Write a note after creating its parent");
+    let mut input = request(&workspace, "Write a note in a new folder");
     input.include_paths.clear();
     let result = run_with(
         &engine,
@@ -3619,12 +3619,11 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
         .unwrap()
         .unwrap();
     assert_eq!(view.runs[0], result.run);
-    assert_eq!(view.runs[0].tools.len(), 5);
+    assert_eq!(view.runs[0].tools.len(), 3);
     for (index, text) in [
         (0, "Parent directory not found; create it with Mkdir first"),
-        (1, "Parent directory not found; create it with Mkdir first"),
         (
-            2,
+            1,
             "File or directory not found; List the parent directory to check the path",
         ),
     ] {
@@ -3632,7 +3631,7 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
         assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
         assert_eq!(observation.output, text);
     }
-    for step in &view.runs[0].tools[3..] {
+    for step in &view.runs[0].tools[2..] {
         assert_eq!(
             step.observation.as_ref().unwrap().disposition,
             arany::ToolDisposition::Succeeded

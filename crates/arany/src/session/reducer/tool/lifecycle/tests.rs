@@ -1087,9 +1087,10 @@ fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts
             ToolCall::Glob {
                 pattern: "**/*.rs".into(),
                 path: "src".into(),
+                offset: 0,
                 limit: 100,
             },
-            r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false}"#,
+            r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false,"next_offset":null}"#,
         ),
         (
             ToolCall::List { path: "src".into() },
@@ -1419,7 +1420,7 @@ fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps
                 if multiedit {
                     ToolCall::MultiEdit {
                         file_path: "src/lib.rs".into(),
-                        expected_digest: crate::validate::hex_digest(before.as_bytes()),
+                        expected_digest: Some(crate::validate::hex_digest(before.as_bytes())),
                         edits: vec![crate::LiteralEdit {
                             old_string: before.into(),
                             new_string: after.into(),

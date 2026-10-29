@@ -20,6 +20,7 @@ fn glob(path: &str) -> ToolCall {
     ToolCall::Glob {
         pattern: "**/*.rs".into(),
         path: path.into(),
+        offset: 0,
         limit: 100,
     }
 }
@@ -35,7 +36,7 @@ fn write(path: &str) -> ToolCall {
 fn multiedit(path: &str) -> ToolCall {
     ToolCall::MultiEdit {
         file_path: path.into(),
-        expected_digest: "0".repeat(64),
+        expected_digest: Some("0".repeat(64)),
         edits: vec![crate::LiteralEdit {
             old_string: "a".into(),
             new_string: "b".into(),
@@ -1787,6 +1788,7 @@ fn updated_input_accepts_only_provable_narrowing() {
     let glob_call = |pattern: &str, path: &str, limit| ToolCall::Glob {
         pattern: pattern.into(),
         path: path.into(),
+        offset: 0,
         limit,
     };
     let status = |path: &str| ToolCall::GitStatus { path: path.into() };
@@ -2637,12 +2639,12 @@ fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
 fn delete_and_move_rules_cover_both_paths_without_partial_allows() {
     let delete = ToolCall::Delete {
         path: "src/source".into(),
-        expected_digest: "0".repeat(64),
+        expected_digest: Some("0".repeat(64)),
     };
     let move_call = ToolCall::Move {
         source: "src/source".into(),
         destination: "dest/target".into(),
-        expected_digest: "0".repeat(64),
+        expected_digest: Some("0".repeat(64)),
     };
     assert_eq!(
         config(json!({"allow":["Edit(./src/**)"]})).decision(&delete),

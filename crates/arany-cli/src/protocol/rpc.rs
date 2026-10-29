@@ -128,6 +128,7 @@ pub enum Reason {
     CancellationDrainTimeout,
     CoordinatorFailed,
     CancelledBeforeStart,
+    PromptOverride,
     Store,
     Tool,
     ProviderUnavailable,
@@ -195,6 +196,7 @@ impl From<&arany::EngineError> for Reason {
             arany::EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,
             arany::EngineError::CoordinatorFailed => Reason::CoordinatorFailed,
             arany::EngineError::CancelledBeforeStart => Reason::CancelledBeforeStart,
+            arany::EngineError::PromptOverride(_) => Reason::PromptOverride,
             arany::EngineError::Store(_) => Reason::Store,
             arany::EngineError::Tool(_) => Reason::Tool,
         }

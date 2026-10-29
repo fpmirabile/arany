@@ -484,7 +484,7 @@ impl RunLoop<'_> {
 }
 
 fn read_end(answer: &Answer, cancelled: bool) -> StepEnd {
-    let observed = (answer.observation.stops_run() || cancelled)
+    let observed = (answer.observation.stops_tool_step() || cancelled)
         .then(|| RunLoop::observation_stop(&answer.observation, cancelled));
     decide_read_end(
         answer.stop,

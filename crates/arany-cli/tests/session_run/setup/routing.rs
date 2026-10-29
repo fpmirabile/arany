@@ -238,7 +238,7 @@ fn concurrent_role_edit_refuses_before_overwriting_the_other_editor() {
     let mut pty = start_setup_pty(&temp, &workspace, &state);
     open_roles(&mut pty, Presentation::ScreenReader);
     let from = Presentation::ScreenReader.choose(&mut pty, 6);
-    let bytes = br#"{"version":1,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
+    let bytes = br#"{"version":2,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
     super::super::private_file(&state.join("provider-routing.json"), bytes);
     confirm(
         &mut pty,

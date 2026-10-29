@@ -218,7 +218,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         permissions: None,
         result_filter: None,
         unguarded_rules: None,
-        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        context_limit_bytes: std::sync::Arc::new(MAX_TOOL_CONTEXT_BYTES.into()),
         cache_state: None,
         command_tools: std::sync::Arc::new(super::CommandTools::default()),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
@@ -325,7 +325,7 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
         temp.path(),
         json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
-    runtime.context_limit_bytes = 1 << 20;
+    runtime.context_limit_bytes = std::sync::Arc::new((1 << 20).into());
     let limit = runtime.context_limit_bytes();
     let reserve = super::ToolRuntime::step_context_reserve(false, 0);
     let fitted = |overhead: usize| limit.saturating_sub(overhead + 512);
@@ -369,7 +369,7 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
         serde_json::from_str(runtime.context().unwrap().catalog()).unwrap();
     assert_eq!(context["commands"], serde_json::json!([]));
     assert_eq!(context["mcp_servers"], serde_json::json!([]));
-    assert_eq!(context["file_tools"], "");
+    assert_eq!(context["file_tools"], false);
     assert_eq!(context["skills"], serde_json::json!([]));
     assert_eq!(context["host_commands"], true);
     assert_eq!(context["write"], false);
@@ -421,6 +421,7 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
             ToolCall::Glob {
                 pattern: "src/*".into(),
                 path: ".".into(),
+                offset: 0,
                 limit: 100,
             },
             "Read",
@@ -564,6 +565,10 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
         assert_eq!(observation.disposition, disposition);
         assert_eq!(observation.limit_cause, limit_cause);
         assert_eq!(observation.stops_run(), stops_run);
+        assert!(
+            observation.guard_failed_before_dispatch() == stops_run
+                && !observation.stops_tool_step()
+        );
         assert!(
             observation
                 .output

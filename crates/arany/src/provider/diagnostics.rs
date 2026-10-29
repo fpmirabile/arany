@@ -183,8 +183,8 @@ impl ToolArgumentShape {
             }
             | ToolCall::MultiEdit {
                 expected_digest, ..
-            } => Some(expected_digest),
-            ToolCall::Write {
+            }
+            | ToolCall::Write {
                 expected_digest, ..
             } => expected_digest.as_ref(),
             ToolCall::McpCall { schema_digest, .. } => Some(schema_digest),

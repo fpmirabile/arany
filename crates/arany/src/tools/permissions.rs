@@ -592,14 +592,25 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
             Glob {
                 pattern,
                 path,
+                offset,
                 limit,
             },
             Glob {
                 pattern: new_pattern,
                 path: new_path,
+                offset: new_offset,
                 limit: new_limit,
             },
-        ) => pattern == new_pattern && new_limit <= limit && within(path, new_path),
+        ) => {
+            pattern == new_pattern
+                && if path == new_path {
+                    new_offset >= offset
+                        && u64::from(*new_offset) + u64::from(*new_limit)
+                            <= u64::from(*offset) + u64::from(*limit)
+                } else {
+                    within(path, new_path) && *offset == 0 && *new_offset == 0 && new_limit <= limit
+                }
+        }
         (
             GitDiff {
                 path,

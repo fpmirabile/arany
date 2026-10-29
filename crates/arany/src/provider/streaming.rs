@@ -427,11 +427,18 @@ impl<'a> ResponsesPreview<'a> {
                     output.iter().collect()
                 };
                 let has_call = items.iter().any(|item| item["type"] == "function_call");
+                let messages = || {
+                    items.iter().enumerate().filter(|(_, item)| {
+                        item["type"] == "message" && item["role"] == "assistant"
+                    })
+                };
+                // Without a call or a final message the last commentary is the answer.
+                let commentary_answer = (!has_call
+                    && messages().all(|(_, item)| item["phase"] == "commentary"))
+                .then(|| messages().next_back().map(|(index, _)| index))
+                .flatten();
                 let mut preview = PreviewText::default();
-                for item in items {
-                    if item["type"] != "message" || item["role"] != "assistant" {
-                        continue;
-                    }
+                for (index, item) in messages() {
                     let Some(parts) = item["content"].as_array() else {
                         return Err(ProviderError::InvalidResponseContract);
                     };
@@ -445,7 +452,8 @@ impl<'a> ResponsesPreview<'a> {
                     if !self.secret.is_empty() && text.contains(self.secret) {
                         return Err(ProviderError::InvalidOutcome);
                     }
-                    if has_call || item["phase"] == "commentary" {
+                    if has_call || item["phase"] == "commentary" && Some(index) != commentary_answer
+                    {
                         if preview.commentary.len() < MAX_DISPLAY_COMMENTARY_ITEMS
                             && preview.commentary.iter().map(String::len).sum::<usize>()
                                 + text.len()

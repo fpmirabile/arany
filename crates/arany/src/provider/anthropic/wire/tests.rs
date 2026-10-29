@@ -108,11 +108,19 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["stream"], false);
     let system = body["system"].as_array().unwrap();
-    assert_eq!(system.len(), 2);
+    assert_eq!(system.len(), 5);
     assert!(system.iter().all(|block| block["type"] == "text"));
     assert_eq!(
         system[0]["text"],
-        crate::provider::prompts::PRIMARY_INSTRUCTIONS
+        crate::provider::EffectivePrompts::default().text(crate::provider::PromptFile::Primary)
+    );
+    assert_eq!(
+        system[1]["text"],
+        crate::provider::prompts::PRIMARY_AUTHORITY
+    );
+    assert_eq!(
+        system[2]["text"],
+        crate::provider::prompts::PLAN_INSTRUCTIONS
     );
     assert!(!body["system"].to_string().contains("canary"));
     assert_eq!(
@@ -188,7 +196,7 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
         result.get("call").is_none(),
         "the replayed turn carries the call"
     );
-    assert_eq!(result["workspace_effect"], "none");
+    assert!(result.get("workspace_effect").is_none() && result.get("cache_update").is_none());
     assert!(
         results[1]["text"]
             .as_str()
@@ -230,6 +238,25 @@ fn outbound_tool_choice_is_auto_with_parallel() {
         assert!(plain.get(field).is_none(), "{field}");
     }
     assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 1);
+}
+
+#[test]
+fn final_call_keeps_the_tool_list_and_offers_only_an_answer() {
+    let mut request = primary_request(MODEL);
+    let open = body(&request, Effort::Low);
+    request.input.final_call = true;
+    let final_call = body(&request, Effort::Low);
+    assert_eq!(final_call["tools"], open["tools"]);
+    assert_eq!(final_call["system"], open["system"]);
+    assert_eq!(final_call["tool_choice"], json!({"type": "none"}));
+    assert!(
+        final_call["messages"]
+            .to_string()
+            .contains("harness_final_call")
+    );
+    let mut researcher = researcher_request(MODEL);
+    researcher.input.final_call = true;
+    assert!(render::conversation(&researcher).is_err());
 }
 
 #[test]
@@ -936,6 +963,7 @@ fn custom_messages_optional_effort_preserves_text_compaction() {
         previous_summary: None,
         items: vec![],
         max_output_tokens: 1024,
+        prompts: Default::default(),
     };
     let strict = compaction_body_with_optional_effort(&compact, None);
     assert!(strict["output_config"].get("effort").is_none());
@@ -1502,6 +1530,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
             },
         ],
         max_output_tokens: 1024,
+        prompts: Default::default(),
     };
     let compact_body = compaction_body(&compact, Effort::Low);
     let compact_input: Value = serde_json::from_str(
@@ -2308,9 +2337,21 @@ fn child_research_request_offers_only_read_only_tools_and_text_at_exhaustion() {
     let rendered = body(&request, Effort::Low);
     assert_eq!(
         rendered["system"][0]["text"],
-        crate::provider::prompts::RESEARCH_INSTRUCTIONS
+        crate::provider::EffectivePrompts::default().text(crate::provider::PromptFile::Researcher)
     );
-    assert_eq!(rendered["system"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        rendered["system"][1]["text"],
+        crate::provider::prompts::RESEARCH_AUTHORITY
+    );
+    assert_eq!(
+        rendered["system"][2]["text"],
+        format!(
+            "Tool calls per step: at most {}. Answer at most {} bytes.",
+            crate::session::MAX_STEP_TOOL_CALLS,
+            crate::session::MAX_CHILD_RESULT_BYTES
+        )
+    );
+    assert_eq!(rendered["system"].as_array().unwrap().len(), 3);
     assert_eq!(
         tool_names(&rendered),
         [
@@ -2544,6 +2585,11 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
         previous_summary: None,
         items: Vec::new(),
         max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+        // Control bytes are the worst JSON escaping for the largest admitted override.
+        prompts: crate::provider::EffectivePrompts::default().with_override(
+            crate::provider::PromptFile::Compaction,
+            &"\u{1}".repeat(crate::provider::MAX_COMPACTION_PROMPT_OVERRIDE_BYTES),
+        ),
     };
     let envelope = serde_json::to_vec(&compaction_body(&empty, crate::provider::Effort::High))
         .expect("body")

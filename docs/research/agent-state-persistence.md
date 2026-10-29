@@ -48,7 +48,7 @@ Do not weaken synchronization merely to improve a benchmark.
 
 ## Recovery and confidentiality limits
 
-[Execution](../specs/execution.md#journal-migration) owns upgrades, archival and
+[Execution](../specs/execution.md#incompatible-history) owns upgrades, archival and
 strict replay. SQLite structural validity and legal semantic history are separate
 checks. Private OS storage is not encryption; adding encryption needs key and
 recovery ownership. A copy of an open database is not automatically a consistent

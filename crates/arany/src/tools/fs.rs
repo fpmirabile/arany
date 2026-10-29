@@ -1,4 +1,4 @@
-use super::catalog::{nullable, string};
+use super::catalog::string;
 use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};
@@ -38,7 +38,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
         ToolCall::Delete {
             path,
             expected_digest,
-        } => valid_relative(path, false) && valid_digest(expected_digest),
+        } => valid_relative(path, false) && optional_digest(expected_digest),
         ToolCall::Move {
             source,
             destination,
@@ -47,7 +47,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             valid_relative(source, false)
                 && valid_relative(destination, false)
                 && !source.eq_ignore_ascii_case(destination)
-                && valid_digest(expected_digest)
+                && optional_digest(expected_digest)
         }
         ToolCall::Write {
             path,
@@ -56,9 +56,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
         } => {
             valid_relative(path, false)
                 && content.len() <= MAX_EDIT_CONTENT_BYTES
-                && expected_digest
-                    .as_ref()
-                    .is_none_or(|digest| valid_digest(digest))
+                && optional_digest(expected_digest)
         }
         ToolCall::Edit {
             path,
@@ -67,7 +65,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             new,
         } => {
             valid_relative(path, false)
-                && valid_digest(expected_digest)
+                && optional_digest(expected_digest)
                 && !old.is_empty()
                 && old.len() + new.len() <= MAX_EDIT_CONTENT_BYTES
         }
@@ -77,7 +75,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             edits,
         } => {
             valid_relative(file_path, false)
-                && valid_digest(expected_digest)
+                && optional_digest(expected_digest)
                 && (1..=MAX_MULTI_EDITS).contains(&edits.len())
                 && edits
                     .iter()
@@ -97,10 +95,29 @@ pub(super) fn valid(call: &ToolCall) -> bool {
     }
 }
 
+fn optional_digest(digest: &Option<String>) -> bool {
+    digest.as_ref().is_none_or(|digest| valid_digest(digest))
+}
+
+fn expected_digest(file: &str, otherwise: &str) -> (&'static str, Value) {
+    (
+        "expected_digest",
+        json!({"type":["string", "null"], "description":format!("Optional: null uses the SHA-256 from your latest Read or edit of {file} in this Run{otherwise}; supply one only to pin a specific version. Never invent it.")}),
+    )
+}
+
+fn path(description: &str) -> (&'static str, Value) {
+    ("path", json!({"type":"string", "description":description}))
+}
+
 pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
-    let path = ("path", string());
     Some(match operation {
-        "list" | "mkdir" => vec![path],
+        "list" => vec![path(
+            "Workspace-relative directory whose immediate entries to list.",
+        )],
+        "mkdir" => vec![path(
+            "Workspace-relative path of the new directory; its parent must exist.",
+        )],
         "read" => vec![
             (
                 "path",
@@ -116,7 +133,9 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
         ],
         "search" => vec![
-            path,
+            path(
+                "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
+            ),
             (
                 "query",
                 json!({"type":"string", "description":"Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true."}),
@@ -145,10 +164,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "glob" => super::glob::schema(),
         "multiedit" => vec![
             ("file_path", string()),
-            (
-                "expected_digest",
-                json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 of the existing file from Read or a file include."}),
-            ),
+            expected_digest("this file", ""),
             (
                 "edits",
                 json!({
@@ -166,26 +182,29 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
                 }),
             ),
         ],
-        "delete" => vec![path, ("expected_digest", string())],
+        "delete" => vec![
+            path("Workspace-relative regular file to delete."),
+            expected_digest("this file", ""),
+        ],
         "move" => vec![
             ("source", string()),
             ("destination", string()),
-            ("expected_digest", string()),
+            expected_digest("source", ""),
         ],
         "write" => vec![
-            path,
-            ("expected_digest", nullable()),
+            path("Workspace-relative file to create or replace."),
+            expected_digest(
+                "this file",
+                ", or creates a missing file when none is known",
+            ),
             (
                 "content",
                 json!({"type":"string", "description":format!("Complete UTF-8 file content, at most {MAX_EDIT_CONTENT_BYTES} bytes.")}),
             ),
         ],
         "edit" => vec![
-            path,
-            (
-                "expected_digest",
-                json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it."}),
-            ),
+            path("Workspace-relative existing file to edit."),
+            expected_digest("this file", ""),
             (
                 "old",
                 json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file, excluding Read line-number prefixes. To append, select a unique ending and include that ending plus the appended text in new."}),
@@ -574,6 +593,72 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
     {
         let _ = (root, path);
         Err(ToolError::ProtectionUnavailable)
+    }
+}
+
+// Walks resolve each child from its admitted parent handle instead of re-resolving from the root.
+pub(super) fn open_child(parent: &Dir, name: &str, device: u64) -> Result<File, ToolError> {
+    if name.contains('/') || !valid_relative(name, false) {
+        return Err(ToolError::Path);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        let _ = device;
+        let fd = openat2(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .map_err(|error| match error {
+            rustix::io::Errno::NOENT => ToolError::NotFound,
+            _ => ToolError::Path,
+        })?;
+        Ok(File::from(fd))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+        let file = File::from(
+            openat(
+                parent,
+                name,
+                OFlags::RDONLY
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK
+                    | OFlags::NOFOLLOW
+                    | OFlags::NOCTTY,
+                Mode::empty(),
+            )
+            .map_err(|error| match error {
+                rustix::io::Errno::NOENT => ToolError::NotFound,
+                _ => ToolError::Path,
+            })?,
+        );
+        if file.metadata().map_err(|_| ToolError::Path)?.dev() != device {
+            return Err(ToolError::Path);
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (parent, name, device);
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
+// A `.git` entry below the Workspace root marks a nested repository or worktree that walks skip.
+pub(super) fn nested_repository(directory: &Dir) -> Result<bool, ToolError> {
+    match directory.symlink_metadata(".git") {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ToolError::Path),
     }
 }
 
@@ -1558,6 +1643,12 @@ pub(super) fn mutate(
             content,
         } => {
             let bytes = content.as_bytes();
+            if expected_digest.is_none()
+                && valid_relative(path, false)
+                && change_parent(root, path).is_ok_and(|parent| !parent.missing.is_empty())
+            {
+                return create_with_parents(root, path, bytes, control);
+            }
             replace(root, path, expected_digest.as_deref(), bytes, control)
         }
         ToolCall::Mkdir { path } => {
@@ -1589,6 +1680,7 @@ pub(super) fn mutate(
             expected_digest,
             ..
         } => {
+            let expected_digest = expected_digest.as_deref().ok_or(ToolError::Operation)?;
             let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
             let replacement = edited_content(&bytes, call)?;
             let bytes = replacement.as_bytes();
@@ -1616,10 +1708,12 @@ pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, To
     }
     let expected_digest = match call {
         ToolCall::Edit {
-            expected_digest, ..
+            expected_digest: Some(expected_digest),
+            ..
         }
         | ToolCall::MultiEdit {
-            expected_digest, ..
+            expected_digest: Some(expected_digest),
+            ..
         } => expected_digest,
         _ => return Err(ToolError::Operation),
     };
@@ -1665,6 +1759,30 @@ pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, To
     }
 }
 
+// Create-mode Write reuses Move's checked parent creation for missing directories.
+fn create_with_parents(
+    root: &Dir,
+    path: &str,
+    bytes: &[u8],
+    control: &MutationControl,
+) -> Result<String, ToolError> {
+    let change = FileChange {
+        path: path.into(),
+        before: None,
+        after: Some(FileVersion::from_bytes(bytes, false)),
+    };
+    let files = std::slice::from_ref(&change);
+    worker_publication_paths(root, files)?;
+    apply_files_controlled(root, files, control)?;
+    serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+        sha256: hex_digest(bytes),
+        bytes: bytes.len() as u32,
+        executable: false,
+        before: None,
+    })
+    .map_err(|_| ToolError::Uncertain)
+}
+
 fn remove_or_move(
     root: &Dir,
     call: &ToolCall,
@@ -1673,12 +1791,12 @@ fn remove_or_move(
     let (source, destination, expected) = match call {
         ToolCall::Delete {
             path,
-            expected_digest,
+            expected_digest: Some(expected_digest),
         } => (path, None, expected_digest),
         ToolCall::Move {
             source,
             destination,
-            expected_digest,
+            expected_digest: Some(expected_digest),
         } => (source, Some(destination), expected_digest),
         _ => return Err(ToolError::Configuration),
     };

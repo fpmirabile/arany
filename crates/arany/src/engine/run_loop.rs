@@ -609,6 +609,7 @@ impl<'a> RunLoop<'a> {
         root_request: &mut ProviderRequest,
     ) -> Result<Admission<PrimaryCall>, EngineError> {
         let phase = root_request.phase;
+        let context_bytes = self.primary_content_bytes(root_request)?;
         let limits = RateLimitSlot::default();
         let (first, active_segment) =
             match self.invoke_primary(root_request, limits.clone()).await? {
@@ -619,7 +620,7 @@ impl<'a> RunLoop<'a> {
         self.settle_active_segment(active_segment)?;
         let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
         let facts = RunFacts::observe(self)?;
-        let record = call_record(
+        let mut record = call_record(
             phase,
             &first,
             primary_admitted(PrimarySite::Loop, &first, validity, &facts),
@@ -629,6 +630,7 @@ impl<'a> RunLoop<'a> {
                 .and_then(|cause| proposal_refusal(&first, cause)),
             limits.take(),
         );
+        record.context_bytes = context_bytes;
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: self.primary_id,
@@ -1056,6 +1058,8 @@ impl<'a> RunLoop<'a> {
             self.settle_active_segment(active_segment)?;
             return Ok(Admission::Exhausted);
         };
+        root.input.final_call =
+            self.ledger().remaining_calls() == Some(0) && !self.ledger().children_active()?;
         self.primary_context(root).await?;
         let request = root.clone();
         let context = self
@@ -1349,6 +1353,9 @@ impl<'a> RunLoop<'a> {
                 .is_some_and(|tools| tools.allows_goal_contract(contract))
         {
             return Err(PlanOutsideGrant);
+        }
+        if !crate::session::digest_known(view, self.run_id, self.primary_id, call) {
+            return Err(DigestUnknown);
         }
         Ok(())
     }
@@ -1715,6 +1722,7 @@ fn call_record(
     };
     let refused = refusal.is_some();
     let mut record = ProviderCallRecord {
+        context_bytes: None,
         rate_limits,
         refusal,
         delegation: if disposition == ProviderCallDisposition::Delegated {

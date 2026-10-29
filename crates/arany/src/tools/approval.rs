@@ -317,7 +317,7 @@ mod tests {
             (
                 ToolCall::Edit {
                     path: "a".into(),
-                    expected_digest: "0".repeat(64),
+                    expected_digest: Some("0".repeat(64)),
                     old: "x".into(),
                     new: "y".into(),
                 },

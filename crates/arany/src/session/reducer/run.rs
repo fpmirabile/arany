@@ -152,6 +152,7 @@ pub(super) fn apply(
             let run = active_run(current, *run_id)?;
             let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
             let candidate = ProviderCallRecord {
+                context_bytes: None,
                 rate_limits: None,
                 delegation: None,
                 phase: chunk.phase,

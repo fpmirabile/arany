@@ -71,6 +71,11 @@ impl Engine {
             return Err(EngineError::CompactionNotIdle);
         }
         validate_compaction_routes(last_run, providers)?;
+        let prompts = crate::provider::EffectivePrompts::load_files(
+            &self.state,
+            &[crate::provider::PromptFile::Compaction],
+        )?;
+        let prompt = prompts.pin(crate::provider::PromptFile::Compaction);
         let covered_run_id = last_run.id;
         let open_view = self.compaction_view(session_id).await?;
         let goal = open_view.goals.iter().find(|goal| {
@@ -129,22 +134,18 @@ impl Engine {
             covered_run_id,
             TraceProvider::from_profile(&requested_identity.profile),
         );
-        let (request, source_bytes) =
-            compaction_request(prepared, session_id, covered_run_id, identity, goal)?;
+        let (request, source_bytes) = compaction_request(
+            prepared,
+            session_id,
+            covered_run_id,
+            identity,
+            goal,
+            prompts,
+        )?;
         let active_started = Instant::now();
-        let actor = last_run.primary().map(|agent| agent.id);
-        // Every boundary compaction goes through the router, so a single route still retries.
-        let routing = match actor {
-            Some(_) => {
-                let (actor, route_goal_id) =
-                    compaction_route_ids(actor, &open_view, covered_run_id)?;
-                Some((
-                    self.compaction_ledger(session_id, route_goal_id).await?,
-                    actor,
-                ))
-            }
-            None => None,
-        };
+        let routing = self
+            .compaction_routing(session_id, last_run, &open_view)
+            .await?;
         let provider_deadline = self
             .reserve_compaction_call(
                 session_id,
@@ -179,6 +180,7 @@ impl Engine {
                 recent_files,
                 compiler_version,
                 source_bytes,
+                prompt,
             },
             identity,
             status,
@@ -300,6 +302,23 @@ impl Engine {
             .is_some())
     }
 
+    // Every boundary compaction goes through the router, so a single route still retries.
+    async fn compaction_routing(
+        &self,
+        session_id: SessionId,
+        last_run: &crate::session::RunView,
+        open_view: &SessionView,
+    ) -> Result<Option<(super::ledger::GoalLedger, crate::session::AgentRunId)>, EngineError> {
+        let Some(actor) = last_run.primary().map(|agent| agent.id) else {
+            return Ok(None);
+        };
+        let (actor, route_goal_id) = compaction_route_ids(Some(actor), open_view, last_run.id)?;
+        Ok(Some((
+            self.compaction_ledger(session_id, route_goal_id).await?,
+            actor,
+        )))
+    }
+
     async fn compaction_ledger(
         &self,
         session_id: SessionId,
@@ -419,6 +438,7 @@ fn compaction_request(
     covered_run_id: crate::session::RunId,
     identity: &crate::provider::ProviderIdentity,
     goal: Option<&crate::session::GoalView>,
+    prompts: crate::provider::EffectivePrompts,
 ) -> Result<(CompactionRequest, u32), EngineError> {
     let mut items = prepared.items;
     if let Some(goal) = goal {
@@ -431,6 +451,7 @@ fn compaction_request(
         previous_summary: prepared.previous_summary,
         items,
         max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS.min(identity.limits.max_output_tokens),
+        prompts,
     };
     let source_bytes = checked_source_bytes(&request)?;
     Ok((request, source_bytes))
@@ -472,6 +493,7 @@ struct CompactionSource {
     recent_files: Vec<crate::session::RecentFile>,
     compiler_version: u16,
     source_bytes: u32,
+    prompt: crate::provider::PromptPin,
 }
 
 fn compaction_record(
@@ -489,6 +511,7 @@ fn compaction_record(
         recent_files,
         compiler_version,
         source_bytes,
+        prompt,
     } = source;
     CompactionRecord {
         rate_limits: None,
@@ -499,6 +522,7 @@ fn compaction_record(
         provider: identity.profile.clone(),
         model: identity.model.clone(),
         prompt_version: 1,
+        prompt,
         schema_version: 1,
         compiler_version,
         source_bytes,

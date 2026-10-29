@@ -197,6 +197,25 @@ impl LiveProvider {
                 });
             }
             step - 1
+        } else if self.case == "omitted_digest" {
+            // The editor's own Read supplies the digest its null-digest Write replaces.
+            match step {
+                0 => {
+                    return tool_outcome(ToolCall::Read {
+                        path: "notes/0".into(),
+                        offset: None,
+                        limit: Some(128),
+                    });
+                }
+                1 => {
+                    return tool_outcome(ToolCall::Write {
+                        path: "notes/0".into(),
+                        expected_digest: None,
+                        content: "edited 0".into(),
+                    });
+                }
+                _ => step - 1,
+            }
         } else {
             step
         };
@@ -768,14 +787,28 @@ fn assert_live_editor_evidence(
     view: &SessionView,
 ) {
     let run = view.runs.last().unwrap();
-    if matches!(case, "success" | "hooks" | "discovery" | "primary_after") {
+    if matches!(
+        case,
+        "success" | "hooks" | "discovery" | "primary_after" | "omitted_digest"
+    ) {
         assert_eq!(run.status, RunStatus::Finished);
         let worker = run.agents[1].assignment.as_ref().unwrap();
         assert!(worker.released.is_some() && worker.verification.as_ref().unwrap().1.passed);
         assert_eq!(
             run.agents[1].tools.len(),
-            if case == "discovery" { 4 } else { 3 }
+            if matches!(case, "discovery" | "omitted_digest") {
+                4
+            } else {
+                3
+            }
         );
+        if case == "omitted_digest" {
+            assert!(matches!(
+                &run.agents[1].tools[1].intent.call,
+                ToolCall::Write { expected_digest: Some(digest), .. }
+                    if *digest == crate::validate::hex_digest(b"original 0")
+            ));
+        }
         assert!(run.agents[1].tools.iter().all(
             |tool| tool.observation.as_ref().unwrap().disposition == ToolDisposition::Succeeded
         ));

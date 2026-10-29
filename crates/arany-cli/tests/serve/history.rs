@@ -541,6 +541,7 @@ async fn events_resync_is_emitted_when_the_tap_lags_behind_a_stalled_client() {
             policy: arany::CollaborationPolicy::Single,
             goal_budget: arany::GoalBudget::default(),
             resource_settings: arany::ToolResourceSettings::default(),
+            context_window: arany::ContextWindow::default(),
         },
     );
     let mut history = super::super::history::History::default();

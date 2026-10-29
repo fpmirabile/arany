@@ -878,6 +878,7 @@ async fn append_test_compaction(state_path: &std::path::Path, session: SessionId
         provider: config.provider.profile(),
         model: config.model.clone(),
         prompt_version: 1,
+        prompt: arany::EffectivePrompts::default().pin(arany::PromptFile::Compaction),
         schema_version: 1,
         compiler_version: 5,
         source_bytes: 1,

@@ -6,6 +6,7 @@ pub(super) fn glob(pattern: &str, path: &str, limit: u32) -> ToolCall {
     ToolCall::Glob {
         pattern: pattern.into(),
         path: path.into(),
+        offset: 0,
         limit,
     }
 }
@@ -129,7 +130,7 @@ async fn glob_returns_admitted_regular_files_in_path_order_with_honest_truncatio
     let big = glob_result(&runtime, glob("big.*", ".", 100), 1024).await;
     assert_eq!(
         serde_json::from_str::<Value>(&big.output).unwrap(),
-        json!({"entries":[{"path":"big.bin","bytes":2 * 1024 * 1024}],"limit":100,"may_be_truncated":false})
+        json!({"entries":[{"path":"big.bin","bytes":2 * 1024 * 1024}],"limit":100,"may_be_truncated":false,"next_offset":null})
     );
 
     let mut created = Vec::new();
@@ -263,6 +264,8 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     std::fs::write(workspace.join(&deep).join("leaf.rs"), "").unwrap();
     let too_deep = glob_result(&whole, glob("**/*.rs", ".", 100), 1024).await;
     assert_eq!(too_deep.disposition, ToolDisposition::Limit);
+    assert_eq!(too_deep.limit_cause, Some(super::LimitCause::Resource));
+    assert!(too_deep.attestation.is_some());
     let shallow = glob_result(&whole, glob("*.toml", ".", 100), 1024).await;
     assert_eq!(glob_paths(&shallow).0, ["Cargo.toml"]);
     std::fs::remove_dir_all(workspace.join("d0")).unwrap();
@@ -271,17 +274,31 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     for index in 0..=MAX_SNAPSHOT_FILES {
         std::fs::write(workspace.join(format!("wide/f{index:05}")), "").unwrap();
     }
-    let candidates = glob_result(&whole, glob("wide/*", ".", 100), 1024).await;
-    assert_eq!(candidates.disposition, ToolDisposition::Limit);
+    // More matches than one walk retains still return the first page with its continuation.
+    let candidates = glob_result(&whole, glob("wide/*", ".", 100), 64 * 1024).await;
+    let (paths, truncated) = glob_paths(&candidates);
+    assert!(truncated);
+    assert_eq!(paths.len(), 100);
+    assert_eq!(paths[0], "wide/f00000");
+    let page: Value = serde_json::from_str(&candidates.output).unwrap();
+    assert_eq!(page["next_offset"], 100);
+    let last = ToolCall::Glob {
+        pattern: "wide/*".into(),
+        path: ".".into(),
+        offset: 2000,
+        limit: 100,
+    };
+    let last = glob_result(&whole, last, 64 * 1024).await;
+    let (paths, truncated) = glob_paths(&last);
+    assert!(!truncated);
+    assert_eq!(paths.len(), MAX_SNAPSHOT_FILES + 1 - 2000);
+    assert_eq!(paths[0], "wide/f02000");
+    assert_eq!(
+        serde_json::from_str::<Value>(&last.output).unwrap()["next_offset"],
+        Value::Null
+    );
     let one = glob_result(&whole, glob("wide/f00000", ".", 100), 1024).await;
     assert_eq!(glob_paths(&one).0, ["wide/f00000"]);
-    for index in MAX_SNAPSHOT_FILES + 1..MAX_SNAPSHOT_FILES * 4 {
-        std::fs::write(workspace.join(format!("wide/f{index:05}")), "").unwrap();
-    }
-    let scanned = glob_result(&whole, glob("wide/f00000", ".", 100), 1024).await;
-    assert_eq!(scanned.disposition, ToolDisposition::Limit);
-    assert_eq!(scanned.limit_cause, Some(super::LimitCause::Resource));
-    assert!(scanned.attestation.is_some());
 }
 
 #[tokio::test]

@@ -174,7 +174,6 @@ fn run_native(note_delivery: bool, classic: bool) {
         command.arg("--classic");
     }
     command
-        .arg(if note_delivery { "steer" } else { "pause" })
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::piped())
         .stderr(Stdio::from(slave));
@@ -183,6 +182,8 @@ fn run_native(note_delivery: bool, classic: bool) {
     drop(command);
     let (mut child, mut input, master) = (ChildGuard::new(child), input_master, master);
     let mut declined = false;
+    let mut declined_after = None;
+    let mut submitted = false;
     let mut transcript = Vec::new();
     let mut offered = false;
     let mut controlled = false;
@@ -222,6 +223,25 @@ fn run_native(note_delivery: bool, classic: bool) {
                     &transcript,
                     &mut declined,
                 );
+                if declined && declined_after.is_none() {
+                    declined_after = Some(transcript.len());
+                }
+                // New conversations default to single; delegation needs an explicit opt-in.
+                if !submitted
+                    && declined_after.is_some_and(|offset| {
+                        ordered_cues_end(&transcript[offset..], &[b"Ask"]).is_some()
+                    })
+                {
+                    input.write_all(b"/agents auto\r").unwrap();
+                    input
+                        .write_all(if note_delivery {
+                            b"steer\r"
+                        } else {
+                            b"pause\r"
+                        })
+                        .unwrap();
+                    submitted = true;
+                }
                 if !provider_ready {
                     provider_ready = ready.try_recv().is_ok();
                 }
@@ -297,12 +317,12 @@ fn run_native(note_delivery: bool, classic: bool) {
                     && !goal_paused
                     && let Some(offset) = ordered_cues_end(
                         &transcript[pause_reply_after..],
+                        // A plain message's Goal pauses as an interruption.
                         &[
-                            b"Goal",
-                            b"paused;",
-                            b"use",
-                            b"/goal",
-                            b"resume",
+                            b"Interrupted.",
+                            b"Send",
+                            b"a",
+                            b"message",
                             b"to",
                             b"continue.",
                         ],

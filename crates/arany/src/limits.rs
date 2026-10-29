@@ -3,6 +3,7 @@ use crate::store::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPA
 use crate::{
     provider::{
         COMPACTION_INPUT_EXPANSION, COMPACTION_REQUEST_ENVELOPE_BYTES, MAX_PROVIDER_REQUEST_BYTES,
+        MAX_WINDOW_REQUEST_BYTES,
     },
     session::{
         AUTO_COMPACTION_HISTORY_BYTES, MAX_BUDGET_REFUSAL_BYTES, MAX_COMPACTION_INPUT_BYTES,
@@ -168,6 +169,24 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: MAX_PROVIDER_REQUEST_BYTES as u64,
             unit: "bytes",
             owner: "crates/arany/src/provider.rs",
+        },
+        Limit {
+            name: "MAX_WINDOW_REQUEST_BYTES",
+            value: MAX_WINDOW_REQUEST_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider.rs",
+        },
+        Limit {
+            name: "MAX_PROMPT_OVERRIDE_BYTES",
+            value: crate::provider::MAX_PROMPT_OVERRIDE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider/prompts.rs",
+        },
+        Limit {
+            name: "MAX_COMPACTION_PROMPT_OVERRIDE_BYTES",
+            value: crate::provider::MAX_COMPACTION_PROMPT_OVERRIDE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider/prompts.rs",
         },
         Limit {
             name: "MAX_GOAL_PROVIDER_CALLS",

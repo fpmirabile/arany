@@ -18,7 +18,7 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
     };
     let call = |bytes: &[u8], edits| ToolCall::MultiEdit {
         file_path: "file".into(),
-        expected_digest: hex_digest(bytes),
+        expected_digest: Some(hex_digest(bytes)),
         edits,
     };
     for (name, original, edits, expected) in [
@@ -234,10 +234,35 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         json!({"sha256":hex_digest(b"created"),"bytes":7,"executable":false,"before":null})
     );
     assert!(super::fs::native(&root_path, &write, &config).is_err());
+    let deep = ToolCall::Write {
+        path: "fresh/deeper/created".into(),
+        expected_digest: None,
+        content: "deep".into(),
+    };
+    let result = super::fs::native(&root_path, &deep, &config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap(),
+        json!({"sha256":hex_digest(b"deep"),"bytes":4,"executable":false,"before":null})
+    );
+    assert_eq!(
+        std::fs::read(root_path.join("fresh/deeper/created")).unwrap(),
+        b"deep"
+    );
+    for path in ["linked/fresh/created", "nested/file/created"] {
+        let refused = ToolCall::Write {
+            path: path.into(),
+            expected_digest: None,
+            content: "not admitted".into(),
+        };
+        assert!(
+            super::fs::native(&root_path, &refused, &config).is_err(),
+            "missing parent beneath {path}"
+        );
+    }
     let original = super::fs::open_file(&root, "nested/file").unwrap();
     let edit = ToolCall::Edit {
         path: "nested/file".into(),
-        expected_digest: hex_digest(b"admitted"),
+        expected_digest: Some(hex_digest(b"admitted")),
         old: "admitted".into(),
         new: "replaced".into(),
     };
@@ -1051,11 +1076,11 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     let move_call = ToolCall::Move {
         source: "source".into(),
         destination: "nested/destination".into(),
-        expected_digest: hex_digest(content),
+        expected_digest: Some(hex_digest(content)),
     };
     let stale = ToolCall::Delete {
         path: "source".into(),
-        expected_digest: hex_digest(b"stale"),
+        expected_digest: Some(hex_digest(b"stale")),
     };
     assert!(matches!(
         super::fs::native(temp.path(), &stale, &config),
@@ -1080,7 +1105,7 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     let occupied = ToolCall::Move {
         source: "source".into(),
         destination: "nested/destination".into(),
-        expected_digest: hex_digest(b"replacement"),
+        expected_digest: Some(hex_digest(b"replacement")),
     };
     assert!(matches!(
         super::fs::native(temp.path(), &occupied, &config),
@@ -1090,7 +1115,7 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     assert_eq!(std::fs::read(&destination).unwrap(), content);
     let delete = ToolCall::Delete {
         path: "nested/destination".into(),
-        expected_digest: hex_digest(content),
+        expected_digest: Some(hex_digest(content)),
     };
     assert_eq!(
         super::fs::native(temp.path(), &delete, &config).unwrap(),
@@ -1120,12 +1145,12 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         for call in [
             ToolCall::Delete {
                 path: path.into(),
-                expected_digest: hex_digest(b"source"),
+                expected_digest: Some(hex_digest(b"source")),
             },
             ToolCall::Move {
                 source: path.into(),
                 destination: "owned/new".into(),
-                expected_digest: hex_digest(b"source"),
+                expected_digest: Some(hex_digest(b"source")),
             },
         ] {
             assert!(
@@ -1141,7 +1166,7 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         let call = ToolCall::Move {
             source: "owned/source".into(),
             destination: destination.into(),
-            expected_digest: hex_digest(b"source"),
+            expected_digest: Some(hex_digest(b"source")),
         };
         assert!(super::fs::native(temp.path(), &call, &config).is_err());
     }
@@ -1157,7 +1182,7 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         let call = ToolCall::Move {
             source: source.into(),
             destination: destination.into(),
-            expected_digest: hex_digest(b"source"),
+            expected_digest: Some(hex_digest(b"source")),
         };
         assert!(!config.allows(&call), "{call:?}");
     }
@@ -1165,7 +1190,7 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         assert!(
             !ToolCall::Delete {
                 path: path.into(),
-                expected_digest: hex_digest(b"source")
+                expected_digest: Some(hex_digest(b"source"))
             }
             .valid()
         );
@@ -1175,12 +1200,12 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
     for call in [
         ToolCall::Delete {
             path: "owned/large".into(),
-            expected_digest: hex_digest(b""),
+            expected_digest: Some(hex_digest(b"")),
         },
         ToolCall::Move {
             source: "owned/large".into(),
             destination: "owned/new".into(),
-            expected_digest: hex_digest(b""),
+            expected_digest: Some(hex_digest(b"")),
         },
     ] {
         assert!(matches!(

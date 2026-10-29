@@ -71,6 +71,7 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative directory whose immediate entries to list.",
             "type": "string"
           }
         },
@@ -82,7 +83,7 @@
       "name": "arany_list"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -113,7 +114,7 @@
       "name": "arany_read"
     },
     {
-      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+      "description": "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -146,6 +147,7 @@
             ]
           },
           "path": {
+            "description": "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
             "type": "string"
           },
           "query": {
@@ -304,11 +306,12 @@
       "name": "arany_mcp_list"
     },
     {
-      "description": "Create a new directory whose parent already exists. Does not edit an existing file.",
+      "description": "Create a new empty directory whose parent already exists; only needed for an empty directory, since write and move create missing parents. Does not edit an existing file.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative path of the new directory; its parent must exist.",
             "type": "string"
           }
         },
@@ -320,7 +323,7 @@
       "name": "arany_mkdir"
     },
     {
-      "description": "Write the real Workspace file; null expected_digest only creates a missing file. Existing files require the current SHA-256.",
+      "description": "Write the real Workspace file. Replacing an existing file is guarded by its SHA-256 from your latest Read or edit; with none known, it only creates a missing file. Creates missing parent directories.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -329,12 +332,14 @@
             "type": "string"
           },
           "expected_digest": {
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run, or creates a missing file when none is known; supply one only to pin a specific version. Never invent it.",
             "type": [
               "string",
               "null"
             ]
           },
           "path": {
+            "description": "Workspace-relative file to create or replace.",
             "type": "string"
           }
         },
@@ -348,13 +353,16 @@
       "name": "arany_write"
     },
     {
-      "description": "Apply a unique literal replacement to the real Workspace file, guarded by its current SHA-256. To append, replace a unique file ending with that ending plus new text.",
+      "description": "Apply a unique literal replacement to the real Workspace file, guarded by its SHA-256 from your latest Read or edit. To append, replace a unique file ending with that ending plus new text.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "expected_digest": {
-            "description": "Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it.",
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "new": {
             "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 65536 bytes.",
@@ -365,6 +373,7 @@
             "type": "string"
           },
           "path": {
+            "description": "Workspace-relative existing file to edit.",
             "type": "string"
           }
         },
@@ -508,7 +517,14 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, continue at next_offset or narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching files to skip; null starts at 0. Continue using next_offset.",
             "type": [
               "integer",
               "null"
@@ -529,6 +545,7 @@
         "required": [
           "pattern",
           "path",
+          "offset",
           "limit"
         ],
         "type": "object"
@@ -641,7 +658,7 @@
       "name": "arany_git_switch"
     },
     {
-      "description": "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
+      "description": "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file, guarded by its SHA-256 from your latest Read or edit. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -676,8 +693,11 @@
             "type": "array"
           },
           "expected_digest": {
-            "description": "Exact lowercase 64-character SHA-256 of the existing file from Read or a file include.",
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "file_path": {
             "type": "string"
@@ -693,14 +713,19 @@
       "name": "arany_multiedit"
     },
     {
-      "description": "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
+      "description": "Delete one regular Workspace file, guarded by its SHA-256 from your latest Read or edit. Does not delete directories.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "expected_digest": {
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "path": {
+            "description": "Workspace-relative regular file to delete.",
             "type": "string"
           }
         },
@@ -721,7 +746,11 @@
             "type": "string"
           },
           "expected_digest": {
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of source in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source": {
             "type": "string"
@@ -902,6 +931,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative path of the new directory; its parent must exist.",
                             "type": "string"
                           }
                         },
@@ -919,6 +949,7 @@
                             "type": "string"
                           },
                           "expected_digest": {
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run, or creates a missing file when none is known; supply one only to pin a specific version. Never invent it.",
                             "type": [
                               "string",
                               "null"
@@ -931,6 +962,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative file to create or replace.",
                             "type": "string"
                           }
                         },
@@ -946,8 +978,11 @@
                         "additionalProperties": false,
                         "properties": {
                           "expected_digest": {
-                            "description": "Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it.",
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "new": {
                             "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 65536 bytes.",
@@ -964,6 +999,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative existing file to edit.",
                             "type": "string"
                           }
                         },
@@ -1143,8 +1179,11 @@
                             "type": "array"
                           },
                           "expected_digest": {
-                            "description": "Exact lowercase 64-character SHA-256 of the existing file from Read or a file include.",
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "file_path": {
                             "type": "string"
@@ -1168,7 +1207,11 @@
                         "additionalProperties": false,
                         "properties": {
                           "expected_digest": {
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "operation": {
                             "enum": [
@@ -1177,6 +1220,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative regular file to delete.",
                             "type": "string"
                           }
                         },
@@ -1194,7 +1238,11 @@
                             "type": "string"
                           },
                           "expected_digest": {
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of source in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "operation": {
                             "enum": [
@@ -1305,6 +1353,7 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative directory whose immediate entries to list.",
             "type": "string"
           }
         },
@@ -1316,7 +1365,7 @@
       "name": "arany_list"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1347,7 +1396,7 @@
       "name": "arany_read"
     },
     {
-      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+      "description": "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1380,6 +1429,7 @@
             ]
           },
           "path": {
+            "description": "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
             "type": "string"
           },
           "query": {
@@ -1413,7 +1463,14 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, continue at next_offset or narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching files to skip; null starts at 0. Continue using next_offset.",
             "type": [
               "integer",
               "null"
@@ -1434,6 +1491,7 @@
         "required": [
           "pattern",
           "path",
+          "offset",
           "limit"
         ],
         "type": "object"
@@ -1638,6 +1696,7 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative directory whose immediate entries to list.",
             "type": "string"
           }
         },
@@ -1649,7 +1708,7 @@
       "name": "arany_list"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1680,7 +1739,7 @@
       "name": "arany_read"
     },
     {
-      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+      "description": "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1713,6 +1772,7 @@
             ]
           },
           "path": {
+            "description": "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
             "type": "string"
           },
           "query": {
@@ -1794,7 +1854,14 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, continue at next_offset or narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching files to skip; null starts at 0. Continue using next_offset.",
             "type": [
               "integer",
               "null"
@@ -1815,6 +1882,7 @@
         "required": [
           "pattern",
           "path",
+          "offset",
           "limit"
         ],
         "type": "object"

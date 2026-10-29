@@ -46,9 +46,9 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 fn record() -> serde_json::Value {
-    json!({"version":1,"profiles":[
-        {"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]},
-        {"name":"unused","routes":[{"provider":"anthropic","model":"claude-sonnet-5","effort":"high","account_id":null}]}
+    json!({"version":2,"profiles":[
+        {"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}]},
+        {"name":"unused","routes":[{"provider":{"kind":"anthropic","custom_name":null},"model":"claude-sonnet-5","effort":"high","account_id":null}]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","unused"]}]})
 }
 
@@ -212,7 +212,7 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
     let account = super::prepare_test_file_account_at(&account_root);
     let mut roster = record();
     roster["profiles"][0]["routes"][0]["account_id"] = json!(account);
-    let same = json!({"name":"same","routes":[{"provider":"openai","model":"gpt-6-luna","effort":"low","account_id":account}]});
+    let same = json!({"name":"same","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-6-luna","effort":"low","account_id":account}]});
     roster["profiles"].as_array_mut().unwrap().push(same);
     roster["presets"][0]["child_profiles"] = json!(["main", "same", "unused"]);
     for other in [false, true] {
@@ -394,7 +394,10 @@ fn attached_leg_macos(
     }
     input.write_all(b"\x03").unwrap();
     for (needle, send) in [
-        (&b"Goal paused"[..], &b"\x03"[..]),
+        (
+            &b"Interrupted. Send a message to continue."[..],
+            &b"\x03"[..],
+        ),
         (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
     ] {
         while !transcript.windows(needle.len()).any(|part| part == needle) {
@@ -932,7 +935,10 @@ mod journey {
         }
         input.write_all(b"\x03").unwrap();
         for (needle, send) in [
-            (&b"Goal paused"[..], &b"\x03"[..]),
+            (
+                &b"Interrupted. Send a message to continue."[..],
+                &b"\x03"[..],
+            ),
             (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
         ] {
             while !transcript.windows(needle.len()).any(|part| part == needle) {

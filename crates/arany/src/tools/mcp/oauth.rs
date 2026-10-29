@@ -84,9 +84,7 @@ enum Renewal {
 pub(crate) const MCP_OAUTH: RecordFormat = RecordFormat {
     kind: RecordKind::McpOauth,
     field: "schema",
-    floor: 1,
     current: 1,
-    steps: &[],
     accepts: |bytes| Tokens::decode(bytes).is_ok(),
 };
 
@@ -162,7 +160,8 @@ fn open_account(create: bool) -> Result<Option<StateRoot>, McpAuthError> {
 
 fn load(root: &StateRoot) -> Result<Tokens, McpAuthError> {
     match root
-        .read_current(&MCP_OAUTH)
+        .record(MCP_OAUTH.kind)
+        .read()
         .map_err(|_| McpAuthError::Storage)?
     {
         Some(bytes) => Tokens::decode(&bytes),

@@ -5,6 +5,7 @@ use super::{
     session_picker::{
         checkpoint_screen, pump, screen_contains, tail, wait_for, wait_for_after, wait_for_screen,
     },
+    ui_preferences,
 };
 use arany::{
     CollaborationPolicy, RecordKind, SessionDefaults, SessionId, StateRoot, Store, list_sessions,

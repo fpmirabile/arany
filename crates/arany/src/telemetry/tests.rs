@@ -614,6 +614,7 @@ fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
         chatgpt_provenance: None,
         output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
         context_window_tokens: None,
+        effective_context_window_tokens: None,
         policy: CollaborationPolicy::Single,
         output_token_cap: 4096,
         provider_concurrency: 1,
@@ -621,8 +622,9 @@ fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
         workspace_inode: 1,
         user_instruction_digest: None,
         instruction_sources: Vec::new(),
+        prompts: crate::provider::EffectivePrompts::default().pins(),
         launch_directory: String::new(),
-        include_digests: Vec::new(),
+        include_sources: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
         context_usage: None,
@@ -638,6 +640,7 @@ fn provider_record(
     usage: (Option<u32>, Option<u32>),
 ) -> ProviderCallRecord {
     ProviderCallRecord {
+        context_bytes: None,
         rate_limits: None,
         delegation: None,
         phase,
@@ -1452,6 +1455,8 @@ fn compaction_record(status: CompactionStatus) -> crate::session::CompactionReco
         provider: "other".into(),
         model: "model-1".into(),
         prompt_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         schema_version: 1,
         compiler_version: 3,
         source_bytes: 1,

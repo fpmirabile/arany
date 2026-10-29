@@ -83,15 +83,20 @@ pub use provider::{
     validate_native_api_key, validate_native_model_id,
 };
 pub use provider::{ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, MAX_API_LIMIT_ROWS};
+pub use provider::{
+    EffectivePrompts, MAX_PROMPT_OVERRIDE_BYTES, PromptFile, PromptOverrideError, PromptPin,
+    PromptSource,
+};
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ApiUsage, BudgetAction,
     BudgetChargeBasis, BudgetRefusal, BudgetRefusalCause, ChildGrant, CollaborationPolicy,
     CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
-    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,
-    GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
-    GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES,
-    MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
-    MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, MAX_USER_MESSAGE_BYTES, PlanUsage, ProposalRefusal,
+    ContextWindow, DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget,
+    GoalId, GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding,
+    GoalStatus, GoalSuccessCriterion, GoalView, IncludeFit, IncludeSource, InstructionFile,
+    InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
+    MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
+    MAX_USER_MESSAGE_BYTES, MIN_CONTEXT_WINDOW_PERCENT, PartialInclude, PlanUsage, ProposalRefusal,
     ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
     ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
     RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
@@ -106,9 +111,10 @@ pub use session::{
 };
 pub use session::{rewind, worker};
 pub use store::{
-    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, InspectedEvent,
-    InspectionCause, InspectionFailure, ProviderRecordEdit, ProviderRecordTarget, RECORD_FORMATS,
-    Record, RecordFormat, RecordKind, RecordStep, SessionInspection, StateRoot, Store, StoreError,
+    ArchivedHistory, ArchivedRecords, CheckpointReset, HistoryRecovery, HistoryReset,
+    InspectedEvent, InspectionCause, InspectionFailure, ProviderRecordEdit, ProviderRecordTarget,
+    RECORD_FORMATS, Record, RecordFormat, RecordKind, SessionInspection, StateRoot, Store,
+    StoreError,
 };
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{

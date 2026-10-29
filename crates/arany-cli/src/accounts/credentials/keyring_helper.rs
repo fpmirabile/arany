@@ -397,9 +397,10 @@ mod tests {
         let mut legacy = serde_json::to_value(&account).unwrap();
         legacy["schema"] = 2.into();
         legacy["provider"] = "openai".into();
-        for record in [
-            serde_json::to_string(&account).unwrap(),
-            serde_json::to_string(&legacy).unwrap(),
+        // Records from another schema are refused, never upgraded.
+        for (record, current) in [
+            (serde_json::to_string(&account).unwrap(), true),
+            (serde_json::to_string(&legacy).unwrap(), false),
         ] {
             for (id, provider, accepted) in [
                 (account.id, "openai", true),
@@ -408,7 +409,7 @@ mod tests {
             ] {
                 assert_eq!(
                     valid_authorized_record(DEFAULT_ACCOUNT, &record, Some((id, provider.into()))),
-                    accepted,
+                    current && accepted,
                     "native account identity boundary"
                 );
             }

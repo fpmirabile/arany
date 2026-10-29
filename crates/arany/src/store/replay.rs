@@ -73,8 +73,6 @@ macro_rules! raw_select {
 }
 pub(super) const HEAD_FIRST_SQL: &str =
     raw_select!("WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence ASC LIMIT 1");
-pub(super) const ROWS_AFTER_SQL: &str =
-    raw_select!("WHERE sequence > ?1 ORDER BY sequence ASC LIMIT 256");
 pub(super) const LANE_SQL: &str = raw_select!(
     "WHERE session_id = ?1 AND sequence > ?2 AND sequence <= ?3 ORDER BY sequence ASC LIMIT 256"
 );

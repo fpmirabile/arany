@@ -52,7 +52,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         permissions: None,
         result_filter: None,
         unguarded_rules: None,
-        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        context_limit_bytes: std::sync::Arc::new(MAX_TOOL_CONTEXT_BYTES.into()),
         cache_state: None,
         command_tools: Default::default(),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(

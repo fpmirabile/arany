@@ -2,7 +2,8 @@ use super::*;
 use crate::process::BoundedOutput;
 
 const FINAL_MESSAGE_FAILURES: [(&str, &[Option<&str>]); 4] = [
-    ("ResponseMissingFinalMessage", &[Some("commentary")]),
+    // A commentary-only response is the answer; only an output without any message lacks one.
+    ("ResponseMissingFinalMessage", &[]),
     (
         "ResponseDuplicateFinalMessage",
         &[Some("final_answer"), Some("final_answer")],

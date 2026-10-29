@@ -162,6 +162,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::CancellationDrainTimeout => "CancellationDrainTimeout",
         EngineError::CoordinatorFailed => "CoordinatorFailed",
         EngineError::CancelledBeforeStart => "CancelledBeforeStart",
+        EngineError::PromptOverride(_) => "PromptOverride",
         EngineError::Store(_) => "Store",
         EngineError::Tool(_) => "Tool",
     };
@@ -323,7 +324,7 @@ mod tests {
         const CANARY: &str = "private-diagnostic-canary-do-not-record";
         let call = crate::tools::ToolCall::Edit {
             path: CANARY.into(),
-            expected_digest: CANARY.into(),
+            expected_digest: Some(CANARY.into()),
             old: CANARY.into(),
             new: CANARY.into(),
         };
@@ -375,6 +376,7 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             record: crate::session::ProviderCallRecord {
+                context_bytes: None,
                 rate_limits: None,
                 delegation: None,
                 phase: crate::provider::AgentPhase::RootSynthesis,

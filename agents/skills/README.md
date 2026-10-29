@@ -1,6 +1,6 @@
 # Project skills
 
-Maintain Arany's development skill sources here: `rust-clean-code` for Rust, `arany-terminal-design` for terminal interaction, and `clean-architecture-review` for architecture reviews. Apply each only when its task fits. [Arany's implementation priorities](../../AGENTS.md#product-and-implementation-priorities) require Ponytail for every implementation and code review; the local skills complement it.
+Maintain Arany's development skill sources here: `rust-clean-code` for Rust, `terminal-ui-design` for terminal interaction, and `clean-architecture-review` for architecture reviews. Each skill is repo-agnostic and covers only its vertical; repository rules live in [AGENTS.md](../../AGENTS.md) and `agents/*.md`, which name the skill and when to load it. Apply each only when its task fits. [Arany's implementation priorities](../../AGENTS.md#product-and-implementation-priorities) inline Ponytail's essentials for every implementation and load these skills by name for new modules, cross-module refactors and code reviews.
 
 `agents/skills/` contains editable, checked-in sources. `.agents/skills/` contains generated, gitignored installations discovered by Codex and other compatible agents; agent-specific directories can link to them. These are different directories, not alternative spellings. [`skills-lock.json`](../../skills-lock.json) is the single manifest, with portable local source paths. These skills guide development agents; they do not enable runtime Skills or Tool permissions in Arany.
 
@@ -32,7 +32,7 @@ npx --yes skills@1.7.0 list
 
 This creates `.agents/skills/`, links the selected skills under `.claude/skills/`, and refreshes their lock entries without changing source files. Select only `codex` or another supported agent as needed; use `--copy` where symlinks are unavailable. Confirm that all four skills appear and `.agents/skills/ponytail/SKILL.md` can be opened. If a running agent does not discover them, start a fresh session; the explicit Ponytail path remains readable in the current session.
 
-On a fresh checkout, a lock entry does not mean its skill is installed. Restore a missing required skill before implementation; if installation is blocked, report the missing skill instead of claiming it was applied. Do not create a placeholder skill or silently fetch a different revision.
+On a fresh checkout, a lock entry does not mean its skill is installed. Restore a missing required skill before work that loads it; if installation is blocked, report the missing skill instead of claiming it was applied. Do not create a placeholder skill or silently fetch a different revision.
 
 ## Restore the lockfile
 

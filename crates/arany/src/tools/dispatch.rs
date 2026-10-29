@@ -140,7 +140,7 @@ pub(super) fn outcome(
         {
             (
                 ToolDisposition::Failed,
-                if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Mkdir { .. }) {
+                if matches!(intent.call, ToolCall::Mkdir { .. }) {
                     "Parent directory not found; create it with Mkdir first"
                 } else {
                     "File or directory not found; List the parent directory to check the path"

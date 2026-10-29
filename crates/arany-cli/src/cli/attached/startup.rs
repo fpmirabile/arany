@@ -73,11 +73,18 @@ pub(super) async fn start(
     mut args: AttachedArgs,
     telemetry: Telemetry,
 ) -> Result<ControlFlow<(), AttachedSession>, String> {
+    let (_, state_dir) =
+        super::super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+            .map_err(str::to_owned)?;
+    let archived_records = super::super::record_formats::archive_incompatible(&state_dir)?;
     let selected = select_roster(&mut args)?;
     let admission = args.admit(telemetry)?;
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut startup = Startup::acquire(admission, &restored_settings)?;
+    for notice in archived_records {
+        append_notice(&mut startup.setup_notice, &notice);
+    }
     let ControlFlow::Continue(archived) = admit_startup(
         &mut startup.terminal,
         &mut startup.admission,

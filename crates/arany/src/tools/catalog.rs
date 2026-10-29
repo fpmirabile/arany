@@ -107,28 +107,28 @@ pub(crate) static ALL: [OperationFacts; 29] = [
         "read",
         Family::File,
         1,
-        "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+        "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
     ),
     read_row(
         "search",
         Family::File,
         2,
-        "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+        "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
     ),
     write_row(
         "mkdir",
         8,
-        "Create a new directory whose parent already exists. Does not edit an existing file.",
+        "Create a new empty directory whose parent already exists; only needed for an empty directory, since write and move create missing parents. Does not edit an existing file.",
     ),
     write_row(
         "write",
         9,
-        "Write the real Workspace file; null expected_digest only creates a missing file. Existing files require the current SHA-256.",
+        "Write the real Workspace file. Replacing an existing file is guarded by its SHA-256 from your latest Read or edit; with none known, it only creates a missing file. Creates missing parent directories.",
     ),
     write_row(
         "edit",
         10,
-        "Apply a unique literal replacement to the real Workspace file, guarded by its current SHA-256. To append, replace a unique file ending with that ending plus new text.",
+        "Apply a unique literal replacement to the real Workspace file, guarded by its SHA-256 from your latest Read or edit. To append, replace a unique file ending with that ending plus new text.",
     ),
     OperationFacts {
         spawns_process: true,
@@ -233,7 +233,7 @@ pub(crate) static ALL: [OperationFacts; 29] = [
     write_row(
         "multiedit",
         20,
-        "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
+        "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file, guarded by its SHA-256 from your latest Read or edit. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
     ),
     OperationFacts {
         site: Site::Host,
@@ -254,7 +254,7 @@ pub(crate) static ALL: [OperationFacts; 29] = [
     write_row(
         "delete",
         23,
-        "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
+        "Delete one regular Workspace file, guarded by its SHA-256 from your latest Read or edit. Does not delete directories.",
     ),
     write_row(
         "move",
@@ -379,8 +379,6 @@ pub(crate) fn git_operations(write: bool, host: bool) -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication), delete (one regular file, expected sha256), move (source and missing destination, source expected sha256, preserves bytes and executable status)";
-pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
 pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for command paths. Commands use the primary's selected inputs from the current Workspace in an offline project copy without .git. No network, host home, credentials, state or host execution. The whole changeset must fit your own lease and avoid sibling leases; any out-of-lease change refuses the entire batch without Workspace publication. The Engine publishes validated changes under the child identity with permission checks and checkpoints; only a successful applied Workspace receipt confirms landed edits. Subsequent commands select the current Workspace, including landed edits. Commands take the primary's exclusive cache-identity lease; busy refuses without waiting or retry. The recorded cache_update reports cache publication separately from command success. The primary still needs fresh Workspace evidence to verify the assignment.";
 
 pub(crate) const COMMAND_PROJECT_COPY: &str = "The command's project copy has no .git";
@@ -474,7 +472,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
         }
         let (key, field, cap) = match facts.family {
             Family::File if facts.mutates => return catalog["write"] == true,
-            Family::File => return catalog["file_tools"] != "",
+            Family::File => return catalog["file_tools"] != false,
             Family::Process if facts.site == Site::Unguarded => return catalog["host_commands"] == true,
             Family::Process => ("commands", "program", 8),
             Family::Skill => ("skills", "name", MAX_SKILLS),
@@ -547,7 +545,7 @@ fn plan_contract_schema(call_schema: Option<&Value>, pinned: &crate::session::Go
     let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
     let ceiling = |limit: Option<u64>, unit: &str| match limit {
         Some(limit) => {
-            json!({"type":"integer", "description": format!("Positive integer {unit}, at most {limit}; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.")})
+            json!({"type":"integer", "description": format!("Positive integer {unit}, at most {limit}; the Goal pins this ceiling and null is refused.")})
         }
         None => {
             json!({"type":["integer","null"], "description": format!("Positive integer {unit}, or null because the Goal sets no ceiling here.")})
@@ -670,7 +668,7 @@ mod tests {
             },
             ToolCall::Edit {
                 path: path(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
                 old: "a".into(),
                 new: "b".into(),
             },
@@ -726,6 +724,7 @@ mod tests {
             ToolCall::Glob {
                 pattern: "**/*.rs".into(),
                 path: path(),
+                offset: 0,
                 limit: 1,
             },
             ToolCall::GitCommit {
@@ -745,7 +744,7 @@ mod tests {
             },
             ToolCall::MultiEdit {
                 file_path: path(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
                 edits: vec![super::super::LiteralEdit {
                     old_string: "a".into(),
                     new_string: "b".into(),
@@ -766,12 +765,12 @@ mod tests {
             },
             ToolCall::Delete {
                 path: path(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
             },
             ToolCall::Move {
                 source: path(),
                 destination: "destination".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
             },
             ToolCall::GhPrList {
                 repository: "github.com/o/r".into(),
@@ -977,6 +976,15 @@ mod tests {
                 .filter(|facts| facts.schema().is_none())
                 .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
         );
+    }
+
+    #[test]
+    fn read_and_search_descriptions_state_their_page_limits() {
+        use crate::tools::types::{MAX_READ_PAGE_LINES, MAX_SEARCH_ROWS};
+        let read = by_name("read").unwrap().description;
+        let search = by_name("search").unwrap().description;
+        assert!(read.contains(&format!("read up to {MAX_READ_PAGE_LINES} lines")));
+        assert!(search.contains(&format!("up to {MAX_SEARCH_ROWS} matching lines")));
     }
 
     #[test]

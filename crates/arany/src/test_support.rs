@@ -17,6 +17,7 @@ pub use crate::provider::test_image;
 pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
 
 pub const MAX_SESSION_EVENTS: usize = crate::store::MAX_SESSION_EVENTS;
+pub const MAX_STEP_TOOL_CALLS: usize = crate::session::MAX_STEP_TOOL_CALLS as usize;
 
 pub const fn max_changeset_bytes() -> usize {
     crate::tools::types::MAX_CHANGESET_BYTES

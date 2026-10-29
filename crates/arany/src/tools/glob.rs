@@ -1,5 +1,5 @@
 use super::ToolError;
-use super::types::{MAX_SNAPSHOT_FILES, ToolCall};
+use super::types::ToolCall;
 use crate::validate::valid_relative;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
@@ -10,8 +10,10 @@ const MAX_GLOB_ENTRIES: u32 = 100;
 const MAX_PATTERN_BYTES: usize = 512;
 const MAX_ALTERNATIVES: usize = 16;
 const MAX_TRANSLATION_BYTES: usize = 8 * 1024;
-pub(super) const MAX_SCANNED_ENTRIES: usize = MAX_SNAPSHOT_FILES * 4;
-pub(super) const MAX_GLOB_CANDIDATES: usize = MAX_SNAPSHOT_FILES;
+// Discovery walks are bounded by their deadline; this caps the work a fast filesystem can add.
+pub(super) const MAX_SCANNED_ENTRIES: usize = 200_000;
+// No walk can match more files than it inspects entries.
+const MAX_GLOB_OFFSET: u32 = MAX_SCANNED_ENTRIES as u32;
 pub(super) const MAX_DEPTH: usize = 16;
 
 pub(super) fn default_path() -> String {
@@ -60,6 +62,17 @@ pub(super) fn matcher(pattern: &str) -> Result<Regex, PatternError> {
         .nest_limit(32)
         .build()
         .map_err(|_| PatternError::Size)
+}
+
+// Wildcard-free leading directory components; every match lies beneath them.
+pub(super) fn literal_prefix(pattern: &str) -> Vec<String> {
+    let mut components: Vec<_> = pattern.split('/').collect();
+    components.pop();
+    components
+        .into_iter()
+        .take_while(|component| !component.contains(['*', '?', '{', '}']))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn translate(pattern: &str) -> Result<String, PatternError> {
@@ -161,8 +174,9 @@ fn translate_wildcards(text: &str, regex: &mut String) {
 }
 
 pub(super) fn valid(call: &ToolCall) -> bool {
-    matches!(call, ToolCall::Glob { pattern, path, limit }
+    matches!(call, ToolCall::Glob { pattern, path, offset, limit }
         if valid_relative(path, true)
+            && *offset <= MAX_GLOB_OFFSET
             && (1..=MAX_GLOB_ENTRIES).contains(limit)
             && matcher(pattern).is_ok())
 }
@@ -178,15 +192,21 @@ pub(super) fn schema() -> Vec<(&'static str, Value)> {
             json!({"type":["string", "null"], "description":"Workspace-relative directory to search; null searches the whole Workspace."}),
         ),
         (
+            "offset",
+            json!({"type":["integer", "null"], "description":"Number of matching files to skip; null starts at 0. Continue using next_offset."}),
+        ),
+        (
             "limit",
-            json!({"type":["integer", "null"], "description":format!("Maximum entries, 1 through {MAX_GLOB_ENTRIES}; null returns up to {MAX_GLOB_ENTRIES}. When may_be_truncated is true, narrow pattern or path.")}),
+            json!({"type":["integer", "null"], "description":format!("Maximum entries, 1 through {MAX_GLOB_ENTRIES}; null returns up to {MAX_GLOB_ENTRIES}. When may_be_truncated is true, continue at next_offset or narrow pattern or path.")}),
         ),
     ]
 }
 
-// Keeps a Limit, not an empty success, when matches exist but none fits.
+// Keeps a Limit, not an empty success, when matches exist but none fits. `matches` follow the
+// skipped offset and hold one lookahead entry when another page exists.
 pub(super) fn render(
     matches: BTreeMap<String, u64>,
+    offset: u32,
     limit: u32,
     result_bytes: usize,
 ) -> Result<String, ToolError> {
@@ -198,8 +218,9 @@ pub(super) fn render(
         .collect();
     let had_entries = !entries.is_empty();
     loop {
-        let output =
-            json!({"entries":entries, "limit":limit, "may_be_truncated":truncated}).to_string();
+        let next = truncated.then(|| u64::from(offset) + entries.len() as u64);
+        let output = json!({"entries":entries, "limit":limit, "may_be_truncated":truncated, "next_offset":next})
+            .to_string();
         if output.len() <= result_bytes {
             if had_entries && entries.is_empty() {
                 return Err(ToolError::Limit);
@@ -303,15 +324,17 @@ mod tests {
     }
 
     #[test]
-    fn null_or_omitted_path_and_limit_normalize_before_hashing() {
+    fn null_or_omitted_path_offset_and_limit_normalize_before_hashing() {
         let normalized = ToolCall::Glob {
             pattern: "*.rs".into(),
             path: ".".into(),
+            offset: 0,
             limit: MAX_GLOB_ENTRIES,
         };
         for input in [
             json!({"operation":"glob","pattern":"*.rs"}),
-            json!({"operation":"glob","pattern":"*.rs","path":null,"limit":null}),
+            json!({"operation":"glob","pattern":"*.rs","path":null,"offset":null,"limit":null}),
+            json!({"operation":"glob","pattern":"*.rs","path":"","offset":0,"limit":100}),
             json!({"operation":"glob","pattern":"*.rs","path":"","limit":100}),
         ] {
             assert_eq!(
@@ -324,18 +347,37 @@ mod tests {
             serde_json::to_value(&normalized).unwrap(),
             json!({"operation":"glob","pattern":"*.rs","path":".","limit":100})
         );
-        for (limit, valid_limit) in [(0, false), (1, true), (100, true), (101, false)] {
+        let paged = ToolCall::Glob {
+            pattern: "*.rs".into(),
+            path: ".".into(),
+            offset: 7,
+            limit: 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&paged).unwrap(),
+            json!({"operation":"glob","pattern":"*.rs","path":".","offset":7,"limit":1})
+        );
+        for (offset, limit, valid_limit) in [
+            (0, 0, false),
+            (0, 1, true),
+            (0, 100, true),
+            (0, 101, false),
+            (MAX_GLOB_OFFSET, 1, true),
+            (MAX_GLOB_OFFSET + 1, 1, false),
+        ] {
             let call = ToolCall::Glob {
                 pattern: "*.rs".into(),
                 path: "src".into(),
+                offset,
                 limit,
             };
-            assert_eq!(call.valid(), valid_limit, "limit {limit}");
+            assert_eq!(call.valid(), valid_limit, "offset {offset} limit {limit}");
         }
         for path in ["/src", "../x", "src/.env", "a//b"] {
             let call = ToolCall::Glob {
                 pattern: "*.rs".into(),
                 path: path.into(),
+                offset: 0,
                 limit: 1,
             };
             assert!(!call.valid(), "{path}");

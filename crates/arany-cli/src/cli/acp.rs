@@ -33,7 +33,7 @@ pub(crate) struct AcpArgs {
     pub effort: Option<Effort>,
     #[arg(long)]
     pub profile: Option<String>,
-    #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
+    #[arg(long, value_enum, default_value_t = CollaborationArg::Single)]
     pub collaboration: CollaborationArg,
     #[arg(long)]
     pub max_active_children: Option<u8>,
@@ -116,6 +116,7 @@ pub(crate) async fn run(
     telemetry: Telemetry,
 ) -> Result<super::CommandOutput, String> {
     let state_dir = super::state_dir(args.state_dir).map_err(str::to_owned)?;
+    super::admit_headless_records(&state_dir)?;
     let state =
         StateRoot::admit(&state_dir).map_err(|_| "state directory unavailable or unsafe")?;
     let roster = args

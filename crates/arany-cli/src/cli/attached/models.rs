@@ -71,15 +71,14 @@ fn bounded_models<'de, D: serde::Deserializer<'de>>(
 pub(crate) const MODEL_PREFERENCES: RecordFormat = RecordFormat {
     kind: RecordKind::ModelPreferences,
     field: "version",
-    floor: 1,
     current: 1,
-    steps: &[],
     accepts: |bytes| decode_preferences(bytes).is_ok(),
 };
 
 fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
     let Some(record) = root
-        .read_current(&MODEL_PREFERENCES)
+        .record(MODEL_PREFERENCES.kind)
+        .read()
         .map_err(|_| "saved model preferences unavailable or unsafe")?
     else {
         return Ok(ModelPreferences {
@@ -99,14 +98,15 @@ fn decode_preferences(record: &[u8]) -> Result<ModelPreferences, String> {
 
 pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
     let path = StateRoot::account_path().map_err(|_| "saved model preferences unavailable")?;
-    let Some(root) = crate::files::open_optional_state(&path)
+    let Some(root) = arany::StateRoot::open_optional(&path)
         .map_err(|_| "saved model preferences unavailable or unsafe")?
     else {
         return Ok(false);
     };
     root.with_account_replacement_lock(workspace, || {
         let record = root
-            .read_current(&MODEL_PREFERENCES)
+            .record(MODEL_PREFERENCES.kind)
+            .read()
             .map_err(|_| "saved model preferences unavailable or unsafe")?;
         Ok(record.is_some_and(|bytes| decode_preferences(&bytes).is_err()))
     })
@@ -164,11 +164,11 @@ fn matching_source<'a>(
     })
 }
 
-pub(super) fn last_saved_defaults(
+pub(crate) fn last_saved_defaults(
     workspace: &Path,
 ) -> Result<Option<arany::SessionDefaults>, String> {
     let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
-    let Some(root) = crate::files::open_optional_state(&path)
+    let Some(root) = arany::StateRoot::open_optional(&path)
         .map_err(|_| "saved selection unavailable or unsafe")?
     else {
         return Ok(None);
@@ -190,6 +190,33 @@ pub(super) fn last_saved_defaults(
                 account_id: Some(source.account_id),
                 ..arany::SessionDefaults::default()
             }))
+    })
+    .map_err(|_| "saved selection unavailable".to_owned())?
+}
+
+pub(crate) fn saved_effort(
+    workspace: &Path,
+    profile: &str,
+    model: &str,
+) -> Result<Option<Effort>, String> {
+    let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
+    let Some(root) = arany::StateRoot::open_optional(&path)
+        .map_err(|_| "saved selection unavailable or unsafe")?
+    else {
+        return Ok(None);
+    };
+    root.with_account_replacement_lock(workspace, || {
+        let preferences = read_preferences(&root)?;
+        let selected = preferences
+            .selected
+            .as_ref()
+            .map(|selected| selected.account_id);
+        Ok(preferences
+            .sources
+            .iter()
+            .filter(|source| source.profile == profile && source.model.as_deref() == Some(model))
+            .max_by_key(|source| Some(source.account_id) == selected)
+            .and_then(|source| source.effort))
     })
     .map_err(|_| "saved selection unavailable".to_owned())?
 }

@@ -2,7 +2,7 @@ use super::routing::{Route, RoutingError, admit};
 use super::select::{ProviderArg, Selection};
 use arany::{
     AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, ProviderKind,
-    Providers, RecordFormat, RecordKind, RecordStep, RosterSnapshot, StateRoot, valid_profile_name,
+    Providers, RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
@@ -117,12 +117,7 @@ fn bounded(bytes: &[u8]) -> bool {
 pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRoster,
     field: "version",
-    floor: 1,
     current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_roster,
-    }],
     accepts: |bytes| presets(bytes).is_ok(),
 };
 
@@ -135,7 +130,8 @@ pub(crate) struct RosterDraft {
 impl RosterDraft {
     pub(crate) fn load(state: &StateRoot) -> Result<Self, String> {
         let expected = state
-            .read_current(&PROVIDER_ROSTER)
+            .record(PROVIDER_ROSTER.kind)
+            .read()
             .map_err(|_| "Provider roster unavailable or unsafe")?;
         let config = match &expected {
             Some(bytes) => {
@@ -283,20 +279,11 @@ impl RosterDraft {
     }
 }
 
-fn migrate_roster(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    for profile in value.get_mut("profiles")?.as_array_mut()? {
-        for route in profile.get_mut("routes")?.as_array_mut()? {
-            super::routing::migrate_route(route)?;
-        }
-    }
-    value["version"] = PROVIDER_ROSTER.current.into();
-    Some(value)
-}
-
 pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<bool, String> {
     let state = StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable")?;
     let Some(bytes) = state
-        .read_current(&PROVIDER_ROSTER)
+        .record(PROVIDER_ROSTER.kind)
+        .read()
         .map_err(|_| "Provider roster unavailable or unsafe")?
     else {
         return Ok(false);
@@ -440,7 +427,8 @@ pub(crate) fn load_without_workspace(
         );
     }
     let bytes = root
-        .read_current(&PROVIDER_ROSTER)
+        .record(PROVIDER_ROSTER.kind)
+        .read()
         .map_err(|_| "Provider roster unavailable or unsafe")?
         .ok_or("provider-roster.json is unavailable")?;
     parse(&bytes, name)

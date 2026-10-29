@@ -218,7 +218,7 @@ fn startup_upper_bound_two_files_on_named_host() {
         );
         let config = view.runs[0].config.as_ref().expect("pinned Run");
         assert_eq!(config.policy, CollaborationPolicy::Single);
-        assert_eq!(config.include_digests.len(), 2);
+        assert_eq!(config.include_sources.len(), 2);
     }
     server.join().expect("synthetic Provider completed");
     runtime.block_on(observer.close()).expect("close observer");

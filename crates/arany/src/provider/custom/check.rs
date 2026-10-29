@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const CUSTOM_CHECK_VERSION: &str =
-    "custom-protocol-workspace-tools-conformance-effort-stream-journal-v45";
+    "custom-protocol-workspace-tools-conformance-effort-stream-journal-v46";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -376,6 +376,7 @@ async fn probe(
             assistant: "Synthetic conformance answer".into(),
         })],
         max_output_tokens: 128,
+        prompts: Default::default(),
     };
     let compact_id = probe_compaction(
         &transport,
@@ -722,10 +723,12 @@ mod tests {
             } else {
                 "application/json"
             };
+            let instructions =
+                crate::provider::EffectivePrompts::default().compaction_instructions();
             let compaction = if messages.is_some() {
-                body["system"][0]["text"] == crate::provider::prompts::COMPACTION_INSTRUCTIONS
+                body["system"][0]["text"] == instructions
             } else {
-                body["instructions"] == crate::provider::prompts::COMPACTION_INSTRUCTIONS
+                body["instructions"] == instructions
             };
             if compaction {
                 for field in ["text", "tools", "tool_choice", "parallel_tool_calls"] {
@@ -1152,6 +1155,7 @@ mod tests {
                     assistant: "Synthetic answer".into(),
                 })],
                 max_output_tokens: 128,
+                prompts: Default::default(),
             };
             tokio::time::timeout(Duration::from_secs(10), transport.compact(&request, None))
                 .await
@@ -1386,6 +1390,7 @@ mod tests {
             "custom-protocol-text-compaction-conformance-effort-stream-journal-v42",
             "custom-protocol-text-compaction-conformance-effort-stream-journal-v43",
             "custom-protocol-text-compaction-conformance-effort-stream-journal-v44",
+            "custom-protocol-workspace-tools-conformance-effort-stream-journal-v45",
         ] {
             let mut legacy = Sha256::new();
             for field in [
@@ -1560,13 +1565,17 @@ mod tests {
             let store = Store::open(root.try_clone().unwrap()).unwrap();
             store.record_provider_evidence(old).await.unwrap();
             store.close().await.unwrap();
-            responses["version"] = json!(1);
-            write(&responses);
             assert!(matches!(
                 super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
                 Err(CustomProfileError::EvidenceUnavailable)
             ));
         }
+        responses["version"] = json!(1);
+        write(&responses);
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::InvalidConfiguration)
+        ));
         write(&original);
         assert!(matches!(
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,

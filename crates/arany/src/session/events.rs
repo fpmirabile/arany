@@ -1,17 +1,7 @@
-mod command_tools;
-pub(crate) use command_tools::pre_command_tools_payload;
-mod goal;
-mod records;
-mod selection_timing;
-mod shared_editors;
-pub(crate) use selection_timing::{add_selection_timing, pre_selection_timing_payload};
-pub(crate) use shared_editors::{
-    live_editor_payload, pre_shared_editor_payload, retired_worker_payload,
-    run_started_v23_payload, run_started_v24_payload, run_started_v24_to_v25,
-};
-use shared_editors::{parse_run_started, string_run_provider_text};
 #[cfg(test)]
 mod api_limits_tests;
+mod goal;
+mod records;
 #[cfg(test)]
 mod tests;
 mod validate;
@@ -36,11 +26,11 @@ pub(crate) use goal::{
 pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
-    DisplayChunk, EffectTarget, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES,
-    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal,
-    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RecentFile, RunConfig,
-    RunDisposition, RunFailure, SessionDefaults, ToolIntentRecord, ToolPreflightRefusal,
-    ToolRefusal, ToolRefusalReason,
+    DisplayChunk, EffectTarget, IncludeSource, InstructionFile, InstructionSource,
+    MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
+    MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
+    ProviderCallRecord, RecentFile, RunConfig, RunDisposition, RunFailure, SessionDefaults,
+    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason,
 };
 use validate::bounded;
 
@@ -150,7 +140,7 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
+const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("HostEnvironmentCapture", 1),
     ("CommandToolProbeStarted", 1),
     ("CommandToolProbeFinished", 1),
@@ -163,7 +153,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
     ("GoalPlanContractRecorded", 15),
-    ("GoalContextCompacted", 6),
+    ("GoalContextCompacted", 7),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
@@ -171,7 +161,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 18),
     ("AgentFinished", 12),
-    ("ProviderCallRecorded", 26),
+    ("ProviderCallRecorded", 27),
     ("WorkerStopObserved", 1),
     ("WorkerLeaseReleased", 2),
     ("WorkerVerificationRecorded", 1),
@@ -188,13 +178,13 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 44] = [
     ("HookStarted", 17),
     ("HookFinished", 24),
     ("ToolFinished", 35),
-    ("RunStarted", 27),
+    ("RunStarted", 29),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
     ("ToolStarted", 28),
     ("ToolActiveTimeReserved", 1),
-    ("ContextCompacted", 7),
+    ("ContextCompacted", 8),
 ];
 
 pub(crate) fn payload_version(kind: &str) -> Option<i64> {
@@ -209,8 +199,9 @@ pub(crate) const MAX_CHILD_TURNS: u8 = {
     assert!(MAX_CHILD_TOOL_CALLS < u8::MAX as usize);
     MAX_CHILD_TOOL_CALLS as u8 + 1
 };
-pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
+pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 8;
 const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
+pub(crate) const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AgentRunId(Uuid);
@@ -1701,473 +1692,6 @@ impl Event {
     }
 }
 
-pub(crate) fn intent_without_expiry(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let intent = if value.get("intent").is_some() {
-        value.get_mut("intent")?
-    } else {
-        value.get_mut("observation")?.get_mut("intent")?
-    };
-    let old = expiring_intent_text(intent)?;
-    intent.as_object_mut()?.remove("expires_at_ms")?;
-    let current: crate::tools::EffectIntent = serde_json::from_value(intent.clone()).ok()?;
-    let old_digest = crate::validate::digest(old.as_bytes());
-    let new_digest = current.digest();
-    replace_intent_pin(&mut value, &old_digest, &new_digest);
-    let observation = if value.get("observation").is_some() {
-        value.get_mut("observation")?
-    } else {
-        &mut value
-    };
-    if observation.get("disposition").is_some()
-        && observation
-            .as_object_mut()?
-            .insert("approval_cause".into(), serde_json::Value::Null)
-            .is_some()
-    {
-        return None;
-    }
-    Some(value)
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RewindStartedV1 {
-    rewind_id: uuid::Uuid,
-    target: super::rewind::CheckpointTarget,
-    head_sequence: u64,
-    prefix_digest: [u8; 32],
-    plan_digest: [u8; 32],
-    file_count: u32,
-    restored_bytes: u64,
-    kept: Vec<String>,
-    overwrite: Vec<super::rewind::Overwrite>,
-    workspace_device: u64,
-    workspace_inode: u64,
-    policy_digest: [u8; 32],
-    enforcement_digest: [u8; 32],
-    expires_at_ms: i64,
-}
-
-pub(crate) fn rewind_started_v1_payload(payload: &str) -> Option<String> {
-    let record = serde_json::from_str::<RewindStartedV1>(payload).ok()?;
-    (record.expires_at_ms > 0)
-        .then(|| serde_json::to_string(&record).ok())
-        .flatten()
-}
-
-pub(crate) fn rewind_started_v1_to_v2(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let record = value.as_object_mut()?;
-    let expiry = record.remove("expires_at_ms")?.as_i64()?;
-    (expiry > 0).then_some(value)
-}
-
-pub(crate) fn replace_intent_pin(value: &mut serde_json::Value, old: &[u8; 32], new: &[u8; 32]) {
-    rebind_intent_pins(value, &|digest| (digest == old).then_some(*new));
-}
-
-pub(crate) fn rebind_intent_pins(
-    value: &mut serde_json::Value,
-    lookup: &impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
-) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, value) in fields {
-                if matches!(
-                    key.as_str(),
-                    "intent_digest"
-                        | "source_intent_digest"
-                        | "last_intent_digest"
-                        | "subject_digest"
-                ) && let Ok(old) = serde_json::from_value::<[u8; 32]>(value.clone())
-                    && let Some(new) = lookup(&old)
-                {
-                    *value = serde_json::json!(new);
-                } else {
-                    rebind_intent_pins(value, lookup);
-                }
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                rebind_intent_pins(value, lookup);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn restore_expiry(mut text: String, expiry: u64) -> Option<String> {
-    let at = text.find(",\"use_count\":")?;
-    text.insert_str(at, &format!(",\"expires_at_ms\":{expiry}"));
-    Some(text)
-}
-
-pub(crate) fn expiring_intent_text(value: &serde_json::Value) -> Option<String> {
-    let mut value = value.clone();
-    let expiry = value.as_object_mut()?.remove("expires_at_ms")?.as_u64()?;
-    if expiry == 0 {
-        return None;
-    }
-    let intent: crate::tools::EffectIntent = serde_json::from_value(value).ok()?;
-    let text = serialize(&intent).ok()?;
-    restore_expiry(text, expiry)
-}
-
-pub(crate) fn expiring_payload(kind: &str, payload: &str) -> Option<String> {
-    let mut value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    let intent = if kind == "HookFinished" {
-        value.get_mut("observation")?.get_mut("intent")?
-    } else {
-        value.get_mut("intent")?
-    };
-    let expiry = intent.as_object_mut()?.remove("expires_at_ms")?.as_u64()?;
-    if expiry == 0 {
-        return None;
-    }
-    if matches!(kind, "ToolFinished" | "HookFinished") {
-        let observation = if kind == "HookFinished" {
-            value.get_mut("observation")?
-        } else {
-            &mut value
-        };
-        if observation
-            .as_object_mut()?
-            .insert("approval_cause".into(), serde_json::Value::Null)
-            .is_some()
-        {
-            return None;
-        }
-    }
-    let payload = value.to_string();
-    let text = match kind {
-        "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(&payload).ok()?).ok()?,
-        "HookStarted" => {
-            serialize(&parse::<crate::tools::permissions::HookInvocation>(&payload).ok()?).ok()?
-        }
-        "HookFinished" => {
-            serialize(&parse::<crate::tools::permissions::HookOutcome>(&payload).ok()?).ok()?
-        }
-        _ => return None,
-    };
-    let text = text.replacen(",\"approval_cause\":null", "", 1);
-    restore_expiry(text, expiry)
-}
-
-// The typed text a payload had before its kind only gained the glob variants, or `None`
-// when it names them (they did not exist) or does not parse.
-pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
-    before_operations(kind, payload, &["glob"], Some("glob"))
-}
-
-pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
-    use crate::tools::permissions::HookResult;
-    fn again<T: Serialize + for<'de> Deserialize<'de>>(
-        payload: &str,
-        allowed: impl FnOnce(&T) -> bool,
-    ) -> Option<String> {
-        let value = parse::<T>(payload).ok()?;
-        allowed(&value).then(|| serialize(&value).ok()).flatten()
-    }
-    fn expiring_again<T: for<'de> Deserialize<'de>>(
-        kind: &str,
-        payload: &str,
-        allowed: impl FnOnce(&T) -> bool,
-    ) -> Option<String> {
-        let source = expiring_payload(kind, payload)?;
-        let current = intent_without_expiry(serde_json::from_str(payload).ok()?)?;
-        let value = serde_json::from_value::<T>(current).ok()?;
-        allowed(&value).then_some(source)
-    }
-    fn intent_allowed(intent: &crate::tools::EffectIntent) -> bool {
-        intent.host_command.is_none() && !intent.call.is_unguarded()
-    }
-    fn observation_allowed(observation: &crate::tools::ToolObservation) -> bool {
-        intent_allowed(&observation.intent)
-            && !matches!(
-                observation.attestation,
-                Some(crate::tools::Attestation::Unguarded(_))
-            )
-    }
-    fn criterion_allowed(criterion: &GoalSuccessCriterion) -> bool {
-        !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if call.is_unguarded())
-    }
-    match kind {
-        "RunStarted" => {
-            let (data, allowance) = parse_run_started(payload, run_started_v23_to_v24)?;
-            data.config
-                .tool_policy
-                .as_ref()
-                .is_none_or(|policy| {
-                    policy.host_epoch.is_none()
-                        && policy.host_prefixes.is_empty()
-                        && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
-                })
-                .then(|| string_run_provider_text(&data, allowance))
-                .flatten()
-        }
-        "ToolFinished" => expiring_again::<ToolFinishedPayload>(kind, payload, |data| {
-            observation_allowed(&data.observation)
-        }),
-        "AgentSpawned" => again::<SpawnPayload>(payload, |data| {
-            data.grant
-                .is_none_or(|grant| grant.unguarded() == crate::tools::UnguardedGrant::Denied)
-                && data
-                    .assignment
-                    .as_ref()
-                    .is_none_or(|assignment| criterion_allowed(&assignment.request.criterion))
-        }),
-        "HookStarted" => {
-            expiring_again::<crate::tools::permissions::HookInvocation>(kind, payload, |hook| {
-                intent_allowed(&hook.intent)
-            })
-        }
-        "HookFinished" => {
-            expiring_again::<crate::tools::permissions::HookOutcome>(kind, payload, |outcome| {
-                observation_allowed(&outcome.observation)
-                    && !matches!(&outcome.result, HookResult::Narrowed { call } if call.is_unguarded())
-            })
-        }
-        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload, |record| {
-            record
-                .refusal
-                .as_ref()
-                .is_none_or(|refusal| refusal.operation != "arany_command_unguarded")
-                && record
-                    .delegation
-                    .iter()
-                    .flatten()
-                    .all(|assignment| match assignment {
-                        ChildAssignment::Researcher { .. } => true,
-                        ChildAssignment::Editor { assignment } => {
-                            criterion_allowed(&assignment.criterion)
-                        }
-                    })
-        }),
-        _ => None,
-    }
-}
-
-// The same for the typed Git write variants, which a later payload version added.
-pub(crate) fn pre_host_git_payload(kind: &str, payload: &str) -> Option<String> {
-    fn has_host(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(fields) => {
-                fields.contains_key("host")
-                    || fields.get("network").is_some_and(|v| v == "host")
-                    || fields.values().any(has_host)
-            }
-            serde_json::Value::Array(values) => values.iter().any(has_host),
-            _ => false,
-        }
-    }
-    if has_host(&serde_json::from_str(payload).ok()?) {
-        return None;
-    }
-    before_operations(kind, payload, &["git_push", "gh_pr_create"], None)
-}
-
-// The egress proxy network class arrived with a later payload version.
-pub(crate) fn pre_proxy_payload(kind: &str, payload: &str) -> Option<String> {
-    fn has_proxy(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(fields) => {
-                fields
-                    .get("network")
-                    .is_some_and(|network| network == "proxy")
-                    || fields.values().any(has_proxy)
-            }
-            serde_json::Value::Array(values) => values.iter().any(has_proxy),
-            _ => false,
-        }
-    }
-    if has_proxy(&serde_json::from_str(payload).ok()?) {
-        return None;
-    }
-    match kind {
-        "ToolProposed" => serialize(&parse::<ToolProposedPayload>(payload).ok()?).ok(),
-        "ToolStarted" => serialize(&parse::<ToolStartedPayload>(payload).ok()?).ok(),
-        "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(payload).ok()?).ok(),
-        "HookStarted" => {
-            serialize(&parse::<crate::tools::permissions::HookInvocation>(payload).ok()?).ok()
-        }
-        "HookFinished" => {
-            serialize(&parse::<crate::tools::permissions::HookOutcome>(payload).ok()?).ok()
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn pre_gh_pr_list_payload(kind: &str, payload: &str) -> Option<String> {
-    before_typed_pr_read(kind, payload, &["gh_pr_list"])
-}
-
-pub(crate) fn pre_gh_pr_view_payload(kind: &str, payload: &str) -> Option<String> {
-    before_typed_pr_read(kind, payload, &["gh_pr_view"])
-}
-
-// The web Tools arrived with a later payload version of every kind that carries a Tool call.
-pub(crate) fn pre_web_payload(kind: &str, payload: &str) -> Option<String> {
-    let text = before_typed_pr_read(kind, payload, &["web_fetch", "web_search"])?;
-    let value = serde_json::from_str(&text).ok()?;
-    if mentions(&value, &[], Some("web_fetch"))
-        || mentions(&value, &[], Some("web_search"))
-        || value
-            .pointer("/config/tool_policy/child_web")
-            .is_some_and(|grant| grant == true)
-    {
-        return None;
-    }
-    Some(text)
-}
-
-fn before_typed_pr_read(kind: &str, payload: &str, operations: &[&str]) -> Option<String> {
-    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
-        serialize(&parse::<T>(payload).ok()?).ok()
-    }
-    let text = match kind {
-        "ToolProposed" => again::<ToolProposedPayload>(payload),
-        "ToolStarted" => again::<ToolStartedPayload>(payload),
-        "ToolFinished" => again::<ToolFinishedPayload>(payload),
-        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
-        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
-        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
-        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
-        "RunStarted" => again::<RunStartedPayload>(payload),
-        "AgentSpawned" => again::<SpawnPayload>(payload),
-        _ => None,
-    }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, operations, None)).then_some(text)
-}
-
-pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {
-    before_operations(
-        kind,
-        payload,
-        &["git_commit", "git_branch", "git_switch"],
-        None,
-    )
-}
-
-pub(crate) fn provider_call_v18_payload(payload: &str) -> Option<String> {
-    let mut record: ProviderCallRecord = parse(payload).ok()?;
-    let old = record.disposition;
-    if let Some(refusal) = &record.refusal {
-        if old != ProviderCallDisposition::InvalidResponse
-            || refusal.cause == ProposalRefusalCause::InvalidPath
-        {
-            return None;
-        }
-        record.disposition = ProviderCallDisposition::Rejected;
-    }
-    record.validate().ok()?;
-    record.disposition = old;
-    serialize(&record).ok()
-}
-
-pub(crate) fn provider_call_v18_to_v19(value: serde_json::Value) -> Option<serde_json::Value> {
-    let canonical = provider_call_v18_payload(&value.to_string())?;
-    let mut record: ProviderCallRecord = parse(&canonical).ok()?;
-    if record.refusal.is_some() {
-        record.disposition = ProviderCallDisposition::Rejected;
-    }
-    serde_json::to_value(record).ok()
-}
-
-pub(crate) fn provider_call_v19_payload(payload: &str) -> Option<String> {
-    let record: ProviderCallRecord = parse(payload).ok()?;
-    (record.failure_reason != Some(crate::provider::ProviderFailureReason::OutcomeDecode)).then(
-        || {
-            record.validate().ok()?;
-            serialize(&record).ok()
-        },
-    )?
-}
-
-pub(crate) fn provider_call_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
-    let canonical = provider_call_v19_payload(&value.to_string())?;
-    serde_json::from_str(&canonical).ok()
-}
-
-pub(crate) fn provider_call_v22_payload(payload: &str) -> Option<String> {
-    use ProposalRefusalCause::*;
-    let record: ProviderCallRecord = parse(payload).ok()?;
-    if record.refusal.as_ref().is_some_and(|refusal| {
-        !matches!(
-            refusal.cause,
-            InvalidArguments
-                | InvalidPath
-                | Phase
-                | PlanInvalid
-                | PlanBudgetOutsideGoal
-                | PlanBudgetSpent
-                | PlanScopeExcludesCall
-                | PlanOutsideGrant
-                | ArgumentBytes
-                | LeaseOverlap
-                | NotOffered
-                | AnswerInvalid
-                | DelegateInvalid
-        )
-    }) {
-        return None;
-    }
-    record.validate().ok()?;
-    serialize(&record).ok()
-}
-
-pub(crate) fn pre_file_removal_payload(kind: &str, payload: &str) -> Option<String> {
-    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
-        serialize(&parse::<T>(payload).ok()?).ok()
-    }
-    let text = match kind {
-        "ToolFinished" => again::<ToolFinishedPayload>(payload),
-        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
-        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
-        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
-        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
-        "RunStarted" => run_started_v23_payload(payload),
-        "AgentSpawned" => again::<SpawnPayload>(payload),
-        _ => None,
-    }?;
-    let value = serde_json::from_str(&text).ok()?;
-    (!mentions(&value, &["delete", "move"], Some("delete")) && !mentions(&value, &[], Some("move")))
-        .then_some(text)
-}
-
-pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String> {
-    let text = if kind == "RunStarted" {
-        run_started_v23_payload(payload)?
-    } else {
-        before_operations(kind, payload, &["multiedit"], Some("multiedit"))?
-    };
-    (!mentions(
-        &serde_json::from_str(&text).ok()?,
-        &["multiedit"],
-        Some("multiedit"),
-    ))
-    .then_some(text)
-}
-
-fn before_operations(
-    kind: &str,
-    payload: &str,
-    operations: &[&str],
-    worker_label: Option<&str>,
-) -> Option<String> {
-    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
-        serialize(&parse::<T>(payload).ok()?).ok()
-    }
-    let text = match kind {
-        "ToolFinished" | "HookStarted" | "HookFinished" => expiring_payload(kind, payload),
-        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
-        "AgentSpawned" => again::<SpawnPayload>(payload),
-        "RunStarted" => run_started_v18_payload(payload),
-        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
-        _ => None,
-    }?;
-    (!mentions(&serde_json::from_str(&text).ok()?, operations, worker_label)).then_some(text)
-}
-
 // Checked before the Goal and Message facts that precede RunStarted commit.
 pub(crate) fn run_started_fits(config: &RunConfig) -> bool {
     serialize(&RunStartedPayloadRef {
@@ -2175,124 +1699,6 @@ pub(crate) fn run_started_fits(config: &RunConfig) -> bool {
         active_deadline_ms: Some(u64::MAX),
     })
     .is_ok_and(|payload| payload.len() <= crate::store::MAX_EVENT_BYTES)
-}
-
-pub(crate) fn goal_started_v7_to_v8(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let fields = value.as_object_mut()?;
-    if fields.contains_key("include_paths") {
-        return None;
-    }
-    fields.insert("include_paths".into(), serde_json::Value::Null);
-    Some(value)
-}
-
-pub(crate) fn goal_started_v7_payload(payload: &str) -> Option<String> {
-    let value = goal_started_v7_to_v8(serde_json::from_str(payload).ok()?)?;
-    let text = serialize(&parse::<GoalStartedPayload>(&value.to_string()).ok()?).ok()?;
-    let field = r#""include_paths":null,"#;
-    (text.matches(field).count() == 1).then(|| text.replacen(field, "", 1))
-}
-
-// Version 18 read only the root, so its digest becomes the root source with an unknown name.
-pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_json::Value> {
-    let serde_json::Value::Object(mut payload) = value else {
-        return None;
-    };
-    let serde_json::Value::Object(config) = payload.get_mut("config")? else {
-        return None;
-    };
-    let sources = match config.remove("instruction_digest")? {
-        serde_json::Value::Null => serde_json::json!([]),
-        digest => serde_json::json!([{"directory": "", "file": null, "digest": digest}]),
-    };
-    if config.contains_key("instruction_sources") || config.contains_key("launch_directory") {
-        return None;
-    }
-    config.insert("instruction_sources".into(), sources);
-    config.insert("launch_directory".into(), serde_json::json!(""));
-    Some(serde_json::Value::Object(payload))
-}
-
-// Version 19 had no user-instruction field, so no global file was loaded.
-pub(crate) fn run_started_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
-    let serde_json::Value::Object(mut payload) = value else {
-        return None;
-    };
-    let serde_json::Value::Object(config) = payload.get_mut("config")? else {
-        return None;
-    };
-    if config.contains_key("user_instruction_digest") {
-        return None;
-    }
-    config.insert("user_instruction_digest".into(), serde_json::Value::Null);
-    Some(serde_json::Value::Object(payload))
-}
-
-const USER_DIGEST_FIELD: &str = r#""user_instruction_digest":null,"#;
-
-pub(crate) fn goal_finished_v7_to_v8(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let payload = value.as_object_mut()?;
-    if payload.contains_key("budget_refusal") {
-        return None;
-    }
-    payload.insert("budget_refusal".into(), serde_json::Value::Null);
-    Some(value)
-}
-
-pub(crate) fn goal_finished_v7_payload(payload: &str) -> Option<String> {
-    let value = goal_finished_v7_to_v8(serde_json::from_str(payload).ok()?)?;
-    let text = serialize(&parse::<GoalFinishedPayload>(&value.to_string()).ok()?).ok()?;
-    Some(text.replace(r#","budget_refusal":null"#, ""))
-}
-
-// Version 19's hashed text: the current text without the null user digest.
-pub(crate) fn run_started_v19_payload(payload: &str) -> Option<String> {
-    let value = run_started_v19_to_v20(serde_json::from_str(payload).ok()?)?;
-    let text = run_started_v23_payload(&value.to_string())?;
-    (text.matches(USER_DIGEST_FIELD).count() == 1).then(|| text.replacen(USER_DIGEST_FIELD, "", 1))
-}
-
-// Version 18's hashed text: version 19's with the sources written back as one digest.
-pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
-    let value = run_started_v18_to_v19(serde_json::from_str(payload).ok()?)?;
-    let sources: Vec<InstructionSource> =
-        serde_json::from_value(value["config"]["instruction_sources"].clone()).ok()?;
-    let text = run_started_v19_payload(&value.to_string())?;
-    let current = format!(
-        r#""instruction_sources":{},"launch_directory":"""#,
-        serialize(&sources).ok()?
-    );
-    let legacy = format!(
-        r#""instruction_digest":{}"#,
-        serialize(&sources.first().map(|source| source.digest)).ok()?
-    );
-    (text.matches(&current).count() == 1).then(|| text.replacen(&current, &legacy, 1))
-}
-
-fn mentions(value: &serde_json::Value, operations: &[&str], worker_label: Option<&str>) -> bool {
-    let named = |field: &serde_json::Value| {
-        field.as_str().is_some_and(|name| {
-            operations.iter().any(|operation| {
-                name == *operation || name.strip_prefix("arany_") == Some(operation)
-            })
-        })
-    };
-    match value {
-        serde_json::Value::Object(fields) => fields.iter().any(|(key, field)| {
-            (key == "operation" && named(field))
-                || (key == "tools"
-                    && worker_label.is_some_and(|label| {
-                        field
-                            .as_array()
-                            .is_some_and(|tools| tools.iter().any(|tool| tool == label))
-                    }))
-                || mentions(field, operations, worker_label)
-        }),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .any(|item| mentions(item, operations, worker_label)),
-        _ => false,
-    }
 }
 
 fn serialize<T: Serialize>(value: &T) -> Result<String, ReplayError> {
@@ -2314,111 +1720,4 @@ fn required_skill<'de, D: serde::Deserializer<'de>>(
         return Err(serde::de::Error::custom("invalid Skill name"));
     }
     Ok(skill)
-}
-
-pub(crate) fn pre_command_selection_payload(kind: &str, payload: &str) -> Option<String> {
-    let text = match kind {
-        "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(payload).ok()?).ok()?,
-        "HookFinished" => {
-            serialize(&parse::<crate::tools::permissions::HookOutcome>(payload).ok()?).ok()?
-        }
-        _ => return None,
-    };
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let observation = if kind == "HookFinished" {
-        &value["observation"]
-    } else {
-        &value
-    };
-    let output = observation["output"].as_str()?;
-    if matches!(
-        observation["intent"]["call"]["operation"].as_str(),
-        Some("command" | "command_unguarded")
-    ) && serde_json::from_str::<serde_json::Value>(output)
-        .is_ok_and(|value| value.get("selection").is_some())
-    {
-        return None;
-    }
-    Some(text)
-}
-
-pub(crate) fn add_command_selection(
-    kind: &str,
-    mut value: serde_json::Value,
-) -> Option<serde_json::Value> {
-    pre_command_selection_payload(kind, &value.to_string())?;
-    let observation = if kind == "HookFinished" {
-        value.get_mut("observation")?
-    } else {
-        &mut value
-    };
-    if !matches!(
-        observation["intent"]["call"]["operation"].as_str(),
-        Some("command" | "command_unguarded")
-    ) {
-        return Some(value);
-    }
-    let budget = usize::try_from(observation["intent"]["limits"]["result_bytes"].as_u64()?).ok()?;
-    let output = observation.get_mut("output")?;
-    if output.as_str()?.len() > budget {
-        return None;
-    }
-    let Ok(mut result) = serde_json::from_str::<serde_json::Value>(output.as_str()?) else {
-        return Some(value);
-    };
-    if result.get("changeset").is_some() {
-        result
-            .as_object_mut()?
-            .insert("selection".into(), serde_json::Value::Null);
-        let result: crate::tools::types::CommandResult = serde_json::from_value(result).ok()?;
-        let mut text = serde_json::to_string(&result).ok()?;
-        if text.len() > budget {
-            text = result.fit_migrated(budget)?;
-        }
-        if !serde_json::from_str::<crate::tools::types::CommandResult>(&text)
-            .ok()?
-            .valid()
-        {
-            return None;
-        }
-        *output = text.into();
-    }
-    Some(value)
-}
-
-pub(crate) fn pre_role_routing_payload(kind: &str, payload: &str) -> Option<String> {
-    if kind != "ProviderSetupEditStarted" {
-        return None;
-    }
-    let data: ProviderSetupEditStartedPayload = parse(payload).ok()?;
-    match data.target.kind {
-        ProviderSetupTargetKind::RoleRouting | ProviderSetupTargetKind::Roster => None,
-        ProviderSetupTargetKind::NativeAccount
-        | ProviderSetupTargetKind::ChatGptAccount
-        | ProviderSetupTargetKind::CustomProfile
-        | ProviderSetupTargetKind::ModelPreferences => serialize(&data).ok(),
-    }
-}
-
-// Migration-only decoding; live Events accept only the tagged Provider record.
-pub(crate) fn run_started_v23_to_v24(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let provider = value.get_mut("config")?.get_mut("provider")?;
-    let record = crate::provider::ProviderRecord::parse(provider.as_str()?)?;
-    *provider = serde_json::to_value(record).ok()?;
-    Some(value)
-}
-
-pub(crate) fn pre_roster_setup_payload(kind: &str, payload: &str) -> Option<String> {
-    if kind != "ProviderSetupEditStarted" {
-        return None;
-    }
-    let data: ProviderSetupEditStartedPayload = parse(payload).ok()?;
-    match data.target.kind {
-        ProviderSetupTargetKind::Roster => None,
-        ProviderSetupTargetKind::NativeAccount
-        | ProviderSetupTargetKind::ChatGptAccount
-        | ProviderSetupTargetKind::CustomProfile
-        | ProviderSetupTargetKind::ModelPreferences
-        | ProviderSetupTargetKind::RoleRouting => serialize(&data).ok(),
-    }
 }

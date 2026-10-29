@@ -931,10 +931,6 @@ fn version_two_value(index: &AccountIndex) -> serde_json::Value {
     value
 }
 
-fn as_version_two(index: &AccountIndex) -> Vec<u8> {
-    serde_json::to_vec(&version_two_value(index)).unwrap()
-}
-
 #[test]
 fn keyring_slot_and_consent_bind_token_to_its_record() {
     let id = Uuid::now_v7();
@@ -1159,113 +1155,6 @@ fn private_file_entries_carry_no_slot() {
 }
 
 #[test]
-fn migrated_keyring_accounts_keep_their_slots_and_stay_distinct() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let first = credentials("oaiapp_first_issued", "shared-subject");
-    let second = credentials("oaiapp_second_issued", "shared-subject");
-    let file = credentials("oaiapp_file_issued", "shared-subject");
-    let first_id = save_keyring_at_with(
-        &state,
-        &workspace,
-        first.clone(),
-        keyring_consent(&first),
-        None,
-        |_, _| Ok(()),
-    )
-    .unwrap();
-    let second_id = save_keyring_at_with(
-        &state,
-        &workspace,
-        second.clone(),
-        keyring_consent(&second),
-        None,
-        |_, _| Ok(()),
-    )
-    .unwrap();
-    save_private_file_at(&state, &workspace, file.clone(), accepted(&file), None).unwrap();
-    let legacy = as_version_two(&AccountIndex::read(&state).unwrap());
-    state
-        .record(RecordKind::ChatgptAccounts)
-        .replace(&legacy)
-        .unwrap();
-
-    let migrated = AccountIndex::read(&state).unwrap();
-    assert_eq!(migrated.accounts.len(), 3);
-    assert_eq!(migrated.accounts[0].id, first_id);
-    assert_eq!(migrated.accounts[1].id, second_id);
-    let legacy_first = legacy_keyring_slot("oaiapp_first_issued");
-    let legacy_second = legacy_keyring_slot("oaiapp_second_issued");
-    assert_eq!(
-        migrated.accounts[0].keyring_slot,
-        Some(legacy_first.clone())
-    );
-    assert_eq!(
-        migrated.accounts[1].keyring_slot,
-        Some(legacy_second.clone())
-    );
-    assert!(migrated.accounts[2].keyring_slot.is_none());
-    let file_token = migrated.accounts[2].token.as_ref().unwrap();
-    assert_eq!(file_token.schema, TOKEN_RECORD_SCHEMA);
-    assert!(file_token.slot.is_none());
-    for account in &migrated.accounts {
-        assert!(account.chatgpt_account_id.is_none());
-    }
-    let current = serde_json::to_vec(&migrated).unwrap();
-    assert!(CHATGPT_ACCOUNTS.upgrade(&current).is_none());
-
-    let mut selected = migrated;
-    selected.selected = Some(first_id);
-    selected.write(&state).unwrap();
-    let mut writes = Vec::new();
-    assert!(matches!(
-        save_keyring_at_with(
-            &state,
-            &workspace,
-            first.clone(),
-            keyring_consent(&first),
-            Some(first_id),
-            |slot, body| {
-                assert!(valid_written_keyring_record(slot, body.as_bytes()));
-                writes.push(slot.to_owned());
-                Err(AuthorizationError::Unavailable)
-            },
-        ),
-        Err(AuthorizationError::CredentialStore(
-            crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
-        ))
-    ));
-    assert!(AccountIndex::read(&state).unwrap().accounts[0].renewal_pending);
-    assert!(matches!(
-        load_selected_keyring_at(&state, first_id),
-        Err(AuthorizationError::RenewalStorageUncertain)
-    ));
-    assert_eq!(
-        save_keyring_at_with(
-            &state,
-            &workspace,
-            first.clone(),
-            keyring_consent(&first),
-            Some(first_id),
-            |slot, body| {
-                assert!(valid_written_keyring_record(slot, body.as_bytes()));
-                writes.push(slot.to_owned());
-                Ok(())
-            },
-        )
-        .unwrap(),
-        first_id
-    );
-    assert_eq!(writes, [legacy_first.clone(), legacy_first.clone()]);
-    let restored = AccountIndex::read(&state).unwrap();
-    assert!(!restored.accounts[0].renewal_pending);
-    assert_eq!(restored.accounts[0].keyring_slot, Some(legacy_first));
-    assert_eq!(restored.accounts[1].keyring_slot, Some(legacy_second));
-}
-
-#[test]
 fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path() {
     let id = Uuid::now_v7();
     let creds = credentials("oaiapp_dup", "subject-one");
@@ -1334,78 +1223,8 @@ fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path()
     }
 }
 
-fn version_two_pair() -> serde_json::Value {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let keyring = credentials("oaiapp_keyring_pair", "subject-one");
-    let file = credentials("oaiapp_file_pair", "subject-one");
-    save_keyring_at_with(
-        &state,
-        &workspace,
-        keyring.clone(),
-        keyring_consent(&keyring),
-        None,
-        |_, _| Ok(()),
-    )
-    .unwrap();
-    save_private_file_at(&state, &workspace, file.clone(), accepted(&file), None).unwrap();
-    version_two_value(&AccountIndex::read(&state).unwrap())
-}
-
 #[test]
-fn account_index_migration_refuses_unvalidated_sources_unchanged() {
-    let base = version_two_pair();
-    let upgrade =
-        |value: &serde_json::Value| CHATGPT_ACCOUNTS.upgrade(&serde_json::to_vec(value).unwrap());
-    let upgraded = upgrade(&base).unwrap();
-    let upgraded: serde_json::Value = serde_json::from_slice(&upgraded).unwrap();
-    assert_eq!(upgraded["schema"], 3);
-    assert_eq!(upgraded["accounts"][1]["token"]["schema"], 2);
-
-    let mut source = base.clone();
-    source["accounts"][1]["token"]["schema"] = 255.into();
-    assert!(upgrade(&source).is_none());
-    let mut source = base.clone();
-    source["accounts"][1]["token"]["slot"] = serde_json::Value::Null;
-    assert!(upgrade(&source).is_none());
-    let mut source = base.clone();
-    source["accounts"][0]["keyring_slot"] = serde_json::Value::Null;
-    assert!(upgrade(&source).is_none());
-    let mut source = base.clone();
-    source["accounts"][0]["chatgpt_account_id"] = serde_json::Value::Null;
-    assert!(upgrade(&source).is_none());
-    let mut source = base.clone();
-    source["accounts"][0]["storage"] = "unknown".into();
-    assert!(upgrade(&source).is_none());
-
-    let account = base["accounts"][1]["id"].clone();
-    let check = |account: &serde_json::Value, fingerprint: u8| {
-        let fingerprint = [fingerprint; 32];
-        serde_json::json!({
-            "account_id": account,
-            "fingerprint": fingerprint,
-            "checked_at_sec": 1_700_000_000_u64,
-            "expires_at_sec": 1_700_000_000_u64 + MODEL_CHECK_AGE_SECONDS,
-            "context_window_tokens": null,
-        })
-    };
-    let mut legacy = base.clone();
-    legacy["schema"] = 1.into();
-    legacy["model_checks"] = serde_json::json!([check(&account, 7)]);
-    let cleared = upgrade(&legacy).unwrap();
-    let cleared: serde_json::Value = serde_json::from_slice(&cleared).unwrap();
-    assert_eq!(cleared["schema"], 3);
-    assert_eq!(cleared["model_checks"], serde_json::json!([]));
-    legacy["model_checks"] = serde_json::json!([check(&Uuid::now_v7().to_string().into(), 7)]);
-    assert!(upgrade(&legacy).is_none());
-    legacy["model_checks"] = serde_json::json!([check(&account, 7), check(&account, 7)]);
-    assert!(upgrade(&legacy).is_none());
-}
-
-#[test]
-fn account_index_migration_keeps_one_account_per_client_in_source_schemas() {
+fn older_account_indexes_are_refused_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1422,7 +1241,7 @@ fn account_index_migration_keeps_one_account_per_client_in_source_schemas() {
         let mut source = version_two_value(&current);
         source["schema"] = version.into();
         let bytes = serde_json::to_vec(&source).unwrap();
-        assert!(CHATGPT_ACCOUNTS.upgrade(&bytes).is_none());
+        assert!(CHATGPT_ACCOUNTS.mismatched(&bytes));
         let record = state.record(RecordKind::ChatgptAccounts);
         record.replace(&bytes).unwrap();
         assert!(AccountIndex::read(&state).is_err());
@@ -1507,7 +1326,7 @@ fn rotate(previous: &VerifiedCredentials) -> Result<VerifiedCredentials, Authori
 
 #[cfg(unix)]
 #[test]
-fn migrated_keyring_accounts_load_refresh_and_block_through_their_retained_slots() {
+fn legacy_slot_keyring_accounts_load_refresh_and_block_through_their_retained_slots() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1529,20 +1348,20 @@ fn migrated_keyring_accounts_load_refresh_and_block_through_their_retained_slots
         );
     }
     let (first_id, second_id) = (ids[0], ids[1]);
-    let legacy = as_version_two(&AccountIndex::read(&state).unwrap());
-    state
-        .record(RecordKind::ChatgptAccounts)
-        .replace(&legacy)
-        .unwrap();
-
     let helper = FakeHelper::install(temp.path());
     let legacy_first = legacy_keyring_slot("oaiapp_first_issued");
     let legacy_second = legacy_keyring_slot("oaiapp_second_issued");
+    // Current indexes keep the client-derived slot an earlier release wrote tokens at.
+    let mut index = AccountIndex::read(&state).unwrap();
+    index.accounts[0].keyring_slot = Some(legacy_first.clone());
+    index.accounts[1].keyring_slot = Some(legacy_second.clone());
+    index.write(&state).unwrap();
     let version_one = |creds: &VerifiedCredentials| {
         serde_json::to_vec(&token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, creds)).unwrap()
     };
     helper.put(&legacy_first, &version_one(&first));
-    helper.put(&legacy_second, &version_one(&second));
+    let second_bytes = version_one(&second);
+    helper.put(&legacy_second, &second_bytes);
     let first_bytes = helper.get(&legacy_first);
 
     let mut index = AccountIndex::read(&state).unwrap();
@@ -1554,7 +1373,7 @@ fn migrated_keyring_accounts_load_refresh_and_block_through_their_retained_slots
             .refresh_token,
         "synthetic-refresh"
     );
-    assert_eq!(helper.get(&legacy_second), version_one(&second));
+    assert_eq!(helper.get(&legacy_second), second_bytes);
 
     let renewed =
         refresh_selected_with(&state, &workspace, second_id, 1_799_999_900, rotate).unwrap();
@@ -3362,61 +3181,6 @@ fn record_model_check_at(
     })
     .join()
     .unwrap()
-}
-
-#[test]
-fn account_index_migration_clears_only_valid_optional_checks_and_preserves_credentials() {
-    let (_temp, state, _workspace, selected) = model_account();
-    let mut legacy = serde_json::to_value(AccountIndex::read(&state).unwrap()).unwrap();
-    let record = new_model_check(
-        &selected,
-        ("model-one", Effort::High),
-        Some(272_000),
-        CheckId::new(),
-        1_799_999_000,
-    )
-    .unwrap();
-    let mut old_check = serde_json::to_value(record).unwrap();
-    old_check.as_object_mut().unwrap().remove("check_id");
-    legacy["schema"] = 1.into();
-    to_version_two_shape(&mut legacy);
-    legacy["model_checks"] = serde_json::json!([old_check]);
-    let bytes = serde_json::to_vec(&legacy).unwrap();
-    state
-        .record(RecordKind::ChatgptAccounts)
-        .replace(&bytes)
-        .unwrap();
-    let migrated = AccountIndex::read(&state).unwrap();
-    let actual = serde_json::to_value(&migrated).unwrap();
-    assert_eq!(actual["schema"], 3);
-    let mut downgraded = actual.clone();
-    to_version_two_shape(&mut downgraded);
-    assert_eq!(downgraded["accounts"], legacy["accounts"]);
-    assert_eq!(actual["selected"], legacy["selected"]);
-    assert!(migrated.model_checks.is_empty());
-    assert!(
-        CHATGPT_ACCOUNTS
-            .upgrade(&serde_json::to_vec(&actual).unwrap())
-            .is_none()
-    );
-    for field in ["checked_at_sec", "account_id", "check_id", "unexpected"] {
-        let mut malformed = legacy.clone();
-        malformed["model_checks"][0][field] = serde_json::Value::Null;
-        let bytes = serde_json::to_vec(&malformed).unwrap();
-        state
-            .record(RecordKind::ChatgptAccounts)
-            .replace(&bytes)
-            .unwrap();
-        assert!(AccountIndex::read(&state).is_err(), "{field}");
-        assert!(
-            state
-                .record(RecordKind::ChatgptAccounts)
-                .read()
-                .unwrap()
-                .unwrap()
-                == bytes
-        );
-    }
 }
 
 #[tokio::test]

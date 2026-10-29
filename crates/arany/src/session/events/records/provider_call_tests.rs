@@ -6,6 +6,7 @@ fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
     let run = RunId::new();
     let agent = AgentRunId::new();
     let mut record = ProviderCallRecord {
+        context_bytes: None,
         rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
@@ -83,6 +84,7 @@ fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
 fn rejects_unbounded_or_unearned_provider_metadata() {
     let current = payload_version("ProviderCallRecorded").expect("payload version");
     let mut record = ProviderCallRecord {
+        context_bytes: None,
         rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
@@ -231,6 +233,7 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
             ProviderCallDisposition::TaskPanic,
         ] {
             let record = ProviderCallRecord {
+                context_bytes: None,
                 rate_limits: None,
                 delegation: None,
                 phase: crate::provider::AgentPhase::RootPlan,
@@ -354,6 +357,7 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
 #[test]
 fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     let record = ProviderCallRecord {
+        context_bytes: None,
         rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
@@ -381,6 +385,21 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     };
     assert!(decode(&value, current).is_ok());
     assert!(decode(&value, current - 1).is_err());
+    let mut measured = value.clone();
+    measured["context_bytes"] = serde_json::json!(4096);
+    assert!(decode(&measured, current).is_ok());
+    let mut child = measured.clone();
+    child["phase"] = serde_json::json!("child_work");
+    child["disposition"] = serde_json::json!("finished");
+    assert!(
+        decode(&child, current).is_err(),
+        "only primary requests measure"
+    );
+    measured["context_bytes"] = serde_json::json!(crate::session::MAX_WINDOW_CONTENT_BYTES + 1);
+    assert!(decode(&measured, current).is_err());
+    let mut missing = value.clone();
+    missing.as_object_mut().unwrap().remove("context_bytes");
+    assert!(decode(&missing, current).is_err());
     for (key, invalid) in [
         ("phase", serde_json::json!("child_work")),
         ("phase", serde_json::json!("tool_review")),

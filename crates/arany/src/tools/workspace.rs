@@ -153,14 +153,13 @@ fn state_error(error: StoreError) -> TrustRecordError {
 pub(crate) const WORKSPACE_PERMISSIONS: RecordFormat = RecordFormat {
     kind: RecordKind::WorkspacePermissions,
     field: "version",
-    floor: 2,
     current: 2,
-    steps: &[],
     accepts: |bytes| parse(bytes).is_ok(),
 };
 
 fn read_bytes(root: &StateRoot) -> Result<Option<Vec<u8>>, TrustRecordError> {
-    root.read_current(&WORKSPACE_PERMISSIONS)
+    root.record(WORKSPACE_PERMISSIONS.kind)
+        .read()
         .map_err(record_error)
 }
 

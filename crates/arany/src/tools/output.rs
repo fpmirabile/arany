@@ -34,6 +34,7 @@ impl Window {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn from_recorded(text: &str, total: OutputTotal) -> Option<Self> {
         let (head, tail) = recorded_parts(total, text)?;
         if head.len() == text.len() {

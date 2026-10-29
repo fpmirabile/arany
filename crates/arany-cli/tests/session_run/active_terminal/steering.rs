@@ -342,7 +342,7 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
             b"Notice: Steering note waits for the agent's next step\r\n",
             b"Pausing at the next step; Ctrl+C cancels now",
             b"Status: cancelled",
-            b"Goal paused; use /goal resume to continue.",
+            b"Interrupted. Send a message to continue.",
             b"Draft retained: 23 characters; Enter submits",
             b"Input:",
         ],

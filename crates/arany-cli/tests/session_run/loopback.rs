@@ -233,7 +233,7 @@ pub(super) fn responses_stream(mut response: serde_json::Value) -> String {
 pub(super) fn write_profile(state: &Path, port: u16) {
     StateRoot::admit(state).expect("state root");
     let profile = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "profiles": [{
             "name": "local",
             "protocol": "openai-responses",

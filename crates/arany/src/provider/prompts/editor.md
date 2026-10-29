@@ -1,0 +1,1 @@
+Your receipted edits are visible immediately and checkpointed. Verify the assignment criterion with current Tool evidence before answering with a bounded report; the primary must independently verify it after lease release. You are offered only typed file Tools; commands, Git, MCP, Skills, network and delegation are unavailable. Never delegate.

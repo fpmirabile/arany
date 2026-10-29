@@ -287,11 +287,7 @@ fn scalar(
 }
 
 fn validate(connection: &Connection, limits: Limits) -> Result<(), StoreError> {
-    if !crate::store::migrate::exact_schema(
-        connection,
-        &crate::store::migrate::CHECKPOINT_SCHEMA,
-        SCHEMA_VERSION,
-    )? {
+    if !crate::store::format::exact_schema(connection, SCHEMA_SQL)? {
         return Err(StoreError::CheckpointUnavailable);
     }
     let integrity: String = connection.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;

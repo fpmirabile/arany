@@ -28,10 +28,8 @@ mod budget_tests {
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
                 .expect("private config");
             if finite {
-                let preferences = serde_json::json!({"version":7,"preferences":{
-                    "completion":"tabs","view":"fullscreen",
+                let preferences = serde_json::json!({"version":9,"preferences":{
                     "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-                    "resources":arany::ToolResourceSettings::default(),"copy_on_select":true,"newline":"shift_enter"
                 }});
                 StateRoot::open_existing(&state)
                     .expect("State")

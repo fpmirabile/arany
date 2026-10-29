@@ -344,7 +344,7 @@ fn resident_memory_two_includes_on_named_host() {
             .config
             .as_ref()
             .expect("pinned Run")
-            .include_digests
+            .include_sources
             .len(),
         2
     );

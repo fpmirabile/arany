@@ -67,11 +67,12 @@ Derive eagerly: the orphan rule stops anyone else from adding these later, and a
 
 ## Comments and documentation
 
-Comments default to none. Names, types and tests carry the intent; behavior and limits live in the owning spec, not beside the code.
+Names, types and tests carry the intent; comments explain what they cannot.
 
-- One short `//` comment where the reason is non-obvious: a workaround for a platform bug, an ordering constraint, a `ponytail:` ceiling. The comment states *why*, never what the next line does.
+- A `//` comment states *why* where the reason is non-obvious: a workaround for a platform bug, an ordering constraint, a deliberate ceiling. It never restates what the next line does.
 - `// SAFETY:` before every `unsafe` block, stating the obligations that make it sound ([unsafe](verification-and-concurrency.md#unsafe-code-requires-a-proof)).
-- No `///` or `//!` doc comments and no multi-line comment blocks in internal code. An implementation invariant is pinned by a test; if its reason is non-obvious, one short `//` line is the limit. `// SAFETY:` is the one exception: a single line stating the obligations, spilling to a second `//` line only when a distinct obligation needs it. Behavior and limits live in [`docs/specs/`](../../../../docs/specs/README.md).
-- Published-library rustdoc only, not for this internal crate: `# Errors`, `# Panics`, `# Safety` and `# Examples` sections (C-FAILURE, C-EXAMPLE), a one-sentence summary line and intra-doc links such as `` [`Type`] ``. Keep Clippy's `missing_errors_doc`/`missing_panics_doc` allowed here. If a crate is split out and published, document its `pub` surface with these then.
+- An implementation invariant is better pinned by a test than described in a comment block.
+- Public rustdoc for a published API: a one-sentence summary line, `# Errors`, `# Panics`, `# Safety` and `# Examples` sections (C-FAILURE, C-EXAMPLE) and intra-doc links such as `` [`Type`] ``. Clippy's `missing_errors_doc`/`missing_panics_doc` enforce the sections; a crate that documents only its published surface can allow them internally.
+- Follow the project's comment policy where it is stricter.
 
 Sources: [API Guidelines naming](https://rust-lang.github.io/api-guidelines/naming.html), [interoperability](https://rust-lang.github.io/api-guidelines/interoperability.html), [predictability](https://rust-lang.github.io/api-guidelines/predictability.html), [future proofing](https://rust-lang.github.io/api-guidelines/future-proofing.html), [Book ch. 7 modules](https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html), [`must_use` and lint attributes](https://doc.rust-lang.org/reference/attributes/diagnostics.html), [`non_exhaustive`](https://doc.rust-lang.org/reference/attributes/type_system.html), [rustdoc conventions](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html), [Effective Rust items 10, 22, 23, 27](https://www.lurklurk.org/effective-rust/).

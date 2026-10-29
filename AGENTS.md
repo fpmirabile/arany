@@ -2,6 +2,8 @@
 
 Arany is a Rust-first, CLI-only harness for multi-agent coding teams that can be trusted to work autonomously. The product and executable are named Arany and `arany`; the repository directory name is not part of the contract. This file guides agents developing Arany; the [documentation map](./docs/README.md) locates contracts and owners.
 
+This file is already in your context; do not re-read it. Linked files are references, not preloads: open one only when you reach the action that triggers it, and read only the section you need (`rg -n '^#' FILE`, then a bounded read). Specs are large; never read a spec whole.
+
 ## Non-negotiable guarantees
 
 Multi-agent coordination builds on five guarantees. Never weaken them for speed, convenience or parity with another harness; a guarantee costing more than a peer's unguarded path is a defect to fix, not a price to accept:
@@ -18,39 +20,28 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 
 ## Product and implementation priorities
 
-1. **Build the harness.** Arany owns agent execution, context, Tools, permissions and durable Sessions. Keep product policy in the Engine and platform, Provider and presentation details at their existing boundaries, and evaluate changes against the complete task lifecycle, including failure, cancellation and recovery. The [system overview](./docs/architecture/system-overview.md) owns the architecture.
-2. **Design for Linux and macOS parity.** Arany targets Linux and macOS with equivalent behavior. Native Windows is out of scope (use the Linux build under WSL2). Consider platform impact on both targets; for OS facilities prefer standard/library capabilities with equivalent guarantees, then narrow native adapters. Assume no shell, path layout, desktop, distribution or service manager. Document unavoidable differences in the owning contract; unsupported security enforcement fails closed. A Linux-first milestone is delivery order, not the product boundary. Native evidence is required before claiming support; current gaps belong in [NEXT_STEPS.md](./NEXT_STEPS.md).
-3. **Apply Ponytail on every implementation.** Read [Ponytail](./.agents/skills/ponytail/SKILL.md) before implementing, refactoring or reviewing code (install via [project skill setup](./agents/skills/README.md#install-for-a-harness) if missing). Prefer existing code, the standard library, OS facilities and installed dependencies; add only complexity the task or a demonstrated constraint requires. Never cut scope, correctness, security, accessibility, error handling, resource bounds or verification to save lines; repository rules win over the skill's shortcuts. Also apply [rust-clean-code](./agents/skills/rust-clean-code/SKILL.md) and [clean-architecture-review](./agents/skills/clean-architecture-review/SKILL.md) to every implementation and review.
-4. **Prefer proven harness designs.** When established harnesses (Claude Code, Codex CLI, OpenCode, Goose, Aider) share a working answer for a behavior, default or wire format, replicate it; diverge only for a documented Arany constraint (security, durability, strict replay), naming the peer behavior and reason in the owning contract.
+1. **Build the harness.** Arany owns agent execution, context, Tools, permissions and durable Sessions. Keep product policy in the Engine and platform, Provider and presentation details at their boundaries; judge changes across the whole task lifecycle, including failure, cancellation and recovery.
+2. **Linux and macOS parity.** Equivalent behavior on both; native Windows is out of scope (use WSL2). Prefer standard/library OS facilities, then narrow native adapters; assume no shell, path layout, desktop, distribution or service manager. Document unavoidable differences in the owning contract; unsupported security enforcement fails closed. Linux-first is delivery order, not the boundary; native support needs native evidence.
+3. **Ponytail on every implementation.** Make the smallest change that works: reuse existing code, std, OS facilities and installed dependencies; add only complexity the task or a demonstrated constraint requires, never speculative abstraction. Never cut scope, correctness, security, accessibility, error handling, resource bounds or verification to save lines; repository rules win over the skill's shortcuts. For a new module, a cross-module refactor or a code review, load the `ponytail`, `rust-clean-code` and `clean-architecture-review` skills by name ([setup](./agents/skills/README.md#install-for-a-harness) if missing); local fixes and UI tweaks need only these lines and rule 8.
+4. **Prefer proven harness designs.** When Claude Code, Codex CLI, OpenCode, Goose and Aider share a working answer for a behavior, default or wire format, replicate it; diverge only for a documented Arany constraint (security, durability, strict replay), naming the peer behavior and reason in the owning contract.
 
 ## Rules to load before editing
 
-**Documentation ownership.** `agents/` holds general working practice only. `docs/specs/<domain>.md` is the only home of behavior, decisions and limits; load a spec only when the task changes or verifies that behavior. Implementation invariants live in the tests that pin them. State each fact in one home and link elsewhere. A split-out crate gets its own `agents/<unit>.md`; a module does not.
+`agents/` holds working practice only; `docs/specs/<domain>.md` is the only home of behavior, decisions and limits; tests pin implementation invariants. State each fact once and link elsewhere. A split-out crate gets its own `agents/<unit>.md`; a module does not. If ownership is unclear, see the [documentation map](./docs/README.md#find-the-owner-for-a-task); [development](./docs/development.md) owns shared commands.
 
-| Task or boundary | Read |
+| Before you do this | Read that section |
 |---|---|
 | Git operations, including planned steps | [Git](./agents/git.md) |
 | Auth, secrets, I/O, APIs, Tools, processes, MCP, memory, transports, untrusted rendering, audits | [Security](./agents/security.md) |
-| Behavior, fixes, tests, correctness or release claims, deferred evidence, handoff | [Testing](./agents/testing.md) |
-| Native, PTY, tmux, account, storage or process fixtures; CI reproduction | [Fixture procedures](./agents/references/testing-details.md) |
-| Documentation, instructions, development skills | [Documentation checks](./agents/testing.md#documentation-and-instruction-changes), [Project skills](./agents/skills/README.md) |
-| Library work in `crates/arany/` | [Library practice](./agents/arany.md) |
-| CLI, terminal, presentation or accounts work in `crates/arany-cli/` | [Binary practice](./agents/arany-cli.md) |
-| Architecture, data model, new seams; plans | [System overview](./docs/architecture/system-overview.md), [Planning](./planning/PLANNING.md) |
-| Behavior, spec ownership | [Spec workflow](./docs/specs/README.md) and the owning spec below |
-| Providers, models, custom endpoints, streaming, usage | [Provider spec](./docs/specs/provider.md) |
-| ChatGPT-plan OAuth, consent, tokens, catalogs | [ChatGPT spec](./docs/specs/chatgpt.md) |
-| Saved accounts, keyrings, credential helper, private State directories and ACL admission | [Credential spec](./docs/specs/credentials.md) |
-| Sessions, resume, fork, compaction, context | [Session spec](./docs/specs/session.md) |
-| Goals, budgets, steering, `exec` | [Goals spec](./docs/specs/goals.md) |
-| Runs, outcomes, Events, replay, persistence | [Execution spec](./docs/specs/execution.md) |
-| Tools, commands, Skills, MCP, Guard, folder trust, toolchains, build cache | [Tool spec](./docs/specs/tools.md) |
-| `acp`, editor protocol and ACP capabilities | [ACP spec](./docs/specs/acp.md) |
-| `serve --stdio`, JSON-RPC protocol, schema export | [Serve spec](./docs/specs/serve.md) |
-| Terminal, output, accessibility, history, clipboard, images, CLI modes | [Terminal spec](./docs/specs/terminal.md) |
-| OTLP telemetry; development logs and failure stages | [Telemetry](./docs/specs/telemetry.md), [Diagnostics](./docs/specs/diagnostics.md) |
-
-Open only the linked files whose triggers apply; they are not automatic imports. Use the [documentation map](./docs/README.md#find-the-owner-for-a-task) when ownership is unclear; [development setup and checks](./docs/development.md) owns shared commands.
+| Adding or changing tests; claiming correctness, release, security or platform support | [Testing](./agents/testing.md) |
+| Native, PTY, tmux, account, storage or process fixtures; CI reproduction | [Fixtures](./agents/references/testing-details.md) |
+| Reviewing a diff, branch or pull request | [Review](./agents/review.md) |
+| Documentation, instructions, development skills | [Doc checks](./agents/testing.md#documentation-and-instruction-changes), [skills](./agents/skills/README.md) |
+| Engine loop decisions, new flows or files in `crates/arany/` | [Library practice](./agents/arany.md) |
+| New flows or files, or human-readable measures, in `crates/arany-cli/` | [Binary practice](./agents/arany-cli.md) |
+| UI-only change in `crates/arany-cli/src/terminal` | [Binary growth](./agents/arany-cli.md#growth), that component's [terminal spec](./docs/specs/terminal.md) section |
+| Architecture, data model, boundaries, new seams; plans | [Overview](./docs/architecture/system-overview.md), [boundaries](./agents/arany.md#module-boundaries), [planning](./planning/PLANNING.md) |
+| Changing or verifying behavior; recording a finding | [Spec workflow](./docs/specs/README.md), then the owning section ([index](./docs/specs/README.md#domain-index)): [Provider](./docs/specs/provider.md), [ChatGPT](./docs/specs/chatgpt.md), [Credentials](./docs/specs/credentials.md), [Session](./docs/specs/session.md), [Goals](./docs/specs/goals.md), [Execution](./docs/specs/execution.md), [Tools](./docs/specs/tools.md), [ACP](./docs/specs/acp.md), [Serve](./docs/specs/serve.md), [Terminal](./docs/specs/terminal.md), [Telemetry](./docs/specs/telemetry.md), [Diagnostics](./docs/specs/diagnostics.md) |
 
 ## Global rules
 
@@ -58,27 +49,13 @@ Open only the linked files whose triggers apply; they are not automatic imports.
 2. **Minimal comments**: default to none; add short `//` lines only for a non-obvious reason beside its code. No `//!` or multi-line doc blocks in internal code: behavior belongs in specs, implementation invariants in tests. Architectural reasoning belongs in design documents or ADRs.
 3. **Deep modules**: keep interfaces small and hide complexity inside the implementation. Prefer in-process calls. Add a seam only with two adapters or when privilege, process, release or ownership isolation requires it. No speculative frameworks, traits or configuration.
 4. **Explicit resource bounds**: queues, buffers, caches, request bodies, decompression, stdout/stderr, tool output, artifacts, concurrency, and retry counts have declared limits and overflow behavior. Goal usage follows its pinned settings ([defaults](./docs/specs/goals.md#lifecycle-budgets-and-recovery)); this never removes finite per-action, storage, request, Tool and platform bounds.
-5. **No historical residue**: remove superseded code cleanly. Keep one current internal format at runtime without compatibility readers. Every change to a stored format version ships its migration step and fixture (enforced by a test); state older than the migration floor is archived intact and replaced with a fresh store with a notice. Reject, never silently alter, anything neither migratable nor archivable. External protocol support stays with its owning contract. Documentation describes the current system; git history records the old one.
+5. **No historical residue**: remove superseded code cleanly. Keep one current internal format at runtime without compatibility readers. Every stored format keeps a version; pre-beta, state at any other version is archived intact and replaced with a fresh store plus a notice, and there are no migration steps or fixtures until the owner declares a beta migration floor. Never silently alter what cannot be read. External protocol support stays with its owning contract. Documentation describes the current system; git history records the old one.
 6. **Never inspect or print `.env`**: read `.env.example` only. Commands may load secrets without echoing them or dumping the process environment.
 7. **Unsafe Rust is exceptional**: keep `unsafe` isolated behind a safe interface, document its invariants, and require a dedicated review and test strategy.
 8. **Clean code shape**: name every limit, size, timeout, ratio and retry count once, beside its owner, and derive every other use from that constant, including user- and model-facing text. Extract shared logic into its owner instead of copying it across modules. Use domain types and enums for identities and states (Provider names, phases, dispositions) instead of raw strings or flag booleans. Keep functions single-purpose: a function past 80 lines, nesting past 4 levels or 5 parameters is a split signal to resolve or justify in review. A new flow, type or function that would put a function past those signals, or a file's production lines (excluding `#[cfg(test)]` modules and test files) past 2,000, goes into a new phase or family child in the same PR; a fix inside existing code does not trigger the split. Justify any exception in review. The [library](./agents/arany.md#growth) and [binary](./agents/arany-cli.md#growth) practice name where each kind of new code goes. [rust-clean-code](./agents/skills/rust-clean-code/SKILL.md) owns the detail.
 
-## Auto-learning
-
-Record a found invariant, failure or ownership decision once: behavior, limits and decisions in the owning spec ([spec workflow](./docs/specs/README.md)); an implementation invariant as a test, or a non-obvious reason as one `//` line beside its code; a working practice in its general rule. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
-
-## Module boundaries
-
-Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture), the [library](./agents/arany.md) or [binary](./agents/arany-cli.md) practice, and the owning spec before changing a boundary. The overview owns crate and process shape, dependency direction and state ownership.
-
-Create a module only once it has depth; a crate needs measured dependency, release, privilege, ownership or compile pressure. Add a daemon only for a second Client or detached execution. Effectful Tools require deterministic Policy and the separate Guard, except for the explicitly authorized primary host operations above.
-
 ## Workflow
 
-1. **Read, then plan only when the change is big.** Read the triggered rules and affected flow; for behavior work, the owning contract. For multi-module or public-interface changes, plan first: scope, Ponytail choice, OS impact or none, triggered [security pass](./agents/security.md#security-pass-triggers) and verification of success and meaningful failure paths through existing evidence owners. Ask before deleting files, renaming public APIs, restructuring modules or changing CI/shared infrastructure unless the request authorizes it; preserve user work ([Git rules](./agents/git.md)).
-2. **Verify by target locally, fully in CI.** Run formatting, Clippy and the tests covering what you touched ([verification](./docs/development.md#verification)); CI runs the full workspace suite on pull requests with code changes. After pushing, watch CI; stacked PRs are fine ([Git rules](./agents/git.md#pull-requests)). A red CI blocks handoff; if the failure is demonstrably unrelated or infrastructural, say so with the run link and ask the user. Until a stable pre-beta, synthetic tests plus green CI are sufficient evidence; live, native and manual checklists stay in [NEXT_STEPS.md](./NEXT_STEPS.md), never block day-to-day work, and are the only basis for claiming native or live support.
-3. **Touch documentation once, and only when behavior changed.** If observable behavior, a limit or a recovery path changed, update the owning spec ([spec workflow](./docs/specs/README.md)); a refactor, a fix restoring specified behavior or an adequate contract needs no edit. Review the final diff with Ponytail, keep local visual artifacts in gitignored `.lavish/`, and report changes, checks run, limitations, platform evidence and, when working from a plan, the [plan slice IDs](./planning/PLANNING.md#slice-delivery) completed or left open.
-
-## Maintaining these instructions
-
-Keep this file to knowledge useful in almost every session: one source per rule, details behind conditional links, machine-local preferences in personal configuration. When changing routing, check links and representative tasks.
+1. **Read the code you will change first; open a rule or spec section when your edit touches its trigger.** Plan first only for multi-module or public-interface changes: scope, Ponytail choice, OS impact or none, triggered [security pass](./agents/security.md#security-pass-triggers), and verification of success and meaningful failure paths through existing evidence owners. Ask before deleting files, renaming public APIs, restructuring modules or changing CI/shared infrastructure unless the request authorizes it; preserve user work ([Git](./agents/git.md)).
+2. **Verify by target locally, fully in CI.** Run formatting, Clippy and the tests covering what you touched ([verification](./docs/development.md#verification)); CI runs the full suite on code PRs (after pushing, follow [Git](./agents/git.md#pull-requests)). Red CI blocks handoff; if a failure is demonstrably unrelated or infrastructural, say so with the run link and ask the user. Until a stable pre-beta, synthetic tests plus green CI suffice; live, native and manual checklists stay in [NEXT_STEPS.md](./NEXT_STEPS.md), never block day-to-day work, and are the only basis for native or live support claims.
+3. **Touch documentation once, only when behavior changed.** Update the owning spec when observable behavior, a limit or a recovery path changed; a refactor, a fix restoring specified behavior or an adequate contract needs no edit. Record each found invariant, failure or ownership decision once at its owner ([auto-learning](./docs/specs/README.md#auto-learning)). Review the final diff with Ponytail, keep local visual artifacts in gitignored `.lavish/`, and report changes, checks run, limitations, platform evidence and, from a plan, the [slice IDs](./planning/PLANNING.md#slice-delivery) completed or left open.

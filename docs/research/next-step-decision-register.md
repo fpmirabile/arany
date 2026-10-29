@@ -270,15 +270,17 @@ exact validated changesets, and its Git operations require a neutralized private
 view. [The Tool contract](../specs/tools.md#checkpoints-and-rewind) owns capture
 behavior, retention and storage limits.
 
-### D-22 — Pre-beta history below the migration floor
+### D-22 — Pre-beta stored formats are archived, not migrated
 
-The owner accepted archiving pre-floor history during pre-beta on 2026-10-21.
-Some past format changes introduced facts that cannot be reconstructed honestly;
-preserving that history intact in an archive avoids fabricating replay facts.
-[The execution contract](../specs/execution.md#journal-migration) owns the floor
-and migration behavior. The [migration owner](../../crates/arany/src/store/migrate.rs)
-implements registered upgrades and pre-floor archival; this source observation
-is not native crash-recovery or release evidence.
+The owner accepted archiving pre-floor history during pre-beta on 2026-10-21 and,
+on 2026-10-28, extended it to every stored format: until a beta migration floor is
+declared, state at any other version is archived intact with a notice and no
+migration steps exist. Some past format changes introduced facts that cannot be
+reconstructed honestly; preserving that history intact in an archive avoids
+fabricating replay facts. [The execution contract](../specs/execution.md#incompatible-history)
+owns the behavior, and the [format owner](../../crates/arany/src/store/format.rs)
+implements the version checks; this source observation is not native
+crash-recovery or release evidence.
 
 ### D-23 — Tool latency measures durable acknowledgement
 
@@ -304,7 +306,7 @@ disk, long-history, large-snapshot or live Provider latency support.
 
 Owner decision, 2026-10-22: follow Codex's scalar threshold, duplicate labels and inline expansion, with process-local unsubmitted chips and canonical submitted text. Arany retains its smaller objective and journal bounds; collapse cannot save input tokens. The pinned [Codex composer](https://github.com/openai/codex/blob/342ed69a174c206c1de52a59491b131e0753cfa5/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs#L152-L193) supplies the presentation precedent. In-process inert inspection avoids introducing a separately admitted external editor.
 
-Like Claude Code and Codex replaying history without re-expanding old message text, Goal continuation and ordinary resume reuse admitted inputs. Parsing stored objectives would turn literal pasted `@` text into new file disclosure. The journal previously stored only include digests, which cannot recover paths, so a minimal nullable admitted-path list and registered migration are required. Unknown legacy paths remain unknown; guessing from text would violate honest uncertainty and per-effect isolation. [Goals](../specs/goals.md#budget-continuation), [Terminal](../specs/terminal.md#paste-and-attachments) and [Execution](../specs/execution.md#journal-migration) own behavior and limits.
+Like Claude Code and Codex replaying history without re-expanding old message text, Goal continuation and ordinary resume reuse admitted inputs. Parsing stored objectives would turn literal pasted `@` text into new file disclosure. The journal previously stored only include digests, which cannot recover paths, so a minimal nullable admitted-path list and registered migration are required. Unknown legacy paths remain unknown; guessing from text would violate honest uncertainty and per-effect isolation. [Goals](../specs/goals.md#budget-continuation), [Terminal](../specs/terminal.md#paste-and-attachments) and [Execution](../specs/execution.md#incompatible-history) own behavior and limits.
 
 ### D-25 — User-local known-owner storage metadata
 

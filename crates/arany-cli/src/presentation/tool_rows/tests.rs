@@ -574,7 +574,7 @@ mod peer_row_tests {
             (
                 ToolCall::Delete {
                     path: "src/source".into(),
-                    expected_digest: "0".repeat(64),
+                    expected_digest: Some("0".repeat(64)),
                 },
                 "⏺ Delete(src/source)\n  ⎿ applied",
                 vec!["Delete src/source · only if the file is unchanged"],
@@ -583,7 +583,7 @@ mod peer_row_tests {
                 ToolCall::Move {
                     source: "src/source".into(),
                     destination: "dest/target".into(),
-                    expected_digest: "0".repeat(64),
+                    expected_digest: Some("0".repeat(64)),
                 },
                 "⏺ Move(src/source → dest/target)\n  ⎿ applied",
                 vec![
@@ -601,7 +601,7 @@ mod peer_row_tests {
             ToolCall::Move {
                 source: "source\u{1b}[2J".into(),
                 destination: "target\nline".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
             },
             "{}",
         );
@@ -617,7 +617,7 @@ mod peer_row_tests {
         let tool = tool_fixture(
             ToolCall::MultiEdit {
                 file_path: "src/a".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
                 edits: vec![
                     arany::LiteralEdit {
                         old_string: "old\nline".into(),
@@ -983,6 +983,7 @@ mod peer_row_tests {
                 ToolCall::Glob {
                     pattern: "**/*.rs".into(),
                     path: "src".into(),
+                    offset: 0,
                     limit: 1,
                 },
                 r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":1,"may_be_truncated":true}"#,

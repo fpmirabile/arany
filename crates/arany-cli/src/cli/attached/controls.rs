@@ -14,7 +14,7 @@ use arany::{
     CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionId, SessionView, StateRoot,
     fork_session, rename_session, resume_session, validate_native_model_id,
 };
-use arany::{RecordFormat, RecordKind, RecordStep};
+use arany::{RecordFormat, RecordKind};
 use serde_json::Value;
 use std::str::FromStr;
 
@@ -24,7 +24,7 @@ const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleare
 mod build_cpu;
 mod build_jobs;
 
-const UI_PREFERENCES_VERSION: u8 = 8;
+const UI_PREFERENCES_VERSION: u8 = 9;
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
     ("KB", 1024),
@@ -36,76 +36,16 @@ const SIZE_UNITS: &[(&str, u64)] = &[
 pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
     kind: RecordKind::UiPreferences,
     field: "version",
-    floor: 3,
     current: UI_PREFERENCES_VERSION as u64,
-    steps: &[
-        RecordStep {
-            from: 3,
-            transform: with_pointer_defaults,
-        },
-        RecordStep {
-            from: 4,
-            transform: with_newline_default,
-        },
-        RecordStep {
-            from: 5,
-            transform: without_mouse_preference,
-        },
-        RecordStep {
-            from: 6,
-            transform: build_jobs::with_default,
-        },
-        RecordStep {
-            from: 7,
-            transform: build_cpu::with_default,
-        },
-    ],
     accepts: |bytes| decode_settings(bytes).is_ok(),
 };
-
-// Version 4 added Mouse and Copy on select; a version-3 record had no choice, so it gets the defaults.
-fn with_pointer_defaults(record: Value) -> Option<Value> {
-    let Value::Object(mut record) = record else {
-        return None;
-    };
-    let Some(Value::Object(preferences)) = record.get_mut("preferences") else {
-        return None;
-    };
-    if preferences.contains_key("mouse") || preferences.contains_key("copy_on_select") {
-        return None;
-    }
-    preferences.insert("mouse".into(), "wheel_and_clicks".into());
-    preferences.insert("copy_on_select".into(), true.into());
-    record.insert("version".into(), 4.into());
-    Some(Value::Object(record))
-}
-
-fn with_newline_default(mut record: Value) -> Option<Value> {
-    let preferences = record.get_mut("preferences")?.as_object_mut()?;
-    if preferences.contains_key("newline") {
-        return None;
-    }
-    preferences.insert("newline".into(), "shift_enter".into());
-    record.as_object_mut()?.insert("version".into(), 5.into());
-    Some(record)
-}
-
-fn without_mouse_preference(mut record: Value) -> Option<Value> {
-    let preferences = record.get_mut("preferences")?.as_object_mut()?;
-    let mouse = preferences.get("mouse")?.as_str()?;
-    if !["wheel_and_clicks", "wheel_only", "off"].contains(&mouse) {
-        return None;
-    }
-    preferences.remove("mouse")?;
-    record.as_object_mut()?.insert("version".into(), 6.into());
-    Some(record)
-}
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct UiPreferences {
     version: u8,
-    preferences: Preferences,
+    // Only keys that differ from the binary's defaults; every other key follows them at read time.
+    preferences: serde_json::Map<String, Value>,
 }
 
 // Read first so an older record is refused by version rather than by its missing fields.
@@ -123,6 +63,7 @@ pub(super) struct Preferences {
     pub resources: arany::ToolResourceSettings,
     pub copy_on_select: bool,
     pub newline: NewlineShortcut,
+    pub context_window: arany::ContextWindow,
 }
 
 impl Default for Preferences {
@@ -138,6 +79,7 @@ impl Default for Preferences {
             },
             copy_on_select: PointerSettings::default().copy_on_select,
             newline: NewlineShortcut::default(),
+            context_window: arany::ContextWindow::default(),
         }
     }
 }
@@ -154,12 +96,20 @@ fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingInput {
+    Choice,
+    Typed,
+}
+
 struct Setting {
     label: &'static str,
     hint: &'static str,
+    input: SettingInput,
     value: fn(&Preferences) -> String,
     apply: fn(&mut Preferences, &str) -> Option<()>,
     cycle: fn(&mut Preferences, bool),
+    reset: fn(&mut Preferences, &Preferences),
     guidance: Option<fn(&AttachedTerminal) -> String>,
 }
 
@@ -167,6 +117,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         label: "Slash menu",
         hint: "tabs|combined",
+        input: SettingInput::Choice,
         value: |p| p.completion.label().into(),
         apply: |p, raw| {
             p.completion = [CompletionLayout::Tabs, CompletionLayout::Combined]
@@ -177,11 +128,13 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, _| {
             p.completion = p.completion.toggled();
         },
+        reset: |p, default| p.completion = default.completion,
         guidance: None,
     },
     Setting {
         label: "Chat view",
         hint: "fullscreen|classic",
+        input: SettingInput::Choice,
         value: |p| p.view.label().into(),
         apply: |p, raw| {
             p.view = [TerminalMode::Fullscreen, TerminalMode::Classic]
@@ -192,11 +145,13 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, _| {
             p.view = p.view.toggled();
         },
+        reset: |p, default| p.view = default.view,
         guidance: None,
     },
     Setting {
-        label: "Goal provider calls",
+        label: "Provider calls per task",
         hint: "number or unlimited",
+        input: SettingInput::Typed,
         value: |p| {
             show_limit(p.goal_budget.max_provider_calls.map(u64::from), |value| {
                 value.to_string()
@@ -212,15 +167,19 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, forward| {
             p.goal_budget.max_provider_calls = step(
                 p.goal_budget.max_provider_calls,
-                &[Some(64), Some(32), Some(16), None],
+                &[None, Some(256), Some(64), Some(16)],
                 forward,
             );
+        },
+        reset: |p, default| {
+            p.goal_budget.max_provider_calls = default.goal_budget.max_provider_calls
         },
         guidance: None,
     },
     Setting {
-        label: "Goal tokens",
+        label: "Tokens per task",
         hint: "number or unlimited",
+        input: SettingInput::Typed,
         value: |p| show_limit(p.goal_budget.max_tokens, |value| value.to_string()),
         apply: |p, raw| {
             p.goal_budget.max_tokens = parse_limit(raw, |value| value.parse().ok())?;
@@ -233,11 +192,13 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.goal_budget.max_tokens = default.goal_budget.max_tokens,
         guidance: None,
     },
     Setting {
-        label: "Goal active time",
+        label: "Active time per task",
         hint: "duration or unlimited",
+        input: SettingInput::Typed,
         value: |p| show_limit(p.goal_budget.max_active_ms, format_duration),
         apply: |p, raw| {
             p.goal_budget.max_active_ms = parse_limit(raw, parse_duration)?;
@@ -246,15 +207,22 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, forward| {
             p.goal_budget.max_active_ms = step(
                 p.goal_budget.max_active_ms,
-                &[Some(arany::MAX_GOAL_ACTIVE_MS), Some(15 * 60 * 1000), None],
+                &[
+                    None,
+                    Some(arany::MAX_GOAL_ACTIVE_MS),
+                    Some(60 * 60 * 1000),
+                    Some(15 * 60 * 1000),
+                ],
                 forward,
             );
         },
+        reset: |p, default| p.goal_budget.max_active_ms = default.goal_budget.max_active_ms,
         guidance: None,
     },
     Setting {
         label: "Default command timeout",
         hint: "duration, e.g. 30s",
+        input: SettingInput::Typed,
         value: |p| format_duration(u64::from(p.resources.default_command_timeout_ms)),
         apply: |p, raw| {
             p.resources.default_command_timeout_ms = parse_duration(raw)?.try_into().ok()?;
@@ -267,11 +235,15 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| {
+            p.resources.default_command_timeout_ms = default.resources.default_command_timeout_ms;
+        },
         guidance: None,
     },
     Setting {
         label: "Maximum command timeout",
         hint: "duration, e.g. 5m",
+        input: SettingInput::Typed,
         value: |p| format_duration(u64::from(p.resources.max_command_timeout_ms)),
         apply: |p, raw| {
             p.resources.max_command_timeout_ms = parse_duration(raw)?.try_into().ok()?;
@@ -284,11 +256,15 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| {
+            p.resources.max_command_timeout_ms = default.resources.max_command_timeout_ms;
+        },
         guidance: None,
     },
     Setting {
         label: "Build memory",
         hint: "size, e.g. 512MB",
+        input: SettingInput::Typed,
         value: |p| format_setting_size(p.resources.build_memory_bytes),
         apply: |p, raw| {
             p.resources.build_memory_bytes = parse_size(raw)?;
@@ -306,11 +282,13 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.resources.build_memory_bytes = default.resources.build_memory_bytes,
         guidance: None,
     },
     Setting {
         label: "Build processes/threads",
         hint: "number",
+        input: SettingInput::Typed,
         value: |p| p.resources.build_processes.to_string(),
         apply: |p, raw| {
             p.resources.build_processes = raw.parse().ok()?;
@@ -320,11 +298,13 @@ const SETTINGS: &[Setting] = &[
             p.resources.build_processes =
                 step(p.resources.build_processes, &[256, 128, 64, 32], forward);
         },
+        reset: |p, default| p.resources.build_processes = default.resources.build_processes,
         guidance: None,
     },
     Setting {
         label: "Build writable project",
         hint: "size, e.g. 1GB",
+        input: SettingInput::Typed,
         value: |p| format_setting_size(p.resources.build_project_bytes),
         apply: |p, raw| {
             p.resources.build_project_bytes = parse_size(raw)?;
@@ -342,11 +322,13 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.resources.build_project_bytes = default.resources.build_project_bytes,
         guidance: None,
     },
     Setting {
         label: "Build cache",
         hint: "size, e.g. 8GB",
+        input: SettingInput::Typed,
         value: |p| format_setting_size(p.resources.build_cache_bytes),
         apply: |p, raw| {
             p.resources.build_cache_bytes = parse_size(raw)?;
@@ -359,11 +341,13 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.resources.build_cache_bytes = default.resources.build_cache_bytes,
         guidance: None,
     },
     Setting {
         label: "Copy on select",
         hint: "on|off",
+        input: SettingInput::Choice,
         value: |p| on_off(p.copy_on_select).into(),
         apply: |p, raw| {
             p.copy_on_select = [true, false]
@@ -374,11 +358,13 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, _| {
             p.copy_on_select = !p.copy_on_select;
         },
+        reset: |p, default| p.copy_on_select = default.copy_on_select,
         guidance: None,
     },
     Setting {
         label: "Newline shortcut",
         hint: "shift+enter|alt+enter|ctrl+enter",
+        input: SettingInput::Choice,
         value: |p| p.newline.label().into(),
         apply: |p, raw| {
             p.newline = NewlineShortcut::ALL
@@ -389,11 +375,48 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, forward| {
             p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
         },
+        reset: |p, default| p.newline = default.newline,
         guidance: Some(AttachedTerminal::newline_shortcut_guidance),
     },
     build_jobs::SETTING,
     build_cpu::SETTING,
+    Setting {
+        label: "Context window",
+        hint: "percent or tokens, e.g. 80% or 500k",
+        input: SettingInput::Typed,
+        value: |p| p.context_window.to_string(),
+        apply: |p, raw| {
+            p.context_window = raw.parse().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.context_window = step(p.context_window, &CONTEXT_WINDOW_PRESETS, forward);
+        },
+        reset: |p, default| p.context_window = default.context_window,
+        guidance: None,
+    },
 ];
+
+const CONTEXT_WINDOW_PRESETS: [arany::ContextWindow; 7] = {
+    use arany::ContextWindow::{Percent, Tokens};
+    [
+        Percent(100),
+        Percent(75),
+        Percent(50),
+        Tokens(1_000_000),
+        Tokens(500_000),
+        Tokens(256_000),
+        Tokens(128_000),
+    ]
+};
+const MAX_SETTING_VALUE_BYTES: usize = 64;
+
+fn fits_model_window(window: arany::ContextWindow, model_window: Option<u32>) -> bool {
+    match window {
+        arany::ContextWindow::Percent(_) => true,
+        arany::ContextWindow::Tokens(tokens) => model_window.is_none_or(|limit| tokens <= limit),
+    }
+}
 
 fn show_limit(value: Option<u64>, format: impl FnOnce(u64) -> String) -> String {
     value.map_or_else(|| "unlimited".into(), format)
@@ -510,29 +533,53 @@ fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
     let Some((number, raw)) = value.split_once(' ') else {
         return false;
     };
-    let Some(setting) = number
+    number
         .parse::<usize>()
         .ok()
         .and_then(|number| number.checked_sub(1))
-        .and_then(|index| SETTINGS.get(index))
-    else {
+        .is_some_and(|row| apply_row(preferences, row, raw))
+}
+
+// Linear `NUMBER VALUE` and the visual value field share this parser.
+fn apply_row(preferences: &mut Preferences, row: usize, raw: &str) -> bool {
+    let Some(setting) = SETTINGS.get(row) else {
         return false;
     };
     let mut chosen = *preferences;
-    if (setting.apply)(&mut chosen, raw.trim()).is_none()
-        || chosen.goal_budget.validate().is_err()
-        || !chosen.resources.valid()
-    {
+    let raw = raw.trim();
+    if raw == "default" {
+        (setting.reset)(&mut chosen, &Preferences::default());
+    } else if (setting.apply)(&mut chosen, raw).is_none() {
+        return false;
+    }
+    if chosen.goal_budget.validate().is_err() || !chosen.resources.valid() {
         return false;
     }
     *preferences = chosen;
     true
 }
 
+fn setting_value(setting: &Setting, preferences: &Preferences) -> String {
+    let mut reset = *preferences;
+    (setting.reset)(&mut reset, &Preferences::default());
+    let value = (setting.value)(preferences);
+    if reset == *preferences {
+        format!("{value} (default)")
+    } else {
+        value
+    }
+}
+
 fn setting_rows(preferences: Preferences) -> Vec<String> {
     SETTINGS
         .iter()
-        .map(|setting| format!("{}: {}", setting.label, (setting.value)(&preferences)))
+        .map(|setting| {
+            format!(
+                "{}: {}",
+                setting.label,
+                setting_value(setting, &preferences)
+            )
+        })
         .collect()
 }
 
@@ -543,7 +590,7 @@ fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
             format!(
                 "{}: {} ({})",
                 setting.label,
-                (setting.value)(&preferences),
+                setting_value(setting, &preferences),
                 setting.hint
             )
         })
@@ -562,10 +609,30 @@ fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
     }]
 }
 
-fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
+fn reset_setting(preferences: &mut Preferences, row: usize) {
+    if let Some(setting) = SETTINGS.get(row) {
+        (setting.reset)(preferences, &Preferences::default());
+    }
+}
+
+fn cycle_setting(
+    preferences: &mut Preferences,
+    row: usize,
+    forward: bool,
+    model_window: Option<u32>,
+) {
     if let Some(setting) = SETTINGS.get(row) {
         let mut chosen = *preferences;
         (setting.cycle)(&mut chosen, forward);
+        // Token presets larger than the known model window are skipped; percentages always fit.
+        for _ in 0..CONTEXT_WINDOW_PRESETS.len() {
+            if chosen.context_window == preferences.context_window
+                || fits_model_window(chosen.context_window, model_window)
+            {
+                break;
+            }
+            (setting.cycle)(&mut chosen, forward);
+        }
         if chosen.goal_budget.validate().is_ok() && chosen.resources.valid() {
             *preferences = chosen;
         }
@@ -584,9 +651,20 @@ pub(super) async fn restore_settings_at(
 
 pub(in crate::cli) async fn execution_limits(
     state_dir: &std::path::Path,
-) -> Result<(arany::GoalBudget, arany::ToolResourceSettings), String> {
+) -> Result<
+    (
+        arany::GoalBudget,
+        arany::ToolResourceSettings,
+        arany::ContextWindow,
+    ),
+    String,
+> {
     let settings = restore_settings_at(state_dir).await?;
-    Ok((settings.goal_budget, settings.resources))
+    Ok((
+        settings.goal_budget,
+        settings.resources,
+        settings.context_window,
+    ))
 }
 
 // An unsupported or invalid record leaves defaults in force until /settings replaces it.
@@ -600,18 +678,10 @@ async fn saved_settings(
     state_dir: &std::path::Path,
 ) -> Result<Result<Preferences, &'static str>, String> {
     let path = state_dir.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let root = match StateRoot::open_existing(&path) {
-            Ok(root) => root,
-            Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
-                    return Ok(Ok(Preferences::default()));
-                }
-                return Err("display settings unavailable or unsafe".into());
-            }
-            Err(_) => return Err("display settings unavailable or unsafe".into()),
-        };
-        read_settings(&root)
+    tokio::task::spawn_blocking(move || match StateRoot::open_optional(&path) {
+        Ok(Some(root)) => read_settings(&root),
+        Ok(None) => Ok(Ok(Preferences::default())),
+        Err(_) => Err("display settings unavailable or unsafe".into()),
     })
     .await
     .map_err(|_| "display settings unavailable".to_owned())?
@@ -619,7 +689,8 @@ async fn saved_settings(
 
 fn read_settings(root: &StateRoot) -> Result<Result<Preferences, &'static str>, String> {
     let Some(record) = root
-        .read_current(&UI_PREFERENCES)
+        .record(UI_PREFERENCES.kind)
+        .read()
         .map_err(|_| "display settings unavailable or unsafe")?
     else {
         return Ok(Ok(Preferences::default()));
@@ -635,10 +706,57 @@ fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
         return Err(unsupported);
     }
     let record: UiPreferences = serde_json::from_slice(record).map_err(|_| invalid)?;
-    if record.preferences.goal_budget.validate().is_err() || !record.preferences.resources.valid() {
+    let mut resolved = serde_json::to_value(Preferences::default()).map_err(|_| invalid)?;
+    overlay(&mut resolved, Value::Object(record.preferences)).ok_or(invalid)?;
+    let preferences: Preferences = serde_json::from_value(resolved).map_err(|_| invalid)?;
+    if preferences.goal_budget.validate().is_err() || !preferences.resources.valid() {
         return Err(unsupported);
     }
-    Ok(record.preferences)
+    Ok(preferences)
+}
+
+// Saved keys replace defaults; a key the defaults lack is refused.
+fn overlay(resolved: &mut Value, saved: Value) -> Option<()> {
+    match (resolved, saved) {
+        (Value::Object(resolved), Value::Object(saved)) => {
+            for (key, value) in saved {
+                overlay(resolved.get_mut(&key)?, value)?;
+            }
+            Some(())
+        }
+        (resolved, saved) => {
+            *resolved = saved;
+            Some(())
+        }
+    }
+}
+
+// The keys of `chosen` that differ from `default`, so unchanged keys keep following the binary.
+fn changed(chosen: Value, default: &Value) -> Option<Value> {
+    let (Value::Object(chosen), Value::Object(default)) = (&chosen, default) else {
+        return (chosen != *default).then_some(chosen);
+    };
+    let fields: serde_json::Map<String, Value> = chosen
+        .iter()
+        .filter_map(|(key, value)| {
+            let changed = changed(value.clone(), default.get(key).unwrap_or(&Value::Null))?;
+            Some((key.clone(), changed))
+        })
+        .collect();
+    (!fields.is_empty()).then_some(Value::Object(fields))
+}
+
+fn encode_settings(preferences: Preferences) -> Option<Vec<u8>> {
+    let default = serde_json::to_value(Preferences::default()).ok()?;
+    let preferences = match changed(serde_json::to_value(preferences).ok()?, &default) {
+        Some(Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    serde_json::to_vec(&UiPreferences {
+        version: UI_PREFERENCES_VERSION,
+        preferences,
+    })
+    .ok()
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -672,11 +790,8 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
     tokio::task::spawn_blocking(move || {
         let root = StateRoot::admit(&path)
             .map_err(|_| SaveError::Failed("display settings unavailable or unsafe"))?;
-        let record = serde_json::to_vec(&UiPreferences {
-            version: UI_PREFERENCES_VERSION,
-            preferences,
-        })
-        .map_err(|_| SaveError::Failed("display settings unavailable"))?;
+        let record = encode_settings(preferences)
+            .ok_or(SaveError::Failed("display settings unavailable"))?;
         root.with_account_replacement_lock(&workspace, || {
             root.record(RecordKind::UiPreferences).replace(&record)
         })
@@ -716,23 +831,96 @@ fn settings_notice(
     }
 }
 
+// The last Run on the selected model tells which token presets fit; without one all are offered.
+fn model_window(view: &SessionView) -> Option<u32> {
+    view.runs
+        .iter()
+        .rev()
+        .filter_map(|run| run.config.as_ref())
+        .find(|config| view.defaults.model.as_ref() == Some(&config.model))
+        .and_then(|config| config.context_window_tokens)
+}
+
+enum FieldKey {
+    Edited,
+    Cancel,
+    Submit,
+    Pass,
+}
+
+fn field_key(text: &mut String, input: TerminalInput) -> FieldKey {
+    match input {
+        TerminalInput::Character(character) => {
+            if text.len() + character.len_utf8() <= MAX_SETTING_VALUE_BYTES {
+                text.push(character);
+            }
+            FieldKey::Edited
+        }
+        TerminalInput::Backspace | TerminalInput::Delete => {
+            text.pop();
+            FieldKey::Edited
+        }
+        TerminalInput::Escape => FieldKey::Cancel,
+        TerminalInput::Submit => FieldKey::Submit,
+        TerminalInput::Interrupt
+        | TerminalInput::EndOfInput
+        | TerminalInput::Suspend
+        | TerminalInput::Shutdown(_) => FieldKey::Pass,
+        _ => FieldKey::Edited,
+    }
+}
+
+fn field_notice(setting: &Setting, invalid: &mut bool) -> String {
+    let lead = if std::mem::take(invalid) {
+        "Invalid value; type"
+    } else {
+        "Type"
+    };
+    format!(
+        "{lead} {}; Enter applies, empty Enter saves, Esc returns to the list",
+        setting.hint
+    )
+}
+
+fn visual_rows(chosen: Preferences, selected_row: usize, field: Option<&str>) -> Vec<String> {
+    let mut rows = setting_rows(chosen);
+    if let (Some(text), Some(row), Some(setting)) = (
+        field,
+        rows.get_mut(selected_row),
+        SETTINGS.get(selected_row),
+    ) {
+        *row = format!("{}: {text}▏", setting.label);
+    }
+    rows
+}
+
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
     view: &SessionView,
 ) -> Result<Option<Preferences>, String> {
     let linear = terminal.is_linear();
+    let model_window = model_window(view);
     let mut selected_row = 0usize;
     let mut answer = Composer::default();
+    let mut field: Option<String> = None;
     let mut invalid = false;
     let mut linear_guidance = linear;
     terminal.begin_dialog();
     loop {
-        let notice = settings_notice(terminal, selected_row, &mut invalid, &mut linear_guidance);
+        let typed_row = SETTINGS[selected_row].input == SettingInput::Typed;
+        let notice = match &field {
+            Some(_) => Some(field_notice(&SETTINGS[selected_row], &mut invalid)),
+            None if typed_row && !linear && !invalid => Some(format!(
+                "Enter types a value: {}",
+                SETTINGS[selected_row].hint
+            )),
+            None => settings_notice(terminal, selected_row, &mut invalid, &mut linear_guidance),
+        };
         let rows = if linear {
             linear_setting_rows(chosen)
         } else {
-            setting_rows(chosen)
+            visual_rows(chosen, selected_row, field.as_deref())
         };
         terminal
             .draw_settings(&rows, selected_row, notice.as_deref(), view)
@@ -748,11 +936,37 @@ async fn choose_settings(
             .next_input()
             .await
             .map_err(|error| error.to_string())?;
+        if let Some(text) = field.as_mut() {
+            match field_key(text, input) {
+                FieldKey::Edited => continue,
+                FieldKey::Cancel => {
+                    field = None;
+                    continue;
+                }
+                FieldKey::Submit if text.trim().is_empty() => return Ok(Some(chosen)),
+                FieldKey::Submit => {
+                    if apply_row(&mut chosen, selected_row, &text.to_ascii_lowercase()) {
+                        field = None;
+                    } else {
+                        invalid = true;
+                    }
+                    continue;
+                }
+                FieldKey::Pass => {}
+            }
+        }
         match input {
             TerminalInput::Up if !linear => selected_row = selected_row.saturating_sub(1),
             TerminalInput::Down if !linear => selected_row = (selected_row + 1).min(rows.len() - 1),
-            TerminalInput::Left if !linear => cycle_setting(&mut chosen, selected_row, false),
-            TerminalInput::Right if !linear => cycle_setting(&mut chosen, selected_row, true),
+            TerminalInput::Left | TerminalInput::Right if !linear => cycle_setting(
+                &mut chosen,
+                selected_row,
+                input == TerminalInput::Right,
+                model_window,
+            ),
+            TerminalInput::Backspace | TerminalInput::Delete if !linear => {
+                reset_setting(&mut chosen, selected_row);
+            }
             TerminalInput::Character(_) if !linear => {
                 selected_row = input.choice_index(rows.len()).unwrap_or(selected_row);
             }
@@ -770,6 +984,7 @@ async fn choose_settings(
                     value => invalid = !apply_setting(&mut chosen, value),
                 }
             }
+            TerminalInput::Submit if typed_row => field = Some(String::new()),
             TerminalInput::Submit => return Ok(Some(chosen)),
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(None);
@@ -1752,6 +1967,7 @@ mod tests {
             chatgpt_provenance: None,
             output_token_bound: arany::OutputTokenBound::ProviderEnforced,
             context_window_tokens: None,
+            effective_context_window_tokens: None,
             policy: CollaborationPolicy::Single,
             output_token_cap: 1024,
             provider_concurrency: 1,
@@ -1759,8 +1975,9 @@ mod tests {
             workspace_inode: 1,
             user_instruction_digest: None,
             instruction_sources: Vec::new(),
+            prompts: arany::EffectivePrompts::default().pins(),
             launch_directory: String::new(),
-            include_digests: Vec::new(),
+            include_sources: Vec::new(),
             history_run_ids: Vec::new(),
             excluded_history_runs: 0,
             context_usage: Some(ContextUsage {
@@ -1945,7 +2162,7 @@ mod tests {
             "5 60000",
             "6 30000",
             "8 512",
-            "5 2h",
+            "5 8.001h",
             "5 -1s",
             "5 +1s",
             "5 NaNs",
@@ -1981,40 +2198,88 @@ mod tests {
         let process_limit = preferences.resources.build_processes;
         let build_jobs = match cores {
             Some(cores) => format!(
-                "Build jobs: automatic; {} effective (cores {cores}, process limit {process_limit}) (automatic or 1..cores)",
+                "Build jobs: automatic; {} effective (cores {cores}, process limit {process_limit}) (default) (automatic or 1..cores)",
                 cores.min(process_limit)
             ),
-            None => "Build jobs: automatic; Build unavailable (automatic or 1..cores)".into(),
+            None => {
+                "Build jobs: automatic; Build unavailable (default) (automatic or 1..cores)".into()
+            }
         };
         let build_cpu = match cores {
             Some(cores) => format!(
-                "Build CPU cores: automatic; {cores} effective (1..{cores}) (automatic or 1..cores; Linux quota)"
+                "Build CPU cores: automatic; {cores} effective (1..{cores}) (default) (automatic or 1..cores; Linux quota)"
             ),
             None => {
-                "Build CPU cores: automatic; Build unavailable (automatic or 1..cores; Linux quota)"
+                "Build CPU cores: automatic; Build unavailable (default) (automatic or 1..cores; Linux quota)"
                     .into()
             }
         };
         assert_eq!(
             linear_setting_rows(preferences),
             [
-                "Slash menu: tabs (tabs|combined)",
-                "Chat view: fullscreen (fullscreen|classic)",
-                "Goal provider calls: unlimited (number or unlimited)",
-                "Goal tokens: unlimited (number or unlimited)",
-                "Goal active time: unlimited (duration or unlimited)",
-                "Default command timeout: 2 min (duration, e.g. 30s)",
-                "Maximum command timeout: 10 min (duration, e.g. 5m)",
-                "Build memory: 4.0 GB (size, e.g. 512MB)",
-                "Build processes/threads: 256 (number)",
-                "Build writable project: 1.0 GB (size, e.g. 1GB)",
-                "Build cache: 8.0 GB (size, e.g. 8GB)",
-                "Copy on select: on (on|off)",
-                "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)",
+                "Slash menu: tabs (default) (tabs|combined)",
+                "Chat view: fullscreen (default) (fullscreen|classic)",
+                "Provider calls per task: unlimited (default) (number or unlimited)",
+                "Tokens per task: unlimited (default) (number or unlimited)",
+                "Active time per task: unlimited (default) (duration or unlimited)",
+                "Default command timeout: 2 min (default) (duration, e.g. 30s)",
+                "Maximum command timeout: 10 min (default) (duration, e.g. 5m)",
+                "Build memory: 4.0 GB (default) (size, e.g. 512MB)",
+                "Build processes/threads: 256 (default) (number)",
+                "Build writable project: 1.0 GB (default) (size, e.g. 1GB)",
+                "Build cache: 8.0 GB (default) (size, e.g. 8GB)",
+                "Copy on select: on (default) (on|off)",
+                "Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)",
                 build_jobs.as_str(),
                 build_cpu.as_str(),
+                "Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)",
             ]
         );
+        for (raw, expected) in [
+            ("80%", arany::ContextWindow::Percent(80)),
+            ("500k", arany::ContextWindow::Tokens(500_000)),
+            ("500000", arany::ContextWindow::Tokens(500_000)),
+        ] {
+            assert!(apply_setting(&mut preferences, &format!("16 {raw}")));
+            assert_eq!(preferences.context_window, expected);
+        }
+        for rejected in ["16 5%", "16 101%", "16 1000", "16 3m"] {
+            assert!(!apply_setting(&mut preferences, rejected), "{rejected}");
+        }
+        assert_eq!(
+            preferences.context_window,
+            arany::ContextWindow::Tokens(500_000)
+        );
+        let saved = encode_settings(preferences).expect("encoded settings");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&saved).unwrap()["preferences"],
+            serde_json::json!({"context_window": "500k"}),
+            "only the changed key is saved"
+        );
+        assert_eq!(decode_settings(&saved), Ok(preferences));
+        assert!(apply_setting(&mut preferences, "16 default"));
+        assert_eq!(preferences, Preferences::default());
+        let mut cycled = Vec::new();
+        for _ in 0..CONTEXT_WINDOW_PRESETS.len() {
+            cycle_setting(&mut preferences, 15, true, Some(400_000));
+            cycled.push(preferences.context_window.to_string());
+        }
+        assert_eq!(
+            cycled,
+            ["75%", "50%", "256k", "128k", "100%", "75%", "50%"],
+            "token presets above the model window are skipped"
+        );
+        preferences = Preferences::default();
+        cycle_setting(&mut preferences, 15, false, None);
+        assert_eq!(preferences.context_window.to_string(), "128k");
+        preferences = Preferences::default();
+        let typed = SETTINGS
+            .iter()
+            .filter(|setting| setting.input == SettingInput::Typed)
+            .map(|setting| setting.label)
+            .collect::<Vec<_>>();
+        assert!(typed.contains(&"Context window") && typed.contains(&"Build memory"));
+        assert!(!typed.contains(&"Chat view") && !typed.contains(&"Newline shortcut"));
         for (raw, expected) in [
             ("30s", 30_000),
             ("5m", 300_000),
@@ -2053,8 +2318,8 @@ mod tests {
                 &format!("13 {}", shortcut.label().to_ascii_lowercase())
             ));
             assert_eq!(preferences.newline, shortcut);
-            cycle_setting(&mut preferences, 12, true);
-            cycle_setting(&mut preferences, 12, false);
+            cycle_setting(&mut preferences, 12, true, None);
+            cycle_setting(&mut preferences, 12, false, None);
             assert_eq!(preferences.newline, shortcut);
         }
         assert!(apply_setting(&mut preferences, "1 combined"));
@@ -2069,13 +2334,75 @@ mod tests {
         assert!(apply_setting(&mut preferences, "7 5m"));
         assert!(apply_setting(&mut preferences, "12 off"));
         assert!(!preferences.copy_on_select);
-        cycle_setting(&mut preferences, 11, true);
+        cycle_setting(&mut preferences, 11, true, None);
         assert!(preferences.copy_on_select);
         assert_eq!(preferences.completion, CompletionLayout::Combined);
         assert_eq!(preferences.view, TerminalMode::Fullscreen);
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
         assert_eq!(preferences.goal_budget.max_tokens, Some(100_000));
         assert_eq!(preferences.resources.max_command_timeout_ms, 300_000);
+        assert!(setting_rows(preferences).contains(&"Tokens per task: 100000".into()));
+        assert!(apply_setting(&mut preferences, "4 default"));
+        assert!(setting_rows(preferences).contains(&"Tokens per task: unlimited (default)".into()));
+        assert!(apply_setting(&mut preferences, "3 64"));
+        reset_setting(&mut preferences, 2);
+        assert_eq!(preferences.goal_budget, Preferences::default().goal_budget);
+        for row in 0..SETTINGS.len() {
+            reset_setting(&mut preferences, row);
+        }
+        assert_eq!(preferences, Preferences::default());
+    }
+
+    #[test]
+    fn goal_budget_cycles_start_at_their_unlimited_default() {
+        let mut preferences = Preferences::default();
+        for (row, first) in [(2, Some(256)), (4, Some(arany::MAX_GOAL_ACTIVE_MS))] {
+            cycle_setting(&mut preferences, row, true, None);
+            let budget = preferences.goal_budget;
+            assert_eq!(
+                budget
+                    .max_provider_calls
+                    .map(u64::from)
+                    .or(budget.max_active_ms),
+                first
+            );
+            cycle_setting(&mut preferences, row, false, None);
+            assert_eq!(preferences, Preferences::default());
+        }
+    }
+
+    #[test]
+    fn saved_settings_keep_only_changed_keys_and_follow_current_defaults() {
+        assert_eq!(
+            encode_settings(Preferences::default()).unwrap(),
+            br#"{"version":9,"preferences":{}}"#
+        );
+        let mut changed = Preferences::default();
+        changed.goal_budget.max_provider_calls = Some(64);
+        changed.resources.build_jobs = Some(2);
+        changed.view = TerminalMode::Classic;
+        let record = encode_settings(changed).unwrap();
+        assert_eq!(
+            record,
+            br#"{"version":9,"preferences":{"goal_budget":{"max_provider_calls":64},"resources":{"build_jobs":2},"view":"classic"}}"#
+        );
+        assert_eq!(decode_settings(&record), Ok(changed));
+        assert!((UI_PREFERENCES.accepts)(&record));
+        for invalid in [
+            br#"{"version":9,"preferences":{"unknown":1}}"#.as_slice(),
+            br#"{"version":9,"preferences":{"goal_budget":{"unknown":1}}}"#,
+            br#"{"version":9,"preferences":{"goal_budget":3}}"#,
+            br#"{"version":9,"preferences":{"view":"unknown"}}"#,
+            br#"{"version":9}"#,
+        ] {
+            assert!(decode_settings(invalid).is_err());
+        }
+        assert_eq!(
+            decode_settings(
+                br#"{"version":9,"preferences":{"goal_budget":{"max_provider_calls":0}}}"#
+            ),
+            Err("unsupported settings; use /settings to replace them")
+        );
     }
 
     #[test]
@@ -2102,8 +2429,10 @@ mod tests {
             },
             copy_on_select: false,
             newline: NewlineShortcut::AltEnter,
+            context_window: arany::ContextWindow::Tokens(123_456),
         };
         assert!(setting_rows(custom).contains(&"Build memory: 1.0009765625 KB".into()));
+        assert!(setting_rows(custom).contains(&"Context window: 123456".into()));
         assert!(setting_rows(custom).contains(&"Build cache: 1.0009765625 GB".into()));
         for mut original in [defaults, custom] {
             for memory in [
@@ -2361,78 +2690,24 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":8,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_cpu_cores":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
+            br#"{"version":9,"preferences":{"completion":"combined","view":"classic"}}"#
         );
-        // A complete version-3 record upgrades in place, keeping its choices and adding newer defaults.
-        let finite = Preferences {
-            goal_budget: arany::GoalBudget {
-                max_provider_calls: Some(64),
-                max_active_ms: Some(1_800_000),
-                ..Default::default()
-            },
-            ..combined_classic
-        };
-        let version_three = br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
-        root.record(RecordKind::UiPreferences)
-            .replace(version_three)
-            .unwrap();
-        assert_eq!(restore_settings(&admission).await.unwrap(), finite);
-        let upgraded = root
-            .record(RecordKind::UiPreferences)
-            .read()
-            .unwrap()
-            .unwrap();
-        assert_eq!(decode_settings(&upgraded), Ok(finite));
-        for mouse in ["wheel_and_clicks", "wheel_only", "off"] {
-            let mut legacy: Value = serde_json::from_slice(&original).unwrap();
-            legacy["version"] = 5.into();
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_jobs");
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_cpu_cores");
-            legacy["preferences"]["mouse"] = mouse.into();
+        // Records of any other version stay untouched for the startup archive; reading refuses them.
+        for version in [3, 8, 10] {
+            let mut other: Value = serde_json::from_slice(&original).unwrap();
+            other["version"] = version.into();
+            let other = serde_json::to_vec(&other).unwrap();
             root.record(RecordKind::UiPreferences)
-                .replace(&serde_json::to_vec(&legacy).unwrap())
+                .replace(&other)
                 .unwrap();
-            assert_eq!(
-                restore_settings(&admission).await.unwrap(),
-                combined_classic
-            );
-            let migrated = root
-                .record(RecordKind::UiPreferences)
-                .read()
-                .unwrap()
-                .unwrap();
-            assert_eq!(decode_settings(&migrated), Ok(combined_classic));
-            assert!(!migrated.windows(5).any(|window| window == b"mouse"));
-        }
-        for mouse in [false.into(), Value::Null, "unknown".into()] {
-            let mut legacy: Value = serde_json::from_slice(&original).unwrap();
-            legacy["version"] = 5.into();
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_jobs");
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_cpu_cores");
-            legacy["preferences"]["mouse"] = mouse;
-            let legacy = serde_json::to_vec(&legacy).unwrap();
-            root.record(RecordKind::UiPreferences)
-                .replace(&legacy)
-                .unwrap();
+            assert!(UI_PREFERENCES.mismatched(&other));
             assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
                 root.record(RecordKind::UiPreferences)
                     .read()
                     .unwrap()
                     .unwrap(),
-                legacy
+                other
             );
         }
         let mut invalid_shortcut: Value = serde_json::from_slice(&original).unwrap();
@@ -2745,7 +3020,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let file = admission.state_dir.join("provider-profiles.json");
             let profile = serde_json::json!({
-                "version": 1,
+                "version": 2,
                 "profiles": [{
                     "name": "local",
                     "protocol": "openai-responses",
