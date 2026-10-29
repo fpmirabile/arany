@@ -2,7 +2,7 @@ use super::{
     ProductGuard, collect_nonblocking, product_child_of, redacted_tail, transcript_field,
     tty_settings,
 };
-use crate::loopback::{ChildGuard, read_request, send_response_for, wait_product, write_profile};
+use crate::loopback::{read_request, send_response_for, wait_product, write_profile};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -13,7 +13,6 @@ use std::{
     fs::File,
     io::{Read, Write},
     net::TcpListener,
-    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -133,23 +132,17 @@ fn run_broken_stderr_case(compaction: bool) {
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_STDERR_PTY", &slave_path)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_TEST_STDERR_PTY", &slave_path)
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .term("xterm")
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");

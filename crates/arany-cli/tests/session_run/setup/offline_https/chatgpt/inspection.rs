@@ -268,12 +268,13 @@ fn start_inspection(
         Presentation::Inline => SetupPtyMode::ResumedInline(id),
     };
     let state = temp.path().join("state");
-    let mut command = setup_pty_command(temp, workspace, &state, &mode, None);
-    command.env("ARANY_TEST_EXE", "/arany").env(
-        "DBUS_SESSION_BUS_ADDRESS",
-        format!("unix:path={}", temp.path().join("bus").display()),
-    );
-    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut child = setup_pty_command(temp, workspace, &state, &mode, None)
+        .executable("/arany")
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", temp.path().join("bus").display()),
+        )
+        .spawn();
     let input = child.child().stdin.take().unwrap();
     let output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();

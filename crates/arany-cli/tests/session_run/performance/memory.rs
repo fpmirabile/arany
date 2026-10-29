@@ -1,11 +1,10 @@
-use crate::loopback::{ChildGuard, wait_product, write_profile};
+use crate::loopback::{wait_product, write_profile};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, kill_process};
 use std::{
     io::{Read, Write},
     net::TcpListener,
     path::Path,
-    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -163,30 +162,16 @@ fn resident_memory_two_includes_on_named_host() {
             .expect("second response half");
     });
 
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/usr/bin/zsh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            r#"TIMEFMT='ARANY_MAX_RSS:%M'; time /usr/bin/zsh -c 'printf "ARANY_PID:%s\n" "$$"; exec "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --provider custom:local --model model-1 --include first.txt --include second.txt'"#,
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(state.parent().expect("fixture root"))),
+        r#"TIMEFMT='ARANY_MAX_RSS:%M'; time /usr/bin/zsh -c 'printf "ARANY_PID:%s\n" "$$"; exec "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --provider custom:local --model model-1 --include first.txt --include second.txt'"#,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .env("SHELL", "/usr/bin/zsh")
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(child.child().stdout.take().expect("PTY output"));
     let (stage_sender, stage_receiver) = mpsc::channel();
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));

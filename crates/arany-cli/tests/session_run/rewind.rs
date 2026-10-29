@@ -1,6 +1,5 @@
 use super::{
     active_terminal::{ProductGuard, product_child_of, transcript_field},
-    loopback::ChildGuard,
     session_picker::{PtyResponses, pump, tail},
 };
 use arany::{
@@ -9,7 +8,6 @@ use arany::{
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::{Read, Write},
-    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -89,22 +87,15 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
         let shell = format!(
             "trap : INT; stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode} --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$code\""
         );
-        let mut command: Command = super::isolation::account_isolated_script(root.path());
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("ARANY_TEST_SESSION", source.to_string())
-            .env("OPENAI_API_KEY", "synthetic-test-key")
-            .env("TERM", "xterm-256color")
-            .env("SHELL", "/bin/sh")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", &shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().unwrap());
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(root.path())),
+            &shell,
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_SESSION", source.to_string())
+        .env("OPENAI_API_KEY", "synthetic-test-key")
+        .term("xterm-256color")
+        .spawn();
         let mut input = child.child().stdin.take().unwrap();
         let mut output = child.child().stdout.take().unwrap();
         fcntl_setfl(&output, fcntl_getfl(&output).unwrap() | OFlags::NONBLOCK).unwrap();

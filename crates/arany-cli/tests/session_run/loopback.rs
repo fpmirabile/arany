@@ -12,30 +12,7 @@ use std::{
     time::Duration,
 };
 
-pub(super) struct ChildGuard(Option<Child>);
-
-impl ChildGuard {
-    pub(super) fn new(child: Child) -> Self {
-        Self(Some(child))
-    }
-
-    pub(super) fn child(&mut self) -> &mut Child {
-        self.0.as_mut().expect("supervised child")
-    }
-
-    pub(super) fn take(&mut self) -> Child {
-        self.0.take().expect("supervised child")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
+pub(super) use crate::product::ChildGuard;
 
 pub(super) const PRODUCT_EXIT_WAIT: Duration = Duration::from_secs(10);
 

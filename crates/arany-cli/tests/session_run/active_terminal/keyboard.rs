@@ -1,10 +1,8 @@
-use crate::loopback::ChildGuard;
 use crate::{PtyResponses, pump};
 use arany_cli::terminal::{AttachedTerminal, Composer, TerminalInput, TerminalMode};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::Write,
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -128,33 +126,27 @@ fn keyboard_negotiation_retains_input_and_restores_each_screen() {
     }
 }
 
-fn keyboard_command(root: &std::path::Path, mode: TerminalMode, unwind: bool) -> Command {
+fn keyboard_command(
+    root: &std::path::Path,
+    mode: TerminalMode,
+    unwind: bool,
+) -> crate::product::PtyLaunch {
     let script = "stty rows 24 cols 80; \"$ARANY_TEST_HELPER\" --ignored --exact \"$ARANY_TEST_FILTER\" --nocapture; result=$?; printf 'KEYBOARD_EXIT:%s\n' \"$result\"; exit \"$result\"";
-    let mut command = Command::new("/usr/bin/script");
-    #[cfg(target_os = "linux")]
-    command.args(["-q", "-e", "-c", script, "/dev/null"]);
-    #[cfg(target_os = "macos")]
-    command.args(["-q", "/dev/null", "/bin/sh", "-c", script]);
-    command
-        .env_clear()
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
+    let command = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, script)
+        .term("xterm")
         .env("ARANY_TEST_HELPER", std::env::current_exe().unwrap())
         .env("ARANY_TEST_FILTER", HELPER)
         .env("ARANY_TEST_KEYBOARD_MODE", mode.label())
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .current_dir(root);
     if unwind {
-        command.env("ARANY_TEST_KEYBOARD_PANIC", "1");
+        return command.env("ARANY_TEST_KEYBOARD_PANIC", "1");
     }
     command
 }
 
 fn keyboard_case(mode: TerminalMode, reply: Reply, unwind: bool) {
     let root = tempfile::tempdir().unwrap();
-    let mut process = ChildGuard::new(keyboard_command(root.path(), mode, unwind).spawn().unwrap());
+    let mut process = keyboard_command(root.path(), mode, unwind).spawn();
     let mut input = process.child().stdin.take().unwrap();
     let mut output = process.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();

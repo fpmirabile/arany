@@ -11,7 +11,7 @@ use std::{
     net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{ChildStdin, ChildStdout, Stdio},
+    process::{ChildStdin, ChildStdout},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -111,25 +111,18 @@ impl Chat {
         let command = format!(
             "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {arguments}; exit_code=$?; exit \"$exit_code\""
         );
-        let mut attached = if network {
-            crate::isolation::account_isolated_script(root)
+        let wrapper = if network {
+            crate::isolation::account_wrapper(root)
         } else {
-            crate::isolation::isolated_script(root)
+            crate::isolation::isolated_wrapper(root)
         };
-        attached
-            .env_clear()
-            .env("ARANY_TEST_EXE", "/arany")
-            .env("ARANY_TEST_STATE", state)
-            .env("ARANY_TEST_WORKSPACE", workspace)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm")
-            .envs(env.iter().copied())
-            .current_dir(workspace)
-            .args(["-q", "-e", "-c", &command, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(attached.spawn().expect("chat process"));
+        let mut child =
+            crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(wrapper), &command)
+                .executable("/arany")
+                .session(state, workspace)
+                .term("xterm")
+                .envs(env.iter().copied())
+                .spawn();
         let input = child.child().stdin.take().expect("PTY input");
         let output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout pipe flags");

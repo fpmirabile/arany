@@ -628,7 +628,6 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             std::fs::write(skill.join("SKILL.md"), b"---\nname: review\ndescription: Synthetic review\n---\nReview the current task.\n").unwrap();
             let state = temp.path().join("state");
             let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany $ARANY_TEST_MODE --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" $ARANY_TEST_SELECTION; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-            let mut command = super::isolation::isolated_script(temp.path());
             if startup_escape {
                 let account =
                     StateRoot::admit(&temp.path().join("account-home/.local/state/arany")).unwrap();
@@ -644,31 +643,26 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     )
                     .unwrap();
             }
-            command
-                .env_clear()
-                .env(
-                    "ARANY_TEST_MODE",
-                    if linear { "--screen-reader" } else { "" },
-                )
-                .env(
-                    "ARANY_TEST_SELECTION",
-                    if startup_escape || unconfigured {
-                        ""
-                    } else {
-                        "--provider openai --model gpt-5.4"
-                    },
-                )
-                .env("ARANY_TEST_STATE", &state)
-                .env("ARANY_TEST_WORKSPACE", &workspace)
-                .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-                .env("SHELL", "/bin/sh")
-                .env("TERM", if linear { "dumb" } else { "xterm-256color" })
-                .current_dir(&workspace)
-                .args(["-q", "-e", "-c", shell, "/dev/null"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null());
-            let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+            let mut child = crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+                shell,
+            )
+            .session(&state, &workspace)
+            .env(
+                "ARANY_TEST_MODE",
+                if linear { "--screen-reader" } else { "" },
+            )
+            .env(
+                "ARANY_TEST_SELECTION",
+                if startup_escape || unconfigured {
+                    ""
+                } else {
+                    "--provider openai --model gpt-5.4"
+                },
+            )
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .term(if linear { "dumb" } else { "xterm-256color" })
+            .spawn();
             let mut input = child.child().stdin.take().unwrap();
             let mut output = child.child().stdout.take().unwrap();
             let flags = fcntl_getfl(&output).unwrap();
@@ -1073,20 +1067,14 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
 
     let state = temp.path().join("state");
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-    let mut command = super::isolation::isolated_script(temp.path());
-    command
-        .env_clear()
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm-256color")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+        shell,
+    )
+    .session(&state, &workspace)
+    .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+    .term("xterm-256color")
+    .spawn();
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();
@@ -1258,20 +1246,14 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
 
         let state = temp.path().join("state");
         let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-        let mut command = super::isolation::isolated_script(temp.path());
-        command
-            .env_clear()
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .term("xterm-256color")
+        .spawn();
         let mut input = child.child().stdin.take().unwrap();
         let mut output = child.child().stdout.take().unwrap();
         let flags = fcntl_getfl(&output).unwrap();
@@ -1442,20 +1424,14 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
     let account = temp.path().join("account-home/.local/state/arany");
     let state = temp.path().join("state");
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 8 cols 16; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-    let mut command = super::isolation::isolated_script(temp.path());
-    command
-        .env_clear()
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm-256color")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+        shell,
+    )
+    .session(&state, &workspace)
+    .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+    .term("xterm-256color")
+    .spawn();
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();
@@ -1538,20 +1514,14 @@ fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
         let shell = format!(
             "stty rows {rows} cols 80; /arany --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4"
         );
-        let mut command = super::isolation::isolated_script(temp.path());
-        command
-            .env_clear()
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm-256color")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", &shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            &shell,
+        )
+        .session(&state, &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .term("xterm-256color")
+        .spawn();
         let mut input = child.child().stdin.take().unwrap();
         let mut output = child.child().stdout.take().unwrap();
         let flags = fcntl_getfl(&output).unwrap();
@@ -2028,20 +1998,14 @@ fn run_permissions_journey(journey: PermissionsJourney) {
         root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"1ae964a6a4911a76405b9484671bd5f5c24650a712f4c6c829698c8ad9128c2b"}"#).unwrap();
     }
     let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
-    let mut command = super::isolation::isolated_script(temp.path());
-    command
-        .env_clear()
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm-256color")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+        shell,
+    )
+    .session(&state, &workspace)
+    .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+    .term("xterm-256color")
+    .spawn();
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();

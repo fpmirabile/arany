@@ -65,12 +65,12 @@ const RELEASE_ACCOUNT_SHELL: &str = r#"before=$(stty -g); printf 'TTY_BEFORE:%s\
 
 #[cfg(debug_assertions)]
 fn prepare_test_file_account(root: &Path) -> Uuid {
-    super::prepare_test_file_account_at(&root.join("account-root"))
+    super::prepare_test_file_account_at(&crate::product::fixture_account(root))
 }
 
 #[cfg(debug_assertions)]
 fn prepare_selected_chatgpt_account(root: &Path) -> Uuid {
-    prepare_selected_chatgpt_account_at(&root.join("account-root"))
+    prepare_selected_chatgpt_account_at(&crate::product::fixture_account(root))
 }
 
 pub(crate) fn chatgpt_slot(client_id: &str, id: Uuid) -> String {
@@ -235,8 +235,7 @@ fn start_setup_pty_with_key(
     mode: SetupPtyMode,
     key: Option<&str>,
 ) -> SetupPty {
-    let mut command = setup_pty_command(temp, workspace, state, &mode, key);
-    let mut child = ChildGuard::new(command.spawn().expect("setup process"));
+    let mut child = setup_pty_command(temp, workspace, state, &mode, key).spawn();
     let mut input = child.child().stdin.take().expect("setup input");
     let mut output = child.child().stdout.take().expect("setup output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -302,7 +301,7 @@ fn setup_pty_command(
     state: &Path,
     mode: &SetupPtyMode,
     key: Option<&str>,
-) -> Command {
+) -> crate::product::PtyLaunch {
     let arguments = match mode {
         SetupPtyMode::Manager => "--screen-reader --setup".to_owned(),
         SetupPtyMode::InlineManager => "--classic --no-color --setup".to_owned(),
@@ -316,46 +315,32 @@ fn setup_pty_command(
     let shell = format!(
         "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {arguments} --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .args(["-q", "-e", "-c", &shell, "/dev/null"])
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={}", temp.path().join("missing-bus").display()),
-        )
-        .env("ARANY_PROVIDER_FIRST_ROUTE_KEY", FIRST_ROUTE_KEY_CANARY)
-        .env("SHELL", "/bin/sh")
-        .env(
-            "TERM",
-            if matches!(
-                mode,
-                SetupPtyMode::InlineManager
-                    | SetupPtyMode::FullscreenManager
-                    | SetupPtyMode::ResumedInline(_)
-            ) {
-                "xterm-256color"
-            } else {
-                "dumb"
-            },
-        )
-        .env(
-            "ARANY_PROVIDER_UNSELECTED_KEY",
-            "unselected-credential-canary",
-        )
-        .current_dir(workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    let mut command =
+        crate::product::PtyLaunch::new(crate::product::Isolation::Fixture(temp.path()), &shell)
+            .session(state, workspace)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", temp.path().join("missing-bus").display()),
+            )
+            .env("ARANY_PROVIDER_FIRST_ROUTE_KEY", FIRST_ROUTE_KEY_CANARY)
+            .term(
+                if matches!(
+                    mode,
+                    SetupPtyMode::InlineManager
+                        | SetupPtyMode::FullscreenManager
+                        | SetupPtyMode::ResumedInline(_)
+                ) {
+                    "xterm-256color"
+                } else {
+                    "dumb"
+                },
+            )
+            .env(
+                "ARANY_PROVIDER_UNSELECTED_KEY",
+                "unselected-credential-canary",
+            );
     if let Some(key) = key {
-        command.env("ARANY_PROVIDER_LOCAL_KEY", key);
+        command = command.env("ARANY_PROVIDER_LOCAL_KEY", key);
     }
     command
 }
@@ -453,20 +438,20 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         prepare_test_file_account(temp.path());
         prepare_selected_chatgpt_account(temp.path());
         if corrupt_native {
-            StateRoot::open_existing(&temp.path().join("account-root"))
+            StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
                 .expect("account root")
                 .record(RecordKind::SavedAccount)
                 .replace(b"invalid unselected account JSON")
                 .expect("corrupt unselected native record");
         }
         if corrupt_chatgpt {
-            StateRoot::open_existing(&temp.path().join("account-root"))
+            StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
                 .expect("account root")
                 .record(RecordKind::ChatgptAccounts)
                 .replace(b"invalid unselected ChatGPT JSON")
                 .expect("corrupt unselected ChatGPT index");
         }
-        let account_root = StateRoot::open_existing(&temp.path().join("account-root"))
+        let account_root = StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
             .expect("protected account root");
         let native_before = account_root
             .record(RecordKind::SavedAccount)
@@ -476,28 +461,16 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
             .record(RecordKind::ChatgptAccounts)
             .read()
             .expect("ChatGPT account snapshot");
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("fixture-home"))
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", temp.path().join("missing-bus").display()),
-            )
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "dumb")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", MIXED_START_SHELL, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("mixed-account PTY"));
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Fixture(temp.path()),
+            MIXED_START_SHELL,
+        )
+        .session(&state, &workspace)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", temp.path().join("missing-bus").display()),
+        )
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -630,36 +603,26 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     std::fs::create_dir(&workspace).expect("Workspace");
     let prompt_shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; if [ -n \"$ARANY_TEST_FORK\" ]; then set -- --fork \"$ARANY_TEST_FORK\"; else set --; fi; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" \"$@\" 'startup objective'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     crate::isolation::remember_workspace_trust(
-        &temp.path().join("account-root"),
+        &crate::product::fixture_account(temp.path()),
         &workspace,
         &workspace,
     );
     for (name, fork) in [("new", String::new()), ("fork", Uuid::now_v7().to_string())] {
         let prompt_state = temp.path().join(format!("{name}-prompt-state"));
         let result = wait_product(
-            Command::new("/usr/bin/script")
-                .env_clear()
-                .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-                .env("ARANY_TEST_STATE", &prompt_state)
-                .env("ARANY_TEST_WORKSPACE", &workspace)
-                .env("ARANY_TEST_FORK", &fork)
-                .env("HOME", temp.path().join("fixture-home"))
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-                .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-                .env(
-                    "DBUS_SESSION_BUS_ADDRESS",
-                    format!("unix:path={}", temp.path().join("missing-bus").display()),
-                )
-                .env("SHELL", "/bin/sh")
-                .env("TERM", "dumb")
-                .current_dir(&workspace)
-                .args(["-q", "-e", "-c", prompt_shell, "/dev/null"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("unconfigured startup-task PTY"),
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Fixture(temp.path()),
+                prompt_shell,
+            )
+            .session(&prompt_state, &workspace)
+            .env("ARANY_TEST_FORK", &fork)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", temp.path().join("missing-bus").display()),
+            )
+            .piped_stderr()
+            .spawn()
+            .take(),
         );
         assert_eq!(result.status.code(), Some(1), "{name}: ordinary error exit");
         assert!(result.stderr.is_empty(), "{name}: script wrapper stderr");
@@ -687,28 +650,14 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     }
     let state = temp.path().join("state");
     let shell = "trap ':' INT; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={}", temp.path().join("missing-bus").display()),
-        )
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("unconfigured PTY process"));
+    let mut child =
+        crate::product::PtyLaunch::new(crate::product::Isolation::Fixture(temp.path()), shell)
+            .session(&state, &workspace)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", temp.path().join("missing-bus").display()),
+            )
+            .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -818,24 +767,17 @@ fn release_bare_session(
     let environment_state = format!("{name}-xdg");
     std::fs::create_dir(private_home.join(&environment_home)).expect("environment home");
     std::fs::create_dir(private_home.join(&environment_state)).expect("environment State");
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_HOME", private_home)
-        .env("ARANY_PASSWD_HOME", passwd_home)
-        .env("ARANY_TEST_STATE", passwd_home.join(name))
-        .env("ARANY_TEST_HOME_ENV", passwd_home.join(&environment_home))
-        .env("ARANY_TEST_XDG_STATE", passwd_home.join(&environment_state))
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .env("PATH", "/usr/bin")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", RELEASE_ACCOUNT_SHELL, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("saved-account release PTY"));
+    // The shell runs the product in its own Bubblewrap passwd-home fixture.
+    let mut child =
+        crate::product::PtyLaunch::new(crate::product::Isolation::Caller, RELEASE_ACCOUNT_SHELL)
+            .env("ARANY_TEST_HOME", private_home)
+            .env("ARANY_PASSWD_HOME", passwd_home)
+            .env("ARANY_TEST_STATE", passwd_home.join(name))
+            .env("ARANY_TEST_HOME_ENV", passwd_home.join(&environment_home))
+            .env("ARANY_TEST_XDG_STATE", passwd_home.join(&environment_state))
+            .env("PATH", "/usr/bin")
+            .current_dir(&workspace)
+            .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -1335,28 +1277,16 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         let shell = format!(
             "stty rows 8 cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
         );
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", &executable)
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("fixture-home"))
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", temp.path().join("missing-bus").display()),
-            )
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", &shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("inline PTY process"));
+        let mut child =
+            crate::product::PtyLaunch::new(crate::product::Isolation::Fixture(temp.path()), &shell)
+                .session(&state, &workspace)
+                .executable(&executable)
+                .env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}", temp.path().join("missing-bus").display()),
+                )
+                .term("xterm")
+                .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -1645,30 +1575,18 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     listener
         .set_nonblocking(true)
         .expect("nonblocking synthetic bus");
-    let mut command = super::isolation::isolated_script(temp.path());
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", "/arany")
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", socket.display()))
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            "exec /usr/bin/timeout --signal=TERM --kill-after=1s 7s \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"",
-            "/dev/null",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("first-run setup PTY"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+        "exec /usr/bin/timeout --signal=TERM --kill-after=1s 7s \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"",
+    )
+    .executable("/arany")
+    .session(&state, &workspace)
+    .env("HOME", temp.path().join("fixture-home"))
+    .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+    .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+    .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", socket.display()))
+    .stdin(Stdio::null())
+    .spawn();
     let output = wait_product(child.take());
     assert!(
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
@@ -1756,29 +1674,23 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             events
         });
         let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; stty cols 40 rows 12; if [ \"$ARANY_TEST_LINEAR\" = 1 ]; then set -- --screen-reader; else set -- --no-color; fi; \"$ARANY_TEST_EXE\" --classic \"$@\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; stty \"$before\"; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-        let mut command = super::isolation::isolated_script(temp.path());
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", &executable)
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("ARANY_TEST_SESSION", session_id.to_string())
-            .env("ARANY_TEST_LINEAR", if linear { "1" } else { "0" })
-            .env("HOME", temp.path().join("fixture-home"))
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", socket.display()),
-            )
-            .env("SHELL", "/bin/sh")
-            .env("TERM", if linear { "dumb" } else { "xterm-256color" })
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("resumed credential-wait PTY"));
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .executable(&executable)
+        .env("ARANY_TEST_SESSION", session_id.to_string())
+        .env("ARANY_TEST_LINEAR", if linear { "1" } else { "0" })
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", socket.display()),
+        )
+        .term(if linear { "dumb" } else { "xterm-256color" })
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");

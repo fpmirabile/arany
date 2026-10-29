@@ -1,21 +1,15 @@
 use std::process::Command;
 
+// Bubblewrap with a private passwd home and no network, for `product::Isolation::Passwd`.
 #[cfg(target_os = "linux")]
-pub fn isolated_script(root: &std::path::Path) -> Command {
-    script(root, true)
+pub fn isolated_wrapper(root: &std::path::Path) -> Command {
+    account_command(root, true, std::path::Path::new(crate::product::EXE))
 }
 
+// Bubblewrap with a private passwd home, for `product::Isolation::Passwd`.
 #[cfg(target_os = "linux")]
-pub fn account_isolated_script(root: &std::path::Path) -> Command {
-    script(root, false)
-}
-
-#[cfg(target_os = "linux")]
-fn script(root: &std::path::Path, isolate_network: bool) -> Command {
-    let product = std::path::Path::new(env!("CARGO_BIN_EXE_arany"));
-    let mut command = account_command(root, isolate_network, product);
-    command.arg("/usr/bin/script");
-    command
+pub fn account_wrapper(root: &std::path::Path) -> Command {
+    account_command(root, false, std::path::Path::new(crate::product::EXE))
 }
 
 #[cfg(target_os = "linux")]

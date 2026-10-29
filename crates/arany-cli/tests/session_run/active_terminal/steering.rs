@@ -19,32 +19,23 @@ fn spawn_linear_run(
     objective: &str,
     patterns: &[&[u8]],
 ) -> Attached {
-    let command = format!(
-        "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1; exit \"$?\""
-    );
+    let command = "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1; exit \"$?\"";
     // New conversations default to single; delegation needs an explicit opt-in.
     let submission = format!("/agents auto\n{objective}\n").into_bytes();
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(state, workspace)
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .spawn();
     let input = Arc::new(Mutex::new(
         attached.child().stdin.take().expect("PTY input"),
     ));
     let reader_input = Arc::clone(&input);
-    let mut output = attached.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(attached.child().stdout.take().expect("PTY output"));
     let patterns: Vec<Vec<u8>> = patterns.iter().map(|pattern| pattern.to_vec()).collect();
     let (stage_sender, stages) = mpsc::channel();
     let reader = thread::spawn(move || {
@@ -72,7 +63,9 @@ fn spawn_linear_run(
             }
             if !submitted
                 && declined_at.is_some_and(|offset| {
-                    bytes[offset..].windows(b"Input:".len()).any(|part| part == b"Input:")
+                    bytes[offset..]
+                        .windows(b"Input:".len())
+                        .any(|part| part == b"Input:")
                 })
             {
                 reader_input

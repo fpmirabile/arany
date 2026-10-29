@@ -1355,7 +1355,7 @@ fn wait_settled(
 #[cfg(target_os = "linux")]
 fn messages_attached_case(cancel: bool, case: RouteCase) {
     use super::active_terminal::{ProductGuard, product_child_of};
-    use super::loopback::{ChildGuard, read_request_for, send_messages_response_for, wait_product};
+    use super::loopback::{read_request_for, send_messages_response_for, wait_product};
     use super::session_picker::{PtyResponses, pump, wait_for_screen};
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::{
@@ -1465,17 +1465,17 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         }
         listener
     });
-    let mut command = crate::isolation::account_isolated_script(temp.path());
-    command.env_clear().env("ARANY_TEST_EXE",env!("CARGO_BIN_EXE_arany"))
-        .envs(crate::process::account_fixture(temp.path().join("account")))
-        .env("ARANY_TEST_STATE",&state).env("ARANY_TEST_WORKSPACE",&workspace)
-        .env(case.credential_env,case.key).env("ARANY_TEST_MODEL",case.model).env("TERM","xterm-256color")
-        .current_dir(&workspace).args(["-q","-e","-c",
-            "trap ':' INT; stty rows 30 cols 100; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model \"$ARANY_TEST_MODEL\" answer",
-            "/dev/null"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    case.keys(&mut command, Some(case.key));
-    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut command = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+        "trap ':' INT; stty rows 30 cols 100; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model \"$ARANY_TEST_MODEL\" answer",
+    )
+    .session(&state, &workspace)
+    .env(case.credential_env, case.key)
+    .env("ARANY_TEST_MODEL", case.model)
+    .term("xterm-256color")
+    .piped_stderr();
+    case.keys(command.command(), Some(case.key));
+    let mut child = command.spawn();
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();

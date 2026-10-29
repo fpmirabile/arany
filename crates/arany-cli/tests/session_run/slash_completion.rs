@@ -1,7 +1,6 @@
 use super::{
     active_terminal::{self, ProductGuard, product_child_of, tty_settings},
-    loopback::{self, ChildGuard},
-    saved_ui_preferences,
+    loopback, saved_ui_preferences,
     session_picker::{
         checkpoint_screen, pump, screen_contains, tail, wait_for, wait_for_after, wait_for_screen,
     },
@@ -16,7 +15,7 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, Instant},
 };

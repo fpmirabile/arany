@@ -2,7 +2,7 @@ use super::{pump, tail};
 use crate::active_terminal::{
     ProductGuard, collect_nonblocking, product_child_of_executable, tty_settings,
 };
-use crate::loopback::{ChildGuard, wait_product};
+use crate::loopback::wait_product;
 use arany::{SessionView, StateRoot, Store, create_session};
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -13,7 +13,6 @@ use rustix::{
 use std::{
     fs::File,
     io::Write,
-    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -55,20 +54,14 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::isolation::isolated_script(temp.path());
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", "/arany")
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("picker process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+        &command,
+    )
+    .executable("/arany")
+    .session(&state, &workspace)
+    .term("xterm")
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
@@ -281,21 +274,15 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::isolation::isolated_script(temp.path());
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", "/arany")
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_STDERR_PTY", &slave_path)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("picker process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+        &command,
+    )
+    .executable("/arany")
+    .session(&state, &workspace)
+    .env("ARANY_TEST_STDERR_PTY", &slave_path)
+    .term("xterm")
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");

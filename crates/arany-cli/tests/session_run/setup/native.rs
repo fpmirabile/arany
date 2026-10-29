@@ -45,25 +45,11 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
     let state = temp.path().join("state");
     prepare_test_file_account(temp.path());
     let shell = "printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("saved-account PTY process"));
+    let mut child =
+        crate::product::PtyLaunch::new(crate::product::Isolation::Fixture(temp.path()), shell)
+            .session(&state, &workspace)
+            .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
+            .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -142,28 +128,20 @@ fn release_setup_uses_private_passwd_home_without_test_override() {
         .expect("effective user")
         .dir;
     assert!(passwd_home.is_absolute(), "absolute passwd home");
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_HOME", &private_home)
-        .env("ARANY_PASSWD_HOME", &passwd_home)
-        .env("ARANY_TEST_SETUP", "1")
-        .env("ARANY_TEST_STATE", passwd_home.join("state"))
-        .env("ARANY_TEST_HOME_ENV", passwd_home.join("environment-home"))
-        .env(
-            "ARANY_TEST_XDG_STATE",
-            passwd_home.join("environment-state"),
-        )
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .env("PATH", "/usr/bin")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", RELEASE_ACCOUNT_SHELL, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("release setup PTY"));
+    let mut child =
+        crate::product::PtyLaunch::new(crate::product::Isolation::Caller, RELEASE_ACCOUNT_SHELL)
+            .env("ARANY_TEST_HOME", &private_home)
+            .env("ARANY_PASSWD_HOME", &passwd_home)
+            .env("ARANY_TEST_SETUP", "1")
+            .env("ARANY_TEST_STATE", passwd_home.join("state"))
+            .env("ARANY_TEST_HOME_ENV", passwd_home.join("environment-home"))
+            .env(
+                "ARANY_TEST_XDG_STATE",
+                passwd_home.join("environment-state"),
+            )
+            .env("PATH", "/usr/bin")
+            .current_dir(&workspace)
+            .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -311,18 +289,11 @@ fn release_saved_account_is_private_across_os_users() {
         } else {
             "/other/fixture-state"
         };
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .env_clear()
+        let mut child = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, shell)
             .env("SHELL", "/usr/bin/sh")
-            .env("TERM", "dumb")
             .env("HOME", "/owner")
             .env("XDG_STATE_HOME", fixture_state)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("cross-user product PTY"));
+            .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -556,25 +527,18 @@ fn replaced_file_account_cannot_run_an_older_session() {
     assert_ne!(replacement, original_account);
 
     crate::isolation::remember_workspace_trust(
-        &temp.path().join("account-root"),
+        &crate::product::fixture_account(temp.path()),
         &workspace,
         std::path::Path::new("/data/workspace"),
     );
     let shell = "/usr/bin/timeout -k 1s 5s /usr/bin/bwrap --unshare-user --unshare-net --unshare-pid --die-with-parent --tmpfs / --ro-bind /usr /usr --symlink usr/lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev-bind /dev /dev --bind \"$ARANY_TEST_ROOT\" /data --ro-bind \"$ARANY_TEST_EXE\" /arany --clearenv --setenv HOME /data --setenv XDG_STATE_HOME /data/xdg-state --setenv ARANY_TEST_ACCOUNT_ROOT /data/account-root --setenv DBUS_SESSION_BUS_ADDRESS unixexec:path=/usr/bin/false --setenv TERM dumb --chdir /data/workspace -- /arany --screen-reader --state-dir /data/state --workspace /data/workspace --resume \"$ARANY_TEST_SESSION\" 'synthetic stale-account objective'";
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+    let command = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, shell)
         .env("ARANY_TEST_ROOT", temp.path())
         .env("ARANY_TEST_SESSION", session_id.to_string())
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
         .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = wait_product(command.spawn().expect("network-isolated product"));
+        .piped_stderr();
+    let output = wait_product(command.spawn().take());
     assert_eq!(output.status.code(), Some(1), "stale account must fail");
     assert!(output.stderr.is_empty(), "script wrapper stderr");
     let transcript = String::from_utf8(output.stdout).expect("screen-reader UTF-8");
@@ -617,40 +581,20 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
         prepare_test_file_account(temp.path());
-        let account_root = StateRoot::open_existing(&temp.path().join("account-root"))
+        let account_root = StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
             .expect("synthetic account root");
         let account_before = account_root
             .record(RecordKind::SavedAccount)
             .read()
             .expect("initial account");
-        let mut command = Command::new("/usr/bin/script");
-        command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            "unixexec:path=/usr/bin/false",
-        )
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Fixture(temp.path()),
             "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("narrow setup PTY"));
+        )
+        .session(&state, &workspace)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
+        .term("xterm")
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -941,31 +885,19 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     prepare_test_file_account(temp.path());
-    let account_root = StateRoot::open_existing(&temp.path().join("account-root"))
+    let account_root = StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
         .expect("synthetic account root");
     let account_before = account_root
         .record(RecordKind::SavedAccount)
         .read()
         .expect("initial account");
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", SETUP_SHELL, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("setup PTY process"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Fixture(temp.path()),
+        SETUP_SHELL,
+    )
+    .session(&state, &workspace)
+    .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -1193,32 +1125,19 @@ fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
         prepare_test_file_account(temp.path());
-        let account_path = temp.path().join("account-root/account-credentials.json");
+        let account_path =
+            crate::product::fixture_account(temp.path()).join("account-credentials.json");
         let account_before = std::fs::read(&account_path).expect("original account record");
         let shell = if attached {
             MIXED_START_SHELL
         } else {
             SETUP_SHELL
         };
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("fixture-home"))
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-            .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "dumb")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("setup PTY process"));
+        let mut child =
+            crate::product::PtyLaunch::new(crate::product::Isolation::Fixture(temp.path()), shell)
+                .session(&state, &workspace)
+                .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
+                .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -1464,7 +1383,7 @@ fn credential_helper_rejects_invalid_record_before_os_store_access() {
 fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
     let temp = tempfile::tempdir().expect("private test root");
     #[cfg(debug_assertions)]
-    let account_root = temp.path().join("account-root");
+    let account_root = crate::product::fixture_account(temp.path());
     #[cfg(not(debug_assertions))]
     let private_home = temp.path().join("home");
     #[cfg(not(debug_assertions))]

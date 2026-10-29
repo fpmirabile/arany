@@ -811,6 +811,11 @@ mod account_lock;
 #[path = "session_run/setup.rs"]
 mod setup;
 
+// Only the Linux debug PTY fixtures use every launcher variant.
+#[cfg_attr(not(all(target_os = "linux", debug_assertions)), allow(dead_code))]
+#[path = "support/product.rs"]
+mod product;
+
 #[path = "session_run/loopback.rs"]
 mod loopback;
 
@@ -1285,7 +1290,6 @@ fn account_path_ignores_session_state_environment() {
         match case.to_str() {
             #[cfg(debug_assertions)]
             Some("system") => {
-                std::panic::set_hook(Box::new(|_| {}));
                 for (name, resolve) in [
                     ("account", StateRoot::account_path as fn() -> _),
                     ("default state", StateRoot::default_path),
@@ -3726,7 +3730,6 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
     use arany::test_support::scenario::{ScriptedProvider, request};
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
-    use std::process::Stdio;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -3783,14 +3786,13 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
     );
     let report_ready = format!("{expected}Input:\n");
     for _ in 0..2 {
-        let mut command = isolation::account_isolated_script(temp.path());
-        command.env_clear().current_dir(&workspace)
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("ARANY_TEST_SESSION", id.to_string()).env("TERM", "dumb")
-            .args(["-q", "-e", "-c", "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"", "/dev/null"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+            "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"",
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .spawn();
         let mut input = child.child().stdin.take().unwrap();
         let mut output = child.child().stdout.take().unwrap();
         let flags = fcntl_getfl(&output).unwrap();

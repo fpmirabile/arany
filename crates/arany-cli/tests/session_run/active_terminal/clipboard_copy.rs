@@ -40,22 +40,15 @@ fn copy_over_ssh_writes_one_osc52_on_stderr_and_linear_mode_writes_none() {
                 "--classic"
             }
         );
-        let mut command = crate::isolation::account_isolated_script(temp.path());
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("ARANY_TEST_SESSION", id.to_string())
-            .env("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22")
-            .env("TERM", "xterm")
-            .env("SHELL", "/bin/sh")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", &shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("copy PTY process"));
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+            &shell,
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .env("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22")
+        .term("xterm")
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = rustix::fs::fcntl_getfl(&output).expect("PTY output flags");

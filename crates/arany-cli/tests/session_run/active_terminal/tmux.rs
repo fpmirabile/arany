@@ -2,7 +2,7 @@ use super::acquisition::ProductGuard;
 use super::{
     redacted_tail, transcript_field, try_product_child_of_executable, tty_settings, wait_stopped,
 };
-use crate::loopback::{ChildGuard, read_request, send_response_for, wait_product, write_profile};
+use crate::loopback::{read_request, send_response_for, wait_product, write_profile};
 use arany::{StateRoot, list_sessions, resume_session};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Signal, kill_process};
@@ -788,20 +788,13 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     assert_ne!(tty_settings(product_pid), before, "raw mode inside tmux");
 
     let command = "stty rows 24 cols 80; before=$(stty -g); printf 'OUTER_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test; exit_code=$?; after=$(stty -g); printf 'OUTER_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
-    attached
-        .env_clear()
-        .env("TERM", "xterm")
-        .env("SHELL", "/bin/sh")
+    let mut attached = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, command)
+        .term("xterm")
         .env("PATH", "/usr/bin:/bin")
         .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
         .env("ARANY_TEST_SOCKET", &server.socket)
         .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("tmux client PTY"));
+        .spawn();
     let mut input = attached.child().stdin.take().expect("tmux client input");
     let mut output = attached.child().stdout.take().expect("tmux client output");
     let flags = fcntl_getfl(&output).expect("tmux output flags");
@@ -2041,20 +2034,13 @@ fn wheel_scrolls_fullscreen_history(server: &TmuxServer, workspace: &Path) {
     );
     // A 12-row client shrinks the pane to 11 rows so the History is taller than its area.
     let command = "stty rows 12 cols 80; exec \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test";
-    let mut client = Command::new("/usr/bin/script");
-    client
-        .env_clear()
-        .env("TERM", "xterm")
-        .env("SHELL", "/bin/sh")
+    let mut client = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, command)
+        .term("xterm")
         .env("PATH", "/usr/bin:/bin")
         .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
         .env("ARANY_TEST_SOCKET", &server.socket)
         .current_dir(workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut client = ChildGuard::new(client.spawn().expect("tmux mouse client"));
+        .spawn();
     let mut input = client.child().stdin.take().expect("tmux client input");
     let mut output = client.child().stdout.take().expect("tmux client output");
     let flags = fcntl_getfl(&output).expect("tmux client output flags");

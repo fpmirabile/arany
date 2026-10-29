@@ -17,7 +17,8 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
         let other = Uuid::now_v7();
         if disconnected || other_saved {
             let account_root =
-                StateRoot::open_existing(&temp.path().join("account-root")).expect("account root");
+                StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
+                    .expect("account root");
             let bytes = account_root
                 .record(RecordKind::ChatgptAccounts)
                 .read()
@@ -49,28 +50,16 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                 .replace(&serde_json::to_vec(&index).expect("account index"))
                 .expect("disconnected account index");
         }
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("fixture-home"))
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", temp.path().join("missing-bus").display()),
-            )
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "dumb")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", SETUP_SHELL, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("saved ChatGPT setup PTY"));
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Fixture(temp.path()),
+            SETUP_SHELL,
+        )
+        .session(&state, &workspace)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", temp.path().join("missing-bus").display()),
+        )
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -189,7 +178,7 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                 .to_owned()
         };
         assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
-        let index = StateRoot::open_existing(&temp.path().join("account-root"))
+        let index = StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
             .expect("account index remains")
             .record(RecordKind::ChatgptAccounts)
             .read()
@@ -278,8 +267,8 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let selected = prepare_selected_chatgpt_account(temp.path());
-    let account_root =
-        StateRoot::open_existing(&temp.path().join("account-root")).expect("account root");
+    let account_root = StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
+        .expect("account root");
     let bytes = account_root
         .record(RecordKind::ChatgptAccounts)
         .read()
@@ -307,28 +296,16 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
         .record(RecordKind::ChatgptAccounts)
         .replace(&serde_json::to_vec(&index).expect("two accounts"))
         .expect("save account index");
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={}", temp.path().join("missing-bus").display()),
-        )
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", SETUP_SHELL, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("saved-account picker PTY"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Fixture(temp.path()),
+        SETUP_SHELL,
+    )
+    .session(&state, &workspace)
+    .env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={}", temp.path().join("missing-bus").display()),
+    )
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -418,29 +395,18 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace");
         let state = temp.path().join("state");
-        let account_root = temp.path().join("account-root");
-        let mut command = Command::new("/usr/bin/script");
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("HOME", temp.path().join("fixture-home"))
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-            .env(
-                "DBUS_SESSION_BUS_ADDRESS",
-                format!("unix:path={}", temp.path().join("missing-bus").display()),
-            )
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "dumb")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", SETUP_SHELL, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("screen-reader setup process"));
+        let account_root = crate::product::fixture_account(temp.path());
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Fixture(temp.path()),
+            SETUP_SHELL,
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", temp.path().join("missing-bus").display()),
+        )
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -590,35 +556,16 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    let account_root = temp.path().join("account-root");
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={}", temp.path().join("missing-bus").display()),
-        )
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            r#"stty rows 8 cols 16; printf 'SHELL_PID:%s\n' "$$"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' "$before"; "$ARANY_TEST_EXE" --no-color --setup --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' "$after"; exit "$exit_code""#,
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("narrow consent PTY"));
+    let account_root = crate::product::fixture_account(temp.path());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Fixture(temp.path()),
+        r#"stty rows 8 cols 16; printf 'SHELL_PID:%s\n' "$$"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' "$before"; "$ARANY_TEST_EXE" --no-color --setup --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' "$after"; exit "$exit_code""#,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+    .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", temp.path().join("missing-bus").display()))
+    .term("xterm")
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -755,36 +702,19 @@ fn unsafe_dbus_address_cannot_launch_a_credential_command() {
     let marker = temp.path().join("credential-command-marker");
     let address = format!("unixexec:path=/usr/bin/touch,argv1={}", marker.display());
     crate::isolation::remember_workspace_trust(
-        &temp.path().join("account-root"),
+        &crate::product::fixture_account(temp.path()),
         &workspace,
         &workspace,
     );
     prepare_selected_chatgpt_account(temp.path());
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("HOME", temp.path().join("fixture-home"))
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .env("DBUS_SESSION_BUS_ADDRESS", address)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = ChildGuard::new(command.spawn().expect("setup PTY process"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Fixture(temp.path()),
+        "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"",
+    )
+    .session(&state, &workspace)
+    .env("DBUS_SESSION_BUS_ADDRESS", address)
+    .piped_stderr()
+    .spawn();
     let _product = ProductGuard::new(product_child_of(child.child().id()), state.clone());
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");

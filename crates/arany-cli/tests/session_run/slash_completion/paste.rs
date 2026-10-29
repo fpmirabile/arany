@@ -215,29 +215,12 @@ esac
                 "/data/authority",
             ]);
         }
-        command
-            .args([
-                "--chdir",
-                "/data/workspace",
-                "--",
-                "/usr/bin/script",
-                "-q",
-                "-e",
-                "-c",
-                &shell,
-                "/dev/null",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("isolated clipboard PTY"));
+        command.args(["--chdir", "/data/workspace", "--"]);
+        let mut child =
+            crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(command), &shell)
+                .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
-        fcntl_setfl(
-            &output,
-            fcntl_getfl(&output).expect("output flags") | OFlags::NONBLOCK,
-        )
-        .expect("nonblocking output");
         let mut transcript = Vec::new();
         let mut answered = crate::session_picker::PtyResponses::default();
         wait_for(
@@ -928,7 +911,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             "/etc/ca-certificates",
             "/etc/ca-certificates",
         ]);
-        command.args(["--", "/usr/bin/script"]);
+        command.arg("--");
         let mode = if linear {
             "--screen-reader"
         } else {
@@ -937,26 +920,18 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         let shell = format!(
             "trap ':' INT; stty rows 24 cols 120; exec \"$ARANY_TEST_EXE\" {mode} --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume {id} --provider custom:local --model model-1"
         );
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", "/arany")
-            .env("HOME", &home)
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-            .env("XDG_RUNTIME_DIR", &wayland)
-            .env("WAYLAND_DISPLAY", "wayland-0")
-            .env("SHELL", "/bin/sh")
-            .env("TERM", if linear { "dumb" } else { "xterm" })
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", &shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().unwrap());
+        let mut child =
+            crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(command), &shell)
+                .session(&state, &workspace)
+                .executable("/arany")
+                .env("HOME", &home)
+                .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+                .env("XDG_RUNTIME_DIR", &wayland)
+                .env("WAYLAND_DISPLAY", "wayland-0")
+                .term(if linear { "dumb" } else { "xterm" })
+                .spawn();
         let mut input = child.child().stdin.take().unwrap();
         let mut output = child.child().stdout.take().unwrap();
-        fcntl_setfl(&output, OFlags::NONBLOCK).unwrap();
         let mut transcript = Vec::new();
         let mut answered = crate::session_picker::PtyResponses::default();
         let wait_text = |output: &mut std::process::ChildStdout,

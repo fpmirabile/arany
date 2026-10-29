@@ -1,11 +1,10 @@
 use super::active_terminal::{ProductGuard, product_child_of};
-use super::loopback::{ChildGuard, wait_product};
+use super::loopback::wait_product;
 use super::*;
 use std::{
     io::{Read, Write},
     net::TcpListener,
     os::unix::fs::PermissionsExt,
-    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -393,25 +392,16 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     } else {
         shell.to_owned()
     };
-    let mut attached = Command::new("/usr/bin/script");
-    attached
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut attached = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, &shell)
+        .session(&state, &workspace)
         .env("ARANY_TEST_SESSION", session_id.to_string())
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", &shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+        .piped_stderr()
+        .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(attached.child().stdout.take().expect("PTY output"));
     assert_eq!(
-        rustix::pipe::fcntl_setpipe_size(&output, 4096).expect("bounded output pipe"),
+        rustix::pipe::fcntl_setpipe_size(&output.0, 4096).expect("bounded output pipe"),
         4096
     );
     let (sender, receiver) = mpsc::channel();

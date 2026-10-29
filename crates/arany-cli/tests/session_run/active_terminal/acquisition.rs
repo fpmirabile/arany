@@ -2,7 +2,7 @@ use super::{
     collect_nonblocking, kill_process, product_child_of, redacted_tail, transcript_field,
     tty_settings,
 };
-use crate::loopback::{ChildGuard, wait_product};
+use crate::loopback::wait_product;
 use crate::session_picker::{pump, tail};
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -16,7 +16,6 @@ use std::{
     io::Write,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -130,22 +129,16 @@ fn startup_case(case: &str, signal: Option<Signal>) {
     arany::StateRoot::admit(&state).unwrap();
     let seeded = state_entries(&state);
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+    .term("xterm")
+    .spawn();
     let mut input = attached
         .child()
         .stdin
@@ -305,22 +298,16 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_STDERR_PTY", &slave_path)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_TEST_STDERR_PTY", &slave_path)
+    .term("xterm")
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
@@ -468,22 +455,16 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --classic --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     };
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("SHELL", "/bin/sh")
-        .env("TERM", if screen_reader { "dumb" } else { "xterm" })
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+    .term(if screen_reader { "dumb" } else { "xterm" })
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");

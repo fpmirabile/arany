@@ -519,19 +519,12 @@ fn isolated_stage(near_expiry: bool) {
     let mut auth = issuer(receiver, true, 1);
     let catalog_started = Arc::new(AtomicBool::new(false));
     let _api = catalog_server(Arc::clone(&catalog_started));
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .args(["-q", "-e", "-c", SHELL, "/dev/null"])
-        .env_clear()
+    let mut child = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, SHELL)
         .env("SHELL", "/usr/bin/sh")
-        .env("TERM", "dumb")
         .env("HOME", "/root")
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/root/missing-bus")
         .env("SSL_CERT_FILE", "/fixture/ca.pem")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("ChatGPT setup PTY"));
+        .spawn();
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();

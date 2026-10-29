@@ -402,20 +402,13 @@ fn run_pty_with_gate(
     completion: Option<&[u8]>,
     mut before_answer: impl FnMut(&[u8]),
 ) -> Vec<u8> {
-    let mut command = Command::new("/usr/bin/script");
-    command
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .env_clear()
+    let mut child = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, shell)
         .env("SHELL", "/usr/bin/sh")
-        .env("TERM", "dumb")
         .env("HOME", "/root")
         .env("XDG_STATE_HOME", "/root/fixture-state")
         .env("SSL_CERT_FILE", "/fixture/ca.pem")
         .env("ANTHROPIC_WORKSPACE_ID", AMBIENT_WORKSPACE)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("offline setup PTY"));
+        .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");

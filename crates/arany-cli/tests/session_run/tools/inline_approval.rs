@@ -80,18 +80,19 @@ fn run_case(case: &'static str) {
     let flags = rustix::fs::fcntl_getfl(&peer_out).unwrap();
     rustix::fs::fcntl_setfl(&peer_out, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
     let mut peer_in = server.child().stdin.take().unwrap();
-    let mut product = Command::new("/usr/bin/script");
-    product.env_clear().env("PATH", "/usr/bin:/bin").env("SHELL", "/bin/sh")
-        .env("TERM", if case.starts_with("linear") { "dumb" } else { "xterm" })
-        .env("LD_PRELOAD", &tls.shim).env("ARANY_TEST_TLS_PORT", port.to_string())
-        .env("SSL_CERT_FILE", &tls.ca).env("OPENAI_API_KEY", "synthetic-native-key")
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_ROWS", if case == "unguarded-page-up" { "50" } else { "24" })
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", "stty rows \"$ARANY_TEST_ROWS\" cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval", "/dev/null"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = crate::loopback::ChildGuard::new(product.spawn().unwrap());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Caller,
+        "stty rows \"$ARANY_TEST_ROWS\" cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval",
+    )
+    .session(&state, &workspace)
+    .env("PATH", "/usr/bin:/bin")
+    .term(if case.starts_with("linear") { "dumb" } else { "xterm" })
+    .env("LD_PRELOAD", &tls.shim)
+    .env("ARANY_TEST_TLS_PORT", port.to_string())
+    .env("SSL_CERT_FILE", &tls.ca)
+    .env("OPENAI_API_KEY", "synthetic-native-key")
+    .env("ARANY_TEST_ROWS", if case == "unguarded-page-up" { "50" } else { "24" })
+    .spawn();
     let input = Arc::new(Mutex::new(child.child().stdin.take().unwrap()));
     let peer_input = input.clone();
     let (typeahead_delivered, delivery) = mpsc::sync_channel(1);

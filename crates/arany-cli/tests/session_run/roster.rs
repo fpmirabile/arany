@@ -470,20 +470,13 @@ fn attached_pty_refusal(
     use std::time::{Duration, Instant};
 
     let shell = "stty rows 24 cols 80; /arany --screen-reader --no-color --profile coding --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" answer";
-    let mut command = super::isolation::isolated_script(temp);
-    command
-        .env_clear()
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("SHELL", "/bin/sh")
-        .envs(account_root.map(|root| ("ARANY_TEST_ACCOUNT_ROOT", root)))
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp)),
+        shell,
+    )
+    .session(state, workspace)
+    .envs(account_root.map(|root| ("ARANY_TEST_ACCOUNT_ROOT", root)))
+    .spawn();
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
     let flags = fcntl_getfl(&output).unwrap();
@@ -895,21 +888,13 @@ mod journey {
         use std::{io::Write, time::Instant};
 
         let shell = "stty rows 24 cols 80; exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --profile coding --provider custom:local --model model-1 --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"";
-        let mut command = crate::isolation::account_isolated_script(temp);
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", state)
-            .env("ARANY_TEST_WORKSPACE", workspace)
-            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "dumb")
-            .current_dir(workspace)
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = super::super::loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp)),
+            shell,
+        )
+        .session(state, workspace)
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .spawn();
         let mut input = child.child().stdin.take().unwrap();
         let mut output = child.child().stdout.take().unwrap();
         let flags = fcntl_getfl(&output).unwrap();

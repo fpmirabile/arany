@@ -26,23 +26,17 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         } else {
             String::new()
         };
-        let mut command =
-            crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state)
-            .env("ARANY_TEST_INCLUDES", includes)
-            .env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm")
-            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-            .current_dir(&workspace)
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
+        let mut child = crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_INCLUDES", includes)
+        .term("xterm")
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .spawn();
         let mut input = child.child().stdin.take().expect("PTY input");
         let mut output = child.child().stdout.take().expect("PTY output");
         let flags = fcntl_getfl(&output).expect("stdout flags");
@@ -315,21 +309,15 @@ fn session_picker_close_case(quick: bool) {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        shell,
+    )
+    .session(&state, &workspace)
+    .term("xterm")
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
     let mut output = child.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
