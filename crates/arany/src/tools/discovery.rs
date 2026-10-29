@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 pub use suggestions::FileSuggestionSource;
 
-pub(super) const TYPED_WAIT: Duration = Duration::from_millis(250);
 pub const SUGGESTION_LIFETIME: Duration = Duration::from_secs(30);
 pub const SUGGESTION_QUERY_TIME: Duration = Duration::from_millis(50);
 const INDEX_NAMES: usize = 2048;
@@ -95,19 +94,18 @@ impl SuggestionIndex {
 }
 
 pub(super) fn enforcement_contract() -> Vec<u8> {
-    let mut bytes = b";typed-discovery-v2-guard-owned-handle-relative-no-follow-controls-restrictive-read-before-payload-nested-repositories-pruned-partial-discovery-pages-no-fallback".to_vec();
+    let mut bytes = b";typed-discovery-v3-in-process-pinned-root-handle-relative-no-follow-controls-restrictive-read-before-payload-nested-repositories-pruned-partial-discovery-pages-shared-read-capacity".to_vec();
     for limit in [
         super::selection::DISCOVERY_CALLS,
         MAX_DEPTH as u64,
         MAX_SCANNED_ENTRIES as u64,
         MAX_LIST_ENTRIES as u64,
         u64::from(SEARCH_SCAN_PERCENT),
+        super::MAX_IN_PROCESS_READS as u64,
     ] {
         bytes.extend_from_slice(&limit.to_le_bytes());
     }
-    for duration in [super::selection::DISCOVERY_TIME, TYPED_WAIT] {
-        bytes.extend_from_slice(&duration.as_nanos().to_le_bytes());
-    }
+    bytes.extend_from_slice(&super::selection::DISCOVERY_TIME.as_nanos().to_le_bytes());
     bytes
 }
 

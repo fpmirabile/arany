@@ -1,4 +1,4 @@
-use super::catalog::{Family, Site};
+use super::catalog::Site;
 use super::config::Config;
 use super::permissions::HiddenPaths;
 use super::toolchains::{RuntimeGrant, validate_selection};
@@ -27,8 +27,6 @@ const PAYLOAD_KILL_WAIT: Duration = Duration::from_secs(1);
 // The launcher measures its runtime from GO, so the grace covers its kill wait, the report write and GO delivery.
 #[cfg(any(target_os = "macos", test))]
 const PAYLOAD_REPORT_GRACE: Duration = PAYLOAD_KILL_WAIT.saturating_add(Duration::from_secs(1));
-#[cfg(any(target_os = "macos", test))]
-pub(super) const DISCOVERY_DONE: &[u8] = b"DISCOVERY_DONE\n";
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn payload_report_deadline(
@@ -818,101 +816,14 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     }
 }
 
-struct DiscoveryWait<'a> {
-    runtime: &'a ToolRuntime,
-    id: uuid::Uuid,
-}
-
-impl Drop for DiscoveryWait<'_> {
-    fn drop(&mut self) {
-        self.runtime.queue_changed(self.id, false);
-    }
-}
-
 async fn admit_operation(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<admission::Permit, ToolError> {
-    if !super::discovery::possible(&intent.call) {
-        return admission::acquire(intent.id, intent.limits.runtime_ms, |queued| {
-            runtime.queue_changed(intent.id, queued)
-        })
-        .await;
-    }
-    let wait = super::discovery::TYPED_WAIT
-        .min(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
-    let _waiting = DiscoveryWait {
-        runtime,
-        id: intent.id,
-    };
-    discovery_capacity(
-        wait,
-        admission::acquire(
-            intent.id,
-            u32::try_from(wait.as_millis()).map_err(|_| ToolError::Limit)?,
-            |queued| runtime.queue_changed(intent.id, queued),
-        ),
-    )
-    .await
-}
-
-async fn discovery_capacity<T>(
-    wait: Duration,
-    operation: impl Future<Output = Result<T, ToolError>>,
-) -> Result<T, ToolError> {
-    let deadline = tokio::time::Instant::now() + wait;
-    let result = tokio::time::timeout_at(deadline, operation).await;
-    if tokio::time::Instant::now() >= deadline {
-        return Err(ToolError::QueueFull);
-    }
-    match result {
-        Err(_) | Ok(Err(ToolError::Limit)) => Err(ToolError::QueueFull),
-        Ok(result) => result,
-    }
-}
-
-async fn discovery_work<T>(
-    intent: &EffectIntent,
-    operation: impl Future<Output = Result<T, ToolError>>,
-) -> Result<T, ToolError> {
-    if !super::discovery::possible(&intent.call) {
-        return operation.await;
-    }
-    let duration = super::selection::DISCOVERY_TIME
-        .min(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
-    tokio::time::timeout(duration, operation)
-        .await
-        .map_err(|_| ToolError::Timeout(String::new()))?
-}
-
-#[cfg(any(target_os = "macos", test))]
-async fn wait_discovery_completion<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    intent: &EffectIntent,
-) -> Result<(), ToolError> {
-    discovery_work(intent, async {
-        let prefix = reader.fill_buf().await.map_err(|_| ToolError::Operation)?;
-        if prefix.first() != DISCOVERY_DONE.first() {
-            return match read_worker_report(reader, intent).await {
-                Err(error) => Err(error),
-                Ok(_) => Err(ToolError::Operation),
-            };
-        }
-        if read_line_capped(reader, DISCOVERY_DONE.len()).await? != DISCOVERY_DONE {
-            return Err(ToolError::Operation);
-        }
-        Ok(())
+    admission::acquire(intent.id, intent.limits.runtime_ms, |queued| {
+        runtime.queue_changed(intent.id, queued)
     })
     .await
-}
-
-#[cfg(any(target_os = "macos", test))]
-async fn read_discovery_report<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    intent: &EffectIntent,
-) -> Result<ToolObservation, ToolError> {
-    wait_discovery_completion(reader, intent).await?;
-    read_worker_report(reader, intent).await
 }
 
 impl ToolRuntime {
@@ -971,8 +882,8 @@ pub(super) async fn execute(
     #[cfg(target_os = "linux")]
     let result = result
         .map_err(|error| linux::supervisor::namespace_failure(error, &runtime.guard_executable));
-    let result = if known_read_stop(&intent.call) {
-        read_stop_result(intent, dispatched, stop.is_cancelled(), result)
+    let result = if intent.call.is_web() {
+        web_stop_result(intent, dispatched, stop.is_cancelled(), result)
     } else {
         dispatch_result(intent, dispatched, result)
     };
@@ -986,48 +897,26 @@ pub(super) async fn execute(
     ))
 }
 
-// Discovery and web calls publish nothing, so confirmed teardown after a stop is a known outcome.
-fn known_read_stop(call: &ToolCall) -> bool {
-    super::discovery::possible(call) || call.is_web()
-}
-
-fn read_stop_result(
+// Web calls publish nothing, so confirmed teardown after a stop is a known outcome.
+fn web_stop_result(
     intent: &EffectIntent,
     dispatched: bool,
     cancelled: bool,
     result: Result<ToolObservation, ToolError>,
 ) -> Result<ToolObservation, ToolError> {
-    let discovery = super::discovery::possible(&intent.call);
-    let cause = match &result {
-        Err(ToolError::Timeout(_)) if dispatched && discovery => {
-            Some(crate::tools::LimitCause::Timeout)
-        }
-        Err(ToolError::Limit) if dispatched && discovery => {
-            Some(crate::tools::LimitCause::Resource)
-        }
-        Err(ToolError::Operation) if cancelled => None,
+    match &result {
+        Err(ToolError::Operation) if cancelled => {}
         Err(ToolError::GuardBootstrap(BootstrapFailure {
             check: Some(GuardCheck::Cancelled),
             ..
-        })) if cancelled => None,
+        })) if cancelled => {}
         _ => return dispatch_result(intent, dispatched, result),
-    };
+    }
     Ok(ToolObservation {
         spill: None,
         intent: intent.clone(),
-        disposition: if cause.is_some() {
-            ToolDisposition::Limit
-        } else {
-            ToolDisposition::Cancelled
-        },
-        output: if cause.is_some() {
-            "Discovery stopped at its resource or time limit"
-        } else if discovery {
-            "Discovery cancelled"
-        } else {
-            "Web request cancelled"
-        }
-        .into(),
+        disposition: ToolDisposition::Cancelled,
+        output: "Web request cancelled".into(),
         attestation: dispatched.then(|| {
             Attestation::Guard(GuardReceipt {
                 contract_version: 1,
@@ -1037,7 +926,7 @@ fn read_stop_result(
             })
         }),
         enforcement_cause: None,
-        limit_cause: cause,
+        limit_cause: None,
         approval_cause: None,
         guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
@@ -1593,8 +1482,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         return Err(ToolError::Configuration);
     }
     if !task.intent.valid()
-        || !(task.intent.call.facts().site == Site::Guard
-            || super::discovery::possible(&task.intent.call))
+        || task.intent.call.facts().site != Site::Guard
         || task.intent.policy_digest != task.config.digest()
         || !(super::command_tools::prefix::allowed(&task.config, &task.intent)
             || task.handover.is_some() && task.config.write)
@@ -1722,8 +1610,7 @@ pub(super) fn helper_main() -> ExitCode {
         )?;
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
-        let family = task.intent.call.facts().family;
-        if matches!(family, Family::File | Family::Git)
+        if task.intent.call.is_git()
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
@@ -2106,43 +1993,12 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn discovery_capacity_expiry_is_busy_and_discards_the_waiter() {
-        let wait = super::super::discovery::TYPED_WAIT;
-        let start = tokio::time::Instant::now();
-        let result: Result<(), ToolError> = discovery_capacity(wait, std::future::pending()).await;
-        assert!(matches!(result, Err(ToolError::QueueFull)));
-        assert_eq!(tokio::time::Instant::now() - start, wait);
-        for error in [ToolError::Limit, ToolError::QueueFull] {
-            let result: Result<(), ToolError> =
-                discovery_capacity(Duration::ZERO, async { Err(error) }).await;
-            assert!(matches!(result, Err(ToolError::QueueFull)));
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discovery_work_timeout_keeps_the_shorter_action_deadline() {
-        for duration in [
-            Duration::from_millis(25),
-            super::super::selection::DISCOVERY_TIME,
-        ] {
-            let mut intent = intent(ToolCall::List { path: ".".into() });
-            intent.limits.runtime_ms = u32::try_from(duration.as_millis()).unwrap();
-            let start = tokio::time::Instant::now();
-            let result: Result<(), ToolError> =
-                discovery_work(&intent, std::future::pending()).await;
-            assert!(matches!(result, Err(ToolError::Timeout(_))));
-            assert_eq!(tokio::time::Instant::now() - start, duration);
-        }
-    }
-
     #[test]
     fn cancelled_web_teardown_is_cancelled_and_other_dispatched_errors_stay_unknown() {
         let intent = intent(ToolCall::WebFetch {
             url: "https://example.com/".into(),
         });
-        assert!(known_read_stop(&intent.call));
-        let observation = read_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
+        let observation = web_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Cancelled);
         assert_eq!(observation.output, "Web request cancelled");
         assert!(matches!(
@@ -2154,81 +2010,8 @@ mod tests {
             (true, ToolError::Limit),
             (true, ToolError::Timeout(String::new())),
         ] {
-            assert!(read_stop_result(&intent, true, cancelled, Err(error)).is_err());
+            assert!(web_stop_result(&intent, true, cancelled, Err(error)).is_err());
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discovery_completion_keeps_cleanup_outside_the_selection_window() {
-        use tokio::io::AsyncWriteExt;
-        let mut intent = intent(ToolCall::List { path: ".".into() });
-        intent.policy_digest = [1; 32];
-        intent.enforcement_digest = [2; 32];
-        let observation = ToolObservation {
-            spill: None,
-            intent: intent.clone(),
-            disposition: ToolDisposition::Succeeded,
-            output: "{\"entries\":[],\"truncated\":false}".into(),
-            attestation: Some(Attestation::Guard(GuardReceipt {
-                contract_version: 1,
-                intent_digest: intent.digest(),
-                enforcement_digest: intent.enforcement_digest,
-                limits: intent.limits.clone(),
-            })),
-            enforcement_cause: None,
-            limit_cause: None,
-            approval_cause: None,
-            guard_stage: None,
-            cache_update: CacheUpdate::NotApplicable,
-        };
-        assert!(observation.attested_for(&intent));
-        let mut report = serde_json::to_vec(&observation).unwrap();
-        report.push(b'\n');
-        let (mut peer, stream) = tokio::io::duplex(report.len());
-        let mut reader = tokio::io::BufReader::new(stream);
-        let sending = async move {
-            peer.write_all(DISCOVERY_DONE).await.unwrap();
-            tokio::time::sleep(super::super::selection::DISCOVERY_TIME + Duration::from_secs(1))
-                .await;
-            peer.write_all(&report).await.unwrap();
-        };
-        let receiving = async {
-            let reported =
-                tokio::time::timeout(TEARDOWN_WAIT, read_discovery_report(&mut reader, &intent))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(reported, observation);
-        };
-        tokio::join!(sending, receiving);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discovery_completion_bounds_work_and_preserves_bootstrap_failures() {
-        let mut intent = intent(ToolCall::List { path: ".".into() });
-        let duration = Duration::from_millis(25);
-        intent.limits.runtime_ms = u32::try_from(duration.as_millis()).unwrap();
-        let (_peer, stream) = tokio::io::duplex(DISCOVERY_DONE.len());
-        let mut reader = tokio::io::BufReader::new(stream);
-        let started = tokio::time::Instant::now();
-        assert!(matches!(
-            wait_discovery_completion(&mut reader, &intent).await,
-            Err(ToolError::Timeout(_))
-        ));
-        assert_eq!(started.elapsed(), duration);
-        let mut malformed = &b"DISCOVERY_BAD\n"[..];
-        assert!(matches!(
-            wait_discovery_completion(&mut malformed, &intent).await,
-            Err(ToolError::Operation)
-        ));
-        let mut failure =
-            &b"{\"stage\":\"storage_cleanup\",\"check\":\"mount_still_present\"}\n"[..];
-        assert!(matches!(
-            wait_discovery_completion(&mut failure, &intent).await,
-            Err(ToolError::GuardBootstrap(failure))
-                if failure.failure_stage() == FailureStage::StorageCleanup
-                    && failure.check() == Some(GuardCheck::MountStillPresent)
-        ));
     }
 
     #[test]
@@ -3562,7 +3345,7 @@ mod tests {
             Err(ToolError::Configuration)
         ));
         for (call, allowed) in [
-            (ToolCall::List { path: "src".into() }, true),
+            (ToolCall::List { path: "src".into() }, false),
             (
                 ToolCall::Write {
                     path: "src/selected.txt".into(),

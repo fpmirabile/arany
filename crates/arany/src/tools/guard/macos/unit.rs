@@ -1260,12 +1260,6 @@ pub(super) async fn run_unit(
                             .map(|observation| {
                                 (observation, super::super::CacheCandidate::Received)
                             })
-                    } else if crate::tools::discovery::possible(&intent.call) {
-                        super::super::read_discovery_report(&mut stream, intent)
-                            .await
-                            .map(|observation| {
-                                (observation, super::super::CacheCandidate::Received)
-                            })
                     } else {
                         super::super::read_worker_report(&mut stream, intent)
                             .await

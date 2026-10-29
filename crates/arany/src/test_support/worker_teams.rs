@@ -813,7 +813,7 @@ fn assert_live_editor_evidence(
                     .as_ref()
                     .unwrap()
                     .attestation,
-                Some(Attestation::Guard(_))
+                Some(Attestation::InProcess { .. })
             ));
         }
         assert!(

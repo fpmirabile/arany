@@ -281,7 +281,7 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
         );
         assert!(matches!(
             observation.attestation,
-            Some(Attestation::Guard(_))
+            Some(Attestation::InProcess { .. })
         ));
         assert!(!observation.stops_run());
         assert!(observation.valid());

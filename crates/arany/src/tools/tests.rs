@@ -264,49 +264,7 @@ pub(super) async fn inspect_read(
     runtime: &super::ToolRuntime,
     intent: EffectIntent,
 ) -> ToolObservation {
-    if !runtime.guard_available
-        || !runtime.config.allows(&intent.call)
-        || !super::discovery::possible(&intent.call)
-    {
-        return runtime.execute(intent, super::Cancellation::new()).await;
-    }
-    let root = match runtime.pinned_root(&intent) {
-        Ok(root) => root,
-        Err(error) => return super::unstarted_observation(intent, error),
-    };
-    if super::discovery::exact_search(&root, &intent.call).unwrap_or(true) {
-        return runtime.execute(intent, super::Cancellation::new()).await;
-    }
-    let hidden = runtime.hidden_paths(&intent.call);
-    let result = super::discovery::inspect(super::discovery::Request {
-        root: &root,
-        call: &intent.call,
-        config: &runtime.config,
-        hidden: &|path| hidden.covers(path),
-        result_bytes: intent.limits.result_bytes as usize,
-        deadline: std::time::Instant::now() + super::selection::DISCOVERY_TIME,
-        output: super::discovery::Output::Tool,
-        cancellation: None,
-    });
-    let (disposition, output, enforcement_cause, limit_cause) =
-        super::dispatch::outcome(&intent, result);
-    ToolObservation {
-        spill: None,
-        attestation: Some(Attestation::Guard(super::GuardReceipt {
-            contract_version: 1,
-            intent_digest: intent.digest(),
-            enforcement_digest: intent.enforcement_digest,
-            limits: intent.limits.clone(),
-        })),
-        intent,
-        disposition,
-        output,
-        enforcement_cause,
-        limit_cause,
-        approval_cause: None,
-        guard_stage: None,
-        cache_update: super::CacheUpdate::NotApplicable,
-    }
+    runtime.execute(intent, super::Cancellation::new()).await
 }
 
 pub(super) async fn run_in_process(

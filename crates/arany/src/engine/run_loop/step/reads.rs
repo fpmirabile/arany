@@ -551,7 +551,7 @@ async fn execute(
     deadline: ReadDeadline,
 ) -> Answer {
     let cancellation = RunCancellation::new();
-    let execution = runtime.execute_concurrent_read(intent, cancellation.clone());
+    let execution = runtime.execute(intent, cancellation.clone());
     tokio::pin!(execution);
     let mut timed_out = false;
     let mut observation = tokio::select! {

@@ -1297,7 +1297,6 @@ impl Attestation {
                 intent.target == EffectTarget::Workspace
                     && intent.call.facts().site == Site::InProcess
                     && (!intent.call.facts().mutates || super::fs::in_process_mutation(intent))
-                    && !matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
                     && receipt.as_ref().is_none_or(|receipt| {
                         intent.call.facts().mutates && receipt.intent_digest == intent.digest()
                     })
@@ -1308,7 +1307,6 @@ impl Attestation {
             Self::Guard(receipt) => {
                 intent.target == EffectTarget::Workspace
                     && (intent.call.facts().site == Site::Guard
-                        || super::discovery::possible(&intent.call)
                         || intent.call.facts().family == super::catalog::Family::File
                             && intent.call.facts().mutates
                             && !super::fs::in_process_mutation(intent))
@@ -1740,7 +1738,6 @@ impl ToolObservation {
                         && self.attestation.is_none()
                         && !super::fs::in_process_mutation(&self.intent)
                         && (self.intent.call.facts().site == super::catalog::Site::Guard
-                            || super::discovery::possible(&self.intent.call)
                             || self.intent.call.facts().family == super::catalog::Family::File
                                 && self.intent.call.facts().mutates)
                 }

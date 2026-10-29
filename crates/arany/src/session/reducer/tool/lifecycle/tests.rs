@@ -1067,7 +1067,7 @@ fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
 }
 
 #[test]
-fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts() {
+fn discovery_replays_in_process_observations_and_rejects_guard_receipts() {
     let cases = [
         (
             ToolCall::Glob {
@@ -1089,8 +1089,21 @@ fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
         apply(&mut view, tool_started(run, agent, &intent)).expect("discovery starts");
-        let mut guarded = observation_for(intent.clone(), b"");
-        guarded.output = output.into();
+        let mut in_process = observation_for(intent.clone(), b"");
+        in_process.output = output.into();
+        in_process.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
+            policy_digest: intent.policy_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+        });
+        let finished = |observation| Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        let mut guarded = in_process.clone();
         guarded.attestation = Some(crate::tools::Attestation::Guard(
             crate::tools::GuardReceipt {
                 contract_version: 1,
@@ -1099,29 +1112,18 @@ fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts
                 limits: intent.limits.clone(),
             },
         ));
-        let finished = |observation| Event::ToolFinished {
-            checkpoint: None,
-            run_id: run,
-            agent_run_id: agent,
-            observation,
-        };
-        let mut in_process = guarded.clone();
-        in_process.attestation = Some(crate::tools::Attestation::InProcess {
-            receipt: None,
-            policy_digest: intent.policy_digest,
-            workspace_device: intent.workspace_device,
-            workspace_inode: intent.workspace_inode,
-        });
-        assert!(rejected(&view, finished(in_process)));
-        let mut invalid = guarded.clone();
-        if let Some(crate::tools::Attestation::Guard(receipt)) = &mut invalid.attestation {
-            receipt.intent_digest = [0; 32];
+        assert!(rejected(&view, finished(guarded)));
+        let mut invalid = in_process.clone();
+        if let Some(crate::tools::Attestation::InProcess { policy_digest, .. }) =
+            &mut invalid.attestation
+        {
+            *policy_digest = [0; 32];
         }
         assert!(rejected(&view, finished(invalid)));
-        apply(&mut view, finished(guarded.clone())).expect("Guard attestation");
+        apply(&mut view, finished(in_process.clone())).expect("in-process attestation");
         assert_eq!(
             view.runs[0].tools.last().unwrap().observation.as_ref(),
-            Some(&guarded)
+            Some(&in_process)
         );
     }
 }

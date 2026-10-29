@@ -1669,27 +1669,10 @@ impl ToolRuntime {
     }
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call) {
-            let exact = self
-                .reads
-                .as_ref()
-                .is_some_and(|reads| discovery::exact_search(&reads.root, call).unwrap_or(false));
-            if !exact {
-                return guard::RESERVATION_OVERHEAD;
-            }
-        }
         match call.facts().site {
             Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
         }
-    }
-
-    pub(crate) async fn execute_concurrent_read(
-        &self,
-        intent: EffectIntent,
-        cancellation: Cancellation,
-    ) -> ToolObservation {
-        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::InProcess)).await
     }
 
     pub(crate) async fn execute(
@@ -1697,14 +1680,13 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::Automatic)).await
+        Box::pin(self.execute_inner(intent, cancellation)).await
     }
 
     async fn execute_inner(
         &self,
         intent: EffectIntent,
         cancellation: Cancellation,
-        reads: ReadDispatch,
     ) -> ToolObservation {
         if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
             && !self.guard_available
@@ -1747,10 +1729,7 @@ impl ToolRuntime {
             Site::InProcess if intent.call.facts().mutates => {
                 self.run_file(intent, cancellation).await
             }
-            Site::InProcess => match reads {
-                ReadDispatch::Automatic => self.run_read(intent, cancellation).await,
-                ReadDispatch::InProcess => self.run_in_process(intent, cancellation).await,
-            },
+            Site::InProcess => self.run_in_process(intent, cancellation).await,
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
@@ -1990,23 +1969,6 @@ impl ToolRuntime {
         Ok(root)
     }
 
-    async fn run_read(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
-        if !discovery::possible(&intent.call) {
-            return self.run_in_process(intent, cancellation).await;
-        }
-        let root = match self.pinned_root(&intent) {
-            Ok(root) => root,
-            Err(error) => return unstarted_observation(intent, error),
-        };
-        match discovery::exact_search(&root, &intent.call) {
-            Ok(false) => match guard::execute(self, &intent, cancellation).await {
-                Ok(observation) => observation,
-                Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
-            },
-            Ok(true) | Err(_) => self.run_in_process(intent, cancellation).await,
-        }
-    }
-
     async fn run_in_process(
         &self,
         intent: EffectIntent,
@@ -2038,7 +2000,7 @@ impl ToolRuntime {
                 }
             },
         }
-        let (runtime, read_intent) = (self.clone(), intent.clone());
+        let (runtime, read_intent, walk) = (self.clone(), intent.clone(), cancellation.clone());
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let root = runtime.pinned_root(&read_intent)?;
@@ -2088,14 +2050,29 @@ impl ToolRuntime {
                 }));
             }
             let hidden = runtime.hidden_paths(&read_intent.call);
+            let deadline = std::time::Instant::now()
+                + Duration::from_millis(u64::from(read_intent.limits.runtime_ms));
+            if discovery::possible(&read_intent.call)
+                && matches!(discovery::exact_search(&root, &read_intent.call), Ok(false))
+            {
+                return Ok(discovery::inspect(discovery::Request {
+                    root: &root,
+                    call: &read_intent.call,
+                    config: &runtime.config,
+                    hidden: &|path| hidden.covers(path),
+                    result_bytes: read_intent.limits.result_bytes as usize,
+                    deadline,
+                    output: discovery::Output::Tool,
+                    cancellation: Some(&walk),
+                }));
+            }
             Ok(fs::inspect(
                 &root,
                 &read_intent.call,
                 &runtime.config,
                 &|path| hidden.covers(path),
                 read_intent.limits.result_bytes as usize,
-                std::time::Instant::now()
-                    + Duration::from_millis(u64::from(read_intent.limits.runtime_ms)),
+                deadline,
             ))
         });
         let result = tokio::select! {
@@ -2154,11 +2131,6 @@ impl ToolRuntime {
         }
         observation
     }
-}
-
-enum ReadDispatch {
-    Automatic,
-    InProcess,
 }
 
 #[derive(Clone)]
@@ -2273,13 +2245,6 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     }
     if let ToolError::DiskSpace(message) = &error {
         return unattested_limit(intent, LimitCause::Resource, message);
-    }
-    if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
-        return unattested_limit(
-            intent,
-            LimitCause::ReadCapacity,
-            "Discovery capacity is busy; nothing was read",
-        );
     }
     let resource_limit = matches!(&error, ToolError::Limit)
         && matches!(&intent.call, ToolCall::Command { .. })

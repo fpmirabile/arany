@@ -726,7 +726,7 @@ fn unit_command(
         );
     command.arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms));
     launch.append(&mut command, &executable_path)?;
-    let native = intent.call.is_git() || super::super::discovery::possible(&intent.call);
+    let native = intent.call.is_git();
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
@@ -1170,7 +1170,7 @@ pub(super) async fn execute_inner(
             }
             Ok((observation, candidate))
         });
-        super::discovery_work(intent, capture).await
+        capture.await
     });
     let result = tokio::select! {
         biased;
@@ -1186,8 +1186,7 @@ pub(super) async fn execute_inner(
         result,
         (
             &mut cache,
-            super::super::discovery::possible(&intent.call)
-                || (intent.call.is_web() && cancellation.is_cancelled()),
+            intent.call.is_web() && cancellation.is_cancelled(),
         ),
     ))
     .await;
@@ -2088,18 +2087,6 @@ mod tests {
                 None,
             ),
             (
-                serde_json::json!({"operation":"list","path":"."}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"search","path":".","query":"needle"}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"glob","pattern":"**/*.rs"}),
-                Some("--ro-bind"),
-            ),
-            (
                 serde_json::json!({"operation":"git_status","path":"."}),
                 Some("--ro-bind"),
             ),
@@ -2221,7 +2208,7 @@ mod tests {
         unit_command(
             &runtime,
             &intent,
-            "arany-discovery-profile",
+            "arany-native-profile",
             "/usr/bin:/bin",
             UnitFilesystem {
                 command_deadline: super::super::selection_phase::command_deadline(&intent),

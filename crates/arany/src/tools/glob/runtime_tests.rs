@@ -36,7 +36,7 @@ pub(super) fn glob_paths(observation: &ToolObservation) -> (Vec<String>, bool) {
     );
     assert!(matches!(
         observation.attestation,
-        Some(Attestation::Guard(_))
+        Some(Attestation::InProcess { .. })
     ));
     let value: Value = serde_json::from_str(&observation.output).unwrap();
     let paths = value["entries"]

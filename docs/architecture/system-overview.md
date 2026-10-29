@@ -166,12 +166,12 @@ The [researcher contract](../specs/execution.md#researcher-children) owns their
 catalog, budgets, ordering and failure rules; children never inherit a broader
 grant than their parent.
 
-Exact Read, exact-file Search and Skill text use the admitted directory capability
-in process.
+Exact Read, typed discovery (List, Glob, Search) and Skill text use the admitted
+directory capability in process.
 Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
 execution site. Typed Workspace mutations and changeset publication use the same admitted handle
 in process, with digest preconditions and journaled File receipts. Typed Git reads,
-Discovery, Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-file-operations) owns
+Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-file-operations) owns
 path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforcement-and-compatibility)
 and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
 native launch, supervision and recovery. Short-lived same-binary Guard and
@@ -357,7 +357,7 @@ The presentation layer owns the committed budget-refusal lookup and Run feedback
 
 History indexes row counts/source anchors over the already loaded Session view without retaining another full transcript, and materializes only visible message rows. Terminal-local feedback interleaves with those rows but has no canonical or Provider-context authority. The Composer owns the bounded Provider/account-scoped catalog and draft; the CLI's picker owns its cancellable refresh and staged default publication.
 
-The private attached model owner persists token-free `model-preferences.json` under the checked OS-user account root with the account replacement lock and atomic file transport: at most eight exact Provider/account UUID sources, each with its selected model and effort and up to 4,096 catalog IDs, within 1 MiB with oldest-source eviction. It holds no compatibility evidence, grant or credential. New bare Sessions reuse matching preferences and seed the Composer cache; explicit flags and resumed defaults win. A first upgrade may copy only a matching tuple from the latest admitted-Workspace Session, without its history. Selection and catalog writes stay separate from account, consent and response admission.
+The private attached model owner persists token-free `model-preferences.json` under the checked OS-user account root with the account replacement lock and atomic file transport: at most eight exact Provider/account UUID sources, each with its selected model and effort, last catalog read time and up to 4,096 catalog IDs with their context windows, within 1 MiB with oldest-source eviction. It holds no compatibility evidence, grant or credential. New bare Sessions reuse matching preferences and seed the Composer cache; explicit flags and resumed defaults win. A first upgrade may copy only a matching tuple from the latest admitted-Workspace Session, without its history. Selection and catalog writes stay separate from account, consent and response admission.
 
 The attached command owner persists token-free `ui-preferences.json` at the admitted StateRoot through the private replacement lock and atomic file transport. Attached startup reads it read-only before terminal acquisition without creating State. Engine snapshots only the selected execution values into a Goal before Workspace disclosure; they never widen Tool grants, and the record never enters Events, account authority or Provider context. [Terminal settings](../specs/terminal.md) own its fields, defaults and invalid-record behavior. The Composer owns tab and focus state, and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner.
 

@@ -175,6 +175,39 @@ async fn typed_discovery_prunes_ignored_payloads_and_preserves_explicit_access()
     }
 }
 
+#[tokio::test]
+async fn parallel_discovery_in_one_step_shares_read_capacity_and_never_takes_guard_capacity() {
+    let (_temp, runtime) = ignored_discovery_fixture(json!(["."]));
+    let calls = [
+        ToolCall::List {
+            path: "notes".into(),
+        },
+        glob("**", "notes", 100),
+        search("notes", "hit"),
+    ];
+    let mut step = tokio::task::JoinSet::new();
+    for call in calls.iter().cycle().take(super::MAX_IN_PROCESS_READS) {
+        assert!(runtime.reservation_overhead(call).is_zero(), "{call:?}");
+        let (runtime, call) = (runtime.clone(), call.clone());
+        step.spawn(async move { run_in_process(&runtime, call).await });
+    }
+    // The fixture has no Guard launcher, so any Guard dispatch would fail instead of succeeding.
+    while let Some(observation) = step.join_next().await {
+        let observation = observation.unwrap();
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Succeeded,
+            "{}",
+            observation.output
+        );
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::InProcess { .. })
+        ));
+        assert!(observation.valid());
+    }
+}
+
 fn invalid_discovery_control(case: &str) -> (tempfile::TempDir, super::ToolRuntime) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();

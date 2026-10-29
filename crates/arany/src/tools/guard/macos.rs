@@ -347,7 +347,6 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
     bytes.extend_from_slice(b";user-programs-v1:selected-subtrees-and-homebrew-prefixes-and-manager-roots-read-map-exec-without-system-catalogue-checks;pinned-roots-mount-topology-before-seatbelt-and-ready-go");
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
-    bytes.extend_from_slice(super::DISCOVERY_DONE);
     bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
     bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export-reject-option-script-position;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
     bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
@@ -1350,7 +1349,6 @@ async fn worker_receipt(
     mut stdin: tokio::process::ChildStdin,
     stdout: &mut BufReader<tokio::process::ChildStdout>,
     intent: &EffectIntent,
-    control: &mut tokio::net::unix::OwnedWriteHalf,
     git_stage: Option<super::GitStage>,
 ) -> Result<WorkerOutput, ToolError> {
     let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
@@ -1376,12 +1374,6 @@ async fn worker_receipt(
     } else {
         read_observation(stdout, intent).await?
     };
-    if super::super::discovery::possible(&intent.call) {
-        control
-            .write_all(super::DISCOVERY_DONE)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-    }
     capture.complete();
     Ok(WorkerOutput {
         observation,
@@ -1477,7 +1469,7 @@ async fn execute_worker(
             );
             tokio::time::timeout_at(
                 payload_deadline,
-                worker_receipt(stdin, &mut stdout, intent, control, git_stage),
+                worker_receipt(stdin, &mut stdout, intent, git_stage),
             )
             .await
             .map_err(|_| ToolError::Limit)?
