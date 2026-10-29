@@ -340,10 +340,7 @@ impl StateRoot {
                 if target.is_none() {
                     let archive = private_subdirectory(&self.dir, ARCHIVE_DIR)?;
                     sync(&self.dir)?;
-                    let folder = records_archive_name(SystemTime::now());
-                    if identity_of(&archive, &folder)?.is_some() {
-                        return Err(StoreError::HistoryChanged);
-                    }
+                    let folder = unused_records_archive_name(&archive)?;
                     let dir = private_subdirectory(&archive, &folder)?;
                     sync(&archive)?;
                     target = Some((dir, folder));
@@ -369,6 +366,22 @@ impl StateRoot {
 
 fn records_archive_name(now: SystemTime) -> String {
     archive_name(now).replacen("history-", "records-", 1)
+}
+
+// An interrupted attempt within the same millisecond leaves its folder; the retry takes the next suffix.
+fn unused_records_archive_name(archive: &Dir) -> Result<String, StoreError> {
+    const MAX_SAME_TIME_ARCHIVES: usize = 16;
+    let base = records_archive_name(SystemTime::now());
+    for attempt in 0..MAX_SAME_TIME_ARCHIVES {
+        let folder = match attempt {
+            0 => base.clone(),
+            _ => format!("{base}-{attempt}"),
+        };
+        if identity_of(archive, &folder)?.is_none() {
+            return Ok(folder);
+        }
+    }
+    Err(StoreError::HistoryChanged)
 }
 
 impl StateRoot {

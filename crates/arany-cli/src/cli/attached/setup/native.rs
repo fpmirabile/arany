@@ -482,9 +482,9 @@ async fn load_catalog(
 }
 
 async fn read_api_key(terminal: &mut AttachedTerminal) -> Result<Option<String>, SetupError> {
-    terminal.begin_secret_input()?;
+    terminal.begin_hidden_input()?;
     let result = read_api_key_hidden(terminal).await;
-    terminal.end_secret_input()?;
+    terminal.end_hidden_input()?;
     result
 }
 
@@ -545,7 +545,7 @@ async fn read_api_key_hidden(
             }
             TerminalInput::Suspend => {
                 terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
-                terminal.begin_secret_input()?;
+                terminal.begin_hidden_input()?;
             }
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 terminal.discard_draft_input();

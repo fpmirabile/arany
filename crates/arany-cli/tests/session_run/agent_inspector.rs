@@ -21,7 +21,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     assert!(text.contains("No Runs yet"));
     assert!(text.contains("History: 0 agents in 0 recent Runs; 0 older Runs"));
     assert!(text.contains("No AgentRuns yet"));
-    assert!(text.contains("Next Run: auto · up to 3 children"));
+    assert!(text.contains("Next Run: single"));
     assert!(text.contains("Agent inspection closed"));
     assert!(!text.contains("\x1b[?1000h"));
 }
@@ -266,6 +266,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
         .find_map(|id| id.parse::<SessionId>().ok())
         .expect("Session ID");
 
+    opt_into_delegation(&state, &workspace, session_id);
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
@@ -582,6 +583,26 @@ fn replayed(state: &std::path::Path, id: SessionId) -> (Vec<arany::EventEnvelope
     (events, view)
 }
 
+// New conversations default to single; the resumed Run opts into delegation like `/agents auto`.
+fn opt_into_delegation(state: &std::path::Path, workspace: &std::path::Path, id: SessionId) {
+    let (_, view) = replayed(state, id);
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("defaults runtime")
+        .block_on(arany::set_session_defaults(
+            StateRoot::open_existing(state).expect("fixture State"),
+            workspace.to_path_buf(),
+            id,
+            arany::SessionDefaults {
+                policy: arany::CollaborationPolicy::Auto {
+                    max_active_children: 3,
+                },
+                ..view.defaults
+            },
+        ))
+        .expect("delegation opt-in");
+}
+
 #[test]
 fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -640,6 +661,8 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
             "custom:local",
             "--model",
             "model-1",
+            "--collaboration",
+            "auto",
             "team task",
         ])
         .stdout(Stdio::piped())
@@ -1541,6 +1564,7 @@ fn live_pty(
     id: SessionId,
     classic: bool,
 ) -> (ChildGuard, LivePty) {
+    opt_into_delegation(state, workspace, id);
     let mode = if classic { "--classic " } else { "" };
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""

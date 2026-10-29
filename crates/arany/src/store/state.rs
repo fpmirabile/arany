@@ -262,6 +262,18 @@ pub struct StateRoot {
     ancestors: Vec<(u64, u64)>,
 }
 
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+fn passwd_is_mounted() -> bool {
+    const MAX_MOUNTINFO_BYTES: u64 = 1024 * 1024;
+    let mut mounts = String::new();
+    std::fs::File::open("/proc/self/mountinfo")
+        .and_then(|file| file.take(MAX_MOUNTINFO_BYTES).read_to_string(&mut mounts))
+        .is_ok()
+        && mounts
+            .lines()
+            .any(|mount| mount.split(' ').nth(4) == Some("/etc/passwd"))
+}
+
 impl StateRoot {
     pub(crate) fn try_clone(&self) -> Result<Self, StoreError> {
         Ok(Self {
@@ -318,11 +330,9 @@ impl StateRoot {
         if let Some(path) = Self::debug_account_root() {
             return Some(path);
         }
-        // Linux passwd-home fixtures run under Bubblewrap on a tmpfs root, where the passwd home is private.
+        // Linux passwd-home fixtures mount a private passwd file whose home is the fixture's.
         #[cfg(target_os = "linux")]
-        if nix::sys::statfs::statfs("/")
-            .is_ok_and(|root| root.filesystem_type() == nix::sys::statfs::TMPFS_MAGIC)
-        {
+        if passwd_is_mounted() {
             return None;
         }
         // Optimized builds refuse the fixture variable, so a spawned binary isolates itself.

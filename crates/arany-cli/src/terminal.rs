@@ -2712,7 +2712,7 @@ impl AttachedTerminal {
 
     pub fn suspend_and_resume(&mut self, input_capacity: usize) -> Result<(), TerminalError> {
         let screen_reader = self.requested_screen_reader;
-        let secret_input = self.secret_echo.is_some();
+        let hidden_input = self.secret_echo.is_some();
         let mut panel = self.agent_panel.take();
         let help_selected = self.panels.help_selected.take();
         let usage_panel = self.panels.usage_panel.take();
@@ -2724,8 +2724,8 @@ impl AttachedTerminal {
         kill_process(getpid(), Signal::STOP).map_err(io::Error::from)?;
         let mut resumed = Self::acquire_with_mode(screen_reader, self.mode, self.pointer)?;
         resumed.color_enabled = self.color_enabled;
-        if secret_input {
-            resumed.begin_secret_input()?;
+        if hidden_input {
+            resumed.begin_hidden_input()?;
         }
         resumed.agent_panel = panel;
         resumed.panels.help_selected = help_selected;
@@ -3472,7 +3472,7 @@ impl AttachedTerminal {
         Ok(has_more)
     }
 
-    pub fn begin_secret_input(&mut self) -> Result<(), TerminalError> {
+    pub fn begin_hidden_input(&mut self) -> Result<(), TerminalError> {
         if self.linear.is_some() {
             {
                 if self.secret_echo.is_none() {
@@ -3483,7 +3483,7 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    pub fn end_secret_input(&mut self) -> Result<(), TerminalError> {
+    pub fn end_hidden_input(&mut self) -> Result<(), TerminalError> {
         if let Some(mut echo) = self.secret_echo.take() {
             writeln!(io::stderr())?;
             echo.release()?;

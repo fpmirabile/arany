@@ -1341,14 +1341,9 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
                 assert!(!record.exists(), "consented reset must delete the record");
                 input.write_all(b"\x03").unwrap();
             }
+            // The record is archived before any setup step and named in the startup notice
+            // (terminal.md, attached startup), which the chat shows after the trust choice.
             Case::OtherVersion => {
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "Saved records from an incompatible version",
-                );
                 wait(
                     &mut output,
                     &mut input,
@@ -1359,6 +1354,22 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
                 assert!(
                     !record.exists(),
                     "an other-version record must leave the state root"
+                );
+                input.write_all(b"\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "Saved records from an incompatible version",
+                );
+                input.write_all(b"\x03").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    "Ctrl+C again exits",
                 );
                 input.write_all(b"\x03").unwrap();
             }

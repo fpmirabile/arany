@@ -19,16 +19,18 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
         b"Input:\r\n",
     );
     let saved_at = add_custom_route(&mut pty, b"1\r", b"3\r");
-    let (pages, _) = acknowledge_linear_pages(
+    acknowledge_linear_pages(
         &mut pty.output,
         &mut pty.input,
         &mut pty.transcript,
         &mut pty.answered,
         (saved_at, b"empty Enter selects 1. first-route"),
     );
+    // Without a conformance check the save result is one acknowledgment (terminal.md, Custom routes).
     assert!(
-        pages > 1,
-        "save result exercises complete paged acknowledgment"
+        String::from_utf8_lossy(&pty.transcript[saved_at..])
+            .contains("Saved; select it to use this route"),
+        "save result names the next step"
     );
     let before_edit = std::fs::read(state.join("provider-profiles.json")).unwrap();
     let route_at = pty.transcript.len();
@@ -140,7 +142,7 @@ fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
         .expect("select saved Chat route");
     wait_setup_choices(pty, cursor);
     cursor = pty.transcript.len();
-    pty.input.write_all(b"4\r").expect("edit saved Chat route");
+    pty.input.write_all(b"3\r").expect("edit saved Chat route");
     wait_setup_choices(pty, cursor);
     assert!(
         String::from_utf8_lossy(&pty.transcript[cursor..])
@@ -195,7 +197,7 @@ fn assert_changed_protocol_requires_destination(pty: &mut SetupPty) {
     pty.input.write_all(b"1\r").expect("select saved route");
     wait_setup_choices(pty, cursor);
     cursor = pty.transcript.len();
-    pty.input.write_all(b"4\r").expect("edit saved route");
+    pty.input.write_all(b"3\r").expect("edit saved route");
     wait_setup_choices(pty, cursor);
     cursor = pty.transcript.len();
     pty.input.write_all(b"1\r").expect("switch to Responses");
@@ -275,7 +277,7 @@ fn linear_setup_selects_nonfirst_maximum_length_custom_route() {
     let routes_at = pty.transcript.len();
     pty.input.write_all(b"2\r").expect("open custom routes");
     let route_prompt =
-        b"Declarations are saved privately; Select and Check are separate actions; type a listed choice number or exact name (1-4); empty Enter selects 1\r\nInput:\r\n";
+        b"Declarations are saved privately; each Run admits the selected route; type a listed choice number or exact name (1-4); empty Enter selects 1\r\nInput:\r\n";
     acknowledge_linear_pages(
         &mut pty.output,
         &mut pty.input,

@@ -60,7 +60,7 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
         "set -eu; rm -rf \"$CARGO_TARGET_DIR/nested\"; mkdir -p \"$CARGO_TARGET_DIR/nested\"; printf old > \"$CARGO_TARGET_DIR/nested/old\"; printf stable > \"$CARGO_TARGET_DIR/stable\"; mkdir -p /cache/cargo /cache/.npm/_logs; printf transient > /cache/cargo/.package-cache; printf transient > /cache/.npm/_logs/entry",
         "set -eu; test ! -e /cache/cargo/.package-cache; test ! -e /cache/.npm/_logs/entry; test \"$(cat \"$CARGO_TARGET_DIR/nested/old\")\" = old; rm -rf \"$CARGO_TARGET_DIR/nested\"; mkdir \"$CARGO_TARGET_DIR/nested\"; printf new > \"$CARGO_TARGET_DIR/nested/new\"; rm \"$CARGO_TARGET_DIR/stable\"",
         "set -eu; test ! -e \"$CARGO_TARGET_DIR/nested/old\"; test ! -e \"$CARGO_TARGET_DIR/stable\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; dd if=/dev/zero of=\"$CARGO_TARGET_DIR/exhausted\" bs=1048576 count=80",
-        "set -eu; mkdir -p \"$CARGO_TARGET_DIR/inodes\"; i=0; while { : > \"$CARGO_TARGET_DIR/inodes/empty-$i\"; } 2>/dev/null; do i=$((i + 1)); done; test \"$(/usr/bin/stat -f -c %d /cache)\" -eq 0",
+        "set -eu; mkdir -p \"$CARGO_TARGET_DIR/inodes\"; i=0; while { : > \"$CARGO_TARGET_DIR/inodes/empty-$i\"; } 2>/dev/null; do i=$((i + 1)); done; test \"$(/usr/bin/stat -f -c %d /cache)\" -eq 0; rm -rf \"$CARGO_TARGET_DIR/inodes\"",
         "set -eu; test ! -e \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused",
     ];
     let switched = format!(
@@ -196,10 +196,11 @@ fn assert_observations(
         assert_eq!(observation.intent.limits.resource_class, class);
         assert_eq!(
             observation.cache_update,
-            match index {
-                2 => arany::CacheUpdate::NotAttempted,
-                3 => arany::CacheUpdate::Rejected,
-                _ => arany::CacheUpdate::Published,
+            // The upper stays inode-bounded; without an entry cap the emptied candidate publishes.
+            if index == 2 {
+                arany::CacheUpdate::NotAttempted
+            } else {
+                arany::CacheUpdate::Published
             }
         );
         assert_eq!(

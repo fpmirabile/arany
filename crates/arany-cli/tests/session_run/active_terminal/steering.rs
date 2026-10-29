@@ -20,8 +20,10 @@ fn spawn_linear_run(
     patterns: &[&[u8]],
 ) -> Attached {
     let command = format!(
-        "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 {objective}; exit \"$?\""
+        "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1; exit \"$?\""
     );
+    // New conversations default to single; delegation needs an explicit opt-in.
+    let submission = format!("/agents auto\n{objective}\n").into_bytes();
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
@@ -47,6 +49,8 @@ fn spawn_linear_run(
     let (stage_sender, stages) = mpsc::channel();
     let reader = thread::spawn(move || {
         let mut declined = false;
+        let mut declined_at = None;
+        let mut submitted = false;
         let mut bytes = Vec::new();
         let mut next = 0;
         let mut search_from = 0;
@@ -63,6 +67,21 @@ fn spawn_linear_run(
                 &bytes,
                 &mut declined,
             );
+            if declined && declined_at.is_none() {
+                declined_at = Some(bytes.len());
+            }
+            if !submitted
+                && declined_at.is_some_and(|offset| {
+                    bytes[offset..].windows(b"Input:".len()).any(|part| part == b"Input:")
+                })
+            {
+                reader_input
+                    .lock()
+                    .expect("fixture input")
+                    .write_all(&submission)
+                    .expect("opt into delegation and submit");
+                submitted = true;
+            }
             while next < patterns.len() {
                 let Some(offset) = bytes[search_from..]
                     .windows(patterns[next].len())

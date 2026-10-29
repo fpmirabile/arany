@@ -309,13 +309,14 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
           Input:\r\n").as_bytes(),
     );
+    let over_active_limit = format!("5 {}h\r", arany::MAX_GOAL_ACTIVE_MS / 3_600_000 + 1);
     for rejected in [
         &b"combined\r"[..],
         b"12 combined\r",
         b"1 classic\r",
         b"6 30000\r",
         b"8 512\r",
-        b"5 2h\r",
+        over_active_limit.as_bytes(),
     ] {
         let invalid_at = transcript.len();
         input
