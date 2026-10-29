@@ -3159,6 +3159,7 @@ mod child_tool_report_tests {
 
         let intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,

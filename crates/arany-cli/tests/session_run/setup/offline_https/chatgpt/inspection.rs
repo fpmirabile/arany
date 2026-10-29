@@ -9,7 +9,6 @@ const STAGE_TEST: &str = "setup::offline_https::chatgpt::inspection::metadata_in
 enum Access {
     Connected,
     Disconnected,
-    PlanDisabled,
     RenewalPending,
     SignOutPending,
 }
@@ -18,7 +17,6 @@ impl Access {
     fn menu_title(self) -> &'static str {
         match self {
             Self::Connected | Self::RenewalPending => "ChatGPT account",
-            Self::PlanDisabled => "ChatGPT plan disabled",
             Self::Disconnected | Self::SignOutPending => "ChatGPT account disconnected",
         }
     }
@@ -27,7 +25,6 @@ impl Access {
         match self {
             Self::Connected => "connected; saved metadata only, not checked",
             Self::Disconnected => "unavailable; disconnected",
-            Self::PlanDisabled => "unavailable; plan permission disabled",
             Self::RenewalPending => "unavailable; renewal incomplete or uncertain",
             Self::SignOutPending => "unavailable; sign-out incomplete or uncertain",
         }
@@ -36,7 +33,7 @@ impl Access {
     fn inspect_choice(self) -> usize {
         match self {
             Self::Connected | Self::RenewalPending => 4,
-            Self::Disconnected | Self::PlanDisabled | Self::SignOutPending => 3,
+            Self::Disconnected | Self::SignOutPending => 3,
         }
     }
 }
@@ -75,7 +72,6 @@ fn metadata_inspection_stage() {
             ("keyring", Access::Connected),
             ("private_file", Access::Connected),
             ("keyring", Access::Disconnected),
-            ("private_file", Access::PlanDisabled),
             ("keyring", Access::RenewalPending),
             ("keyring", Access::SignOutPending),
         ] {
@@ -100,7 +96,7 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
     let inspected = Uuid::now_v7();
     let host = "123e4567-e89b-42d3-a456-426614174000";
     let entry = |id: Uuid, client: &str| {
-        let disconnected = matches!(access, Access::Disconnected | Access::PlanDisabled);
+        let disconnected = matches!(access, Access::Disconnected);
         let token = (storage == "private_file" && !disconnected).then(|| {
             serde_json::json!({
                 "schema": 2, "slot": null,
@@ -116,24 +112,23 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
                 }
             })
         });
-        let keyring_slot =
-            (storage == "keyring").then(|| crate::setup::legacy_chatgpt_slot(client));
+        let keyring_slot = (storage == "keyring").then(|| crate::setup::chatgpt_slot(client, id));
         serde_json::json!({
             "id": id, "host_id": host, "client_id": client, "subject": "synthetic-subject",
             "chatgpt_account_id": null, "keyring_slot": keyring_slot,
             "storage": storage, "renewal_pending": matches!(access, Access::RenewalPending),
             "signout_pending": matches!(access, Access::SignOutPending), "disconnected": disconnected,
-            "plan_permission_missing": matches!(access, Access::PlanDisabled), "token": token
+            "token": token
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema": 4, "selected": selected,
+        "schema": 5, "selected": selected,
         "accounts": [entry(selected, "oaiapp_selected_inspection"), entry(inspected, "oaiapp_other_inspection")]
     })).unwrap()).unwrap();
     root.record(RecordKind::ChatgptRegistration)
         .replace(
             &serde_json::to_vec(&serde_json::json!({
-                "schema": 1, "host_id": host, "issued_client_id": null
+                "schema": 2, "host_id": host
             }))
             .unwrap(),
         )

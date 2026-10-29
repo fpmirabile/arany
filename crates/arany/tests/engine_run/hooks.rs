@@ -54,6 +54,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
         let config = result.run.config.as_ref().unwrap();
         let intent = arany::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: arany::worker::EffectTarget::Workspace,

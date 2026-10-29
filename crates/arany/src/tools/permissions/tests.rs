@@ -1499,6 +1499,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
         spill: None,
         intent: crate::tools::EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
@@ -2432,6 +2433,7 @@ pub(super) fn host_intent() -> crate::tools::EffectIntent {
     pin.permissions_digest = Some([7; 32]);
     crate::tools::EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: Some(pin),
         target: crate::session::worker::EffectTarget::Workspace,

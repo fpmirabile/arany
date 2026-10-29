@@ -46,12 +46,14 @@ pub(in crate::tools) const RUNTIME_COMPAT_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/arany-runtime-compat.dylib"));
 const RUNTIME_COMPAT_BYTES_CAP: usize = 128 * 1024;
 
-pub(super) fn configure_runtime_compat(
+pub(super) fn configure_runtime_compat<'a>(
     command: &mut tokio::process::Command,
-    program: &crate::tools::config::Program,
+    source: impl Into<super::PayloadProgram<'a>>,
     args: &mut [std::ffi::OsString],
     resources: &Path,
 ) -> Result<(), ToolError> {
+    let source = source.into();
+    let program = source.definition();
     let library = resources.join(RUNTIME_COMPAT_FILE);
     let path = library.to_str().ok_or(ToolError::Path)?;
     if path.contains(':') {
@@ -65,7 +67,10 @@ pub(super) fn configure_runtime_compat(
         return Err(ToolError::ChangedInput);
     }
     command.env("DYLD_INSERT_LIBRARIES", path);
-    if program.executable == "/bin/sh" {
+    if matches!(source, super::PayloadProgram::Prefix(_)) {
+        let script = args.last_mut().ok_or(ToolError::Configuration)?;
+        super::prefix_runtime_compat_script(script, path)?;
+    } else if program.executable == "/bin/sh" {
         super::prefix_shell_runtime_compat(args, path)?;
     }
     Ok(())
@@ -1933,6 +1938,7 @@ mod tests {
             handover: None,
             intent: EffectIntent {
                 host: None,
+                wrap: None,
                 rewrite: Vec::new(),
                 host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,
@@ -2383,6 +2389,7 @@ mod tests {
             handover: None,
             intent: EffectIntent {
                 host: None,
+                wrap: None,
                 rewrite: Vec::new(),
                 host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,

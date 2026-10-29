@@ -51,13 +51,15 @@ pub(crate) fn validate_tool_started(view: &SessionView, event: &Event) -> Result
             .primary()
             .is_some_and(|primary| primary.id == *agent_run_id)
     {
-        validate_primary_tool_scope(view, *run_id, &intent.call).map_err(|cause| ToolRefusal {
-            cause,
-            reason: if cause == InvalidArguments {
-                ToolRefusalReason::Payload
-            } else {
-                ToolRefusalReason::Scope
-            },
+        validate_primary_tool_scope(view, *run_id, intent.scoped_call()).map_err(|cause| {
+            ToolRefusal {
+                cause,
+                reason: if cause == InvalidArguments {
+                    ToolRefusalReason::Payload
+                } else {
+                    ToolRefusalReason::Scope
+                },
+            }
         })?;
         validate_primary_tool_lease(run, &intent.call).map_err(|cause| ToolRefusal {
             cause,

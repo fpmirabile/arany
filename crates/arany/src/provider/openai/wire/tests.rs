@@ -1454,7 +1454,7 @@ fn typed_argument_failures_reach_the_engine_but_wire_bounds_still_reject() {
             Stage::OutcomeToolArgumentSize,
         ),
         (
-            json!({"operation":"command","program":"/usr/bin/date","args":[],"cwd":""}),
+            json!({"operation":"command","program":"usr/bin/date","args":[],"cwd":""}),
             Stage::OutcomeToolProgram,
         ),
         (
@@ -1500,7 +1500,7 @@ fn typed_argument_failures_reach_the_engine_but_wire_bounds_still_reject() {
                 panic!("native Tool request")
             };
             assert_eq!(requests.len(), 1);
-            assert!(!requests[0].call.valid());
+            assert!(!requests[0].call.valid(), "{expected:?}");
         }
         let bytes =
             serde_json::to_vec(&json!({"type":"response.completed","response":fixture})).unwrap();
@@ -1518,7 +1518,7 @@ fn typed_argument_failures_reach_the_engine_but_wire_bounds_still_reject() {
             )));
             assert!(
                 !shape.contains("README.md")
-                    && !shape.contains("/usr/bin/date")
+                    && !shape.contains("usr/bin/date")
                     && !shape.contains("unavailable")
             );
         }

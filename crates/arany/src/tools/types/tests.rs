@@ -146,6 +146,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     }
     let intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
@@ -472,6 +473,7 @@ fn guard_stage_is_valid_only_on_unattested_guard_failures() {
     let observation = |call: ToolCall, disposition| {
         let intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
@@ -550,6 +552,7 @@ fn build_cache_size_pins_unlimited_or_a_set_size_and_bounds_only_the_candidate()
     let mebibyte = 1024 * 1024;
     let mut intent = EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,

@@ -160,6 +160,7 @@ mod tests {
         let sequence = run.tools.len() as u64 + 1;
         let intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,

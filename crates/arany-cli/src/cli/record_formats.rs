@@ -85,7 +85,7 @@ mod tests {
         (RecordKind::ChatgptAccounts, CHATGPT_ACCOUNT),
         (
             RecordKind::ChatgptRegistration,
-            r#"{"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","issued_client_id":null}"#,
+            r#"{"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b"}"#,
         ),
         (RecordKind::McpOauth, MCP_OAUTH),
         (RecordKind::ProviderRoster, ROSTER),
@@ -95,7 +95,7 @@ mod tests {
     const MCP_OAUTH: &str = r#"{"servers":{"remote":{"url":"https://mcp.example.com/mcp","client_id":"client","token_endpoint":"https://auth.example.com/token","revocation_endpoint":null,"access_token":"token","refresh_token":null,"expires_at":null,"renewal":"ready","claim":null}}}"#;
     const PROFILES: &str = r#"{"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"efforts":[]}]}"#;
     const ACCOUNT: &str = r#"{"storage":"private_file","account":{"schema":3,"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","api_key":"synthetic-test-key","anthropic_workspace_id":null}}"#;
-    const CHATGPT_ACCOUNT: &str = r#"{"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","chatgpt_account_id":null,"keyring_slot":null,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":{"schema":2,"slot":null,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","chatgpt_account_id":null,"keyring_slot":"chatgpt-Ne20hIaDcO1pbYxw0HwZIWr8MYnsSAeMgUzaAXLL3rM","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":false,"plan_permission_missing":false,"token":null}]}"#;
+    const CHATGPT_ACCOUNT: &str = r#"{"selected":"01a15ecf-a92a-7707-8af6-ce3d36320b67","accounts":[{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","chatgpt_account_id":null,"keyring_slot":null,"host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"private_file","renewal_pending":false,"signout_pending":false,"disconnected":false,"token":{"schema":2,"slot":null,"credentials":{"client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","id_token":"fake-fixture-id-token","access_token":"fake-fixture-access-token","refresh_token":"fake-fixture-refresh-token","access_expires_at_unix":1800000000},"consent":{"warning_version":4,"warning_digest":[105,213,101,28,44,236,194,209,3,187,128,126,6,193,202,212,235,202,191,172,193,80,5,139,128,220,33,211,20,67,139,31],"storage":"private_file","client_id":"oaiapp_fake_fixture","subject":"fake-fixture-subject","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","accepted_at_sec":1700000000}}},{"id":"01a15ecf-a92a-7707-8af6-ce3d36320b68","client_id":"oaiapp_fake_vault","subject":"fake-keyring-subject","chatgpt_account_id":null,"keyring_slot":"chatgpt-nQXXATpVF2PjrKaVsDChSztVwwSgkhMJ4FvHLnzE6zo","host_id":"6f1c2a3e-4b5d-4e6f-8a7b-9c0d1e2f3a4b","storage":"keyring","renewal_pending":false,"signout_pending":false,"disconnected":false,"token":null}]}"#;
     const ROSTER: &str = r#"{"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}"#;
     const ROUTING: &str = r#"{"providers":{"primary":null,"child":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}],"review":null,"compaction":null}}"#;
 
@@ -112,7 +112,7 @@ mod tests {
             RecordKind::ChatgptAccounts,
             "/accounts/0/token/schema",
             TOKEN_RECORD_SCHEMA,
-            4,
+            5,
         ),
     ];
 

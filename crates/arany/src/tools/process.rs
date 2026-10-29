@@ -54,7 +54,8 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             timeout_ms,
             ..
         } => {
-            valid_command(program, args, cwd)
+            (valid_name(program) || super::config::valid_absolute(program))
+                && valid_command("command", args, cwd)
                 && timeout_ms.is_none_or(|timeout| {
                     (super::types::MIN_COMMAND_TIMEOUT_MS..=super::types::MAX_COMMAND_TIMEOUT_MS)
                         .contains(&timeout)
@@ -114,18 +115,35 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
     Some(fields)
 }
 
-pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
+fn prepare_command(site: &GuardContext<'_>) -> Result<tokio::process::Command, ToolError> {
     let ToolCall::Command {
         program, args, cwd, ..
     } = &site.intent.call
     else {
         return Err(ToolError::Configuration);
     };
-    let definition = site
-        .config
-        .commands
-        .iter()
-        .find(|value| &value.name == program)
+    if let Some(wrap) = &site.intent.wrap {
+        wrap.verify(&site.config.runtime_grants, &site.intent.call)?;
+    }
+    let prefix = site
+        .intent
+        .wrap
+        .as_ref()
+        .filter(|wrap| {
+            matches!(
+                wrap.stage,
+                super::command_tools::WrapStage::Wrapped | super::command_tools::WrapStage::Probe
+            )
+        })
+        .map(|wrap| wrap.program());
+    let definition = prefix
+        .as_ref()
+        .or_else(|| {
+            site.config
+                .commands
+                .iter()
+                .find(|value| &value.name == program)
+        })
         .ok_or(ToolError::Configuration)?;
     #[cfg(target_os = "macos")]
     let args = args
@@ -140,8 +158,13 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         .collect::<Vec<_>>();
     #[cfg(target_os = "macos")]
     let args = &args;
+    let source = if prefix.is_some() {
+        super::guard::PayloadProgram::Prefix(definition)
+    } else {
+        super::guard::PayloadProgram::Configured(definition)
+    };
     let mut command = payload(
-        definition,
+        source,
         args,
         cwd,
         site.root,
@@ -158,6 +181,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     } else {
         std::process::Stdio::null()
     });
+    Ok(command)
+}
+
+pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
+    let mut command = prepare_command(site)?;
     let deadline = tokio::time::Instant::now() + site.remaining_runtime();
     let child = spawn_before(&mut command, deadline)?;
     let (status, out, err, disk_stopped) = capture_payload(site, child, deadline).await?;

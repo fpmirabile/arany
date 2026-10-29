@@ -100,7 +100,7 @@ impl HostPrefixRule {
         let ToolCall::CommandUnguarded { program, args, .. } = &intent.call else {
             return false;
         };
-        if !intent.rewrite.is_empty() {
+        if !intent.rewrite.is_empty() || intent.wrap.is_some() {
             return false;
         }
         let Some(pin) = &intent.host_command else {
@@ -171,6 +171,18 @@ impl HostPrefixRule {
             })
     }
 
+    pub(crate) fn admitted_by_command_tools(&self, tools: &crate::tools::CommandTools) -> bool {
+        tools
+            .entries()
+            .iter()
+            .filter(|tool| tool.role == crate::tools::CommandToolRole::Prefix)
+            .all(|tool| {
+                tool.executable != self.pin.executable
+                    && tool.sha256 != self.pin.sha256
+                    && (tool.device, tool.inode) != (self.pin.device, self.pin.inode)
+            })
+    }
+
     pub(super) fn verify_creation(
         &self,
         state: &crate::store::StateRoot,
@@ -194,7 +206,9 @@ impl HostPrefixRule {
             }
             Err(error) => return Err(error),
         };
-        if !self.admitted_by(&config) {
+        if !self.admitted_by(&config)
+            || !self.admitted_by_command_tools(&crate::tools::CommandTools::load(state)?)
+        {
             return Err(ToolError::Configuration);
         }
         Ok(())

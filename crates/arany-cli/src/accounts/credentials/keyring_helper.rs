@@ -1,7 +1,5 @@
 use super::{CredentialError, DEFAULT_ACCOUNT, SERVICE, SavedAccount, admit_transport};
-use crate::accounts::chatgpt::{
-    MAX_TOKEN_RECORD_BYTES, valid_keyring_record, valid_written_keyring_record,
-};
+use crate::accounts::chatgpt::{MAX_TOKEN_RECORD_BYTES, valid_keyring_record};
 use arany::{ProviderKind, RecordKind};
 #[cfg(not(target_os = "macos"))]
 use keyring::Entry;
@@ -104,7 +102,7 @@ pub(super) fn read(slot: &str) -> Result<Option<Vec<u8>>, CredentialError> {
 
 pub(super) fn write(slot: &str, record: &str) -> Result<(), CredentialError> {
     if record.len() > slot_record_limit(slot).ok_or(CredentialError::InvalidAccount)?
-        || !valid_written_record(slot, record.as_bytes())
+        || !valid_record(slot, record.as_bytes())
     {
         return Err(CredentialError::InvalidAccount);
     }
@@ -382,14 +380,6 @@ fn valid_native_identity(slot: &str, id: Uuid, provider: &str) -> bool {
         && ProviderKind::parse(provider).is_some_and(ProviderKind::is_native_api)
 }
 
-fn valid_written_record(slot: &str, bytes: &[u8]) -> bool {
-    if slot.starts_with("chatgpt-") {
-        valid_written_keyring_record(slot, bytes)
-    } else {
-        valid_record(slot, bytes)
-    }
-}
-
 fn valid_authorized_record(slot: &str, record: &str, expected: Option<(Uuid, String)>) -> bool {
     record.len() <= slot_record_limit(slot).unwrap_or(0)
         && if slot.starts_with("chatgpt-") {
@@ -499,7 +489,7 @@ pub(super) fn main() -> ExitCode {
             let Ok(record) = String::from_utf8(record) else {
                 return ExitCode::FAILURE;
             };
-            if !valid_written_record(slot, record.as_bytes()) {
+            if !valid_record(slot, record.as_bytes()) {
                 return ExitCode::FAILURE;
             }
             match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
@@ -523,13 +513,14 @@ mod tests {
     use std::{os::unix::net::UnixListener, thread};
 
     #[test]
-    fn authorization_admits_version_one_chatgpt_items_only_at_their_retained_slot() {
+    fn authorization_admits_current_chatgpt_items_only_at_their_addressed_slot() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use sha2::{Digest, Sha256};
         let credentials = crate::accounts::chatgpt::VerifiedCredentials {
             client_id: "oaiapp_authorize".into(),
             host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
             subject: "synthetic-subject".into(),
+            chatgpt_account_id: None,
             id_token: "synthetic-id".into(),
             access_token: "synthetic-access".into(),
             refresh_token: "synthetic-refresh".into(),
@@ -544,24 +535,21 @@ mod tests {
         .unwrap();
         let slot =
             |client: &[u8]| format!("chatgpt-{}", URL_SAFE_NO_PAD.encode(Sha256::digest(client)));
-        let retained = slot(credentials.client_id.as_bytes());
+        let addressed = slot(credentials.client_id.as_bytes());
         let foreign = slot(b"another-client");
-        let version_one = serde_json::to_string(
-            &serde_json::json!({"schema":1,"credentials":credentials,"consent":consent}),
-        )
+        let current = serde_json::to_string(&serde_json::json!({
+            "schema": 2, "slot": addressed, "credentials": credentials, "consent": consent
+        }))
         .unwrap();
-        assert!(valid_authorized_record(&retained, &version_one, None));
-        assert!(!valid_authorized_record(&foreign, &version_one, None));
-        assert!(!valid_authorized_record(&retained, "{", None));
-        for schema in [0, 3, 255] {
-            let unsupported =
-                version_one.replacen("\"schema\":1", &format!("\"schema\":{schema}"), 1);
-            assert!(!valid_authorized_record(&retained, &unsupported, None));
+        assert!(valid_authorized_record(&addressed, &current, None));
+        assert!(!valid_authorized_record(&foreign, &current, None));
+        assert!(!valid_authorized_record(&addressed, "{", None));
+        for schema in [0, 1, 3, 255] {
+            let unsupported = current.replacen("\"schema\":2", &format!("\"schema\":{schema}"), 1);
+            assert!(!valid_authorized_record(&addressed, &unsupported, None));
         }
-        let duplicated = version_one.replacen("\"schema\":1", "\"schema\":1,\"schema\":1", 1);
-        assert!(!valid_authorized_record(&retained, &duplicated, None));
-        let current = version_one.replacen("\"schema\":1", "\"schema\":2", 1);
-        assert!(!valid_authorized_record(&retained, &current, None));
+        let duplicated = current.replacen("\"schema\":2", "\"schema\":2,\"schema\":2", 1);
+        assert!(!valid_authorized_record(&addressed, &duplicated, None));
     }
 
     #[test]

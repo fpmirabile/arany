@@ -1,7 +1,4 @@
-use super::{
-    AuthorizationError, CodeExchange, VerifiedCredentials, VerifiedIdentity, VerifiedSignIn,
-    identity,
-};
+use super::{AuthorizationError, CodeExchange, VerifiedCredentials, identity};
 use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +11,7 @@ pub(super) async fn revoke_remote(
     revoke::revoke_remote(credentials).await
 }
 
-const TOKEN_ENDPOINT: &str = "https://auth.openai.com/api/accounts/oauth/token";
+const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const JWKS_ENDPOINT: &str = "https://auth.openai.com/.well-known/jwks.json";
 const MAX_FORM_BYTES: usize = 4096;
 const MAX_REFRESH_FORM_BYTES: usize = 25 * 1024;
@@ -43,9 +40,9 @@ struct TokenReply {
     access_token: String,
     refresh_token: Option<String>,
     id_token: String,
-    token_type: String,
+    token_type: Option<String>,
     expires_in: u64,
-    scope: String,
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -57,9 +54,9 @@ struct CodeErrorReply {
 struct RefreshReply {
     access_token: String,
     refresh_token: String,
-    token_type: String,
+    token_type: Option<String>,
     expires_in: u64,
-    scope: String,
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,7 +79,9 @@ impl RefreshErrorCode {
     }
 }
 
-pub(super) async fn redeem(exchange: CodeExchange) -> Result<VerifiedSignIn, AuthorizationError> {
+pub(super) async fn redeem(
+    exchange: CodeExchange,
+) -> Result<VerifiedCredentials, AuthorizationError> {
     tokio::time::timeout(DEADLINE, redeem_at(exchange, Endpoints::production()))
         .await
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -91,7 +90,7 @@ pub(super) async fn redeem(exchange: CodeExchange) -> Result<VerifiedSignIn, Aut
 async fn redeem_at(
     exchange: CodeExchange,
     endpoints: Endpoints,
-) -> Result<VerifiedSignIn, AuthorizationError> {
+) -> Result<VerifiedCredentials, AuthorizationError> {
     let client = client(endpoints.https_only)?;
     let fields = [
         ("grant_type", "authorization_code"),
@@ -99,7 +98,6 @@ async fn redeem_at(
         ("code", exchange.code.as_str()),
         ("code_verifier", exchange.verifier.as_str()),
         ("redirect_uri", exchange.redirect_uri.as_str()),
-        ("resource", super::RESOURCE),
     ];
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in fields {
@@ -132,7 +130,7 @@ async fn redeem_at(
     .await?;
     let token: TokenReply =
         serde_json::from_slice(&token_bytes).map_err(|_| AuthorizationError::ExchangeFailed)?;
-    let plan_enabled = validate_reply(&token)?;
+    validate_reply(&token)?;
 
     let jwks_response = client
         .get(endpoints.jwks)
@@ -146,7 +144,7 @@ async fn redeem_at(
     })
     .await?;
     let now_seconds = unix_now()?;
-    let subject = identity::verify(
+    let identity = identity::verify(
         &token.id_token,
         &jwks_bytes,
         &exchange.client_id,
@@ -156,30 +154,33 @@ async fn redeem_at(
     if exchange
         .expected_subject
         .as_deref()
-        .is_some_and(|expected| expected != subject)
+        .is_some_and(|expected| expected != identity.subject)
     {
         return Err(AuthorizationError::IdentityRejected(
             identity::IdentityFailure::SelectedSubject,
         ));
     }
-    if !plan_enabled {
-        return Ok(VerifiedSignIn::PlanDisabled(VerifiedIdentity {
-            client_id: exchange.client_id,
-            host_id: exchange.host_id,
-            subject,
-        }));
+    if exchange
+        .expected_account_id
+        .as_deref()
+        .is_some_and(|id| id != identity.account_id)
+    {
+        return Err(AuthorizationError::IdentityRejected(
+            identity::IdentityFailure::AccountClaim,
+        ));
     }
-    Ok(VerifiedSignIn::PlanEnabled(VerifiedCredentials {
+    Ok(VerifiedCredentials {
         client_id: exchange.client_id,
         host_id: exchange.host_id,
-        subject,
+        subject: identity.subject,
+        chatgpt_account_id: Some(identity.account_id),
         id_token: token.id_token,
         access_token: token.access_token,
         refresh_token: token
             .refresh_token
-            .expect("enabled grant has a refresh token"),
+            .ok_or(AuthorizationError::ExchangeFailed)?,
         access_expires_at_unix: access_expiry_at(requested_at_unix, token.expires_in)?,
-    }))
+    })
 }
 
 async fn classify_code_error(response: Response) -> AuthorizationError {
@@ -225,6 +226,9 @@ pub(super) fn client(https_only: bool) -> Result<Client, AuthorizationError> {
 pub(super) async fn refresh_uncommitted(
     credentials: &VerifiedCredentials,
 ) -> Result<VerifiedCredentials, AuthorizationError> {
+    if credentials.client_id == super::CLIENT_ID {
+        return Err(AuthorizationError::BackendRouteNotAdmitted);
+    }
     tokio::time::timeout(DEADLINE, refresh_at(credentials, Endpoints::production()))
         .await
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -248,7 +252,6 @@ async fn refresh_at(
         ("grant_type", "refresh_token"),
         ("client_id", credentials.client_id.as_str()),
         ("refresh_token", credentials.refresh_token.as_str()),
-        ("resource", super::RESOURCE),
     ] {
         serializer.append_pair(name, value);
     }
@@ -283,15 +286,13 @@ async fn refresh_at(
     .await?;
     let replacement: RefreshReply =
         serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::ExchangeFailed)?;
-    if !validate_token_fields(
+    validate_token_fields(
         &replacement.access_token,
         Some(&replacement.refresh_token),
-        &replacement.token_type,
+        replacement.token_type.as_deref(),
         replacement.expires_in,
-        &replacement.scope,
-    )? {
-        return Err(AuthorizationError::PermissionMissing);
-    }
+        replacement.scope.as_deref(),
+    )?;
     if replacement.access_token == credentials.access_token
         || replacement.refresh_token == credentials.refresh_token
     {
@@ -301,6 +302,7 @@ async fn refresh_at(
         client_id: credentials.client_id.clone(),
         host_id: credentials.host_id,
         subject: credentials.subject.clone(),
+        chatgpt_account_id: credentials.chatgpt_account_id.clone(),
         id_token: credentials.id_token.clone(),
         access_token: replacement.access_token,
         refresh_token: replacement.refresh_token,
@@ -339,55 +341,40 @@ async fn classify_refresh_error(response: Response) -> AuthorizationError {
     }
 }
 
-fn validate_reply(token: &TokenReply) -> Result<bool, AuthorizationError> {
-    let plan_enabled = validate_token_fields(
+fn validate_reply(token: &TokenReply) -> Result<(), AuthorizationError> {
+    validate_token_fields(
         &token.access_token,
         token.refresh_token.as_deref(),
-        &token.token_type,
+        token.token_type.as_deref(),
         token.expires_in,
-        &token.scope,
+        token.scope.as_deref(),
     )?;
     if !bounded_token(&token.id_token, 16 * 1024) {
         return Err(AuthorizationError::ExchangeFailed);
     }
-    Ok(plan_enabled)
+    Ok(())
 }
 
 fn validate_token_fields(
     access_token: &str,
     refresh_token: Option<&str>,
-    token_type: &str,
+    token_type: Option<&str>,
     expires_in: u64,
-    scope: &str,
-) -> Result<bool, AuthorizationError> {
-    if token_type != "Bearer"
+    scope: Option<&str>,
+) -> Result<(), AuthorizationError> {
+    let scope = scope.unwrap_or("");
+    if token_type.is_some_and(|kind| kind != "Bearer")
         || !(1..=7200).contains(&expires_in)
         || !bounded_token(access_token, 16 * 1024)
-        || refresh_token.is_some_and(|token| !bounded_token(token, 8 * 1024))
-        || scope.len() > 512
+        || refresh_token.is_none_or(|token| !bounded_token(token, 8 * 1024))
+        || scope.len() > super::MAX_SCOPE_BYTES
         || !scope
             .bytes()
             .all(|byte| byte.is_ascii_graphic() || byte == b' ')
     {
         return Err(AuthorizationError::ExchangeFailed);
     }
-    let scopes: Vec<&str> = scope.split(' ').filter(|scope| !scope.is_empty()).collect();
-    if scopes.len() > 16
-        || scopes.iter().any(|scope| scope.len() > 64)
-        || scopes
-            .iter()
-            .enumerate()
-            .any(|(index, scope)| scopes[..index].contains(scope))
-    {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
-    let plan_enabled = scopes.contains(&"chatgpt.tokens.use.direct")
-        && scopes.contains(&"resource.invoke")
-        && scopes.contains(&"offline_access");
-    if plan_enabled && refresh_token.is_none() {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
-    Ok(plan_enabled)
+    Ok(())
 }
 
 fn bounded_token(value: &str, max: usize) -> bool {

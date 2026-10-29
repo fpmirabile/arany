@@ -15,8 +15,9 @@ pub use discovery::{
 pub(crate) mod command_environment;
 pub(crate) mod command_tools;
 pub use command_tools::{
-    CommandRewrite, CommandTool, CommandToolProbe, CommandToolRole, CommandTools, PROBE_COMMAND,
-    RewriteStage, command_tool_candidates,
+    CommandRewrite, CommandTool, CommandToolImport, CommandToolProbe, CommandToolRole,
+    CommandTools, CommandWrap, PROBE_COMMAND, RewriteStage, WrapStage, command_tool_candidates,
+    import_command_tools,
 };
 mod executable;
 mod fs;
@@ -922,6 +923,13 @@ impl ToolRuntime {
                         .as_ref()
                         .is_some_and(|auth| auth.allows(call))
             }
+            ToolCall::Command { program, .. } if Path::new(program).is_absolute() => {
+                self.command_tools.entries().iter().any(|tool| {
+                    tool.enabled
+                        && tool.role == CommandToolRole::Prefix
+                        && tool.executable == *program
+                })
+            }
             _ => self.config.allows(call),
         }
     }
@@ -1095,12 +1103,11 @@ impl ToolRuntime {
             .map(|mut snapshot| {
                 let mut scoped = (*snapshot.config).clone();
                 scoped.scope_to(workspace, workspace_identity);
-                if let Some(index) = snapshot
-                    .config
-                    .host
-                    .iter()
-                    .position(|rule| scoped.host.contains(rule) && !rule.admitted_by(&config))
-                {
+                if let Some(index) = snapshot.config.host.iter().position(|rule| {
+                    scoped.host.contains(rule)
+                        && (!rule.admitted_by(&config)
+                            || !rule.admitted_by_command_tools(&command_tools))
+                }) {
                     return Err(ToolError::HostPrefixConflict { rule: index + 1 });
                 }
                 snapshot.config = std::sync::Arc::new(scoped);
@@ -1578,6 +1585,7 @@ impl ToolRuntime {
         };
         EffectIntent {
             host: git::host::pin(&self.workspace, &call).ok(),
+            wrap: None,
             rewrite: Vec::new(),
             host_command: match &call {
                 ToolCall::CommandUnguarded { program, .. } => {
@@ -1644,7 +1652,10 @@ impl ToolRuntime {
         {
             return false;
         }
-        if !unguarded::wrapper(program) && !unguarded::wrapper(&pin.executable) {
+        if intent.wrap.is_none()
+            && !unguarded::wrapper(program)
+            && !unguarded::wrapper(&pin.executable)
+        {
             return true;
         }
         let intent = intent.clone();
@@ -1713,8 +1724,11 @@ impl ToolRuntime {
                 .run_file(intent, cancellation)
                 .await;
         }
+        if let Err(error) = self.verify_wrap_async(&intent).await {
+            return unstarted_observation(intent, error);
+        }
         if intent.target != crate::session::worker::EffectTarget::Workspace
-            || !self.config.allows(&intent.call)
+            || !command_tools::prefix::allowed(&self.config, &intent)
         {
             return ToolObservation {
                 spill: None,
@@ -1933,6 +1947,13 @@ impl ToolRuntime {
             observation.disposition = ToolDisposition::Limit;
             observation.limit_cause = Some(crate::tools::LimitCause::Resource);
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if observation.attestation.is_some() {
+            let intent = observation.intent.clone();
+            return crate::fault::guard_result(intent.id, Ok(observation)).unwrap_or_else(
+                |error| uncertain_observation(intent, error, CacheUpdate::NotApplicable),
+            );
         }
         observation
     }

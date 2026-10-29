@@ -106,6 +106,17 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · rewrite: ");
         summary.push_str(fact.stage.label());
     }
+    if let Some(wrap) = &tool.intent.wrap {
+        summary.push_str(" · wrap: ");
+        summary.push_str(match wrap.stage {
+            arany::WrapStage::Wrapped => "wrapped",
+            arany::WrapStage::Direct => "direct wrapper",
+            arany::WrapStage::Probe => "probe",
+            arany::WrapStage::PinRefused => "unavailable (needs re-pin)",
+        });
+        summary.push_str(" · ");
+        summary.push_str(&escape_terminal(&wrap.tool.executable));
+    }
     if tool.ran_unguarded() {
         summary.push_str(" · UNGUARDED");
     }

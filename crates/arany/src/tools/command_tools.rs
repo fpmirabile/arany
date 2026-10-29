@@ -1,3 +1,8 @@
+mod import;
+pub(crate) mod prefix;
+pub use import::{CommandToolImport, import_command_tools};
+pub use prefix::{CommandWrap, WrapStage};
+
 use super::config::Program;
 use super::toolchains::RuntimeGrant;
 use super::{ToolCall, ToolError, ToolRuntime};
@@ -18,6 +23,7 @@ pub(crate) const TIMEOUT_MS: u32 = (super::permissions::MAX_TIMEOUT_SECONDS * 10
 #[serde(rename_all = "snake_case")]
 pub enum CommandToolRole {
     Rewrite,
+    Prefix,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -78,6 +84,15 @@ pub(crate) const COMMAND_TOOLS: RecordFormat = RecordFormat {
     current: 1,
     accepts: |bytes| CommandTools::parse(bytes).is_ok(),
 };
+
+impl CommandToolRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rewrite => "Rewrite hook",
+            Self::Prefix => "Prefix wrapper",
+        }
+    }
+}
 
 impl RewriteStage {
     pub fn label(self) -> &'static str {
@@ -149,7 +164,7 @@ impl CommandTools {
             || self
                 .tools
                 .iter()
-                .any(|entry| entry.selected_path == tool.selected_path)
+                .any(|entry| entry.selected_path == tool.selected_path && entry.role == tool.role)
         {
             return Err(ToolError::Configuration);
         }
@@ -188,11 +203,17 @@ impl CommandTools {
         let record: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
         if record.version != VERSION
             || record.tools.len() > MAX_COMMAND_TOOLS
+            || record
+                .tools
+                .iter()
+                .filter(|tool| tool.enabled && tool.role == CommandToolRole::Prefix)
+                .nth(1)
+                .is_some()
             || record.tools.iter().enumerate().any(|(index, tool)| {
                 !tool.valid()
-                    || record.tools[..index]
-                        .iter()
-                        .any(|prior| prior.selected_path == tool.selected_path)
+                    || record.tools[..index].iter().any(|prior| {
+                        prior.selected_path == tool.selected_path && prior.role == tool.role
+                    })
             })
         {
             return Err(ToolError::Configuration);
@@ -206,12 +227,15 @@ impl CommandTool {
     pub const ARGUMENT_COUNT_LIMIT: usize = super::process::MAX_COMMAND_ARGS;
 
     pub(crate) fn call(&self) -> ToolCall {
-        ToolCall::Command {
-            program: TOOL_NAME.into(),
-            args: self.args.clone(),
-            cwd: String::new(),
-            resource_class: None,
-            timeout_ms: None,
+        match self.role {
+            CommandToolRole::Rewrite => ToolCall::Command {
+                program: TOOL_NAME.into(),
+                args: self.args.clone(),
+                cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
+            },
+            CommandToolRole::Prefix => prefix::probe_call(self),
         }
     }
 
@@ -221,6 +245,9 @@ impl CommandTool {
             && self.inode != 0
             && valid_digest(&self.sha256)
             && super::process::valid_command(TOOL_NAME, &self.args, "")
+            && (self.role != CommandToolRole::Prefix
+                || self.args.len() < Self::ARGUMENT_COUNT_LIMIT)
+            && (self.role != CommandToolRole::Prefix || prefix::probe_call(self).valid())
             && (!self.enabled
                 || matches!(
                     self.last_probe,
@@ -393,6 +420,9 @@ pub fn command_tool_candidates(
 
 pub(crate) fn result(observation: &super::ToolObservation) -> super::permissions::HookResult {
     use super::permissions::{HookIgnoreReason, HookResult};
+    if prefix::is_prefix_probe(&observation.intent) {
+        return prefix::probe_result(observation);
+    }
     if !matches!(
         observation.disposition,
         super::ToolDisposition::Succeeded | super::ToolDisposition::Failed
@@ -577,10 +607,17 @@ impl ToolRuntime {
         tool: &CommandTool,
         stdin: &str,
     ) -> Result<Self, ToolError> {
+        if !tool.valid() {
+            return Err(ToolError::Configuration);
+        }
         tool.verify(&self.config.runtime_grants)?;
         let mut runtime = self.clone().with_hook_stdin(stdin);
         runtime.config.commands = vec![Program {
-            name: TOOL_NAME.into(),
+            name: match tool.role {
+                CommandToolRole::Rewrite => TOOL_NAME,
+                CommandToolRole::Prefix => prefix::PREFIX_NAME,
+            }
+            .into(),
             executable: tool.executable.clone(),
             sha256: tool.sha256.clone(),
             interpreter: false,

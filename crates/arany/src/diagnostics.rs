@@ -434,6 +434,7 @@ mod tests {
                 limit_cause: None,
                 intent: crate::tools::EffectIntent {
                     host: None,
+                    wrap: None,
                     rewrite: Vec::new(),
                     host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,

@@ -36,10 +36,12 @@ pub(super) fn started(
         || hook.intent.workspace_inode != config.workspace_inode
         || hook.active_ceiling_ms.is_none_or(|ceiling| ceiling == 0)
         || hook.group as usize >= crate::tools::command_tools::MAX_COMMAND_TOOLS
-        || hook
-            .command_tool
-            .as_ref()
-            .is_none_or(|tool| !tool.enabled || !tool.valid() || hook.intent.call != tool.call())
+        || hook.command_tool.as_ref().is_none_or(|tool| {
+            !tool.enabled
+                || !tool.valid()
+                || tool.role != crate::tools::CommandToolRole::Rewrite
+                || hook.intent.call != tool.call()
+        })
         || hook.handler != 0
         || run
             .lifecycle_hooks
@@ -89,6 +91,22 @@ fn subject_admitted(run: &RunView, hook: &crate::tools::permissions::HookInvocat
 
 pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
     use crate::tools::RewriteStage;
+    if intent
+        .wrap
+        .as_ref()
+        .is_some_and(|wrap| wrap.stage == crate::tools::WrapStage::Probe)
+    {
+        return false;
+    }
+    if intent.wrap.is_some()
+        && run
+            .config
+            .as_ref()
+            .and_then(|config| config.tool_policy.as_ref())
+            .is_none_or(|policy| policy.command_tools_digest.is_none())
+    {
+        return false;
+    }
     let mut expected = intent.rewrite.first().map(|fact| fact.original_sha256);
     let mut previous = None;
     for (index, fact) in intent.rewrite.iter().enumerate() {
@@ -142,7 +160,8 @@ pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
             .result
             .command_rewrite(outcome.observation.disposition);
         if let Some(command) = command {
-            let call = crate::tools::command_tools::rewritten(&intent.call, command.to_owned());
+            let call =
+                crate::tools::command_tools::rewritten(intent.scoped_call(), command.to_owned());
             expected = Some(crate::validate::digest(
                 &serde_json::to_vec(&call).expect("typed call is serializable"),
             ));
@@ -154,7 +173,7 @@ pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
     expected.is_none_or(|expected| {
         expected
             == crate::validate::digest(
-                &serde_json::to_vec(&intent.call).expect("typed call is serializable"),
+                &serde_json::to_vec(intent.scoped_call()).expect("typed call is serializable"),
             )
     })
 }

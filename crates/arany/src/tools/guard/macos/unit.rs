@@ -2040,6 +2040,7 @@ mod tests {
     fn fallback_command_deadlines_share_runtime_with_selection() {
         let mut intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
@@ -2414,6 +2415,18 @@ done
         let mut command = tokio::process::Command::new("/usr/bin/true");
         super::super::configure_runtime_compat(&mut command, &program, &mut [], &resources)
             .unwrap();
+        let mut wrapped = ["--fixed".into(), "cargo test".into()];
+        super::super::configure_runtime_compat(
+            &mut command,
+            super::super::super::PayloadProgram::Prefix(&program),
+            &mut wrapped,
+            &resources,
+        )
+        .unwrap();
+        assert_eq!(wrapped[0], "--fixed");
+        let script = wrapped[1].to_str().unwrap();
+        assert!(script.starts_with("export DYLD_INSERT_LIBRARIES="));
+        assert!(script.ends_with("\ncargo test"));
 
         let mut changed = super::super::RUNTIME_COMPAT_BYTES.to_vec();
         changed[0] ^= 1;
@@ -3842,6 +3855,7 @@ int main(int argc, char **argv) {
                     hidden: Default::default(),
                     intent: EffectIntent {
                         host: None,
+                        wrap: None,
                         rewrite: Vec::new(),
                         host_command: None,
                         target: crate::session::worker::EffectTarget::Workspace,

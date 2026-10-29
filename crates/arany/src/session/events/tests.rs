@@ -25,6 +25,7 @@ fn decode_accepts_known_kinds_and_rejects_unknown_ones() {
 pub(super) fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
     let intent = crate::tools::EffectIntent {
         host: None,
+        wrap: None,
         rewrite: Vec::new(),
         host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,

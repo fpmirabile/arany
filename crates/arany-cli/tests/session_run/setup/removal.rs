@@ -11,8 +11,13 @@ use std::time::{Duration, Instant};
 const REMOVED_CLIENT: &str = "oaiapp_removed_account";
 
 // Local: this module also compiles in the binary unit tests, which lack `crate::setup`.
-fn legacy_chatgpt_slot(client_id: &str) -> String {
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(client_id.as_bytes());
+fn chatgpt_slot(client_id: &str, id: uuid::Uuid) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::new()
+        .chain_update(client_id)
+        .chain_update([0])
+        .chain_update(id.as_bytes())
+        .finalize();
     format!(
         "chatgpt-{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
@@ -52,7 +57,15 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     std::fs::write(root.join("helper"), HELPER).unwrap();
     std::fs::set_permissions(root.join("helper"), std::fs::Permissions::from_mode(0o700)).unwrap();
     let account_root = StateRoot::admit(&root.join("account-root")).unwrap();
-    let (selected, _) = seed_accounts(&account_root);
+    let (selected, removed) = seed_accounts(&account_root);
+    let saved: serde_json::Value = serde_json::from_slice(
+        &account_root
+            .record(RecordKind::ChatgptAccounts)
+            .read()
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
     let preferences = account_root
         .record(RecordKind::ModelPreferences)
         .read()
@@ -81,7 +94,15 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
             .unwrap();
         let index: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(index["selected"], selected.to_string());
-        assert_eq!(index["accounts"][1]["disconnected"], true);
+        assert_eq!(index["accounts"][0], saved["accounts"][0]);
+        let accounts = index["accounts"].as_array().unwrap();
+        if phase == "first" {
+            assert_eq!(accounts.len(), 2);
+            assert_eq!(accounts[1]["id"], removed.to_string());
+            assert_eq!(accounts[1]["disconnected"], true);
+        } else {
+            assert_eq!(accounts.len(), 1);
+        }
         assert_eq!(
             account_root
                 .record(RecordKind::ModelPreferences)
@@ -94,7 +115,7 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     let deleted: Vec<_> = deleted.lines().collect();
     assert_eq!(deleted.len(), 2);
     assert_eq!(deleted[0], deleted[1]);
-    assert_eq!(deleted[0], legacy_chatgpt_slot(REMOVED_CLIENT));
+    assert_eq!(deleted[0], chatgpt_slot(REMOVED_CLIENT, removed));
 }
 
 fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
@@ -104,15 +125,15 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     let entry = |id, client| {
         serde_json::json!({
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
-            "chatgpt_account_id":null,"keyring_slot":legacy_chatgpt_slot(client),
+            "chatgpt_account_id":null,"keyring_slot":chatgpt_slot(client, id),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
-            "disconnected":false,"plan_permission_missing":false,"token":null
+            "disconnected":false,"token":null
         })
     };
     root.record(RecordKind::ChatgptAccounts)
         .replace(
             &serde_json::to_vec(&serde_json::json!({
-                "schema":4,"selected":selected,
+                "schema":5,"selected":selected,
                 "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)]
             }))
             .unwrap(),

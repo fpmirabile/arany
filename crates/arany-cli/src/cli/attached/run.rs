@@ -1501,8 +1501,13 @@ mod tests {
             use sha2::{Digest, Sha256};
             let client_slot = format!(
                 "chatgpt-{}",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .encode(Sha256::digest("synthetic-client"))
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    Sha256::new()
+                        .chain_update("synthetic-client")
+                        .chain_update([0])
+                        .chain_update(id.as_bytes())
+                        .finalize()
+                )
             );
             state
                 .record(RecordKind::ChatgptAccounts).replace(
@@ -1513,7 +1518,7 @@ mod tests {
                             "client_id": "synthetic-client", "subject": "synthetic-subject",
                             "chatgpt_account_id": null, "keyring_slot": client_slot,
                             "storage": "keyring", "renewal_pending": false, "signout_pending": false,
-                            "disconnected": false, "plan_permission_missing": false, "token": null
+                            "disconnected": false, "token": null
                         }]
                     }))
                     .unwrap(),
@@ -1575,7 +1580,7 @@ mod tests {
             record["accounts"][0]
                 .as_object_mut()
                 .unwrap()
-                .remove("plan_permission_missing");
+                .remove("signout_pending");
             state
                 .record(RecordKind::ChatgptAccounts)
                 .replace(&serde_json::to_vec(&record).unwrap())

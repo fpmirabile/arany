@@ -7,6 +7,7 @@ fn credentials(client_id: &str, subject: &str) -> VerifiedCredentials {
         client_id: client_id.into(),
         host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
         subject: subject.into(),
+        chatgpt_account_id: None,
         id_token: "synthetic-id".into(),
         access_token: "synthetic-access".into(),
         refresh_token: "synthetic-refresh".into(),
@@ -118,87 +119,6 @@ async fn assert_disappearing_keyring_save(root: &Path, existing: bool) {
         },
     )
     .await;
-}
-
-#[tokio::test]
-async fn chatgpt_partial_publication_faults_block_setup_continuation() {
-    enum Permission {
-        Enabled,
-        Disabled,
-    }
-    for (storage, permission) in [
-        (AccountStorage::Keyring, Permission::Enabled),
-        (AccountStorage::Keyring, Permission::Disabled),
-        (AccountStorage::PrivateFile, Permission::Enabled),
-        (AccountStorage::PrivateFile, Permission::Disabled),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir(&workspace).unwrap();
-        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-        let credentials = credentials("oaiapp_partial_save", "synthetic-subject");
-        let registration = serde_json::json!({
-            "schema": 1, "host_id": credentials.host_id,
-            "issued_client_id": credentials.client_id,
-        });
-        state
-            .record(RecordKind::ChatgptRegistration)
-            .replace(&serde_json::to_vec(&registration).unwrap())
-            .unwrap();
-        arany::FaultPlan::fail_record_publication(
-            state.path().to_owned(),
-            "chatgpt-registration.json",
-        );
-        crate::cli::attached::assert_uncertain_publication(
-            crate::cli::attached::SetupPublication::ChatGpt,
-            || {
-                let result = if matches!(permission, Permission::Disabled) {
-                    save_without_plan_permission_at(
-                        &state,
-                        &workspace,
-                        VerifiedIdentity {
-                            client_id: credentials.client_id.clone(),
-                            host_id: credentials.host_id,
-                            subject: credentials.subject.clone(),
-                        },
-                        storage,
-                        None,
-                        |_| panic!("new disabled account has no keyring item"),
-                    )
-                    .map(|outcome| outcome.id)
-                } else {
-                    let consent = RiskPrompt::new(storage)
-                        .accept("Accept")
-                        .unwrap()
-                        .bind(&credentials)
-                        .unwrap();
-                    match storage {
-                        AccountStorage::PrivateFile => {
-                            save_private_file_at(&state, &workspace, credentials, consent, None)
-                        }
-                        AccountStorage::Keyring => save_keyring_at_with(
-                            &state,
-                            &workspace,
-                            credentials,
-                            consent,
-                            None,
-                            |_, _| Ok(()),
-                        ),
-                    }
-                };
-                assert_eq!(AccountIndex::read(&state).unwrap().accounts.len(), 1);
-                let error = result.unwrap_err();
-                assert!(matches!(
-                    error,
-                    AuthorizationError::CredentialStore(
-                        crate::accounts::credentials::CredentialError::WriteOutcomeUnknown
-                    )
-                ));
-                error
-            },
-        )
-        .await;
-    }
 }
 
 #[tokio::test]
@@ -389,18 +309,12 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     let id = save_keyring_at_with(
         &state,
         &workspace,
-        credentials.clone(),
-        consent.clone(),
+        credentials,
+        consent,
         None,
         |_, _| Ok(()),
     )
     .unwrap();
-    let token = TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
-        slot: Some(account_keyring_slot("oaiapp_keyring_signout", id)),
-        credentials,
-        consent,
-    };
     let expected_index = state
         .record(RecordKind::ChatgptAccounts)
         .read()
@@ -414,12 +328,7 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
             expected_index: Some(&expected_index),
         },
         SignOutActions {
-            read_keyring: |entry: &AccountEntry| {
-                assert_eq!(entry.client_id, token.credentials.client_id);
-                assert_eq!(entry.subject, token.credentials.subject);
-                assert_eq!(entry.host_id, token.credentials.host_id);
-                Ok(token.clone())
-            },
+            read_keyring: |_: &AccountEntry| panic!("local removal must not load token"),
             revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
             delete_keyring: |slot: &str| {
                 assert_eq!(slot, account_keyring_slot("oaiapp_keyring_signout", id));
@@ -453,83 +362,10 @@ fn timed_out_chatgpt_keyring_deletion_blocks_account_until_cleanup_succeeds() {
     .unwrap();
     assert!(!cleanup.remote_confirmed);
     assert!(cleanup.local_cleared);
-    for confirmed in [true, false] {
-        assert_eq!(
-            save_keyring_at_with(
-                &state,
-                &workspace,
-                token.credentials.clone(),
-                token.consent.clone(),
-                Some(id),
-                |_, _| Ok(()),
-            )
-            .unwrap(),
-            id
-        );
-        let outcome = save_without_plan_permission_at(
-            &state,
-            &workspace,
-            VerifiedIdentity {
-                client_id: token.credentials.client_id.clone(),
-                host_id: token.credentials.host_id,
-                subject: token.credentials.subject.clone(),
-            },
-            AccountStorage::Keyring,
-            Some(id),
-            |slot| {
-                assert_eq!(slot, account_keyring_slot("oaiapp_keyring_signout", id));
-                let blocked = AccountIndex::read(&state).unwrap();
-                assert!(blocked.accounts[0].plan_permission_missing);
-                assert!(blocked.accounts[0].disconnected);
-                assert!(blocked.accounts[0].token.is_none());
-                assert!(matches!(
-                    load_selected_keyring_at(&state, id),
-                    Err(AuthorizationError::PermissionMissing)
-                ));
-                if confirmed {
-                    Ok(())
-                } else {
-                    Err(AuthorizationError::Unavailable)
-                }
-            },
-        )
-        .unwrap();
-        assert_eq!(outcome.id, id);
-        assert_eq!(outcome.local_cleared, confirmed);
-        assert!(matches!(
-            load_selected_keyring_at(&state, id),
-            Err(AuthorizationError::PermissionMissing)
-        ));
-        assert_eq!(selected_registration_at(&state).unwrap(), (id, false));
-        assert!(
-            selected_reauthorization_target_at(&state, id)
-                .unwrap()
-                .plan_permission_missing
-        );
-    }
-    assert_eq!(
-        save_keyring_at_with(
-            &state,
-            &workspace,
-            token.credentials.clone(),
-            token.consent.clone(),
-            Some(id),
-            |_, _| {
-                assert!(matches!(
-                    load_selected_keyring_at(&state, id),
-                    Err(AuthorizationError::PermissionMissing)
-                ));
-                Ok(())
-            },
-        )
-        .unwrap(),
-        id
-    );
-    let enabled = AccountIndex::read(&state).unwrap();
-    assert!(!enabled.accounts[0].plan_permission_missing);
-    assert!(!enabled.accounts[0].disconnected);
-    assert!(!enabled.accounts[0].renewal_pending);
-    assert_eq!(selected_registration_at(&state).unwrap(), (id, true));
+    let reopened = StateRoot::open_existing(state.path()).unwrap();
+    let index = AccountIndex::read(&reopened).unwrap();
+    assert!(index.accounts.is_empty());
+    assert!(index.selected.is_none());
 }
 
 #[test]
@@ -664,7 +500,6 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
             renewal_pending: true,
             signout_pending: false,
             disconnected: false,
-            plan_permission_missing: false,
             token: None,
         }],
     }
@@ -868,7 +703,6 @@ fn keyring_entry(id: Uuid, credentials: &VerifiedCredentials, slot: String) -> A
         renewal_pending: false,
         signout_pending: false,
         disconnected: false,
-        plan_permission_missing: false,
         token: None,
     }
 }
@@ -881,18 +715,9 @@ fn keyring_slot_and_consent_bind_token_to_its_record() {
     let value = token_record_json(TOKEN_RECORD_SCHEMA, Some(&slot), &creds);
     let record = serde_json::to_vec(&value).unwrap();
     assert!(valid_keyring_record(&slot, &record));
-    assert!(valid_written_keyring_record(&slot, &record));
     let foreign = account_keyring_slot("oaiapp_first", Uuid::now_v7());
     assert!(!valid_keyring_record(&foreign, &record));
     assert!(!valid_keyring_record(
-        &legacy_keyring_slot("oaiapp_first"),
-        &record
-    ));
-    assert!(!valid_keyring_record(
-        &slot,
-        &vec![b'x'; MAX_TOKEN_RECORD_BYTES + 1]
-    ));
-    assert!(!valid_written_keyring_record(
         &slot,
         &vec![b'x'; MAX_TOKEN_RECORD_BYTES + 1]
     ));
@@ -911,23 +736,6 @@ fn keyring_slot_and_consent_bind_token_to_its_record() {
 }
 
 #[test]
-fn version_one_keyring_records_upgrade_in_memory_at_their_client_derived_slot() {
-    let creds = credentials("oaiapp_legacy", "subject-one");
-    let legacy_slot = legacy_keyring_slot("oaiapp_legacy");
-    let mut value = token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds);
-    let record = serde_json::to_vec(&value).unwrap();
-    assert!(valid_keyring_record(&legacy_slot, &record));
-    assert!(!valid_written_keyring_record(&legacy_slot, &record));
-    let moved = account_keyring_slot("oaiapp_legacy", Uuid::now_v7());
-    assert!(!valid_keyring_record(&moved, &record));
-    let upgraded = decode_keyring_record(&record).unwrap();
-    assert_eq!(upgraded.schema, TOKEN_RECORD_SCHEMA);
-    assert_eq!(upgraded.slot.as_deref(), Some(legacy_slot.as_str()));
-    value["slot"] = legacy_slot.into();
-    assert!(decode_keyring_record(&serde_json::to_vec(&value).unwrap()).is_none());
-}
-
-#[test]
 fn keyring_read_admits_only_the_record_written_at_the_entry_slot() {
     let id = Uuid::now_v7();
     let creds = credentials("oaiapp_admit", "subject-one");
@@ -943,7 +751,7 @@ fn keyring_read_admits_only_the_record_written_at_the_entry_slot() {
     for record in [
         bytes(TOKEN_RECORD_SCHEMA, Some(&foreign), &creds),
         bytes(TOKEN_RECORD_SCHEMA, None, &creds),
-        bytes(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds),
+        bytes(1, Some(&slot), &creds),
         bytes(
             TOKEN_RECORD_SCHEMA,
             Some(&slot),
@@ -960,10 +768,6 @@ fn keyring_read_admits_only_the_record_written_at_the_entry_slot() {
             Err(AuthorizationError::InvalidIdentity)
         ));
     }
-    let migrated = keyring_entry(id, &creds, legacy_keyring_slot("oaiapp_admit"));
-    assert!(
-        admit_keyring_record(&migrated, &bytes(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds)).is_ok()
-    );
 }
 
 #[test]
@@ -983,7 +787,7 @@ fn accounts_of_one_client_keep_distinct_slots_and_identities() {
             keyring_consent(credentials),
             None,
             |slot, body| {
-                assert!(valid_written_keyring_record(slot, body.as_bytes()));
+                assert!(valid_keyring_record(slot, body.as_bytes()));
                 written.push(slot.to_owned());
                 Ok(())
             },
@@ -1019,9 +823,7 @@ fn accounts_of_one_client_keep_distinct_slots_and_identities() {
             .is_err()
     );
     let mut shared = serde_json::to_value(&index).unwrap();
-    for account in 0..2 {
-        shared["accounts"][account]["keyring_slot"] = legacy_keyring_slot("oaiapp_shared").into();
-    }
+    shared["accounts"][1]["keyring_slot"] = shared["accounts"][0]["keyring_slot"].clone();
     assert!(
         serde_json::from_value::<AccountIndex>(shared)
             .unwrap()
@@ -1029,7 +831,7 @@ fn accounts_of_one_client_keep_distinct_slots_and_identities() {
             .is_err()
     );
     let mut foreign = serde_json::to_value(&index).unwrap();
-    foreign["accounts"][0]["keyring_slot"] = legacy_keyring_slot("oaiapp_other").into();
+    foreign["accounts"][0]["keyring_slot"] = account_keyring_slot("oaiapp_other", first_id).into();
     assert!(
         serde_json::from_value::<AccountIndex>(foreign)
             .unwrap()
@@ -1058,10 +860,11 @@ fn accounts_of_one_client_keep_distinct_slots_and_identities() {
     assert!(outcome.local_cleared);
     assert_eq!(deleted.as_deref(), Some(written[0].as_str()));
     let index = AccountIndex::read(&state).unwrap();
-    assert!(index.accounts[0].disconnected);
-    assert!(!index.accounts[1].disconnected);
+    assert_eq!(index.accounts.len(), 1);
+    assert_eq!(index.accounts[0].id, second_id);
+    assert!(!index.accounts[0].disconnected);
     assert_eq!(
-        index.accounts[1].keyring_slot.as_deref(),
+        index.accounts[0].keyring_slot.as_deref(),
         Some(written[1].as_str())
     );
 }
@@ -1079,7 +882,8 @@ fn private_file_entries_carry_no_slot() {
     assert!(index.accounts[0].chatgpt_account_id.is_none());
     assert!(index.accounts[0].token.as_ref().unwrap().slot.is_none());
     let mut slotted = serde_json::to_value(&index).unwrap();
-    slotted["accounts"][0]["keyring_slot"] = legacy_keyring_slot("oaiapp_file").into();
+    slotted["accounts"][0]["keyring_slot"] =
+        account_keyring_slot("oaiapp_file", index.accounts[0].id).into();
     assert!(
         serde_json::from_value::<AccountIndex>(slotted)
             .unwrap()
@@ -1105,13 +909,12 @@ fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path()
     let refused = |slot: &str, bytes: &[u8]| {
         assert!(decode_keyring_record(bytes).is_none());
         assert!(!valid_keyring_record(slot, bytes));
-        assert!(!valid_written_keyring_record(slot, bytes));
         assert!(matches!(
             admit_keyring_record(&entry, bytes),
             Err(AuthorizationError::InvalidIdentity)
         ));
     };
-    for schema in [0, 3, 255] {
+    for schema in [0, 1, 3, 255] {
         let value = token_record_json(schema, Some(&slot), &creds);
         refused(&slot, &serde_json::to_vec(&value).unwrap());
     }
@@ -1138,38 +941,13 @@ fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path()
         assert_ne!(duplicated, current);
         refused(&slot, duplicated.as_bytes());
     }
-    let legacy_slot = legacy_keyring_slot("oaiapp_dup");
-    let legacy =
-        serde_json::to_string(&token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, &creds))
-            .unwrap();
-    assert!(valid_keyring_record(&legacy_slot, legacy.as_bytes()));
-    let legacy_entry = keyring_entry(id, &creds, legacy_slot.clone());
-    for (from, to) in [
-        ("\"schema\":1", "\"schema\":1,\"schema\":1"),
-        (
-            "\"client_id\":\"oaiapp_dup\"",
-            "\"client_id\":\"oaiapp_dup\",\"client_id\":\"oaiapp_dup\"",
-        ),
-        (
-            "\"warning_version\":",
-            "\"warning_version\":0,\"warning_version\":",
-        ),
-    ] {
-        let duplicated = legacy.replacen(from, to, 1);
-        assert_ne!(duplicated, legacy);
-        assert!(!valid_keyring_record(&legacy_slot, duplicated.as_bytes()));
-        assert!(matches!(
-            admit_keyring_record(&legacy_entry, duplicated.as_bytes()),
-            Err(AuthorizationError::InvalidIdentity)
-        ));
-    }
 }
 
 const FAKE_HELPER: &str = r#"#!/bin/sh
 d="${0%/*}/store"
 case "$2" in
 read) [ -f "$d/$3" ] || exit 2; /bin/cat "$d/$3" ;;
-write) [ ! -f "$d/fail-write" ] || exit 1; /bin/cat > "$d/$3.tmp" && /bin/mv "$d/$3.tmp" "$d/$3" ;;
+write) /bin/cat > "$d/$3.tmp" && /bin/mv "$d/$3.tmp" "$d/$3" ;;
 delete) /bin/rm -f "$d/$3" ;;
 *) exit 1 ;;
 esac
@@ -1197,25 +975,12 @@ impl FakeHelper {
         Self { store, _gate: gate }
     }
 
-    fn put(&self, slot: &str, bytes: &[u8]) {
-        std::fs::write(self.store.join(slot), bytes).unwrap();
-    }
-
     fn get(&self, slot: &str) -> Vec<u8> {
         std::fs::read(self.store.join(slot)).unwrap()
     }
 
     fn holds(&self, slot: &str) -> bool {
         self.store.join(slot).exists()
-    }
-
-    fn fail_writes(&self, fail: bool) {
-        let marker = self.store.join("fail-write");
-        if fail {
-            std::fs::write(marker, b"").unwrap();
-        } else {
-            std::fs::remove_file(marker).unwrap();
-        }
     }
 }
 
@@ -1233,133 +998,6 @@ fn rotate(previous: &VerifiedCredentials) -> Result<VerifiedCredentials, Authori
     next.refresh_token = "synthetic-rotated-refresh".into();
     next.access_expires_at_unix = 1_800_003_600;
     Ok(next)
-}
-
-#[test]
-fn legacy_slot_keyring_accounts_load_refresh_and_block_through_their_retained_slots() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let first = credentials("oaiapp_first_issued", "shared-subject");
-    let second = credentials("oaiapp_second_issued", "shared-subject");
-    let mut ids = Vec::new();
-    for creds in [&first, &second] {
-        ids.push(
-            save_keyring_at_with(
-                &state,
-                &workspace,
-                creds.clone(),
-                keyring_consent(creds),
-                None,
-                |_, _| Ok(()),
-            )
-            .unwrap(),
-        );
-    }
-    let (first_id, second_id) = (ids[0], ids[1]);
-    let helper = FakeHelper::install(temp.path());
-    let legacy_first = legacy_keyring_slot("oaiapp_first_issued");
-    let legacy_second = legacy_keyring_slot("oaiapp_second_issued");
-    // Current indexes keep the client-derived slot an earlier release wrote tokens at.
-    let mut index = AccountIndex::read(&state).unwrap();
-    index.accounts[0].keyring_slot = Some(legacy_first.clone());
-    index.accounts[1].keyring_slot = Some(legacy_second.clone());
-    index.write(&state).unwrap();
-    let version_one = |creds: &VerifiedCredentials| {
-        serde_json::to_vec(&token_record_json(LEGACY_TOKEN_RECORD_SCHEMA, None, creds)).unwrap()
-    };
-    helper.put(&legacy_first, &version_one(&first));
-    let second_bytes = version_one(&second);
-    helper.put(&legacy_second, &second_bytes);
-    let first_bytes = helper.get(&legacy_first);
-
-    let mut index = AccountIndex::read(&state).unwrap();
-    index.selected = Some(second_id);
-    index.write(&state).unwrap();
-    assert_eq!(
-        load_selected_keyring_at(&state, second_id)
-            .unwrap()
-            .refresh_token,
-        "synthetic-refresh"
-    );
-    assert_eq!(helper.get(&legacy_second), second_bytes);
-
-    let renewed =
-        refresh_selected_with(&state, &workspace, second_id, 1_799_999_900, rotate).unwrap();
-    assert_eq!(
-        renewed.credentials.refresh_token,
-        "synthetic-rotated-refresh"
-    );
-    let stored: TokenRecord = serde_json::from_slice(&helper.get(&legacy_second)).unwrap();
-    assert_eq!(stored.schema, TOKEN_RECORD_SCHEMA);
-    assert_eq!(stored.slot.as_deref(), Some(legacy_second.as_str()));
-    assert_eq!(
-        stored.credentials.refresh_token,
-        "synthetic-rotated-refresh"
-    );
-    assert_eq!(helper.get(&legacy_first), first_bytes);
-    assert!(!AccountIndex::read(&state).unwrap().accounts[1].renewal_pending);
-
-    let mut index = AccountIndex::read(&state).unwrap();
-    index.selected = Some(first_id);
-    index.write(&state).unwrap();
-    helper.fail_writes(true);
-    assert!(matches!(
-        refresh_selected_with(&state, &workspace, first_id, 1_799_999_900, rotate),
-        Err(AuthorizationError::RenewalStorageUncertain)
-    ));
-    helper.fail_writes(false);
-    let reopened = StateRoot::open_existing(state.path()).unwrap();
-    assert!(AccountIndex::read(&reopened).unwrap().accounts[0].renewal_pending);
-    assert!(matches!(
-        load_selected_keyring_at(&reopened, first_id),
-        Err(AuthorizationError::RenewalStorageUncertain)
-    ));
-    assert_eq!(helper.get(&legacy_first), first_bytes);
-    assert_eq!(
-        serde_json::from_slice::<TokenRecord>(&helper.get(&legacy_second))
-            .unwrap()
-            .credentials
-            .refresh_token,
-        "synthetic-rotated-refresh"
-    );
-
-    assert_eq!(
-        save_keyring_at(
-            &reopened,
-            &workspace,
-            first.clone(),
-            keyring_consent(&first),
-            Some(first_id),
-        )
-        .unwrap(),
-        first_id
-    );
-    let repaired: TokenRecord = serde_json::from_slice(&helper.get(&legacy_first)).unwrap();
-    assert_eq!(repaired.schema, TOKEN_RECORD_SCHEMA);
-    assert_eq!(repaired.slot.as_deref(), Some(legacy_first.as_str()));
-    assert!(!AccountIndex::read(&reopened).unwrap().accounts[0].renewal_pending);
-
-    let removed = sign_out_target_at_with(
-        &reopened,
-        &workspace,
-        SignOutTarget {
-            account_id: Some(second_id),
-            expected_index: None,
-        },
-        SignOutActions {
-            read_keyring: read_keyring_token,
-            revoke: None::<fn(&VerifiedCredentials) -> Result<(), AuthorizationError>>,
-            delete_keyring: |slot: &str| {
-                delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable)
-            },
-        },
-    )
-    .unwrap();
-    assert!(removed.local_cleared);
-    assert!(!helper.holds(&legacy_second));
-    assert!(helper.holds(&legacy_first));
 }
 
 #[test]
@@ -1469,7 +1107,6 @@ fn pending_keyring_renewal_blocks_load_before_os_store_access() {
             renewal_pending: true,
             signout_pending: false,
             disconnected: false,
-            plan_permission_missing: false,
             token: None,
         }],
     }
@@ -1680,19 +1317,17 @@ fn reuse_picker_excludes_every_unusable_nonselected_account() {
             .unwrap(),
         );
     }
-    for (disconnected, signout_pending, renewal_pending, plan_permission_missing, usable) in [
-        (false, false, false, false, true),
-        (true, false, false, false, false),
-        (false, true, false, false, false),
-        (false, false, true, false, false),
-        (true, false, false, true, false),
+    for (disconnected, signout_pending, renewal_pending, usable) in [
+        (false, false, false, true),
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
     ] {
         let mut index = AccountIndex::read(&state).unwrap();
         let entry = &mut index.accounts[0];
         entry.disconnected = disconnected;
         entry.signout_pending = signout_pending;
         entry.renewal_pending = renewal_pending;
-        entry.plan_permission_missing = plan_permission_missing;
         index.write(&state).unwrap();
         assert_eq!(
             saved_ids_at(&state).unwrap(),
@@ -1822,13 +1457,14 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
     assert!(outcome.remote_confirmed && outcome.local_cleared);
     let index = AccountIndex::read(&state).unwrap();
     assert_eq!(index.selected, Some(second_id));
-    assert!(
-        index
-            .accounts
-            .iter()
-            .find(|entry| entry.id == first_id)
+    assert_eq!(index.accounts.len(), 1);
+    assert_eq!(index.accounts[0].id, second_id);
+    assert!(!index.accounts[0].disconnected);
+    assert_eq!(
+        load_selected_private_file_at(&state, second_id)
             .unwrap()
-            .disconnected
+            .refresh_token,
+        second.refresh_token
     );
 
     let stale = state
@@ -1840,7 +1476,7 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
     let changed_id = Uuid::now_v7();
     let mut changed = index;
     changed.selected = Some(changed_id);
-    changed.accounts[1].id = changed_id;
+    changed.accounts[0].id = changed_id;
     changed.write(&state).unwrap();
     assert!(matches!(
         sign_out_target_at_with(
@@ -1861,7 +1497,7 @@ fn setup_signout_removes_the_confirmed_identity_and_rejects_a_stale_index() {
 }
 
 #[test]
-fn local_account_removal_disconnects_without_remote_revocation() {
+fn local_account_removal_forgets_identity_without_remote_revocation() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1896,7 +1532,9 @@ fn local_account_removal_disconnects_without_remote_revocation() {
     .unwrap();
     assert!(!outcome.remote_confirmed);
     assert!(outcome.local_cleared);
-    assert!(AccountIndex::read(&state).unwrap().accounts[0].disconnected);
+    let index = AccountIndex::read(&state).unwrap();
+    assert!(index.accounts.is_empty());
+    assert!(index.selected.is_none());
 }
 
 #[test]
@@ -2252,143 +1890,10 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         "subject-two"
     );
 
-    let selected = refresh_selected_with(&reopened, &workspace, second_id, 1_799_000_000, |_| {
-        panic!("fresh token must not rotate")
-    })
-    .unwrap();
-    let outcome = save_without_plan_permission_at(
-        &reopened,
-        &workspace,
-        VerifiedIdentity {
-            client_id: "oaiapp_second".into(),
-            host_id: selected.credentials.host_id,
-            subject: "subject-two".into(),
-        },
-        AccountStorage::PrivateFile,
-        Some(second_id),
-        |_| panic!("private disabled sign-in must not access keyring"),
-    )
-    .unwrap();
-    assert_eq!(outcome.id, second_id);
-    assert!(outcome.local_cleared);
-    let disabled = AccountIndex::read(&reopened).unwrap();
-    assert!(disabled.accounts[1].plan_permission_missing);
-    assert!(disabled.accounts[1].token.is_none());
-    assert_eq!(
-        selected_registration_at(&reopened).unwrap(),
-        (second_id, false)
-    );
-    assert!(
-        selected_reauthorization_target_at(&reopened, second_id)
-            .unwrap()
-            .plan_permission_missing
-    );
-    assert!(matches!(
-        load_selected_private_file_at(&reopened, second_id),
-        Err(AuthorizationError::PermissionMissing)
-    ));
-    assert!(matches!(
-        refresh_selected_with(&reopened, &workspace, second_id, 1_799_999_000, |_| {
-            panic!("disabled sign-in must not refresh")
-        }),
-        Err(AuthorizationError::PermissionMissing)
-    ));
-    assert!(matches!(
-        admitted_model_at(
-            &reopened,
-            &workspace,
-            &selected,
-            ("model-one", Effort::Medium),
-            Ok(&[])
-        ),
-        Err(AuthorizationError::PermissionMissing)
-    ));
-    let before = reopened
-        .record(RecordKind::ChatgptAccounts)
-        .read()
-        .unwrap()
-        .unwrap();
-    for (client, subject, host, storage, expected) in [
-        (
-            "oaiapp_second",
-            "different-subject",
-            selected.credentials.host_id,
-            AccountStorage::PrivateFile,
-            Some(second_id),
-        ),
-        (
-            "oaiapp_second",
-            "subject-two",
-            selected.credentials.host_id,
-            AccountStorage::Keyring,
-            Some(second_id),
-        ),
-        (
-            "oaiapp_second",
-            "subject-two",
-            Uuid::parse_str("123e4567-e89b-42d3-a456-426614174001").unwrap(),
-            AccountStorage::PrivateFile,
-            Some(second_id),
-        ),
-        (
-            "oaiapp_first",
-            "subject-one",
-            selected.credentials.host_id,
-            AccountStorage::PrivateFile,
-            Some(second_id),
-        ),
-    ] {
-        assert!(
-            save_without_plan_permission_at(
-                &reopened,
-                &workspace,
-                VerifiedIdentity {
-                    client_id: client.into(),
-                    host_id: host,
-                    subject: subject.into()
-                },
-                storage,
-                expected,
-                |_| panic!("rejected disabled sign-in must not access keyring"),
-            )
-            .is_err()
-        );
-        assert!(
-            before
-                == reopened
-                    .record(RecordKind::ChatgptAccounts)
-                    .read()
-                    .unwrap()
-                    .unwrap(),
-            "rejected identity replaced the account"
-        );
-    }
-    let repaired = credentials("oaiapp_second", "subject-two");
-    assert_eq!(
-        save_private_file_at(
-            &reopened,
-            &workspace,
-            repaired.clone(),
-            accepted(&repaired),
-            Some(second_id)
-        )
-        .unwrap(),
-        second_id
-    );
-    let enabled = AccountIndex::read(&reopened).unwrap();
-    assert!(!enabled.accounts[1].plan_permission_missing);
-    assert_eq!(
-        load_selected_private_file_at(&reopened, second_id)
-            .unwrap()
-            .subject,
-        "subject-two"
-    );
-    let encoded = serde_json::to_value(&enabled).unwrap();
-    assert_eq!(encoded["accounts"][1]["plan_permission_missing"], false);
+    let encoded = serde_json::to_value(AccountIndex::read(&reopened).unwrap()).unwrap();
     for field in [
         "signout_pending",
         "disconnected",
-        "plan_permission_missing",
         "keyring_slot",
         "chatgpt_account_id",
         "token",
@@ -2402,16 +1907,6 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     }
 
     let valid = serde_json::to_value(AccountIndex::read(&reopened).unwrap()).unwrap();
-    let mut contradictory = valid.clone();
-    contradictory["accounts"][1]["plan_permission_missing"] = true.into();
-    reopened
-        .record(RecordKind::ChatgptAccounts)
-        .replace(&serde_json::to_vec(&contradictory).unwrap())
-        .unwrap();
-    assert!(matches!(
-        load_selected_private_file_at(&reopened, second_id),
-        Err(AuthorizationError::InvalidSavedState)
-    ));
     let mut wrong_host = valid.clone();
     wrong_host["accounts"][0]["host_id"] = "123e4567-e89b-42d3-a456-426614174001".into();
     reopened
@@ -2432,47 +1927,5 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
     assert!(matches!(
         load_selected_private_file_at(&reopened, second_id),
         Err(AuthorizationError::InvalidSavedState)
-    ));
-
-    let metadata_state = StateRoot::admit(&temp.path().join("metadata-only")).unwrap();
-    let identity = VerifiedIdentity {
-        client_id: "oaiapp_disabled".into(),
-        host_id: selected.credentials.host_id,
-        subject: "verified-subject".into(),
-    };
-    let outcome = save_without_plan_permission_at(
-        &metadata_state,
-        &workspace,
-        identity,
-        AccountStorage::PrivateFile,
-        None,
-        |_| panic!("new metadata-only account must not access keyring"),
-    )
-    .unwrap();
-    let metadata_reopened = StateRoot::open_existing(metadata_state.path()).unwrap();
-    let record = metadata_reopened
-        .record(RecordKind::ChatgptAccounts)
-        .read()
-        .unwrap()
-        .unwrap();
-    for omitted in [
-        b"synthetic-access".as_slice(),
-        b"synthetic-refresh",
-        b"synthetic-id",
-    ] {
-        assert!(
-            !record.windows(omitted.len()).any(|part| part == omitted),
-            "metadata-only record contains a token canary"
-        );
-    }
-    let index = AccountIndex::read(&metadata_reopened).unwrap();
-    assert_eq!(index.accounts.len(), 1);
-    assert_eq!(index.selected, Some(outcome.id));
-    assert!(index.accounts[0].plan_permission_missing);
-    assert!(index.accounts[0].token.is_none());
-    assert!(outcome.local_cleared);
-    assert!(matches!(
-        load_selected_private_file_at(&metadata_reopened, outcome.id),
-        Err(AuthorizationError::PermissionMissing)
     ));
 }

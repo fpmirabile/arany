@@ -192,6 +192,7 @@ mod tests {
             client_id: "oaiapp_synthetic".into(),
             host_id: Uuid::now_v7(),
             subject: "synthetic-subject".into(),
+            chatgpt_account_id: None,
             id_token: "synthetic-id".into(),
             access_token: "synthetic-access".into(),
             refresh_token: "synthetic-refresh".into(),

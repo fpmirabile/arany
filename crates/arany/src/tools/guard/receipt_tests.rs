@@ -5,6 +5,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
     fn make_observation(call: ToolCall, cache_requested_mebibytes: u64) -> ToolObservation {
         let mut intent = EffectIntent {
             host: None,
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,

@@ -3430,6 +3430,7 @@ fn headless_startup_archives_incompatible_history_and_fails_closed_on_unsafe_his
             process::file_output(
                 Command::new(env!("CARGO_BIN_EXE_arany"))
                     .env_clear()
+                    .env("ARANY_TEST_ACCOUNT_ROOT", root.path().join("account"))
                     .current_dir(&workspace)
                     .args(surface)
                     .arg("--state-dir")
@@ -3503,6 +3504,7 @@ fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
     let output = process::file_output(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", root.path().join("account"))
             .current_dir(&workspace)
             .args([
                 "acp",
@@ -3577,6 +3579,7 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     let output = process::file_output(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", root.path().join("account"))
             .env("OPENAI_API_KEY", "synthetic-acp-key")
             .current_dir(root.path())
             .args(["acp", "--profile", "coding", "--state-dir"])

@@ -2730,6 +2730,7 @@ mod tests {
     fn intent(workspace: &Path, call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: Some(pin(workspace, &call).unwrap()),
+            wrap: None,
             rewrite: Vec::new(),
             host_command: None,
             target: crate::worker::EffectTarget::Workspace,
@@ -2770,17 +2771,6 @@ mod tests {
             ssh_agent: None,
             gh_hosts: Some(b"github.com:\n    oauth_token: credential-canary\n".to_vec()),
             gh_host: "github.com".into(),
-        }
-    }
-
-    fn parser_git() -> crate::tools::config::Program {
-        let executable = std::fs::canonicalize("/usr/bin/git").unwrap();
-        crate::tools::config::Program {
-            name: "git".into(),
-            executable: executable.to_str().unwrap().into(),
-            sha256: hex_digest(&std::fs::read(executable).unwrap()),
-            interpreter: false,
-            inputs: vec![],
         }
     }
 
@@ -2914,7 +2904,7 @@ mod tests {
     #[tokio::test]
     async fn host_credentials_preserve_git_order_resets_scopes_and_includes_refuse() {
         use crate::test_support::process::BoundedOutput;
-        let git = parser_git();
+        let git = super::super::discover().unwrap();
         for (configuration, expected) in [
             (
                 "[credential \"https://github.com\"]\n helper = \"!f() { echo username=X; echo password=synthetic; }; f\"\n[credential]\n helper =\n",
@@ -3007,16 +2997,14 @@ mod tests {
         .unwrap();
         let scratch = parent.path().join("scratch");
         private_directory(&scratch).unwrap();
-        let git = parser_git();
-        assert!(
-            credential_config(
-                &git,
-                &[b"[credential]\nhelper=store\nuseHttpPath\n".to_vec()],
-                &scratch
-            )
-            .await
-            .is_ok()
-        );
+        let git = super::super::discover().unwrap();
+        credential_config(
+            &git,
+            &[b"[credential]\nhelper=store\nuseHttpPath\n".to_vec()],
+            &scratch,
+        )
+        .await
+        .unwrap();
         let second = parent.path().join("second");
         private_directory(&second).unwrap();
         assert_eq!(
@@ -3098,7 +3086,7 @@ mod tests {
             }
             hash.update(&buffer[..n]);
         }
-        let mut program = parser_git();
+        let mut program = super::super::discover().unwrap();
         program.executable = source.to_str().unwrap().into();
         program.sha256 = hash
             .finalize()
@@ -4240,6 +4228,7 @@ done
                     source_oid: "1".repeat(40),
                     refspec: format!("{}:refs/heads/main", "1".repeat(40)),
                 }),
+                wrap: None,
                 rewrite: Vec::new(),
                 host_command: None,
                 target: crate::worker::EffectTarget::Workspace,

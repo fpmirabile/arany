@@ -73,12 +73,17 @@ fn prepare_selected_chatgpt_account(root: &Path) -> Uuid {
     prepare_selected_chatgpt_account_at(&root.join("account-root"))
 }
 
-pub(crate) fn legacy_chatgpt_slot(client_id: &str) -> String {
+pub(crate) fn chatgpt_slot(client_id: &str, id: Uuid) -> String {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(client_id)
+        .chain_update([0])
+        .chain_update(id.as_bytes())
+        .finalize();
     format!(
         "chatgpt-{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(client_id))
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
     )
 }
 
@@ -86,7 +91,7 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 4,
+        "schema": 5,
         "selected": account_id,
         "accounts": [{
             "id": account_id,
@@ -94,10 +99,10 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
             "client_id": "oaiapp_synthetic_saved",
             "subject": "synthetic-subject",
             "chatgpt_account_id": null,
-            "keyring_slot": legacy_chatgpt_slot("oaiapp_synthetic_saved"),
+            "keyring_slot": chatgpt_slot("oaiapp_synthetic_saved", account_id),
             "storage": "keyring",
             "renewal_pending": false, "signout_pending": false,
-            "disconnected": false, "plan_permission_missing": false, "token": null
+            "disconnected": false, "token": null
         }]
     });
     state
@@ -105,9 +110,8 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
         .replace(&serde_json::to_vec(&record).expect("account index"))
         .expect("test ChatGPT account index");
     let registration = serde_json::json!({
-        "schema": 1,
-        "host_id": "123e4567-e89b-42d3-a456-426614174000",
-        "issued_client_id": null
+        "schema": 2,
+        "host_id": "123e4567-e89b-42d3-a456-426614174000"
     });
     state
         .record(RecordKind::ChatgptRegistration)
@@ -1735,18 +1739,6 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             executable
         } else {
             PathBuf::from("/arany")
-        };
-        let defaults = if replaced {
-            let account_id = prepare_selected_chatgpt_account_at(&account_path);
-            SessionDefaults {
-                provider: Some("chatgpt".into()),
-                model: Some("gpt-6.1-sol".into()),
-                effort: Some(arany::Effort::Low),
-                account_id: Some(account_id),
-                policy: Default::default(),
-            }
-        } else {
-            defaults.clone()
         };
         runtime
             .block_on(set_session_defaults(

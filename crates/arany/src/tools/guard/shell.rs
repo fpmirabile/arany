@@ -8,8 +8,14 @@ pub(super) fn validate_command(config: &Config, call: &ToolCall) -> Result<(), T
     let definition = config
         .commands
         .iter()
-        .find(|definition| &definition.name == program)
-        .ok_or(ToolError::Configuration)?;
+        .find(|definition| &definition.name == program);
+    let Some(definition) = definition else {
+        return if super::super::config::valid_absolute(program) {
+            Ok(())
+        } else {
+            Err(ToolError::Configuration)
+        };
+    };
     let executable = Path::new(&definition.executable);
     let shell_path = crate::tools::executable::EXECUTABLES.shell.path;
     match std::fs::canonicalize(shell_path) {
@@ -19,7 +25,7 @@ pub(super) fn validate_command(config: &Config, call: &ToolCall) -> Result<(), T
     }
 }
 
-pub(super) fn script<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<&str, ToolError> {
+pub(in crate::tools) fn script<T: AsRef<std::ffi::OsStr>>(args: &[T]) -> Result<&str, ToolError> {
     let refused = || {
         ToolError::GuardBootstrap(BootstrapFailure {
             check: Some(GuardCheck::ShellArguments),

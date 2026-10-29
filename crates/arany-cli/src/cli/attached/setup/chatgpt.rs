@@ -22,7 +22,6 @@ pub(super) enum ChatGptSetupAccount {
     Switched(uuid::Uuid),
     Connected(uuid::Uuid),
     Reauthorized(uuid::Uuid),
-    PermissionDisabled { id: uuid::Uuid, local_cleared: bool },
 }
 
 impl ChatGptSetupAccount {
@@ -32,7 +31,6 @@ impl ChatGptSetupAccount {
             | Self::Switched(id)
             | Self::Connected(id)
             | Self::Reauthorized(id) => *id,
-            Self::PermissionDisabled { id, .. } => *id,
         }
     }
 
@@ -42,9 +40,6 @@ impl ChatGptSetupAccount {
             Self::Switched(_) => "saved ChatGPT account was selected",
             Self::Connected(_) => "new ChatGPT account was saved",
             Self::Reauthorized(_) => "ChatGPT account was reconnected",
-            Self::PermissionDisabled { .. } => {
-                "verified ChatGPT sign-in was saved; plan usage is disabled"
-            }
         }
     }
 
@@ -96,7 +91,7 @@ pub(super) async fn chatgpt_setup(
             }
             Err(error) => return Err(SetupError::recoverable(error)),
         };
-        match chatgpt_account_action(terminal, saved, connected).await? {
+        match chatgpt_account_action(terminal, connected).await? {
             Some(ChatGptAccountAction::Inspect) => inspect_chatgpt_account(terminal).await?,
             Some(ChatGptAccountAction::UseSaved) => {
                 break choose_saved_chatgpt(terminal, workspace, saved, journal).await?;
@@ -132,7 +127,6 @@ enum ChatGptAccountAction {
 
 async fn chatgpt_account_action(
     terminal: &mut AttachedTerminal,
-    saved: uuid::Uuid,
     connected: bool,
 ) -> Result<Option<ChatGptAccountAction>, SetupError> {
     let (title, instruction, reconnect_label, other_saved) = if connected {
@@ -143,27 +137,13 @@ async fn chatgpt_account_action(
             true,
         )
     } else {
-        let (_, accounts) = chatgpt::account_inspections().map_err(SetupError::recoverable)?;
-        let permission_missing = accounts
-            .iter()
-            .find(|account| account.id == saved)
-            .is_some_and(|account| account.access == chatgpt::AccountAccess::PlanDisabled);
         let (_, ids) = chatgpt::saved_account_ids().map_err(SetupError::recoverable)?;
-        if permission_missing {
-            (
-                "ChatGPT plan disabled",
-                "Inspect, enable plan or choose another account",
-                "Enable plan",
-                ids.len() > 1,
-            )
-        } else {
-            (
-                "ChatGPT account disconnected",
-                "Inspect, reconnect or add",
-                "Reconnect",
-                ids.len() > 1,
-            )
-        }
+        (
+            "ChatGPT account disconnected",
+            "Inspect, reconnect or add",
+            "Reconnect",
+            ids.len() > 1,
+        )
     };
     let mut choices = Vec::new();
     if other_saved {
@@ -427,7 +407,6 @@ async fn inspect_chatgpt_account(terminal: &mut AttachedTerminal) -> Result<(), 
     let access = match account.access {
         chatgpt::AccountAccess::Connected => "connected; saved metadata only, not checked",
         chatgpt::AccountAccess::Disconnected => "unavailable; disconnected",
-        chatgpt::AccountAccess::PlanDisabled => "unavailable; plan permission disabled",
         chatgpt::AccountAccess::RenewalPending => "unavailable; renewal incomplete or uncertain",
         chatgpt::AccountAccess::SignOutPending => "unavailable; sign-out incomplete or uncertain",
     };
@@ -553,11 +532,7 @@ pub(super) async fn settle_chatgpt_authorization(
     result: Result<Option<ChatGptSetupAccount>, SetupError>,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
     let (digest, disposition) = match &result {
-        Ok(Some(ChatGptSetupAccount::PermissionDisabled {
-            local_cleared: false,
-            ..
-        }))
-        | Err(SetupError::Uncertain(_)) => (None, ProviderSetupDisposition::Uncertain),
+        Err(SetupError::Uncertain(_)) => (None, ProviderSetupDisposition::Uncertain),
         Ok(Some(account)) => (
             Some(Sha256::digest(account.id().as_bytes()).into()),
             ProviderSetupDisposition::Applied,
@@ -575,7 +550,6 @@ pub(super) async fn settle_chatgpt_authorization(
 }
 
 async fn begin_chatgpt_authorization(
-    terminal: &mut AttachedTerminal,
     workspace: &Path,
     target: Option<&chatgpt::ReauthorizationTarget>,
     acknowledgment: RiskAcknowledgment,
@@ -587,20 +561,6 @@ async fn begin_chatgpt_authorization(
         .is_some_and(|selected| selected.host_id != registration.host_id())
     {
         return Err("ChatGPT registration changed; restart /setup".into());
-    }
-    if target.is_none()
-        && registration.has_unfinished_sign_in()
-        && choose(
-            terminal,
-            4,
-            "Resume sign-in?",
-            "Reuse saved registration",
-            &[(b'0', "Back"), (b'1', "Resume")],
-        )
-        .await?
-            != Some(b'1')
-    {
-        return Ok(None);
     }
     let listener = CallbackListener::bind(acknowledgment)
         .await
@@ -625,7 +585,7 @@ async fn complete_chatgpt_authorization(
     acknowledgment: RiskAcknowledgment,
 ) -> Result<Option<ChatGptSetupAccount>, SetupError> {
     let Some((listener, attempt)) =
-        begin_chatgpt_authorization(terminal, workspace, target.as_ref(), acknowledgment).await?
+        begin_chatgpt_authorization(workspace, target.as_ref(), acknowledgment).await?
     else {
         return Ok(None);
     };
@@ -646,8 +606,8 @@ async fn complete_chatgpt_authorization(
     let Some(credentials) = await_chatgpt_step(
         terminal,
         "Verifying ChatGPT",
-        "Checking the signed account and plan permission",
-        exchange.redeem(workspace),
+        "Checking the signed account identity",
+        exchange.redeem(),
     )
     .await?
     else {
@@ -673,36 +633,23 @@ async fn complete_chatgpt_authorization(
 async fn save_chatgpt_authorization(
     workspace: &Path,
     expected: Option<uuid::Uuid>,
-    credentials: chatgpt::VerifiedSignIn,
+    credentials: chatgpt::VerifiedCredentials,
     acknowledgment: RiskAcknowledgment,
 ) -> Result<ChatGptSetupAccount, SetupError> {
-    match credentials {
-        chatgpt::VerifiedSignIn::PlanEnabled(credentials) => chatgpt::save_verified(
-            workspace.to_path_buf(),
-            credentials,
-            acknowledgment,
-            expected,
-        )
-        .await
-        .map(|id| {
-            if expected.is_some() {
-                ChatGptSetupAccount::Reauthorized(id)
-            } else {
-                ChatGptSetupAccount::Connected(id)
-            }
-        }),
-        chatgpt::VerifiedSignIn::PlanDisabled(identity) => chatgpt::save_without_plan_permission(
-            workspace.to_path_buf(),
-            identity,
-            acknowledgment,
-            expected,
-        )
-        .await
-        .map(|outcome| ChatGptSetupAccount::PermissionDisabled {
-            id: outcome.id,
-            local_cleared: outcome.local_cleared,
-        }),
-    }
+    chatgpt::save_verified(
+        workspace.to_path_buf(),
+        credentials,
+        acknowledgment,
+        expected,
+    )
+    .await
+    .map(|id| {
+        if expected.is_some() {
+            ChatGptSetupAccount::Reauthorized(id)
+        } else {
+            ChatGptSetupAccount::Connected(id)
+        }
+    })
     .map_err(SetupError::chatgpt_authorization)
 }
 
@@ -744,20 +691,6 @@ async fn configure_chatgpt(
 ) -> Result<(SessionDefaults, Option<String>, Vec<ModelEntry>), SetupError> {
     let account_id = account.id();
     let defaults = chatgpt_defaults(account_id);
-    if let ChatGptSetupAccount::PermissionDisabled { local_cleared, .. } = account {
-        let cleanup = if *local_cleared {
-            ""
-        } else {
-            "; removal of the previous keyring token was not confirmed"
-        };
-        return Ok((
-            defaults,
-            Some(format!(
-                "Verified ChatGPT sign-in saved; plan usage is disabled{cleanup}. Use /setup to enable the plan or explicitly choose an API account; no model check or Run started"
-            )),
-            Vec::new(),
-        ));
-    }
     let catalog = await_chatgpt_step(
         terminal,
         "Loading ChatGPT models",
@@ -886,14 +819,6 @@ mod tests {
             ChatGptSetupAccount::Switched(account_id),
             ChatGptSetupAccount::Connected(account_id),
             ChatGptSetupAccount::Reauthorized(account_id),
-            ChatGptSetupAccount::PermissionDisabled {
-                id: account_id,
-                local_cleared: true,
-            },
-            ChatGptSetupAccount::PermissionDisabled {
-                id: account_id,
-                local_cleared: false,
-            },
         ] {
             assert!(matches!(
                 account.finish(chatgpt_defaults(account_id), Some(failed_catalog.clone())),

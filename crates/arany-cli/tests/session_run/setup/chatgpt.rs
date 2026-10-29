@@ -36,12 +36,11 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
                         "client_id": "oaiapp_synthetic_other",
                         "subject": "synthetic-other-subject",
                         "chatgpt_account_id": null,
-                        "keyring_slot": legacy_chatgpt_slot("oaiapp_synthetic_other"),
+                        "keyring_slot": chatgpt_slot("oaiapp_synthetic_other", other),
                         "storage": "keyring",
                         "renewal_pending": false,
                         "signout_pending": false,
                         "disconnected": false,
-                        "plan_permission_missing": false,
                         "token": null
                     }));
             }
@@ -297,12 +296,11 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
             "client_id": "oaiapp_synthetic_other",
             "subject": "synthetic-other-subject",
             "chatgpt_account_id": null,
-            "keyring_slot": legacy_chatgpt_slot("oaiapp_synthetic_other"),
+            "keyring_slot": chatgpt_slot("oaiapp_synthetic_other", other),
             "storage": "keyring",
             "renewal_pending": false,
             "signout_pending": false,
             "disconnected": false,
-            "plan_permission_missing": false,
             "token": null
         }));
     account_root
