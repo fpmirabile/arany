@@ -176,17 +176,10 @@ fn assert_read_observations(run: &arany::RunView) {
     for tool in &run.tools {
         let observation = tool.observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        if matches!(tool.intent.call, ToolCall::Read { .. }) {
-            assert!(matches!(
-                observation.attestation,
-                Some(arany::Attestation::InProcess { .. })
-            ));
-        } else {
-            assert!(matches!(
-                observation.attestation,
-                Some(arany::Attestation::Guard(_))
-            ));
-        }
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::InProcess { .. })
+        ));
         assert!(!observation.output.contains("secret-canary"));
         assert!(!observation.output.contains(".env"));
         if matches!(tool.intent.call, ToolCall::Search { .. }) {

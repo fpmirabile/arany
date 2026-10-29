@@ -17,7 +17,7 @@ impl Presentation {
         workspace: &Path,
         state: &Path,
         key: Option<&str>,
-    ) -> SetupPty {
+    ) -> Pty {
         let mode = match self {
             Self::ScreenReader => SetupPtyMode::Manager,
             Self::Inline => SetupPtyMode::InlineManager,
@@ -25,17 +25,17 @@ impl Presentation {
         start_setup_pty_with_key(temp, workspace, state, mode, key)
     }
 
-    pub(super) fn choose(self, pty: &mut SetupPty, choice: usize) -> usize {
+    pub(super) fn choose(self, pty: &mut Pty, choice: usize) -> usize {
         let from = pty.transcript.len();
         let keys = match self {
             Self::ScreenReader => format!("{choice}\r").into_bytes(),
             Self::Inline => [b"\x1b[B".repeat(choice - 1), b"\r".to_vec()].concat(),
         };
-        pty.input.write_all(&keys).expect("manager choice");
+        pty.send(&keys);
         from
     }
 
-    pub(super) fn menu(self, pty: &mut SetupPty, from: usize, title: &str) {
+    pub(super) fn menu(self, pty: &mut Pty, from: usize, title: &str) {
         match self {
             Self::ScreenReader => wait_setup_choices(pty, from),
             Self::Inline => {
@@ -53,16 +53,9 @@ impl Presentation {
         }
     }
 
-    pub(super) fn composer(self, pty: &mut SetupPty, from: usize) {
+    pub(super) fn composer(self, pty: &mut Pty, from: usize) {
         match self {
-            Self::ScreenReader => wait_for_after(
-                &mut pty.output,
-                &mut pty.input,
-                &mut pty.transcript,
-                &mut pty.answered,
-                from,
-                b"Input:\r\n",
-            ),
+            Self::ScreenReader => pty.wait_for_after(from, b"Input:\r\n"),
             Self::Inline => {
                 inline_frame(pty, from, "Ask Arany");
             }
@@ -70,7 +63,7 @@ impl Presentation {
     }
 }
 
-pub(super) fn inline_frame(pty: &mut SetupPty, from: usize, needle: &str) -> Vec<String> {
+pub(super) fn inline_frame(pty: &mut Pty, from: usize, needle: &str) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(end) = pty.transcript[from..]
@@ -82,12 +75,7 @@ pub(super) fn inline_frame(pty: &mut SetupPty, from: usize, needle: &str) -> Vec
                 return screen;
             }
         }
-        pump(
-            &mut pty.output,
-            &mut pty.input,
-            &mut pty.transcript,
-            &mut pty.answered,
-        );
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "completed setup frame missing {needle}: {}",
@@ -98,36 +86,21 @@ pub(super) fn inline_frame(pty: &mut SetupPty, from: usize, needle: &str) -> Vec
 }
 
 pub(super) fn acknowledge_result(
-    pty: &mut SetupPty,
+    pty: &mut Pty,
     presentation: Presentation,
     from: usize,
 ) -> (usize, String) {
     let mut text = String::new();
     let mut cursor = from;
     let total = match presentation {
-        Presentation::ScreenReader => wait_linear_page(
-            &mut pty.output,
-            &mut pty.input,
-            &mut pty.transcript,
-            &mut pty.answered,
-            (cursor, 1),
-        ),
+        Presentation::ScreenReader => pty.wait_linear_page((cursor, 1)),
         Presentation::Inline => page_total(&inline_frame(pty, cursor, "Page 1/")),
     };
     assert!((1..=MAX_REVIEW_PAGES).contains(&total));
     for page in 1..=total {
         match presentation {
             Presentation::ScreenReader => {
-                assert_eq!(
-                    wait_linear_page(
-                        &mut pty.output,
-                        &mut pty.input,
-                        &mut pty.transcript,
-                        &mut pty.answered,
-                        (cursor, page)
-                    ),
-                    total
-                );
+                assert_eq!(pty.wait_linear_page((cursor, page)), total);
                 text.push_str(&linear_result_page(pty, cursor, page, total));
             }
             Presentation::Inline => {
@@ -141,14 +114,12 @@ pub(super) fn acknowledge_result(
             }
         }
         cursor = pty.transcript.len();
-        pty.input
-            .write_all(b"\r")
-            .expect("acknowledge check result page");
+        pty.send(b"\r");
     }
     (cursor, text)
 }
 
-fn linear_result_page(pty: &mut SetupPty, from: usize, page: usize, total: usize) -> String {
+fn linear_result_page(pty: &mut Pty, from: usize, page: usize, total: usize) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     let marker = format!("Choose: Page {page}/{total}\\u{{000a}}");
     loop {
@@ -158,12 +129,7 @@ fn linear_result_page(pty: &mut SetupPty, from: usize, page: usize, total: usize
         {
             return line.to_owned();
         }
-        pump(
-            &mut pty.output,
-            &mut pty.input,
-            &mut pty.transcript,
-            &mut pty.answered,
-        );
+        pty.pump();
         assert!(Instant::now() < deadline, "complete linear result page");
         thread::yield_now();
     }
@@ -230,7 +196,7 @@ fn manager_empty_account_removal_waits_for_acknowledgment() {
     }
 }
 
-fn finish_manager_pty(pty: SetupPty) {
+fn finish_manager_pty(pty: Pty) {
     let (result, transcript) = finish_setup_pty_with_transcript(pty);
     assert!(
         result.status.success(),

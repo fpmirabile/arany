@@ -1,17 +1,13 @@
 use super::active_terminal::{ProductGuard, product_child_of_executable, wait_stopped};
-use super::loopback::{ChildGuard, read_request, send_response, wait_product, write_profile};
-use super::session_picker::{PtyResponses, pump, screen_rows, tail};
+use super::loopback::{read_request, send_response, wait_product, write_profile};
+use super::pty::Pty;
+use super::session_picker::{screen_rows, tail};
 use arany::{StateRoot, create_session};
-use rustix::{
-    fs::{OFlags, fcntl_getfl, fcntl_setfl},
-    process::{Pid, Signal, kill_process},
-};
+use rustix::process::{Pid, Signal, kill_process};
 use std::{
-    io::Write,
     net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{ChildStdin, ChildStdout},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -80,18 +76,26 @@ impl GraphicsPeer {
     }
 }
 
-// Fields drop in order: the product guard, then the PTY pipes, then the reaping child guard.
 struct Chat {
-    product: Option<(Pid, ProductGuard)>,
-    output: ChildStdout,
-    input: ChildStdin,
-    child: ChildGuard,
-    transcript: Vec<u8>,
-    answered: PtyResponses,
+    pty: Pty,
     // Modes folded from captures that `fresh` discarded.
     folded: Modes,
     graphics_peer: Option<GraphicsPeer>,
     graphics_reply_sent: bool,
+}
+
+impl std::ops::Deref for Chat {
+    type Target = Pty;
+
+    fn deref(&self) -> &Pty {
+        &self.pty
+    }
+}
+
+impl std::ops::DerefMut for Chat {
+    fn deref_mut(&mut self) -> &mut Pty {
+        &mut self.pty
+    }
 }
 
 impl Chat {
@@ -116,24 +120,15 @@ impl Chat {
         } else {
             crate::isolation::isolated_wrapper(root)
         };
-        let mut child =
+        let child =
             crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(wrapper), &command)
                 .executable("/arany")
                 .session(state, workspace)
                 .term("xterm")
                 .envs(env.iter().copied())
                 .spawn();
-        let input = child.child().stdin.take().expect("PTY input");
-        let output = child.child().stdout.take().expect("PTY output");
-        let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
         Self {
-            product: None,
-            output,
-            input,
-            child,
-            transcript: Vec::new(),
-            answered: PtyResponses::default(),
+            pty: Pty::new(child),
             folded: Modes::default(),
             graphics_peer: None,
             graphics_reply_sent: false,
@@ -141,12 +136,7 @@ impl Chat {
     }
 
     fn pump(&mut self) {
-        pump(
-            &mut self.output,
-            &mut self.input,
-            &mut self.transcript,
-            &mut self.answered,
-        );
+        self.pty.pump();
         if let Some(peer) = self.graphics_peer
             && !self.graphics_reply_sent
             && self
@@ -154,9 +144,7 @@ impl Chat {
                 .windows(b"\x1b_Gi=31,s=1,v=1,a=q".len())
                 .any(|part| part == b"\x1b_Gi=31,s=1,v=1,a=q")
         {
-            self.input
-                .write_all(peer.reply())
-                .expect("answer graphics probe");
+            self.pty.send(peer.reply());
             self.graphics_reply_sent = true;
         }
     }
@@ -213,22 +201,15 @@ impl Chat {
     }
 
     fn adopt_product(&mut self, state: &Path) -> Pid {
-        let shell_pid = String::from_utf8_lossy(&self.transcript)
-            .lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix("SHELL_PID:"))
-            .expect("shell PID")
-            .parse()
-            .expect("numeric shell PID");
-        let pid = product_child_of_executable(shell_pid, Path::new("/arany"));
-        self.product = Some((pid, ProductGuard::new(pid, state.to_owned())));
+        let pid = product_child_of_executable(self.shell_pid(), Path::new("/arany"));
+        self.pty
+            .guard_product(ProductGuard::new(pid, state.to_owned()));
         pid
     }
 
     fn send(&mut self, bytes: &[u8]) -> usize {
         assert!(bytes.len() <= 1024, "bounded PTY input write");
-        let from = self.transcript.len();
-        self.input.write_all(bytes).expect("chat input");
-        from
+        self.pty.send(bytes)
     }
 
     fn modes(&self) -> Modes {
@@ -253,8 +234,7 @@ impl Chat {
     // Starts a new capture so the 64 KiB pump bound covers the remaining steps.
     fn fresh(&mut self) {
         self.folded = self.modes();
-        self.transcript.clear();
-        self.answered = PtyResponses::default();
+        self.pty.fresh_capture();
     }
 
     fn exit(self) -> Modes {
@@ -273,7 +253,7 @@ impl Chat {
             );
             thread::yield_now();
         }
-        let result = wait_product(self.child.take());
+        let result = wait_product(self.pty.child.take());
         self.pump();
         assert!(
             result.status.success(),

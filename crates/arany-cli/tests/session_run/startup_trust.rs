@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(target_os = "linux")]
+use crate::pty::Pty;
+#[cfg(target_os = "linux")]
 use std::{
     net::TcpListener,
     os::unix::fs::PermissionsExt,
@@ -500,107 +502,52 @@ fn state_instructions_precede_project_rules_and_replay_only_digests() {
 #[cfg(target_os = "linux")]
 #[ignore = "native Linux PTY workspace consent and restoration gate"]
 fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_trust() {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
     // The full-frame copy spans several pages at 80x24; each page is reviewed before the choices.
-    fn review_consent_pages(
-        output: &mut std::process::ChildStdout,
-        input: &mut std::process::ChildStdin,
-        transcript: &mut Vec<u8>,
-        answered: &mut crate::session_picker::PtyResponses,
-    ) {
-        fn wait_for(
-            output: &mut std::process::ChildStdout,
-            input: &mut std::process::ChildStdin,
-            transcript: &mut Vec<u8>,
-            answered: &mut crate::session_picker::PtyResponses,
-            page: usize,
-        ) {
+    fn review_consent_pages(pty: &mut Pty) {
+        fn wait_for_page(pty: &mut Pty, page: usize) {
             let next = format!("Page {page}/");
-            super::session_picker::pump_until(
-                output,
-                input,
-                transcript,
-                answered,
-                &format!("consent page {page} missing"),
-                |transcript| {
-                    super::session_picker::screen_contains(transcript, 80, 24, &next)
-                        || super::session_picker::screen_contains(
-                            transcript,
-                            80,
-                            24,
-                            "Continue read only",
-                        )
-                },
-            );
+            pty.pump_until(&format!("consent page {page} missing"), |transcript| {
+                super::session_picker::screen_contains(transcript, 80, 24, &next)
+                    || super::session_picker::screen_contains(
+                        transcript,
+                        80,
+                        24,
+                        "Continue read only",
+                    )
+            });
         }
         let mut page = 1;
-        wait_for(output, input, transcript, answered, page);
-        while super::session_picker::screen_contains(transcript, 80, 24, &format!("Page {page}/")) {
-            input.write_all(b"\r").unwrap();
+        wait_for_page(pty, page);
+        while super::session_picker::screen_contains(
+            &pty.transcript,
+            80,
+            24,
+            &format!("Page {page}/"),
+        ) {
+            pty.send(b"\r");
             page += 1;
-            wait_for(output, input, transcript, answered, page);
+            wait_for_page(pty, page);
         }
     }
 
     // Each key waits for the marker it must produce, so no key lands on a stale consent state.
-    fn toggle_and_confirm(
-        output: &mut std::process::ChildStdout,
-        input: &mut std::process::ChildStdin,
-        transcript: &mut Vec<u8>,
-        answered: &mut crate::session_picker::PtyResponses,
-    ) {
-        fn send_until(
-            output: &mut std::process::ChildStdout,
-            input: &mut std::process::ChildStdin,
-            transcript: &mut Vec<u8>,
-            answered: &mut crate::session_picker::PtyResponses,
-            key: &[u8],
-            done: impl Fn(&[u8]) -> bool,
-        ) {
-            input.write_all(key).unwrap();
-            super::session_picker::pump_until(
-                output,
-                input,
-                transcript,
-                answered,
-                "consent did not advance",
-                done,
-            );
+    fn toggle_and_confirm(pty: &mut Pty) {
+        fn send_until(pty: &mut Pty, key: &[u8], done: impl Fn(&[u8]) -> bool) {
+            pty.send(key);
+            pty.pump_until("consent did not advance", done);
         }
         let shows = |text: &'static str| {
             move |transcript: &[u8]| {
                 super::session_picker::screen_contains(transcript, 80, 24, text)
             }
         };
-        send_until(
-            output,
-            input,
-            transcript,
-            answered,
-            b"\t",
-            shows("Tab back"),
-        );
-        let before = super::session_picker::screen_rows(transcript, 80, 24);
-        send_until(output, input, transcript, answered, b"\r", |transcript| {
+        send_until(pty, b"\t", shows("Tab back"));
+        let before = super::session_picker::screen_rows(&pty.transcript, 80, 24);
+        send_until(pty, b"\r", |transcript| {
             super::session_picker::screen_rows(transcript, 80, 24) != before
         });
-        send_until(
-            output,
-            input,
-            transcript,
-            answered,
-            b"\t",
-            shows("Enter confirm"),
-        );
-        send_until(
-            output,
-            input,
-            transcript,
-            answered,
-            b"\r",
-            shows("Ask Arany"),
-        );
+        send_until(pty, b"\t", shows("Enter confirm"));
+        send_until(pty, b"\r", shows("Ask Arany"));
     }
     for linear in [false, true] {
         for (trust, startup_escape, unconfigured) in [
@@ -643,7 +590,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     )
                     .unwrap();
             }
-            let mut child = crate::product::PtyLaunch::new(
+            let child = crate::product::PtyLaunch::new(
                 crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
                 shell,
             )
@@ -663,213 +610,95 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             .env("OPENAI_API_KEY", "synthetic-never-sent-key")
             .term(if linear { "dumb" } else { "xterm-256color" })
             .spawn();
-            let mut input = child.child().stdin.take().unwrap();
-            let mut output = child.child().stdout.take().unwrap();
-            let flags = fcntl_getfl(&output).unwrap();
-            fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-            let mut transcript = Vec::new();
-            let mut answered = crate::session_picker::PtyResponses::manual_consent();
-            let wait = |output: &mut std::process::ChildStdout,
-                        input: &mut std::process::ChildStdin,
-                        transcript: &mut Vec<u8>,
-                        answered: &mut crate::session_picker::PtyResponses,
-                        from: usize,
-                        needle: &[u8]| {
+            let mut pty = Pty::with_responses(child, crate::PtyResponses::manual_consent());
+            let wait = |pty: &mut Pty, from: usize, needle: &[u8]| {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 // Styled text can be split by cursor moves in the raw bytes; the rendered screen is authoritative.
                 // Linear output is an append-only log whose replayed screen keeps stale banners, so only new bytes count.
                 let text = std::str::from_utf8(needle).ok().filter(|_| !linear);
-                while crate::process::pty_text_matches(&transcript[from..], needle)
+                while crate::process::pty_text_matches(&pty.transcript[from..], needle)
                     .next()
                     .is_none()
                     && !text.is_some_and(|text| {
-                        super::session_picker::screen_contains(transcript, 80, 24, text)
+                        super::session_picker::screen_contains(&pty.transcript, 80, 24, text)
                     })
                 {
-                    super::session_picker::pump(output, input, transcript, answered);
+                    pty.pump();
                     assert!(
                         Instant::now() < deadline,
                         "consent stage missing: {}",
-                        super::session_picker::tail(transcript)
+                        super::session_picker::tail(&pty.transcript)
                     );
                     thread::yield_now();
                 }
             };
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                0,
-                b"Do you trust this folder?",
-            );
+            wait(&mut pty, 0, b"Do you trust this folder?");
             if !linear && unconfigured {
-                review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
+                review_consent_pages(&mut pty);
             }
-            let from = transcript.len();
-            input
-                .write_all(if unconfigured {
-                    b"\x1b[B\r"
-                } else if linear {
-                    b"read only\r"
-                } else {
-                    b"\x1b"
-                })
-                .unwrap();
+            let from = pty.send(if unconfigured {
+                b"\x1b[B\r"
+            } else if linear {
+                b"read only\r"
+            } else {
+                b"\x1b"
+            });
             wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
+                &mut pty,
                 from,
                 if linear { b"Input:" } else { b"Ask Arany" },
             );
             if unconfigured {
-                let from = transcript.len();
-                input.write_all(b"/provider openai\r").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Auto edits",
-                );
-                let from = transcript.len();
-                input.write_all(b"\x1b[Z").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Request approvals",
-                );
+                let from = pty.send(b"/provider openai\r");
+                wait(&mut pty, from, b"Auto edits");
+                let from = pty.send(b"\x1b[Z");
+                wait(&mut pty, from, b"Request approvals");
             }
             if startup_escape {
-                let from = transcript.len();
-                input.write_all(b"Read-only question\r").unwrap();
+                let from = pty.send(b"Read-only question\r");
                 // The isolated network fails the send, so the call shows its first same-route
                 // retry; Ctrl+C then ends the Run inside the backoff without a further call.
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Reconnecting",
-                );
+                wait(&mut pty, from, b"Reconnecting");
                 assert!(
-                    !transcript[from..]
+                    !pty.transcript[from..]
                         .windows(b"Do you trust this folder?".len())
                         .any(|part| part == b"Do you trust this folder?"),
                     "Escape must admit ephemeral read-only chat without another trust prompt"
                 );
-                let from = transcript.len();
-                input.write_all(b"\x03").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"\x1b[?25h",
-                );
+                let from = pty.send(b"\x03");
+                wait(&mut pty, from, b"\x1b[?25h");
             }
-            let from = transcript.len();
-            input.write_all(b"/permissions\r").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Network domains",
-            );
-            let from = transcript.len();
-            input
-                .write_all(if linear { b"Folder trust\r" } else { b"\r" })
-                .unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Do you trust this folder?",
-            );
+            let from = pty.send(b"/permissions\r");
+            wait(&mut pty, from, b"Network domains");
+            let from = pty.send(if linear { b"Folder trust\r" } else { b"\r" });
+            wait(&mut pty, from, b"Do you trust this folder?");
             if trust {
-                let from = transcript.len();
+                let from = pty.transcript.len();
                 if linear {
-                    input
-                        .write_all(format!("trust {runtime_number}\r").as_bytes())
-                        .unwrap();
+                    pty.send(format!("trust {runtime_number}\r").as_bytes());
                 } else {
-                    review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    input.write_all(b"\x1b[B\r").unwrap();
+                    review_consent_pages(&mut pty);
+                    pty.send(b"\x1b[B\r");
                 }
                 wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
+                    &mut pty,
                     from,
                     if linear { b"Input:" } else { b"Ask Arany" },
                 );
                 if !linear {
-                    let from = transcript.len();
-                    input.write_all(b"/rev").unwrap();
-                    wait(
-                        &mut output,
-                        &mut input,
-                        &mut transcript,
-                        &mut answered,
-                        from,
-                        b"(skill) /review",
-                    );
-                    let from = transcript.len();
-                    input.write_all(b"\x03").unwrap();
+                    let from = pty.send(b"/rev");
+                    wait(&mut pty, from, b"(skill) /review");
+                    let from = pty.send(b"\x03");
                     // The cleared composer is found by its border wherever the viewport sits.
-                    let deadline = Instant::now() + Duration::from_secs(10);
-                    while !crate::composer_caret(&transcript, from, 80, 24)
-                        .is_some_and(|(column, _)| column == 3)
-                    {
-                        super::session_picker::pump(
-                            &mut output,
-                            &mut input,
-                            &mut transcript,
-                            &mut answered,
-                        );
-                        assert!(
-                            Instant::now() < deadline,
-                            "cleared Skill draft: {}",
-                            super::session_picker::tail(&transcript[from..])
-                        );
-                        thread::yield_now();
-                    }
+                    pty.pump_until("cleared Skill draft", |transcript| {
+                        crate::composer_caret(transcript, from, 80, 24)
+                            .is_some_and(|(column, _)| column == 3)
+                    });
                 }
-                let from = transcript.len();
-                input.write_all(b"/permissions\r").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Network domains",
-                );
-                let from = transcript.len();
-                input
-                    .write_all(if linear { b"Folder trust\r" } else { b"\r" })
-                    .unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Do you trust this folder?",
-                );
+                let from = pty.send(b"/permissions\r");
+                wait(&mut pty, from, b"Network domains");
+                let from = pty.send(if linear { b"Folder trust\r" } else { b"\r" });
+                wait(&mut pty, from, b"Do you trust this folder?");
                 let record = temp
                     .path()
                     .join("account-home/.local/state/arany/workspace-permissions.json");
@@ -882,18 +711,15 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         .len(),
                     1
                 );
-                let from = transcript.len();
+                let from = pty.transcript.len();
                 if linear {
-                    input.write_all(b"trust\r").unwrap();
+                    pty.send(b"trust\r");
                 } else {
-                    review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    input.write_all(b"\t\t\x1b[B\r").unwrap();
+                    review_consent_pages(&mut pty);
+                    pty.send(b"\t\t\x1b[B\r");
                 }
                 wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
+                    &mut pty,
                     from,
                     if linear { b"Input:" } else { b"Ask Arany" },
                 );
@@ -911,40 +737,19 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     value["workspaces"][0]["runtime_grants"][0]["version"],
                     "v22.3.0"
                 );
-                let from = transcript.len();
-                input.write_all(b"/permissions\r").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Network domains",
-                );
-                let from = transcript.len();
-                input
-                    .write_all(if linear { b"Folder trust\r" } else { b"\r" })
-                    .unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Do you trust this folder?",
-                );
-                let from = transcript.len();
+                let from = pty.send(b"/permissions\r");
+                wait(&mut pty, from, b"Network domains");
+                let from = pty.send(if linear { b"Folder trust\r" } else { b"\r" });
+                wait(&mut pty, from, b"Do you trust this folder?");
+                let from = pty.transcript.len();
                 if linear {
-                    input.write_all(b"trust none\r").unwrap();
+                    pty.send(b"trust none\r");
                 } else {
-                    review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    toggle_and_confirm(&mut output, &mut input, &mut transcript, &mut answered);
+                    review_consent_pages(&mut pty);
+                    toggle_and_confirm(&mut pty);
                 }
                 wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
+                    &mut pty,
                     from,
                     if linear { b"Input:" } else { b"Ask Arany" },
                 );
@@ -953,50 +758,44 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 .path()
                 .join("account-home/.local/state/arany/workspace-permissions.json");
             let before_cancel = std::fs::read(&record).ok();
-            let interrupted = transcript.len();
-            input.write_all(b"\x03").unwrap();
+            let interrupted = pty.send(b"\x03");
             let mut confirmed = false;
             let deadline = Instant::now() + Duration::from_secs(10);
             let status = loop {
-                super::session_picker::pump(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                );
+                pty.pump();
                 // Chat asks for a second Ctrl+C before exiting; linear output is a log, so match new bytes.
                 let again = b"Ctrl+C again exits";
                 if !confirmed
-                    && (transcript[interrupted..]
+                    && (pty.transcript[interrupted..]
                         .windows(again.len())
                         .any(|part| part == again)
                         || super::session_picker::screen_contains(
-                            &transcript,
+                            &pty.transcript,
                             80,
                             24,
                             "Ctrl+C again exits",
                         ))
                 {
-                    input.write_all(b"\x03").unwrap();
+                    pty.send(b"\x03");
                     confirmed = true;
                 }
-                if let Some(status) = child.child().try_wait().unwrap() {
+                if let Some(status) = pty.child.child().try_wait().unwrap() {
                     break status;
                 }
                 assert!(
                     Instant::now() < deadline,
                     "Ctrl+C did not exit: {}",
-                    super::session_picker::tail(&transcript)
+                    super::session_picker::tail(&pty.transcript)
                 );
                 thread::yield_now();
             };
-            super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+            pty.pump();
             assert!(
                 status.success(),
                 "consent exit: {}",
-                super::session_picker::tail(&transcript)
+                super::session_picker::tail(&pty.transcript)
             );
-            let text = String::from_utf8_lossy(&transcript);
+            let text = String::from_utf8_lossy(&pty.transcript);
             let before = super::active_terminal::transcript_field(&text, "TTY_BEFORE:");
             let after = super::active_terminal::transcript_field(&text, "TTY_AFTER:");
             assert_eq!(before, after, "terminal must be restored");
@@ -1048,8 +847,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
     ignore = "native Linux PTY trusted startup with bounded runtime candidate overflow"
 )]
 fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::{io::Write, os::unix::fs::PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("project");
@@ -1067,150 +865,83 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
 
     let state = temp.path().join("state");
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
-        shell,
-    )
-    .session(&state, &workspace)
-    .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-    .term("xterm-256color")
-    .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::manual_consent();
-    let wait = |output: &mut std::process::ChildStdout,
-                input: &mut std::process::ChildStdin,
-                transcript: &mut Vec<u8>,
-                answered: &mut crate::session_picker::PtyResponses,
-                needle: &str| {
+    let mut pty = Pty::with_responses(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .term("xterm-256color")
+        .spawn(),
+        crate::PtyResponses::manual_consent(),
+    );
+    let wait = |pty: &mut Pty, needle: &str| {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !super::session_picker::screen_contains(transcript, 80, 24, needle) {
-            super::session_picker::pump(output, input, transcript, answered);
+        while !super::session_picker::screen_contains(&pty.transcript, 80, 24, needle) {
+            pty.pump();
             assert!(
                 Instant::now() < deadline,
                 "trusted startup screen stage {needle:?} missing: {}",
-                super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
+                super::session_picker::screen_rows(&pty.transcript, 80, 24).join(" | ")
             );
             thread::yield_now();
         }
     };
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Ask a question, or type / for commands",
-    );
+    wait(&mut pty, "Ask a question, or type / for commands");
     assert!(
-        !super::session_picker::screen_contains(&transcript, 80, 24, "Do you trust this folder?"),
+        !super::session_picker::screen_contains(
+            &pty.transcript,
+            80,
+            24,
+            "Do you trust this folder?"
+        ),
         "remembered trust must skip optional candidate discovery"
     );
-    input.write_all(b"/permissions").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "/permissions",
-    );
-    input.write_all(b"\r").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Network domains",
-    );
-    input.write_all(b"\r").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Runtime profile discovery failed",
-    );
-    input.write_all(b"\x1b").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Permissions unchanged",
-    );
-    input.write_all(b"/status").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "/status",
-    );
-    input.write_all(b"\r").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Tokens used: no calls yet",
-    );
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Up/Down · Left/Right page · Esc close",
-    );
-    let closed_at = transcript.len();
-    input.write_all(b"\x1b").unwrap();
-    super::session_picker::wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+    pty.send(b"/permissions");
+    wait(&mut pty, "/permissions");
+    pty.send(b"\r");
+    wait(&mut pty, "Network domains");
+    pty.send(b"\r");
+    wait(&mut pty, "Runtime profile discovery failed");
+    pty.send(b"\x1b");
+    wait(&mut pty, "Permissions unchanged");
+    pty.send(b"/status");
+    wait(&mut pty, "/status");
+    pty.send(b"\r");
+    wait(&mut pty, "Tokens used: no calls yet");
+    wait(&mut pty, "Up/Down · Left/Right page · Esc close");
+    let closed_at = pty.send(b"\x1b");
+    pty.wait_for_screen(
         (closed_at, 80, 24),
         "Ask a question, or type / for commands",
     );
-    input.write_all(b"\x03").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Ctrl+C again exits",
-    );
-    input.write_all(b"\x03").unwrap();
+    pty.send(b"\x03");
+    wait(&mut pty, "Ctrl+C again exits");
+    pty.send(b"\x03");
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if let Some(status) = child.child().try_wait().unwrap() {
+        pty.pump();
+        if let Some(status) = pty.child.child().try_wait().unwrap() {
             break status;
         }
         assert!(
             Instant::now() < deadline,
             "trusted chat did not exit: {}",
-            super::session_picker::tail(&transcript)
+            super::session_picker::tail(&pty.transcript)
         );
         thread::yield_now();
     };
-    super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+    pty.pump();
     assert!(status.success());
-    let text = String::from_utf8_lossy(&transcript);
-    assert_eq!(
-        super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
-        super::active_terminal::transcript_field(&text, "TTY_AFTER:")
-    );
+    let text = String::from_utf8_lossy(&pty.transcript);
+    super::active_terminal::assert_tty_restored(&text);
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 #[cfg_attr(not(arany_ci), ignore = "native Linux PTY folder trust recovery")]
 fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_current_damage() {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
-
     #[derive(Clone, Copy)]
     enum Case {
         OtherVersion,
@@ -1246,130 +977,81 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
 
         let state = temp.path().join("state");
         let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
-            shell,
-        )
-        .session(&state, &workspace)
-        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-        .term("xterm-256color")
-        .spawn();
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let flags = fcntl_getfl(&output).unwrap();
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-        let mut transcript = Vec::new();
-        let mut answered = crate::session_picker::PtyResponses::manual_consent();
-        let wait = |output: &mut std::process::ChildStdout,
-                    input: &mut std::process::ChildStdin,
-                    transcript: &mut Vec<u8>,
-                    answered: &mut crate::session_picker::PtyResponses,
-                    needle: &str| {
+        let mut pty = Pty::with_responses(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+                shell,
+            )
+            .session(&state, &workspace)
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .term("xterm-256color")
+            .spawn(),
+            crate::PtyResponses::manual_consent(),
+        );
+        let wait = |pty: &mut Pty, needle: &str| {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !super::session_picker::screen_contains(transcript, 80, 24, needle) {
-                super::session_picker::pump(output, input, transcript, answered);
+            while !super::session_picker::screen_contains(&pty.transcript, 80, 24, needle) {
+                pty.pump();
                 assert!(
                     Instant::now() < deadline,
                     "folder trust recovery stage missing: {}",
-                    super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
+                    super::session_picker::screen_rows(&pty.transcript, 80, 24).join(" | ")
                 );
                 thread::yield_now();
             }
         };
         match case {
             Case::Linked => {
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "owner-only regular",
-                );
+                wait(&mut pty, "owner-only regular");
                 assert!(
                     !super::session_picker::screen_contains(
-                        &transcript,
+                        &pty.transcript,
                         80,
                         24,
                         "Reset folder trust"
                     ),
                     "a non-private record must not offer a reset"
                 );
-                input.write_all(b"\x1b[B\r").unwrap();
+                pty.send(b"\x1b[B\r");
             }
             Case::Malformed => {
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "workspace-permissions.json is malformed",
-                );
-                input.write_all(b"\x1b[B\r").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "Reset folder trust?",
-                );
-                input.write_all(b"\t\r").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "Do you trust this folder?",
-                );
+                wait(&mut pty, "workspace-permissions.json is malformed");
+                pty.send(b"\x1b[B\r");
+                wait(&mut pty, "Reset folder trust?");
+                pty.send(b"\t\r");
+                wait(&mut pty, "Do you trust this folder?");
                 assert!(!record.exists(), "consented reset must delete the record");
-                input.write_all(b"\x03").unwrap();
+                pty.send(b"\x03");
             }
             // The record is archived before any setup step and named in the startup notice
             // (terminal.md, attached startup), which the chat shows after the trust choice.
             Case::OtherVersion => {
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "Do you trust this folder?",
-                );
+                wait(&mut pty, "Do you trust this folder?");
                 assert!(
                     !record.exists(),
                     "an other-version record must leave the state root"
                 );
-                input.write_all(b"\r").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "Saved records from an incompatible version",
-                );
-                input.write_all(b"\x03").unwrap();
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    "Ctrl+C again exits",
-                );
-                input.write_all(b"\x03").unwrap();
+                pty.send(b"\r");
+                wait(&mut pty, "Saved records from an incompatible version");
+                pty.send(b"\x03");
+                wait(&mut pty, "Ctrl+C again exits");
+                pty.send(b"\x03");
             }
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
-            super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
-            if let Some(status) = child.child().try_wait().unwrap() {
+            pty.pump();
+            if let Some(status) = pty.child.child().try_wait().unwrap() {
                 break status;
             }
             assert!(
                 Instant::now() < deadline,
                 "folder trust recovery did not exit: {}",
-                super::session_picker::tail(&transcript)
+                super::session_picker::tail(&pty.transcript)
             );
             thread::yield_now();
         };
-        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(status.success());
         if matches!(case, Case::OtherVersion) {
             let folders: Vec<_> = std::fs::read_dir(account.join("archive"))
@@ -1393,11 +1075,8 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
                 "a non-private record is never modified"
             );
         }
-        let text = String::from_utf8_lossy(&transcript);
-        assert_eq!(
-            super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
-            super::active_terminal::transcript_field(&text, "TTY_AFTER:")
-        );
+        let text = String::from_utf8_lossy(&pty.transcript);
+        super::active_terminal::assert_tty_restored(&text);
     }
 }
 
@@ -1408,9 +1087,6 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
     ignore = "native Linux narrow PTY consent paging regression"
 )]
 fn tab_cannot_skip_narrow_folder_consent_pages() {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
-
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("project");
     std::fs::create_dir(&workspace).unwrap();
@@ -1424,88 +1100,63 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
     let account = temp.path().join("account-home/.local/state/arany");
     let state = temp.path().join("state");
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 8 cols 16; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
-        shell,
-    )
-    .session(&state, &workspace)
-    .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-    .term("xterm-256color")
-    .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::manual_consent();
-    let wait = |output: &mut std::process::ChildStdout,
-                input: &mut std::process::ChildStdin,
-                transcript: &mut Vec<u8>,
-                answered: &mut crate::session_picker::PtyResponses,
-                needle: &str| {
+    let mut pty = Pty::with_responses(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .term("xterm-256color")
+        .spawn(),
+        crate::PtyResponses::manual_consent(),
+    );
+    let wait = |pty: &mut Pty, needle: &str| {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !super::session_picker::screen_contains(transcript, 16, 8, needle) {
-            super::session_picker::pump(output, input, transcript, answered);
+        while !super::session_picker::screen_contains(&pty.transcript, 16, 8, needle) {
+            pty.pump();
             assert!(
                 Instant::now() < deadline,
                 "narrow consent screen stage missing: {}",
-                super::session_picker::screen_rows(transcript, 16, 8).join(" | ")
+                super::session_picker::screen_rows(&pty.transcript, 16, 8).join(" | ")
             );
             thread::yield_now();
         }
     };
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Page 1/",
-    );
+    wait(&mut pty, "Page 1/");
     for &key in b"\t\t\r" {
-        input.write_all(&[key]).unwrap();
-        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.send(&[key]);
+        pty.pump();
     }
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "Page 2/",
-    );
+    wait(&mut pty, "Page 2/");
     assert!(
         !account.join("workspace-permissions.json").exists(),
         "Tab/Tab/Enter on the first narrow consent page must not save trust"
     );
-    input.write_all(b"\x03").unwrap();
+    pty.send(b"\x03");
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if let Some(status) = child.child().try_wait().unwrap() {
+        pty.pump();
+        if let Some(status) = pty.child.child().try_wait().unwrap() {
             break status;
         }
         assert!(
             Instant::now() < deadline,
             "consent interruption did not exit: {}",
-            super::session_picker::tail(&transcript)
+            super::session_picker::tail(&pty.transcript)
         );
         thread::yield_now();
     };
-    super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+    pty.pump();
     assert!(status.success());
-    let text = String::from_utf8_lossy(&transcript);
-    assert_eq!(
-        super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
-        super::active_terminal::transcript_field(&text, "TTY_AFTER:")
-    );
+    let text = String::from_utf8_lossy(&pty.transcript);
+    super::active_terminal::assert_tty_restored(&text);
 }
 
 #[test]
 #[cfg(target_os = "linux")]
 #[cfg_attr(not(arany_ci), ignore = "native Linux PTY Classic consent viewport")]
 fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
-
     for (rows, paged) in [(24, false), (14, true)] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
@@ -1514,25 +1165,23 @@ fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
         let shell = format!(
             "stty rows {rows} cols 80; /arany --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4"
         );
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
-            &shell,
-        )
-        .session(&state, &workspace)
-        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-        .term("xterm-256color")
-        .spawn();
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let flags = fcntl_getfl(&output).unwrap();
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-        let mut transcript = Vec::new();
-        let mut answered = crate::session_picker::PtyResponses::manual_consent();
-        let mut wait = |input: &mut std::process::ChildStdin, needle: &str, absent: &str| {
+        let mut pty = Pty::with_responses(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+                &shell,
+            )
+            .session(&state, &workspace)
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .term("xterm-256color")
+            .spawn(),
+            crate::PtyResponses::manual_consent(),
+        );
+        let wait = |pty: &mut Pty, needle: &str, absent: &str| {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                super::session_picker::pump(&mut output, input, &mut transcript, &mut answered);
-                let screen = super::session_picker::screen_rows(&transcript, 80, rows).join(" | ");
+                pty.pump();
+                let screen =
+                    super::session_picker::screen_rows(&pty.transcript, 80, rows).join(" | ");
                 if screen.contains(needle) && (absent.is_empty() || !screen.contains(absent)) {
                     return screen;
                 }
@@ -1544,27 +1193,19 @@ fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
             }
         };
         if !paged {
-            let screen = wait(&mut input, "Trust this folder", "Page 1/");
+            let screen = wait(&mut pty, "Trust this folder", "Page 1/");
             assert!(screen.contains("Continue read only"));
             assert!(screen.contains("Do you trust this folder?"));
         } else {
-            let first = wait(&mut input, "Page 1/", "");
+            let first = wait(&mut pty, "Page 1/", "");
             assert!(first.contains("Do you trust this folder?"));
-            input.write_all(b"\x1b[6~").unwrap();
-            wait(&mut input, "Trust this folder", "Do you trust this folder?");
-            input.write_all(b"\x1b[A").unwrap();
-            wait(&mut input, "Do you trust this folder?", "Trust this folder");
+            pty.send(b"\x1b[6~");
+            wait(&mut pty, "Trust this folder", "Do you trust this folder?");
+            pty.send(b"\x1b[A");
+            wait(&mut pty, "Do you trust this folder?", "Trust this folder");
         }
-        input.write_all(b"\x03").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while child.child().try_wait().unwrap().is_none() {
-            super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "consent interruption did not exit"
-            );
-            thread::yield_now();
-        }
+        pty.send(b"\x03");
+        pty.wait_exit("consent interruption did not exit");
     }
 }
 
@@ -1938,24 +1579,17 @@ fn login_shell_capture_requires_review_and_preserves_private_values() {
 const UNTIL_DISPLAY_ALLOWANCE_MS: u64 = 5_000;
 
 #[cfg(target_os = "linux")]
-fn until(
-    output: &mut std::process::ChildStdout,
-    input: &mut std::process::ChildStdin,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    what: &str,
-    ready: &dyn Fn(&[u8]) -> bool,
-) {
+fn until(pty: &mut Pty, what: &str, ready: &dyn Fn(&[u8]) -> bool) {
     let deadline = Instant::now()
         + Duration::from_millis(
             arany::EnvironmentCaptureIntent::RUNTIME_MS + UNTIL_DISPLAY_ALLOWANCE_MS,
         );
-    while !ready(transcript) {
-        super::session_picker::pump(output, input, transcript, answered);
+    while !ready(&pty.transcript) {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "{what}: {}",
-            super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
+            super::session_picker::screen_rows(&pty.transcript, 80, 24).join(" | ")
         );
         thread::yield_now();
     }
@@ -1973,8 +1607,7 @@ enum PermissionsJourney {
 
 #[cfg(target_os = "linux")]
 fn run_permissions_journey(journey: PermissionsJourney) {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::{io::Write, os::unix::fs::PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     let _gate = crate::process::NATIVE_GATE
         .lock()
@@ -1998,170 +1631,98 @@ fn run_permissions_journey(journey: PermissionsJourney) {
         root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"1ae964a6a4911a76405b9484671bd5f5c24650a712f4c6c829698c8ad9128c2b"}"#).unwrap();
     }
     let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
-        shell,
-    )
-    .session(&state, &workspace)
-    .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-    .term("xterm-256color")
-    .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::manual_consent();
+    let mut pty = Pty::with_responses(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .term("xterm-256color")
+        .spawn(),
+        crate::PtyResponses::manual_consent(),
+    );
     let file = state.join("permissions.json");
     until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+        &mut pty,
         "composer",
         &shows("Ask a question, or type / for commands"),
     );
     if matches!(journey, PermissionsJourney::LoginShellCapture) {
         assert!(
-            super::session_picker::screen_rows(&transcript, 80, 24)
+            super::session_picker::screen_rows(&pty.transcript, 80, 24)
                 .join(" ")
                 .contains("Process PATH differs from the pinned")
         );
     }
     if matches!(journey, PermissionsJourney::TypedRules) {
-        input.write_all(b"/permissions\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "area menu",
-            &shows("Network domains"),
-        );
+        pty.send(b"/permissions\r");
+        until(&mut pty, "area menu", &shows("Network domains"));
         assert!(!file.exists());
-        input.write_all(b"\x1b[B\x1b[B\r").unwrap();
+        pty.send(b"\x1b[B\x1b[B\r");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "host rules first-save policy warning",
             &shows("which also governs other Tools."),
         );
         assert!(super::session_picker::screen_contains(
-            &transcript,
+            &pty.transcript,
             80,
             24,
             "The first save creates permissions.json with the default mode,"
         ));
-        input.write_all(b"\x1b").unwrap();
+        pty.send(b"\x1b");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "host rules first-save cancellation",
             &shows("Host command rules unchanged"),
         );
         assert!(!file.exists());
     }
-    input.write_all(b"/permissions\r").unwrap();
+    pty.send(b"/permissions\r");
+    until(&mut pty, "environment area menu", &shows("Network domains"));
+    pty.send(b"\x1b[B\x1b[B\x1b[B\r");
     until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "environment area menu",
-        &shows("Network domains"),
-    );
-    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+        &mut pty,
         "command environment page",
         &shows("Select a name from the Arany process"),
     );
     if matches!(journey, PermissionsJourney::LoginShellCapture) {
-        login_shell::review_login_shell_capture(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            &state,
-        );
+        login_shell::review_login_shell_capture(&mut pty, &state);
     }
-    input.write_all(b"\x1b").unwrap();
+    pty.send(b"\x1b");
     until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+        &mut pty,
         "command environment cancellation",
         &shows("Command environment unchanged"),
     );
     if matches!(journey, PermissionsJourney::TypedRules) {
-        input.write_all(b"/permissions\r").unwrap();
+        pty.send(b"/permissions\r");
+        until(&mut pty, "typed area menu", &shows("Network domains"));
+        pty.send(b"\x1b[B\r");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "typed area menu",
-            &shows("Network domains"),
-        );
-        input.write_all(b"\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "rules list with the settings creation note",
             &shows("creates permissions.json"),
         );
-        input.write_all(b"\r").unwrap();
+        pty.send(b"\r");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "verb menu",
             &shows("gh pr create (host; human approval required)"),
         );
         assert!(super::session_picker::screen_contains(
-            &transcript,
+            &pty.transcript,
             80,
             24,
             "host; human approval required"
         ));
-        input.write_all(b"\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "decision menu",
-            &shows("Rule decision"),
-        );
-        input.write_all(b"\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "scope menu",
-            &shows("Rule scope"),
-        );
-        input.write_all(b"\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "saved rule",
-            &|_| file.exists(),
-        );
+        pty.send(b"\r");
+        until(&mut pty, "decision menu", &shows("Rule decision"));
+        pty.send(b"\r");
+        until(&mut pty, "scope menu", &shows("Rule scope"));
+        pty.send(b"\r");
+        until(&mut pty, "saved rule", &|_| file.exists());
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(value["permissions"]["defaultMode"], "default");
@@ -2181,138 +1742,63 @@ fn run_permissions_journey(journey: PermissionsJourney) {
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "listed rule",
-            &shows("allow git commit"),
-        );
-        input.write_all(b"\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "rule menu",
-            &shows("Remove rule"),
-        );
+        until(&mut pty, "listed rule", &shows("allow git commit"));
+        pty.send(b"\x1b[B\r");
+        until(&mut pty, "rule menu", &shows("Remove rule"));
         // Change the decision to ask before removing the rule.
-        input.write_all(b"\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "changed rule",
-            &|_| {
-                std::fs::read_to_string(&file)
-                    .unwrap()
-                    .contains(r#""decision":"ask""#)
-            },
-        );
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "listed changed rule",
-            &shows("ask git commit"),
-        );
-        input.write_all(b"\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "second rule menu",
-            &shows("Remove rule"),
-        );
-        input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "removed rule",
-            &|_| {
-                !std::fs::read_to_string(&file)
-                    .unwrap()
-                    .contains("typedPrefixes")
-            },
-        );
-        input.write_all(b"\x1b").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "saved notice",
-            &shows("Typed Git rules saved"),
-        );
+        pty.send(b"\x1b[B\r");
+        until(&mut pty, "changed rule", &|_| {
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains(r#""decision":"ask""#)
+        });
+        until(&mut pty, "listed changed rule", &shows("ask git commit"));
+        pty.send(b"\x1b[B\r");
+        until(&mut pty, "second rule menu", &shows("Remove rule"));
+        pty.send(b"\x1b[B\x1b[B\x1b[B\r");
+        until(&mut pty, "removed rule", &|_| {
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("typedPrefixes")
+        });
+        pty.send(b"\x1b");
+        until(&mut pty, "saved notice", &shows("Typed Git rules saved"));
         let before_host_editor = std::fs::read(&file).unwrap();
-        input.write_all(b"/permissions\r").unwrap();
+        pty.send(b"/permissions\r");
+        until(&mut pty, "host area menu", &shows("Network domains"));
+        pty.send(b"\x1b[B\x1b[B\r");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            "host area menu",
-            &shows("Network domains"),
-        );
-        input.write_all(b"\x1b[B\x1b[B\r").unwrap();
-        until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "host rules editor",
             &shows("Add from a recent eligible host command"),
         );
-        input.write_all(b"\r").unwrap();
+        pty.send(b"\r");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "recent host command picker",
             &shows("No command runs here"),
         );
-        input.write_all(b"\x1b").unwrap();
+        pty.send(b"\x1b");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "host rules return",
             &shows("Add from a recent eligible host command"),
         );
-        input.write_all(b"\x1b").unwrap();
+        pty.send(b"\x1b");
         until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             "host rules notice",
             &shows("Host command rules unchanged"),
         );
         assert_eq!(std::fs::read(&file).unwrap(), before_host_editor);
     }
-    input.write_all(b"\x03").unwrap();
-    until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        "exit hint",
-        &shows("Ctrl+C again exits"),
-    );
-    input.write_all(b"\x03").unwrap();
+    pty.send(b"\x03");
+    until(&mut pty, "exit hint", &shows("Ctrl+C again exits"));
+    pty.send(b"\x03");
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if let Some(status) = child.child().try_wait().unwrap() {
+        pty.pump();
+        if let Some(status) = pty.child.child().try_wait().unwrap() {
             break status;
         }
         assert!(Instant::now() < deadline, "chat did not exit");

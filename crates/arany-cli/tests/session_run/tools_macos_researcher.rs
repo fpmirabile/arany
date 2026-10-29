@@ -452,10 +452,12 @@ done
                         matches!(
                             calls[index],
                             ToolCall::Read { .. }
+                                | ToolCall::List { .. }
+                                | ToolCall::Glob { .. }
                                 | ToolCall::Search { .. }
                                 | ToolCall::Skill { .. }
                         ),
-                        "exact file and Skill reads require in-process attestation"
+                        "file reads, discovery and Skill reads require in-process attestation"
                     );
                     assert_eq!(*policy_digest, observation.intent.policy_digest);
                     assert_eq!(
@@ -468,11 +470,8 @@ done
                 }
                 Attestation::Guard(receipt) => {
                     assert!(
-                        matches!(
-                            calls[index],
-                            ToolCall::List { .. } | ToolCall::McpList { .. }
-                        ),
-                        "discovery and MCP catalog listing require a Guard receipt"
+                        matches!(calls[index], ToolCall::McpList { .. }),
+                        "MCP catalog listing requires a Guard receipt"
                     );
                     assert_eq!(receipt.contract_version, 1);
                     let digest: [u8; 32] =

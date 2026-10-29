@@ -3103,7 +3103,7 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
 }
 
 #[test]
-#[cfg_attr(not(arany_ci), ignore = "native discovery Guard on Linux and macOS")]
+#[cfg_attr(not(arany_ci), ignore = "native Tool admission on Linux and macOS")]
 fn missing_skill_path_is_attested_failed_and_the_run_continues() {
     let _gate = process::NATIVE_GATE
         .lock()
@@ -3203,7 +3203,7 @@ fn assert_missing_skill_recovery(run: &arany::RunView) {
     );
     assert!(matches!(
         listed.attestation,
-        Some(arany::Attestation::Guard { .. })
+        Some(arany::Attestation::InProcess { .. })
     ));
     assert!(listed.output.contains(".agents"));
 }

@@ -649,7 +649,7 @@ async fn agent_definition_guard_parsing_ignores_model_permission_rules_without_w
     }
 }
 
-fn guarded_discovery_fixture(whole: bool) -> Fixture {
+fn typed_discovery_fixture(whole: bool) -> Fixture {
     let fixture = Fixture::new(None, false);
     if whole {
         let path = fixture.state.join("tools.json");
@@ -681,7 +681,7 @@ fn guarded_discovery_fixture(whole: bool) -> Fixture {
 }
 
 #[test]
-fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
+fn typed_discovery_omits_ignored_content_and_replays_frozen_results() {
     let _gate = process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -692,12 +692,12 @@ fn guarded_discovery_omits_ignored_content_and_replays_frozen_results() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(guarded_discovery_replay());
+        .block_on(typed_discovery_replay());
 }
 
-async fn guarded_discovery_replay() {
+async fn typed_discovery_replay() {
     for whole in [false, true] {
-        let fixture = guarded_discovery_fixture(whole);
+        let fixture = typed_discovery_fixture(whole);
         let calls = [
             arany::ToolCall::List {
                 path: "notes".into(),
@@ -756,7 +756,7 @@ async fn guarded_discovery_replay() {
             );
             assert!(matches!(
                 observation.attestation,
-                Some(arany::Attestation::Guard(_))
+                Some(arany::Attestation::InProcess { .. })
             ));
             assert!(observation.output.contains(visible));
             assert!(!observation.output.contains("ignored.cache"));

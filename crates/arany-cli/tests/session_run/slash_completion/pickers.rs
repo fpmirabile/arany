@@ -26,171 +26,55 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         } else {
             String::new()
         };
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-                state.parent().expect("fixture root"),
-            )),
-            shell,
-        )
-        .session(&state, &workspace)
-        .env("ARANY_TEST_INCLUDES", includes)
-        .term("xterm")
-        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
-        .spawn();
-        let mut input = child.child().stdin.take().expect("PTY input");
-        let mut output = child.child().stdout.take().expect("PTY output");
-        let flags = fcntl_getfl(&output).expect("stdout flags");
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-        let mut transcript = Vec::new();
-        let mut answered = crate::session_picker::PtyResponses::default();
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+        let mut pty = Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                    state.parent().expect("fixture root"),
+                )),
+                shell,
+            )
+            .session(&state, &workspace)
+            .env("ARANY_TEST_INCLUDES", includes)
+            .term("xterm")
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .spawn(),
+        );
+        pty.wait_for(b"Ask Arany");
+        let selector_at = pty.send("a🙂b\x1b[D\x0b".as_bytes());
+        wait_armed(&mut pty, selector_at);
+        pty.send_and_wait(
+            b"\x1b[200~INERT_MODAL_PASTE\r/exit\x03\x1b[201~\x1b",
             b"Ask Arany",
         );
-        let selector_at = transcript.len();
-        input
-            .write_all("a🙂b\x1b[D\x0b".as_bytes())
-            .expect("draft and selector");
-        wait_armed(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            selector_at,
-        );
-        let after_menu = transcript.len();
-        input
-            .write_all(b"\x1b[200~INERT_MODAL_PASTE\r/exit\x03\x1b[201~\x1b")
-            .expect("ignore paste in selector and close without changing draft");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_menu,
-            b"Ask Arany",
-        );
-        input.write_all(b"X").expect("edit returned draft");
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Xb",
-        );
-        let selector_at = transcript.len();
-        input.write_all(b"\x0b").expect("open quick selector");
-        wait_armed(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            selector_at,
-        );
-        let inspector_at = transcript.len();
-        input.write_all(b"\x1b[B\r").expect("open Agent inspector");
+        pty.send(b"X");
+        pty.wait_for(b"Xb");
+        let selector_at = pty.send(b"\x0b");
+        wait_armed(&mut pty, selector_at);
+        let inspector_at = pty.send(b"\x1b[B\r");
         // With no Runs the inspector has no rows; its key hint is the arming cue.
-        wait_for_frame(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            (inspector_at, 40, 24),
-            |screen| {
-                screen.iter().any(|row| row.contains("No Runs yet"))
-                    && screen.iter().any(|row| row.contains("Esc close"))
-            },
-        );
-        let after_inspector = transcript.len();
-        input.write_all(b"\x1b").expect("close inspector");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_inspector,
-            b"Ask Arany",
-        );
-        input.write_all(b"Y").expect("edit returned draft");
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Yb",
-        );
-        let usage_at = transcript.len();
-        input.write_all(b"\x0b").expect("usage quick selector");
-        wait_armed(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            usage_at,
-        );
-        input
-            .write_all(b"5")
-            .expect("inspect usage over Unicode draft");
-        wait_for_frame(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            (usage_at, 40, 24),
-            |screen| {
-                screen.iter().any(|row| row.contains("no calls yet"))
-                    && screen.iter().any(|row| row.contains("Esc close"))
-            },
-        );
-        let after_usage = transcript.len();
-        input.write_all(b"\x1b").expect("close usage");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_usage,
-            b"Ask Arany",
-        );
-        input.write_all(b"U").expect("edit at retained usage caret");
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Ub",
-        );
-        let after_inspection = transcript.len();
-        input.write_all(b"\x0b").expect("reopen quick selector");
-        wait_armed(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_inspection,
-        );
-        input
-            .write_all(b"\x1b[B\x1b[B\r")
-            .expect("choose guarded Session action");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_inspection,
-            b"Submit",
-        );
-        input.write_all(b"Z").expect("edit after guarded action");
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Zb",
-        );
+        wait_for_frame(&mut pty, (inspector_at, 40, 24), |screen| {
+            screen.iter().any(|row| row.contains("No Runs yet"))
+                && screen.iter().any(|row| row.contains("Esc close"))
+        });
+        pty.send_and_wait(b"\x1b", b"Ask Arany");
+        pty.send(b"Y");
+        pty.wait_for(b"Yb");
+        let usage_at = pty.send(b"\x0b");
+        wait_armed(&mut pty, usage_at);
+        pty.send(b"5");
+        wait_for_frame(&mut pty, (usage_at, 40, 24), |screen| {
+            screen.iter().any(|row| row.contains("no calls yet"))
+                && screen.iter().any(|row| row.contains("Esc close"))
+        });
+        pty.send_and_wait(b"\x1b", b"Ask Arany");
+        pty.send(b"U");
+        pty.wait_for(b"Ub");
+        let after_inspection = pty.send(b"\x0b");
+        wait_armed(&mut pty, after_inspection);
+        pty.send(b"\x1b[B\x1b[B\r");
+        pty.wait_for_after(after_inspection, b"Submit");
+        pty.send(b"Z");
+        pty.wait_for(b"Zb");
         let cases = if merged_overflow {
             vec![("Check @extra.txtZ", b"includes;".as_slice())]
         } else {
@@ -200,66 +84,48 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             ]
         };
         for (draft, diagnostic) in cases {
-            let from = transcript.len();
-            input.write_all(b"\x03").unwrap();
-            input.write_all(draft.as_bytes()).unwrap();
-            input.write_all(b"\x1b[D\r").unwrap();
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                diagnostic,
-            );
+            let from = pty.send(b"\x03");
+            pty.send(draft.as_bytes());
+            pty.send(b"\x1b[D\r");
+            pty.wait_for_after(from, diagnostic);
             let after_diagnostic = from
-                + transcript[from..]
+                + pty.transcript[from..]
                     .windows(diagnostic.len())
                     .position(|part| part == diagnostic)
                     .unwrap()
                 + diagnostic.len();
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                after_diagnostic,
-                b"\x1b[?25h",
-            );
-            let from = transcript.len();
-            input.write_all(b"X").unwrap();
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"XZ",
-            );
+            pty.wait_for_after(after_diagnostic, b"\x1b[?25h");
+            pty.send_and_wait(b"X", b"XZ");
         }
-        input
-            .write_all(b"\x03/exit\r")
-            .expect("clear draft and quit");
+        pty.send(b"\x03/exit\r");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            if child.child().try_wait().expect("process status").is_some() {
+            pty.pump();
+            if pty
+                .child
+                .child()
+                .try_wait()
+                .expect("process status")
+                .is_some()
+            {
                 break;
             }
-            assert!(Instant::now() < deadline, "PTY exit: {}", tail(&transcript));
+            assert!(
+                Instant::now() < deadline,
+                "PTY exit: {}",
+                tail(&pty.transcript)
+            );
             thread::yield_now();
         }
-        let status = child.take().wait().expect("process exit");
-        assert!(status.success(), "product failed: {}", tail(&transcript));
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        let text = String::from_utf8_lossy(&transcript);
-        let marker = |name: &str| {
-            text.lines()
-                .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-                .expect("TTY marker")
-                .to_owned()
-        };
-        assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+        let status = pty.child.take().wait().expect("process exit");
+        assert!(
+            status.success(),
+            "product failed: {}",
+            tail(&pty.transcript)
+        );
+        pty.pump();
+        let text = String::from_utf8_lossy(&pty.transcript);
+        assert_tty_restored(&text);
         assert!(
             !text.contains("INERT_MODAL_PASTE"),
             "ignored modal paste entered the draft"
@@ -309,90 +175,48 @@ fn session_picker_close_case(quick: bool) {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-            state.parent().expect("fixture root"),
-        )),
-        shell,
-    )
-    .session(&state, &workspace)
-    .term("xterm")
-    .spawn();
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            shell,
+        )
+        .session(&state, &workspace)
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
     let mut capture_from = 0;
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (0, 40, 24),
-        "Ask Arany",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (40, 24),
-        capture_from,
-    );
+    pty.wait_for_screen((0, 40, 24), "Ask Arany");
+    capture_from = pty.checkpoint_screen(&mut history, (40, 24), capture_from);
     let mut before_picker = capture_from;
     if quick {
-        input.write_all(b"\x0b").expect("quick actions");
-        wait_armed(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            before_picker,
-        );
-        capture_from = checkpoint_screen(
-            &mut transcript,
-            &mut answered,
-            &mut history,
-            (40, 24),
-            capture_from,
-        );
+        pty.send(b"\x0b");
+        wait_armed(&mut pty, before_picker);
+        capture_from = pty.checkpoint_screen(&mut history, (40, 24), capture_from);
         before_picker = capture_from;
-        input.write_all(b"\x1b[B\x1b[B\r").expect("Session action");
+        pty.send(b"\x1b[B\x1b[B\r");
     } else {
-        input.write_all(b"/resume\r").expect("Session command");
+        pty.send(b"/resume\r");
     }
-    wait_for_frame(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (before_picker, 40, 24),
-        |screen| {
-            screen.iter().any(|row| row.contains("1 in this Workspace"))
-                && screen.iter().any(|row| row.starts_with("› 1."))
-        },
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (40, 24),
-        capture_from,
-    );
+    wait_for_frame(&mut pty, (before_picker, 40, 24), |screen| {
+        screen.iter().any(|row| row.contains("1 in this Workspace"))
+            && screen.iter().any(|row| row.starts_with("› 1."))
+    });
+    capture_from = pty.checkpoint_screen(&mut history, (40, 24), capture_from);
     let before_close = capture_from;
-    input.write_all(b"\x1b").expect("close picker");
+    pty.send(b"\x1b");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        let recent = &transcript[before_close..];
+        pty.pump();
+        let recent = &pty.transcript[before_close..];
         assert!(
-            !screen_contains(&transcript, 40, 24, "failed"),
+            !screen_contains(&pty.transcript, 40, 24, "failed"),
             "picker close failed: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
-        if screen_contains(&transcript, 40, 24, "closed")
+        if screen_contains(&pty.transcript, 40, 24, "closed")
             && recent.windows(6).any(|part| part == b"\x1b[?25h")
         {
             break;
@@ -400,44 +224,40 @@ fn session_picker_close_case(quick: bool) {
         assert!(
             Instant::now() < deadline,
             "picker close: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (40, 24),
-        capture_from,
-    );
-    input.write_all(b"/exit\r").expect("exit");
+    capture_from = pty.checkpoint_screen(&mut history, (40, 24), capture_from);
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if child.child().try_wait().expect("process status").is_some() {
+        pty.pump();
+        if pty
+            .child
+            .child()
+            .try_wait()
+            .expect("process status")
+            .is_some()
+        {
             break;
         }
-        assert!(Instant::now() < deadline, "PTY exit: {}", tail(&transcript));
+        assert!(
+            Instant::now() < deadline,
+            "PTY exit: {}",
+            tail(&pty.transcript)
+        );
         thread::yield_now();
     }
-    let status = child.take().wait().expect("process exit");
-    assert!(status.success(), "product failed: {}", tail(&transcript));
-    checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (40, 24),
-        capture_from,
+    let status = pty.child.take().wait().expect("process exit");
+    assert!(
+        status.success(),
+        "product failed: {}",
+        tail(&pty.transcript)
     );
+    pty.checkpoint_screen(&mut history, (40, 24), capture_from);
     let text = String::from_utf8_lossy(&history);
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .expect("TTY marker")
-            .to_owned()
-    };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    assert_tty_restored(&text);
     tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("replay runtime")

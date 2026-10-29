@@ -1,4 +1,4 @@
-use super::super::session_picker::{PtyResponses, pump, tail};
+use super::super::session_picker::tail;
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -40,85 +40,78 @@ fn copy_over_ssh_writes_one_osc52_on_stderr_and_linear_mode_writes_none() {
                 "--classic"
             }
         );
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
-            &shell,
-        )
-        .session(&state, &workspace)
-        .env("ARANY_TEST_SESSION", id.to_string())
-        .env("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22")
-        .term("xterm")
-        .spawn();
-        let mut input = child.child().stdin.take().expect("PTY input");
-        let mut output = child.child().stdout.take().expect("PTY output");
-        let flags = rustix::fs::fcntl_getfl(&output).expect("PTY output flags");
-        rustix::fs::fcntl_setfl(&output, flags | rustix::fs::OFlags::NONBLOCK)
-            .expect("nonblocking PTY output");
-        let mut transcript = Vec::new();
-        let mut answered = PtyResponses::default();
-        let mut wait = |input: &mut ChildStdin, transcript: &mut Vec<u8>, from, needle: &[u8]| {
+        let mut pty = Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+                &shell,
+            )
+            .session(&state, &workspace)
+            .env("ARANY_TEST_SESSION", id.to_string())
+            .env("SSH_CONNECTION", "192.0.2.1 50000 192.0.2.2 22")
+            .term("xterm")
+            .spawn(),
+        );
+        let wait = |pty: &mut Pty, from, needle: &[u8]| {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !if needle == CARET {
-                crate::composer_caret(transcript, from, 80, 24)
+                crate::composer_caret(&pty.transcript, from, 80, 24)
                     .is_some_and(|(column, _)| column == 3)
             } else {
-                transcript[from..]
+                pty.transcript[from..]
                     .windows(needle.len())
                     .any(|part| part == needle)
             } {
-                pump(&mut output, input, transcript, &mut answered);
+                pty.pump();
                 assert!(
                     Instant::now() < deadline,
                     "copy PTY (linear: {linear}) missing {}: {}",
                     tail(needle),
-                    tail(transcript)
+                    tail(&pty.transcript)
                 );
                 thread::yield_now();
             }
         };
-        wait(&mut input, &mut transcript, 0, b"SHELL_PID:");
-        let label = transcript
+        wait(&mut pty, 0, b"SHELL_PID:");
+        let label = pty
+            .transcript
             .windows(b"SHELL_PID:".len())
             .position(|part| part == b"SHELL_PID:")
             .expect("shell PID label");
-        wait(&mut input, &mut transcript, label, b"\r\n");
-        let text = String::from_utf8_lossy(&transcript).into_owned();
+        wait(&mut pty, label, b"\r\n");
+        let text = String::from_utf8_lossy(&pty.transcript).into_owned();
         let pid = product_child_of(transcript_field(&text, "SHELL_PID:").parse().unwrap());
         let _product = ProductGuard::new(pid, state.clone());
         if linear {
-            wait(&mut input, &mut transcript, 0, b"Input:\r\n");
+            wait(&mut pty, 0, b"Input:\r\n");
         } else {
-            wait(&mut input, &mut transcript, 0, DISPLAYED.as_bytes());
-            wait(&mut input, &mut transcript, 0, CARET);
+            wait(&mut pty, 0, DISPLAYED.as_bytes());
+            wait(&mut pty, 0, CARET);
         }
         assert!(
-            osc52_payloads(&transcript).is_empty(),
+            osc52_payloads(&pty.transcript).is_empty(),
             "an answer's OSC 52 reached the terminal before any copy gesture"
         );
 
-        let from = transcript.len();
-        input.write_all(b"/copy\r").expect("copy command");
+        let from = pty.send(b"/copy\r");
         if linear {
-            wait(
-                &mut input,
-                &mut transcript,
+            wait(&mut pty,
                 from,
                 b"Notice: Copy unavailable: no native or tmux clipboard worked; OSC 52 unavailable in linear mode\r\n",
             );
-            wait(&mut input, &mut transcript, from, b"Input:\r\n");
+            wait(&mut pty, from, b"Input:\r\n");
             assert!(
-                osc52_payloads(&transcript).is_empty(),
+                osc52_payloads(&pty.transcript).is_empty(),
                 "linear mode wrote OSC 52"
             );
         } else {
-            wait(&mut input, &mut transcript, from, b"\x07");
+            wait(&mut pty, from, b"\x07");
             let sent = from
-                + transcript[from..]
+                + pty.transcript[from..]
                     .iter()
                     .position(|byte| *byte == 0x07)
                     .expect("OSC 52 terminator");
-            wait(&mut input, &mut transcript, sent, CARET);
-            let payloads = osc52_payloads(&transcript);
+            wait(&mut pty, sent, CARET);
+            let payloads = osc52_payloads(&pty.transcript);
             assert_eq!(payloads.len(), 1, "copy wrote one OSC 52 sequence");
             let encoded = payloads[0]
                 .strip_prefix(b";c;")
@@ -130,21 +123,11 @@ fn copy_over_ssh_writes_one_osc52_on_stderr_and_linear_mode_writes_none() {
             );
         }
 
-        input.write_all(b"/exit\r").expect("exit");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while child.child().try_wait().expect("PTY status").is_none() {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "copy PTY exit: {}",
-                tail(&transcript)
-            );
-            thread::yield_now();
-        }
-        assert!(wait_product(child.take()).status.success());
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.send(b"/exit\r");
+        pty.wait_exit("copy PTY exit");
+        assert!(pty.finish().status.success());
         assert_eq!(
-            osc52_payloads(&transcript).len(),
+            osc52_payloads(&pty.transcript).len(),
             usize::from(!linear),
             "no further OSC 52 after the gesture"
         );

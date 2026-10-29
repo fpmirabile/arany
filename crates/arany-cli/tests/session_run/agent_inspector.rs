@@ -1,7 +1,7 @@
-use super::loopback::{ChildGuard, read_request, send_response, wait_product, write_profile};
-use super::session_picker::{checkpoint_screen, pump, screen_rows, tail, wait_for_screen};
+use super::loopback::{read_request, send_response, wait_product, write_profile};
+use super::pty::Pty;
+use super::session_picker::{screen_rows, tail};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -394,107 +394,48 @@ fn inline_inspector(
     let command = format!(
         "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-            state.parent().expect("fixture root"),
-        )),
-        &command,
-    )
-    .session(state, workspace)
-    .env("ARANY_TEST_SESSION", id.to_string())
-    .term("xterm")
-    .spawn();
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            &command,
+        )
+        .session(state, workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
     let mut capture_from = 0;
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (0, width.into(), 24),
-        "Ask Arany",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.wait_for_screen((0, width.into(), 24), "Ask Arany");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let opened_at = capture_from;
-    input.write_all(b"/agents\r").expect("open inspector");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+    pty.send(b"/agents\r");
+    pty.wait_for_screen(
         (opened_at, width.into(), 24),
         // The newest Run's details name its objective; 16 columns keep this prefix.
         "Objective: curr",
     );
     // The inspector takes keys only once its armed frame is drawn.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::armed_selector(&transcript, opened_at, width.into(), 24).is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "armed inspector missing: {}",
-            tail(&transcript[opened_at..])
-        );
-        thread::yield_now();
-    }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.pump_until("armed inspector missing", |transcript| {
+        crate::armed_selector(transcript, opened_at, width.into(), 24).is_some()
+    });
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let checkpoint = capture_from;
-    input.write_all(b"\x1b[B").expect("select prior AgentRun");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (checkpoint, width.into(), 24),
-        "Objective: prior",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.send(b"\x1b[B");
+    pty.wait_for_screen((checkpoint, width.into(), 24), "Objective: prior");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let checkpoint = capture_from;
-    input.write_all(b"\x1b").expect("close inspector");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (checkpoint, width.into(), 24),
-        "Agent ins",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
-    input.write_all(b"/exit\r").expect("exit attached mode");
+    pty.send(b"\x1b");
+    pty.wait_for_screen((checkpoint, width.into(), 24), "Agent ins");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if attached
+        pty.pump();
+        if pty
+            .child
             .child()
             .try_wait()
             .expect("inspector status")
@@ -505,21 +446,14 @@ fn inline_inspector(
         assert!(
             Instant::now() < deadline,
             "inline inspector did not exit: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = pty.finish();
     assert!(result.status.success(), "inline inspector exited cleanly");
     assert_eq!(result.stderr, b"");
-    checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let transcript = String::from_utf8(history).expect("inline transcript UTF-8");
     let before = transcript
         .lines()
@@ -684,45 +618,35 @@ fn agent_chat_journey(
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-            state.parent().expect("fixture root"),
-        )),
-        &command,
-    )
-    .session(state, workspace)
-    .env("ARANY_TEST_SESSION", id.to_string())
-    .term("xterm")
-    .spawn();
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            &command,
+        )
+        .session(state, workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
     let mut capture_from = 0;
     let context = if classic { "Classic" } else { "Fullscreen" };
     // Decoding stops at the last cursor hide or show that ends a Ratatui frame, so a partial one never releases keys.
     let mut step = |keys: &[u8], needles: &[&str], absent: &[&str]| {
-        capture_from = checkpoint_screen(
-            &mut transcript,
-            &mut answered,
-            &mut history,
-            (size.0, size.1),
-            capture_from,
-        );
+        capture_from = pty.checkpoint_screen(&mut history, (size.0, size.1), capture_from);
         let from = capture_from;
-        input.write_all(keys).expect("PTY keys");
+        pty.send(keys);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let frame_end = transcript[from..]
+            pty.pump();
+            let frame_end = pty.transcript[from..]
                 .windows(6)
                 .rposition(|part| part == b"\x1b[?25l" || part == b"\x1b[?25h")
                 .map(|offset| from + offset + 6);
             let screen =
-                frame_end.map(|end| screen_rows(&transcript[..end], size.0, size.1).join("\n"));
+                frame_end.map(|end| screen_rows(&pty.transcript[..end], size.0, size.1).join("\n"));
             if let Some(screen) = screen.as_ref().filter(|screen| {
                 needles.iter().all(|needle| {
                     crate::process::pty_text_matches(screen.as_bytes(), needle.as_bytes())
@@ -739,7 +663,7 @@ fn agent_chat_journey(
             assert!(
                 Instant::now() < deadline,
                 "{context} missing {needles:?} or showing {absent:?}: {screen:?} {}",
-                tail(&transcript[from..])
+                tail(&pty.transcript[from..])
             );
             thread::yield_now();
         }
@@ -845,31 +769,24 @@ fn agent_chat_journey(
     );
     step(b"x", &["> x"], &["queued-submit", "queued-draft"]);
     step(b"\x7f", &["Alt+Left/Right agents"], &["> x"]);
-    let from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (size.0, size.1),
-        capture_from,
-    );
-    input.write_all(b"/exit\r").expect("exit attached mode");
+    let from = pty.checkpoint_screen(&mut history, (size.0, size.1), capture_from);
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if attached.child().try_wait().expect("chat status").is_some() {
+        pty.pump();
+        if pty.child.child().try_wait().expect("chat status").is_some() {
             break;
         }
         assert!(
             Instant::now() < deadline,
             "{context} chat did not exit: {}",
-            tail(&transcript[from..])
+            tail(&pty.transcript[from..])
         );
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = pty.finish();
     assert!(result.status.success(), "{context} chat exited cleanly");
-    history.extend_from_slice(&transcript[from..]);
+    history.extend_from_slice(&pty.transcript[from..]);
     let text = String::from_utf8_lossy(&history);
     let setting = |marker: &str| {
         text.split_once(marker)
@@ -1220,7 +1137,7 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
         })
         .expect("prior Run reports its Session");
     let gates = Gates { requested, release };
-    let (mut attached, mut pty) = live_pty(&workspace, &state, id, false);
+    let mut pty = live_pty(&workspace, &state, id, false);
     pty.await_request(&gates, "first");
     pty.frame(0, &["Alt+Left/Right agents"], &[]);
     gates.release.send(()).expect("release the first child");
@@ -1229,7 +1146,7 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
     pty.await_request(&gates, "synthesis");
     // The synthesis is held, so the Run is active: `/exit` is refused until it is released.
     let release = gates.release.clone();
-    exit_live_after_refusal(&mut attached, &mut pty, move || {
+    exit_live_after_refusal(&mut pty, move || {
         release.send(()).expect("release the synthesis");
     });
     server.join().expect("server thread finishes");
@@ -1278,7 +1195,7 @@ fn selected_child_messaging_journey() {
         .expect("prior Run reports its Session");
     let gates = Gates { requested, release };
     for classic in [false, true] {
-        let (mut attached, mut pty) = live_pty(&workspace, &state, id, classic);
+        let mut pty = live_pty(&workspace, &state, id, classic);
         let total = if classic { 7 } else { 4 };
         pty.await_request(&gates, "first");
         pty.frame(0, &["Alt+Left/Right agents", "child 2"], &[]);
@@ -1359,7 +1276,7 @@ fn selected_child_messaging_journey() {
         );
         gates.release.send(()).expect("server accepts the release");
         pty.step(b"\x1b", &["team answer", "Ask Arany"], &["viewing child"]);
-        exit_live(&mut attached, &mut pty);
+        exit_live(&mut pty);
     }
     live_linear_agent_chat(&workspace, &state, id, &gates, true);
     server.join().expect("server thread finishes");
@@ -1392,23 +1309,31 @@ const LIVE_SIZE: (usize, usize) = (80, 24);
 
 // Decode at cursor markers; Classic resizing also emits them before the replacement frame.
 struct LivePty {
-    input: std::process::ChildStdin,
-    output: std::process::ChildStdout,
-    transcript: Vec<u8>,
+    pty: Pty,
     history: Vec<u8>,
-    answered: crate::session_picker::PtyResponses,
     capture_from: usize,
     context: &'static str,
 }
 
+impl std::ops::Deref for LivePty {
+    type Target = Pty;
+
+    fn deref(&self) -> &Pty {
+        &self.pty
+    }
+}
+
+impl std::ops::DerefMut for LivePty {
+    fn deref_mut(&mut self) -> &mut Pty {
+        &mut self.pty
+    }
+}
+
 impl LivePty {
-    fn pump(&mut self) {
-        pump(
-            &mut self.output,
-            &mut self.input,
-            &mut self.transcript,
-            &mut self.answered,
-        );
+    // Bounds the capture at `from`, keeping the raw bytes in `history`.
+    fn checkpoint(&mut self, from: usize) -> usize {
+        self.pty
+            .checkpoint_screen(&mut self.history, LIVE_SIZE, from)
     }
 
     fn frame_ends(&self, from: usize) -> Vec<usize> {
@@ -1456,15 +1381,8 @@ impl LivePty {
     }
 
     fn step(&mut self, keys: &[u8], needles: &[&str], absent: &[&str]) -> usize {
-        self.capture_from = checkpoint_screen(
-            &mut self.transcript,
-            &mut self.answered,
-            &mut self.history,
-            LIVE_SIZE,
-            self.capture_from,
-        );
-        let from = self.capture_from;
-        self.input.write_all(keys).expect("PTY keys");
+        self.capture_from = self.checkpoint(self.capture_from);
+        let from = self.send(keys);
         self.frame(from, needles, absent)
     }
 
@@ -1515,13 +1433,13 @@ fn live_pty(
     state: &std::path::Path,
     id: SessionId,
     classic: bool,
-) -> (ChildGuard, LivePty) {
+) -> LivePty {
     opt_into_delegation(state, workspace, id);
     let mode = if classic { "--classic " } else { "" };
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::product::PtyLaunch::new(
+    let attached = crate::product::PtyLaunch::new(
         crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
             state.parent().expect("fixture root"),
         )),
@@ -1532,33 +1450,21 @@ fn live_pty(
     .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
     .term("xterm")
     .spawn();
-    let input = attached.child().stdin.take().expect("PTY input");
-    let output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let pty = LivePty {
-        input,
-        output,
-        transcript: Vec::new(),
+    LivePty {
+        pty: Pty::new(attached),
         history: Vec::new(),
-        answered: crate::session_picker::PtyResponses::default(),
         capture_from: 0,
         context: if classic { "Classic" } else { "Fullscreen" },
-    };
-    (attached, pty)
+    }
 }
 
 // Exits through `/exit` and checks that the terminal settings were restored.
-fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
-    exit_live_after_refusal(attached, pty, || {});
+fn exit_live(pty: &mut LivePty) {
+    exit_live_after_refusal(pty, || {});
 }
 
 // `on_refused` runs once a refusal of `/exit` is on screen, before the retry.
-fn exit_live_after_refusal(
-    attached: &mut ChildGuard,
-    pty: &mut LivePty,
-    mut on_refused: impl FnMut(),
-) {
+fn exit_live_after_refusal(pty: &mut LivePty, mut on_refused: impl FnMut()) {
     let refused = "unavailable while a Run is active";
     let count = |screen: &str, text: &str| {
         crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes()).count()
@@ -1567,21 +1473,15 @@ fn exit_live_after_refusal(
     let mut from = pty.capture_from;
     // The `/exit` refusal notice persists, so resend after a newer refusal reaches idle.
     'exit: loop {
-        from = checkpoint_screen(
-            &mut pty.transcript,
-            &mut pty.answered,
-            &mut pty.history,
-            LIVE_SIZE,
-            from,
-        );
+        from = pty.checkpoint(from);
         pty.capture_from = from;
         let earlier = count(&pty.screen(pty.transcript.len()), refused);
-        pty.input.write_all(b"/exit\r").expect("exit attached mode");
+        pty.send(b"/exit\r");
         let mut was_refused = false;
         let mut inspected = 0;
         loop {
             pty.pump();
-            if attached.child().try_wait().expect("chat status").is_some() {
+            if pty.child.child().try_wait().expect("chat status").is_some() {
                 break 'exit;
             }
             for end in pty.frame_ends(from).into_iter().skip(inspected) {
@@ -1604,14 +1504,13 @@ fn exit_live_after_refusal(
             thread::yield_now();
         }
     }
-    let result = wait_product(attached.take());
-    pty.pump();
+    let result = pty.finish();
     assert!(
         result.status.success(),
         "{} chat exited cleanly",
         pty.context
     );
-    pty.history.extend_from_slice(&pty.transcript[from..]);
+    pty.history.extend_from_slice(&pty.pty.transcript[from..]);
     let text = String::from_utf8_lossy(&pty.history);
     let setting = |marker: &str| {
         text.split_once(marker)
@@ -1630,7 +1529,7 @@ fn live_agent_chat_journey(
     classic: bool,
     gates: &Gates,
 ) {
-    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
+    let mut pty = live_pty(workspace, state, id, classic);
     let armed = "agents · Esc primary";
     pty.await_request(gates, "first");
     // The shelf lists both children once their spawns are committed and reduced.
@@ -1708,7 +1607,7 @@ fn live_agent_chat_journey(
         ],
         &["viewing child", "agents · Esc primary"],
     );
-    exit_live(&mut attached, &mut pty);
+    exit_live(&mut pty);
     if classic {
         // Live records were appended once each, below the chat's read-only boundary.
         let (scrollback, screen) = crate::terminal_grid(&pty.history, LIVE_SIZE.0, LIVE_SIZE.1);
@@ -1729,7 +1628,7 @@ fn live_agent_picker_journey(
     classic: bool,
     gates: &Gates,
 ) {
-    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
+    let mut pty = live_pty(workspace, state, id, classic);
     let picker = "Enter open · Esc close";
     let focused = |pty: &LivePty, end: usize| {
         pty.screen(end)
@@ -1796,7 +1695,7 @@ fn live_agent_picker_journey(
         ],
         &["viewing child", "agents · Esc primary"],
     );
-    exit_live(&mut attached, &mut pty);
+    exit_live(&mut pty);
 }
 
 fn live_linear_agent_chat(

@@ -1,5 +1,6 @@
 use super::loopback::{ChildGuard, read_request, wait_product, write_profile};
 use super::process::BoundedOutput;
+use crate::pty::Pty;
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, kill_process};
 use std::{
@@ -195,6 +196,14 @@ pub(super) fn transcript_field<'a>(text: &'a str, label: &str) -> &'a str {
                 redacted_tail(text.as_bytes())
             )
         })
+}
+
+#[track_caller]
+pub(super) fn assert_tty_restored(text: &str) {
+    assert_eq!(
+        transcript_field(text, "TTY_BEFORE:"),
+        transcript_field(text, "TTY_AFTER:")
+    );
 }
 
 pub(crate) fn collect_nonblocking(
@@ -1270,28 +1279,24 @@ mod tmux;
 
 #[test]
 fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history() {
-    use super::session_picker::{PtyResponses, pump, tail};
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use super::session_picker::tail;
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
     let id = crate::seed_transcript_session(&state, &workspace);
     let shell = "stty rows 50 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; result=$?; exit \"$result\"";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
-        shell,
-    )
-    .session(&state, &workspace)
-    .env("ARANY_TEST_SESSION", id.to_string())
-    .term("xterm")
-    .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = PtyResponses::default();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .term("xterm")
+        .spawn(),
+    );
     // The latest composer caret row (0-based) drawn after `from`, decoded with the screen.
     let caret = |transcript: &[u8], from: usize| {
         let marker = b"\x1b[?25h\x1b[";
@@ -1323,36 +1328,35 @@ fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history()
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     let (draft_row, idle) = loop {
-        if let Some(found) = caret(&transcript, 0) {
+        if let Some(found) = caret(&pty.transcript, 0) {
             break found;
         }
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "idle composer: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     };
-    let text = String::from_utf8_lossy(&transcript);
+    let text = String::from_utf8_lossy(&pty.transcript);
     let pid = product_child_of(transcript_field(&text, "SHELL_PID:").parse().unwrap());
     let _product = ProductGuard::new(pid, state.clone());
     super::assert_history_above(&idle.1, draft_row - 1, "idle Classic at 50 rows");
     let history = objectives(&idle);
     assert!(history > 0, "seeded history visible or in scrollback");
 
-    let opened_at = transcript.len();
-    input.write_all(b"\x0b").unwrap();
+    let opened_at = pty.send(b"\x0b");
     let deadline = Instant::now() + Duration::from_secs(10);
     let dialog = loop {
-        if let Some(screen) = crate::armed_selector(&transcript, opened_at, 80, 50) {
+        if let Some(screen) = crate::armed_selector(&pty.transcript, opened_at, 80, 50) {
             break screen;
         }
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "armed quick actions: {}",
-            tail(&transcript[opened_at..])
+            tail(&pty.transcript[opened_at..])
         );
         thread::yield_now();
     };
@@ -1366,18 +1370,17 @@ fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history()
     assert!(dialog[top + 6].contains("1-5 or Up/Down · Enter open · Esc return"));
     assert_eq!(top + 7, 50, "no reserved rows below the dialog: {dialog:?}");
 
-    let closed_at = transcript.len();
-    input.write_all(b"\x1b").unwrap();
+    let closed_at = pty.send(b"\x1b");
     let deadline = Instant::now() + Duration::from_secs(10);
     let (draft_row, closed) = loop {
-        if let Some(found) = caret(&transcript, closed_at) {
+        if let Some(found) = caret(&pty.transcript, closed_at) {
             break found;
         }
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "composer after the dialog: {}",
-            tail(&transcript[closed_at..])
+            tail(&pty.transcript[closed_at..])
         );
         thread::yield_now();
     };
@@ -1400,24 +1403,15 @@ fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history()
         "scrollback is intact and never duplicated"
     );
 
-    input.write_all(b"/exit\r").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.child().try_wait().unwrap().is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "Classic exit: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    assert!(wait_product(child.take()).status.success());
+    pty.send(b"/exit\r");
+    pty.wait_exit("Classic exit");
+    assert!(wait_product(pty.child.take()).status.success());
 }
 
 #[test]
 fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
-    use super::session_picker::{PtyResponses, pump, tail};
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use super::session_picker::tail;
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1425,106 +1419,56 @@ fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
     let id = crate::seed_transcript_session(&state, &workspace);
     assert!(!state.join("ui-preferences.json").exists());
     let shell = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; result=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$result\"";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
-        shell,
-    )
-    .session(&state, &workspace)
-    .env("ARANY_TEST_SESSION", id.to_string())
-    .term("xterm")
-    .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = PtyResponses::default();
-    let wait = |mut output: &mut dyn Read,
-                mut input: &mut dyn Write,
-                transcript: &mut Vec<u8>,
-                answered: &mut PtyResponses,
-                from: usize,
-                needle: &[u8]| {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !transcript[from..]
-            .windows(needle.len())
-            .any(|part| part == needle)
-        {
-            pump(&mut output, &mut input, transcript, answered);
-            assert!(
-                Instant::now() < deadline,
-                "Classic PTY: {}",
-                tail(transcript)
-            );
-            thread::yield_now();
-        }
-        pump(&mut output, &mut input, transcript, answered);
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .term("xterm")
+        .spawn(),
+    );
+    let wait = |pty: &mut Pty, from: usize, needle: &[u8]| {
+        pty.pump_until("Classic PTY", |transcript| {
+            transcript[from..]
+                .windows(needle.len())
+                .any(|part| part == needle)
+        });
+        pty.pump();
     };
     // The idle composer caret, found by the composer border wherever the viewport sits.
-    let wait_caret = |mut output: &mut dyn Read,
-                      mut input: &mut dyn Write,
-                      transcript: &mut Vec<u8>,
-                      answered: &mut PtyResponses,
-                      from: usize| {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !super::composer_caret(transcript, from, 80, 24)
-            .is_some_and(|(column, _)| column == 3)
-        {
-            pump(&mut output, &mut input, transcript, answered);
-            assert!(
-                Instant::now() < deadline,
-                "Classic composer caret: {}",
-                tail(&transcript[from..])
-            );
-            thread::yield_now();
-        }
+    let wait_caret = |pty: &mut Pty, from: usize| {
+        pty.pump_until("Classic composer caret", |transcript| {
+            super::composer_caret(transcript, from, 80, 24).is_some_and(|(column, _)| column == 3)
+        });
     };
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        0,
-        b"TTY_BEFORE:",
-    );
-    let text = String::from_utf8_lossy(&transcript);
+    wait(&mut pty, 0, b"TTY_BEFORE:");
+    let text = String::from_utf8_lossy(&pty.transcript);
     let pid = product_child_of(transcript_field(&text, "SHELL_PID:").parse().unwrap());
     let _product = ProductGuard::new(pid, state.clone());
-    wait_caret(&mut output, &mut input, &mut transcript, &mut answered, 0);
-    let first_query = transcript
+    wait_caret(&mut pty, 0);
+    let first_query = pty
+        .transcript
         .windows(4)
         .position(|part| part == b"\x1b[6n")
         .expect("Classic startup cursor query");
     assert!(
-        transcript[..first_query].ends_with(b"\x1b[24;1H"),
+        pty.transcript[..first_query].ends_with(b"\x1b[24;1H"),
         "Classic reserves rows below any existing shell output"
     );
     // Idle Classic takes only its content, so the composer border sits under history.
-    let (_, screen) = super::composer_caret(&transcript, 0, 80, 24).expect("idle composer");
+    let (_, screen) = super::composer_caret(&pty.transcript, 0, 80, 24).expect("idle composer");
     let border = screen
         .iter()
         .rposition(|row| row.starts_with("─ Ask Arany"))
         .expect("composer border");
     super::assert_history_above(&screen, border, "idle Classic");
     // The transcript gesture follows the ignored page keys in reader order.
-    let from = transcript.len();
-    input.write_all(b"\x1b[5~\x1b[6~\x0f").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        from,
-        b"reached;",
-    );
-    wait_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        from,
-    );
-    let dump = &transcript[from..];
+    let from = pty.send(b"\x1b[5~\x1b[6~\x0f");
+    wait(&mut pty, from, b"reached;");
+    wait_caret(&mut pty, from);
+    let dump = &pty.transcript[from..];
     let heading = dump
         .windows(b"Transcript".len())
         .position(|part| part == b"Transcript")
@@ -1538,25 +1482,11 @@ fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
     );
     assert!(!dump.windows(5).any(|part| part == b"\x1b]52;"));
     for gesture in [b"\x0f".as_slice(), b"/transcript\r"] {
-        let from = transcript.len();
-        input.write_all(gesture).unwrap();
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"reached;",
-        );
-        wait_caret(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-        );
+        let from = pty.send(gesture);
+        wait(&mut pty, from, b"reached;");
+        wait_caret(&mut pty, from);
         if gesture == b"\x0f" {
-            let dump = &transcript[from..];
+            let dump = &pty.transcript[from..];
             let heading = dump
                 .windows(b"Transcript".len())
                 .position(|part| part == b"Transcript")
@@ -1573,57 +1503,35 @@ fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
         (b"/agents\r", b"Last"),
         (b"/help\r", b"local controls"),
     ] {
-        let from = transcript.len();
-        input.write_all(command).unwrap();
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            needle,
-        );
+        let from = pty.send(command);
+        wait(&mut pty, from, needle);
         // A selector takes keys only once its armed frame is drawn.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while crate::armed_selector(&transcript, from, 80, 24).is_none() {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
+        while crate::armed_selector(&pty.transcript, from, 80, 24).is_none() {
+            pty.pump();
             assert!(
                 Instant::now() < deadline,
                 "armed {}: {}",
                 String::from_utf8_lossy(command).escape_debug(),
-                tail(&transcript[from..])
+                tail(&pty.transcript[from..])
             );
             thread::yield_now();
         }
-        let close_from = transcript.len();
-        input.write_all(b"\x1b").unwrap();
-        wait_caret(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            close_from,
-        );
+        let close_from = pty.send(b"\x1b");
+        wait_caret(&mut pty, close_from);
         // Closing shrinks the viewport by clearing only its own rows, never the whole screen.
         assert!(
-            !transcript[close_from..]
+            !pty.transcript[close_from..]
                 .windows(4)
                 .any(|part| part == b"\x1b[2J"),
             "settled history must not be cleared"
         );
     }
-    let exit_from = transcript.len();
-    input.write_all(b"/exit\r").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.child().try_wait().unwrap().is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(Instant::now() < deadline, "Classic exit");
-        thread::yield_now();
-    }
-    assert!(wait_product(child.take()).status.success());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    super::assert_classic_owned_clear(&transcript, exit_from);
-    let text = String::from_utf8_lossy(&transcript);
+    let exit_from = pty.send(b"/exit\r");
+    pty.wait_exit("Classic exit");
+    assert!(pty.finish().status.success());
+    super::assert_classic_owned_clear(&pty.transcript, exit_from);
+    let text = String::from_utf8_lossy(&pty.transcript);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
         assert!(
             !text.contains(&format!("\x1b[?{mode}h")),

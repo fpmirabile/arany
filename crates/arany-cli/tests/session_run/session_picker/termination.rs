@@ -1,8 +1,9 @@
-use super::{pump, tail};
+use super::tail;
 use crate::active_terminal::{
     ProductGuard, collect_nonblocking, product_child_of_executable, tty_settings,
 };
 use crate::loopback::wait_product;
+use crate::pty::Pty;
 use arany::{SessionView, StateRoot, Store, create_session};
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -54,39 +55,24 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
-        &command,
-    )
-    .executable("/arany")
-    .session(&state, &workspace)
-    .term("xterm")
-    .spawn();
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"\x1b[?1000h".len())
-        .any(|part| part == b"\x1b[?1000h")
-        || (columns == 16
-            && (!transcript.windows(b"Esc".len()).any(|part| part == b"Esc")
-                || !transcript
-                    .windows(b"\x1b[?25l".len())
-                    .any(|part| part == b"\x1b[?25l")))
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "picker frame did not complete at {columns}x{rows}: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    let visible = String::from_utf8_lossy(&transcript);
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            &command,
+        )
+        .executable("/arany")
+        .session(&state, &workspace)
+        .term("xterm")
+        .spawn(),
+    );
+    pty.pump_until(
+        &format!("picker frame did not complete at {columns}x{rows}"),
+        |transcript| {
+            let has = |needle: &[u8]| transcript.windows(needle.len()).any(|part| part == needle);
+            has(b"\x1b[?1000h") && (columns != 16 || (has(b"Esc") && has(b"\x1b[?25l")))
+        },
+    );
+    let visible = String::from_utf8_lossy(&pty.transcript);
     let shell_pid = visible
         .lines()
         .find_map(|line| line.strip_prefix("SHELL_PID:"))
@@ -111,9 +97,10 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
         kill_process(product_pid, Signal::TSTP).expect("suspend picker");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            pty.pump();
             if product_state(product_pid) == 'T'
-                && transcript
+                && pty
+                    .transcript
                     .windows(b"\x1b[?1000l".len())
                     .any(|part| part == b"\x1b[?1000l")
             {
@@ -130,8 +117,9 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
         kill_process(product_pid, Signal::CONT).expect("resume picker");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let enables = transcript
+            pty.pump();
+            let enables = pty
+                .transcript
                 .windows(b"\x1b[?1000h".len())
                 .filter(|part| *part == b"\x1b[?1000h")
                 .count();
@@ -147,8 +135,9 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if attached
+        pty.pump();
+        if pty
+            .child
             .child()
             .try_wait()
             .expect("picker status")
@@ -159,18 +148,17 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
         assert!(
             Instant::now() < deadline,
             "picker did not exit after {signal_name}: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = pty.finish();
     assert!(
         !result.status.success(),
         "{signal_name} exits unsuccessfully"
     );
     assert_eq!(result.stderr, b"");
-    let transcript = String::from_utf8(transcript).expect("PTY transcript UTF-8");
+    let transcript = String::from_utf8(pty.transcript).expect("PTY transcript UTF-8");
     let disabled = transcript.rfind("\x1b[?1000l").expect("mouse disabled");
     let restored = transcript.find("TTY_AFTER:").expect("restoration marker");
     assert!(

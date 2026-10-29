@@ -1,6 +1,6 @@
 use super::*;
 use crate::setup::manager::{Presentation, acknowledge_result, assert_result_contains};
-use crate::setup::{SetupPty, SetupPtyMode, setup_pty_command};
+use crate::setup::{SetupPtyMode, setup_pty_command};
 use std::{net::TcpListener, os::unix::net::UnixListener};
 
 const STAGE_TEST: &str = "setup::offline_https::chatgpt::inspection::metadata_inspection_stage";
@@ -189,7 +189,7 @@ fn inspection_case(presentation: Presentation, storage: &str, access: Access) {
         .unwrap();
     perform_inspection(&mut pty, presentation, access, inspected, storage);
     assert_eq!(session_snapshot(&state, id), before);
-    pty.input.write_all(b"/exit\r").unwrap();
+    pty.send(b"/exit\r");
     let (result, transcript) = crate::setup::finish_setup_pty_with_transcript(pty);
     assert!(result.status.success());
     assert!(
@@ -228,14 +228,13 @@ fn inspection_case(presentation: Presentation, storage: &str, access: Access) {
 }
 
 fn perform_inspection(
-    pty: &mut SetupPty,
+    pty: &mut Pty,
     presentation: Presentation,
     access: Access,
     inspected: Uuid,
     storage: &str,
 ) {
-    let from = pty.transcript.len();
-    pty.input.write_all(b"/setup\r").unwrap();
+    let from = pty.send(b"/setup\r");
     presentation.menu(pty, from, "Provider setup");
     let accounts = presentation.choose(pty, 1);
     presentation.menu(pty, accounts, "API accounts");
@@ -247,13 +246,10 @@ fn perform_inspection(
     let (returned, content) = acknowledge_result(pty, presentation, details);
     assert_details(&content, inspected, storage, access);
     presentation.menu(pty, returned, access.menu_title());
-    let back = pty.transcript.len();
-    pty.input
-        .write_all(match presentation {
-            Presentation::ScreenReader => b"\x03",
-            Presentation::Inline => b"\x1b",
-        })
-        .unwrap();
+    let back = pty.send(match presentation {
+        Presentation::ScreenReader => b"\x03",
+        Presentation::Inline => b"\x1b",
+    });
     presentation.composer(pty, back);
 }
 
@@ -262,34 +258,23 @@ fn start_inspection(
     workspace: &Path,
     id: arany::SessionId,
     presentation: Presentation,
-) -> SetupPty {
+) -> Pty {
     let mode = match presentation {
         Presentation::ScreenReader => SetupPtyMode::Resumed(id),
         Presentation::Inline => SetupPtyMode::ResumedInline(id),
     };
     let state = temp.path().join("state");
-    let mut child = setup_pty_command(temp, workspace, &state, &mode, None)
-        .executable("/arany")
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path={}", temp.path().join("bus").display()),
-        )
-        .spawn();
-    let input = child.child().stdin.take().unwrap();
-    let output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut pty = SetupPty {
-        _product: ProductGuard::new(
-            product_child_of_executable(child.child().id(), Path::new("/arany")),
-            state,
-        ),
-        child,
-        input,
-        output,
-        transcript: Vec::new(),
-        answered: crate::PtyResponses::default(),
-    };
+    let mut pty = Pty::new(
+        setup_pty_command(temp, workspace, &state, &mode, None)
+            .executable("/arany")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}", temp.path().join("bus").display()),
+            )
+            .spawn(),
+    );
+    let product = product_child_of_executable(pty.child.child().id(), Path::new("/arany"));
+    pty.guard_product(ProductGuard::new(product, state));
     presentation.composer(&mut pty, 0);
     pty
 }

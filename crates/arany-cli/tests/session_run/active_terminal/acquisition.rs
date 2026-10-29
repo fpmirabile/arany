@@ -3,7 +3,8 @@ use super::{
     tty_settings,
 };
 use crate::loopback::wait_product;
-use crate::session_picker::{pump, tail};
+use crate::pty::Pty;
+use crate::session_picker::tail;
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
     io::{FdFlags, fcntl_getfd},
@@ -455,37 +456,25 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --classic --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     };
-    let mut attached = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-            state.parent().expect("fixture root"),
-        )),
-        command,
-    )
-    .session(&state, &workspace)
-    .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-    .term(if screen_reader { "dumb" } else { "xterm" })
-    .spawn();
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"PRODUCT_PID:".len())
-        .position(|part| part == b"PRODUCT_PID:")
-        .is_some_and(|start| transcript[start..].contains(&b'\n'))
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "product PID marker missing: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    let product_pid = transcript_field(&String::from_utf8_lossy(&transcript), "PRODUCT_PID:")
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            command,
+        )
+        .session(&state, &workspace)
+        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+        .term(if screen_reader { "dumb" } else { "xterm" })
+        .spawn(),
+    );
+    pty.pump_until("product PID marker missing", |transcript| {
+        transcript
+            .windows(b"PRODUCT_PID:".len())
+            .position(|part| part == b"PRODUCT_PID:")
+            .is_some_and(|start| transcript[start..].contains(&b'\n'))
+    });
+    let product_pid = transcript_field(&String::from_utf8_lossy(&pty.transcript), "PRODUCT_PID:")
         .parse::<i32>()
         .ok()
         .and_then(rustix::process::Pid::from_raw)
@@ -497,20 +486,24 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         b"Provider setup"
     };
-    while !transcript.windows(prompt.len()).any(|part| part == prompt) {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+    while !pty
+        .transcript
+        .windows(prompt.len())
+        .any(|part| part == prompt)
+    {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "setup prompt missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
     assert!(product.is_owned_and_running(), "test owns attached product");
-    attached.child().kill().expect("close PTY master");
-    attached.take().wait().expect("reap PTY owner");
-    drop(input);
-    drop(output);
+    pty.child.child().kill().expect("close PTY master");
+    pty.child.take().wait().expect("reap PTY owner");
+    drop(pty.input);
+    drop(pty.output);
     let deadline = Instant::now() + Duration::from_secs(5);
     while product.is_owned_and_running() {
         assert!(Instant::now() < deadline, "product survived PTY loss");

@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::pty::Pty;
 
 #[derive(Clone, Copy)]
 struct RouteCase {
@@ -1325,19 +1327,12 @@ fn messages_preview_cancellation_discards_secret_tail() {
 // The agents panel repeats answer text while a Run is active, so require the row and `ready`.
 #[cfg(target_os = "linux")]
 #[track_caller]
-fn wait_settled(
-    output: &mut impl std::io::Read,
-    input: &mut impl std::io::Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut super::session_picker::PtyResponses,
-    from: usize,
-    answer: &str,
-) {
+fn wait_settled(pty: &mut Pty, from: usize, answer: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        super::session_picker::pump(output, input, transcript, answered);
-        let rows = super::screen_rows(transcript, 100, 30);
-        if transcript.len() > from
+        pty.pump();
+        let rows = super::screen_rows(&pty.transcript, 100, 30);
+        if pty.transcript.len() > from
             && rows.iter().any(|row| row.trim() == answer)
             && rows.iter().any(|row| row.trim_start().starts_with("ready"))
         {
@@ -1346,7 +1341,7 @@ fn wait_settled(
         assert!(
             std::time::Instant::now() < deadline,
             "{answer} never settled: {}",
-            super::session_picker::tail(transcript)
+            super::session_picker::tail(&pty.transcript)
         );
         std::thread::yield_now();
     }
@@ -1356,8 +1351,7 @@ fn wait_settled(
 fn messages_attached_case(cancel: bool, case: RouteCase) {
     use super::active_terminal::{ProductGuard, product_child_of};
     use super::loopback::{read_request_for, send_messages_response_for, wait_product};
-    use super::session_picker::{PtyResponses, pump, wait_for_screen};
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -1475,17 +1469,11 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     .term("xterm-256color")
     .piped_stderr();
     case.keys(command.command(), Some(case.key));
-    let mut child = command.spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = PtyResponses::default();
+    let mut pty = Pty::new(command.spawn());
     let deadline = Instant::now() + Duration::from_secs(10);
     let shell_pid = loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if let Some(pid) = String::from_utf8_lossy(&transcript)
+        pty.pump();
+        if let Some(pid) = String::from_utf8_lossy(&pty.transcript)
             .lines()
             .find_map(|line| {
                 line.trim_end_matches('\r')
@@ -1500,50 +1488,22 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     };
     let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
     if cancel {
-        wait_for_screen(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            (0, 100, 30),
-            "safe preview",
-        );
+        pty.wait_for_screen((0, 100, 30), "safe preview");
         assert!(
-            super::screen_rows(&transcript, 100, 30)
+            super::screen_rows(&pty.transcript, 100, 30)
                 .iter()
                 .any(|row| row.trim() == "safe preview")
         );
     } else {
-        wait_settled(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            0,
-            "verified answer",
-        );
-        let from = transcript.len();
+        wait_settled(&mut pty, 0, "verified answer");
+        let from = pty.transcript.len();
         // New conversations default to single; delegation needs an explicit opt-in.
-        input.write_all(b"/agents auto\r").unwrap();
-        input.write_all(b"delegate once\r").unwrap();
-        wait_settled(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            "team answer",
-        );
+        pty.send(b"/agents auto\r");
+        pty.send(b"delegate once\r");
+        wait_settled(&mut pty, from, "team answer");
     }
-    let from = transcript.len();
-    input
-        .write_all(if cancel { b"\x03" } else { b"/compact\r" })
-        .unwrap();
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+    let from = pty.send(if cancel { b"\x03" } else { b"/compact\r" });
+    pty.wait_for_screen(
         (from, 100, 30),
         if cancel {
             "Interrupted. Send a message to continue."
@@ -1552,30 +1512,16 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         },
     );
     if !cancel {
-        let from = transcript.len();
-        input.write_all(b"continue\r").unwrap();
-        wait_settled(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            "continued after compaction",
-        );
+        let from = pty.send(b"continue\r");
+        wait_settled(&mut pty, from, "continued after compaction");
     }
-    input.write_all(b"/exit\r").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.child().try_wait().unwrap().is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(Instant::now() < deadline, "attached exit deadline");
-        thread::yield_now();
-    }
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    fcntl_setfl(&output, flags).unwrap();
-    child.child().stdout = Some(output);
-    let exited = wait_product(child.take());
-    drop(input);
-    transcript.extend_from_slice(&exited.stdout);
+    pty.send(b"/exit\r");
+    pty.wait_exit("attached exit deadline");
+    pty.pump();
+    pty.child.child().stdout = Some(pty.output);
+    let exited = wait_product(pty.child.take());
+    drop(pty.input);
+    pty.transcript.extend_from_slice(&exited.stdout);
     assert!(
         exited.status.success(),
         "attached process exit {:?}",
@@ -1590,7 +1536,9 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     );
     for secret in [case.key.as_bytes(), b"test-", b"OMITTED_WORKSPACE_CANARY"] {
         assert!(
-            !transcript.windows(secret.len()).any(|part| part == secret),
+            !pty.transcript
+                .windows(secret.len())
+                .any(|part| part == secret),
             "sensitive tail reached the terminal"
         );
     }

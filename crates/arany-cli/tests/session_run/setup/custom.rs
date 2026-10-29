@@ -3,29 +3,11 @@ use super::*;
 #[cfg(debug_assertions)]
 #[test]
 fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("Workspace");
-    let state = temp.path().join("state");
+    let (temp, workspace, state) = workspace_root();
     let mut pty = start_setup_pty(&temp, &workspace, &state);
-    let routes_at = pty.transcript.len();
-    pty.input.write_all(b"2\r").expect("open custom routes");
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        routes_at,
-        b"Input:\r\n",
-    );
+    pty.send_and_wait(b"2\r", b"Input:\r\n");
     let saved_at = add_custom_route(&mut pty, b"1\r", b"3\r");
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (saved_at, b"empty Enter selects 1. first-route"),
-    );
+    pty.acknowledge_linear_pages((saved_at, b"empty Enter selects 1. first-route"));
     // Without a conformance check the save result is one acknowledgment (terminal.md, Custom routes).
     assert!(
         String::from_utf8_lossy(&pty.transcript[saved_at..])
@@ -33,27 +15,15 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
         "save result names the next step"
     );
     let before_edit = std::fs::read(state.join("provider-profiles.json")).unwrap();
-    let route_at = pty.transcript.len();
-    pty.input
-        .write_all(b"1\r")
-        .expect("select saved Chat route");
+    let route_at = pty.send(b"1\r");
     wait_setup_choices(&mut pty, route_at);
-    let inspect_at = pty.transcript.len();
-    pty.input
-        .write_all(b"1\r")
-        .expect("inspect saved Chat route");
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (inspect_at, b"empty Enter selects 1. first-route"),
-    );
+    let inspect_at = pty.send(b"1\r");
+    pty.acknowledge_linear_pages((inspect_at, b"empty Enter selects 1. first-route"));
     let details = reviewed_setup_text(&String::from_utf8_lossy(&pty.transcript[inspect_at..]));
     assert!(details.contains("Protocol: OpenAI Chat Completions"));
     edit_custom_chat_route_unchanged(&mut pty);
     assert_changed_protocol_requires_destination(&mut pty);
-    pty.input.write_all(b"3\r").expect("leave custom routes");
+    pty.send(b"3\r");
     let (result, transcript) = finish_setup_pty_with_transcript(pty);
     assert!(result.status.success(), "fresh custom setup failed");
     let profile = std::fs::read_to_string(state.join("provider-profiles.json"))
@@ -134,57 +104,33 @@ fn assert_setup_journal(state: &Path, workspace: &Path) {
 }
 
 #[cfg(debug_assertions)]
-fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
+fn edit_custom_chat_route_unchanged(pty: &mut Pty) {
     let edit_start = pty.transcript.len();
     let mut cursor = edit_start;
-    pty.input
-        .write_all(b"1\r")
-        .expect("select saved Chat route");
+    pty.send(b"1\r");
     wait_setup_choices(pty, cursor);
     cursor = pty.transcript.len();
-    pty.input.write_all(b"3\r").expect("edit saved Chat route");
+    pty.send(b"3\r");
     wait_setup_choices(pty, cursor);
     assert!(
         String::from_utf8_lossy(&pty.transcript[cursor..])
             .contains("empty Enter selects 3. OpenAI Chat Completions")
     );
     cursor = pty.transcript.len();
-    pty.input.write_all(b"\r").expect("retain Chat protocol");
+    pty.send(b"\r");
     for _ in 0..4 {
-        acknowledge_linear_pages(
-            &mut pty.output,
-            &mut pty.input,
-            &mut pty.transcript,
-            &mut pty.answered,
-            (cursor, b"Input:\r\n"),
-        );
+        pty.acknowledge_linear_pages((cursor, b"Input:\r\n"));
         cursor = pty.transcript.len();
-        pty.input.write_all(b"\r").expect("retain saved field");
+        pty.send(b"\r");
     }
     wait_setup_choices(pty, cursor);
     assert!(String::from_utf8_lossy(&pty.transcript[cursor..]).contains("Declared efforts"));
     cursor = pty.transcript.len();
-    pty.input
-        .write_all(b"\r")
-        .expect("retain no effort override");
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (cursor, b"empty Enter selects 1. Back\r\nInput:\r\n"),
-    );
+    pty.send(b"\r");
+    pty.acknowledge_linear_pages((cursor, b"empty Enter selects 1. Back\r\nInput:\r\n"));
     cursor = pty.transcript.len();
-    pty.input
-        .write_all(b"2\r")
-        .expect("save unchanged Chat route");
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (cursor, b"empty Enter selects 1. first-route"),
-    );
+    pty.send(b"2\r");
+    pty.acknowledge_linear_pages((cursor, b"empty Enter selects 1. first-route"));
     assert!(
         String::from_utf8_lossy(&pty.transcript[edit_start..])
             .contains("Arany adds /chat/completions")
@@ -192,41 +138,31 @@ fn edit_custom_chat_route_unchanged(pty: &mut SetupPty) {
 }
 
 #[cfg(debug_assertions)]
-fn assert_changed_protocol_requires_destination(pty: &mut SetupPty) {
+fn assert_changed_protocol_requires_destination(pty: &mut Pty) {
     let mut cursor = pty.transcript.len();
-    pty.input.write_all(b"1\r").expect("select saved route");
+    pty.send(b"1\r");
     wait_setup_choices(pty, cursor);
     cursor = pty.transcript.len();
-    pty.input.write_all(b"3\r").expect("edit saved route");
+    pty.send(b"3\r");
     wait_setup_choices(pty, cursor);
     cursor = pty.transcript.len();
-    pty.input.write_all(b"1\r").expect("switch to Responses");
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (cursor, b"Input:\r\n"),
-    );
+    pty.send(b"1\r");
+    pty.acknowledge_linear_pages((cursor, b"Input:\r\n"));
     cursor = pty.transcript.len();
-    pty.input.write_all(b"\r").expect("retain route name");
+    pty.send(b"\r");
     wait_setup_choices(pty, cursor);
     let destination_prompt = String::from_utf8_lossy(&pty.transcript[cursor..]);
     assert!(destination_prompt.contains("Exact canonical /responses URL"));
     assert!(!destination_prompt.contains("Current value:"));
     assert!(!destination_prompt.contains("empty Enter keeps it"));
     cursor = pty.transcript.len();
-    pty.input
-        .write_all(b"\r")
-        .expect("submit empty destination");
+    pty.send(b"\r");
     wait_setup_choices(pty, cursor);
     assert!(
         String::from_utf8_lossy(&pty.transcript[cursor..]).contains("This field cannot be empty")
     );
     cursor = pty.transcript.len();
-    pty.input
-        .write_all(b"\x03")
-        .expect("cancel protocol change");
+    pty.send(b"\x03");
     wait_setup_choices(pty, cursor);
 }
 
@@ -268,69 +204,25 @@ fn seed_long_custom_profiles(state: &Path) -> String {
 #[cfg(debug_assertions)]
 #[test]
 fn linear_setup_selects_nonfirst_maximum_length_custom_route() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("Workspace");
-    let state = temp.path().join("state");
+    let (temp, workspace, state) = workspace_root();
     let long_name = seed_long_custom_profiles(&state);
     let mut pty = start_setup_pty(&temp, &workspace, &state);
-    let routes_at = pty.transcript.len();
-    pty.input.write_all(b"2\r").expect("open custom routes");
+    let routes_at = pty.send(b"2\r");
     let route_prompt =
         b"Declarations are saved privately; each Run admits the selected route; type a listed choice number or exact name (1-4); empty Enter selects 1\r\nInput:\r\n";
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (routes_at, route_prompt),
-    );
-    pty.input
-        .write_all(b"2\r")
-        .expect("select second route by token");
-    wait_for(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        b"ARANY_PROVIDER_SECOND_ROUTE_KEY",
-    );
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        routes_at,
-        b"empty Enter selects 1. Inspect\r\nInput:\r\n",
-    );
-    let inspect_at = pty.transcript.len();
-    pty.input.write_all(b"1\r").expect("inspect second route");
-    let (_, list_at) = acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (inspect_at, b"Page 1/"),
-    );
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (list_at, route_prompt),
-    );
-    wait_for(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        b"Model: second-model",
-    );
+    pty.acknowledge_linear_pages((routes_at, route_prompt));
+    pty.send(b"2\r");
+    pty.wait_for(b"ARANY_PROVIDER_SECOND_ROUTE_KEY");
+    pty.wait_for_after(routes_at, b"empty Enter selects 1. Inspect\r\nInput:\r\n");
+    let inspect_at = pty.send(b"1\r");
+    let (_, list_at) = pty.acknowledge_linear_pages((inspect_at, b"Page 1/"));
+    pty.acknowledge_linear_pages((list_at, route_prompt));
+    pty.wait_for(b"Model: second-model");
     assert!(
         String::from_utf8_lossy(&pty.transcript).contains(&long_name),
         "selected route title did not preserve its maximum-length name"
     );
-    pty.input.write_all(b"Back\r").expect("leave custom routes");
+    pty.send(b"Back\r");
     let result = finish_setup_pty(pty);
     assert!(
         result.status.success(),

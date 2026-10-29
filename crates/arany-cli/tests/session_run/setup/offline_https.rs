@@ -367,26 +367,20 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
     }
 }
 
-fn wait_for_sanitized(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    start: usize,
-    needle: &[u8],
-) -> usize {
+fn wait_for_sanitized(pty: &mut Pty, start: usize, needle: &[u8]) -> usize {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(matched) = crate::process::pty_text_matches(&transcript[start..], needle).next()
+        if let Some(matched) =
+            crate::process::pty_text_matches(&pty.transcript[start..], needle).next()
         {
             return start + matched.start;
         }
-        pump(output, input, transcript, answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "setup stage missing {:?}: {}",
             String::from_utf8_lossy(needle),
-            tail(transcript).replace(KEY, "[redacted]")
+            tail(&pty.transcript).replace(KEY, "[redacted]")
         );
         thread::yield_now();
     }
@@ -402,38 +396,21 @@ fn run_pty_with_gate(
     completion: Option<&[u8]>,
     mut before_answer: impl FnMut(&[u8]),
 ) -> Vec<u8> {
-    let mut child = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, shell)
-        .env("SHELL", "/usr/bin/sh")
-        .env("HOME", "/root")
-        .env("XDG_STATE_HOME", "/root/fixture-state")
-        .env("SSL_CERT_FILE", "/fixture/ca.pem")
-        .env("ANTHROPIC_WORKSPACE_ID", AMBIENT_WORKSPACE)
-        .spawn();
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(crate::product::Isolation::Caller, shell)
+            .env("SHELL", "/usr/bin/sh")
+            .env("HOME", "/root")
+            .env("XDG_STATE_HOME", "/root/fixture-state")
+            .env("SSL_CERT_FILE", "/fixture/ca.pem")
+            .env("ANTHROPIC_WORKSPACE_ID", AMBIENT_WORKSPACE)
+            .spawn(),
+    );
     let mut after_answer = 0;
     for &(needle, answer) in answers {
         if needle == API_ACCOUNTS_PROMPT {
-            acknowledge_linear_pages(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                (after_answer, needle),
-            );
+            pty.acknowledge_linear_pages((after_answer, needle));
         }
-        let stage_at = wait_for_sanitized(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_answer,
-            needle,
-        );
+        let stage_at = wait_for_sanitized(&mut pty, after_answer, needle);
         let catalog_busy = needle == b"Notice: Loading model catalog; Ctrl+C cancels"
             || needle.ends_with(b"catalog loading; Ctrl+C cancels")
             || needle.ends_with(b"draft unchanged; catalog loading")
@@ -442,77 +419,41 @@ fn run_pty_with_gate(
             && needle != b"Choose number, exact ID, n next, p previous, or q close:"
             && !catalog_busy
         {
-            wait_for_sanitized(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                stage_at,
-                b"Input:\r\n",
-            );
+            wait_for_sanitized(&mut pty, stage_at, b"Input:\r\n");
         }
-        after_answer = transcript.len();
+        after_answer = pty.transcript.len();
         before_answer(needle);
-        input.write_all(answer).expect("setup answer");
+        pty.send(answer);
     }
     if let Some(completion) = completion {
-        after_answer = wait_for_sanitized(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            after_answer,
-            completion,
-        );
+        after_answer = wait_for_sanitized(&mut pty, after_answer, completion);
     }
-    wait_for_sanitized(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        after_answer,
-        b"Input:\r\n",
-    );
-    let quit_at = transcript.len();
-    input.write_all(b"/exit\r").expect("exit Session");
-    wait_for_sanitized(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        quit_at,
-        b"TTY_AFTER:",
-    );
-    let result = wait_product(child.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    wait_for_sanitized(&mut pty, after_answer, b"Input:\r\n");
+    let quit_at = pty.send(b"/exit\r");
+    wait_for_sanitized(&mut pty, quit_at, b"TTY_AFTER:");
+    let result = pty.finish();
     assert!(result.status.success(), "offline setup product exit");
     assert_eq!(
-        answered.cursor_queries, 0,
+        pty.answered.cursor_queries, 0,
         "screen-reader mode queried the cursor"
     );
     assert!(
-        !transcript
+        !pty.transcript
             .windows(KEY.len())
             .any(|part| part == KEY.as_bytes()),
         "API key entered terminal output"
     );
     assert!(
-        !transcript.contains(&b'\x1b'),
+        !pty.transcript.contains(&b'\x1b'),
         "screen-reader output has escapes"
     );
-    let text = std::str::from_utf8(&transcript).expect("screen-reader UTF-8");
+    let text = std::str::from_utf8(&pty.transcript).expect("screen-reader UTF-8");
     assert!(
         !text.contains('─'),
         "screen-reader output has decorative rules"
     );
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .expect("terminal marker")
-            .to_owned()
-    };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
-    transcript
+    assert_tty_restored(text);
+    pty.transcript
 }
 
 fn session(state: &str) -> SessionView {
@@ -598,7 +539,7 @@ fn isolated_stage() {
         SETUP_SHELL,
         &[
             (
-                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                SETUP_MENU_PROMPT,
                 b"API accounts\r",
             ),
             (
@@ -875,7 +816,7 @@ fn isolated_stage() {
         &[
             (b"Input:\r\n", b"/setup\r"),
             (
-                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                SETUP_MENU_PROMPT,
                 b"API accounts\r",
             ),
             (
@@ -929,7 +870,8 @@ fn isolated_stage() {
     let output = run_pty_with_gate(
         LOADING_CATALOG_SHELL,
         &[
-            (b"Input:\r\n", b"/model\r"),
+            // A fresh, emptied catalog skips the startup read, so only this refresh loads.
+            (b"Input:\r\n", b"/model refresh\r"),
             (
                 b"Notice: Loading model catalog; Ctrl+C cancels",
                 b"catalog draft\x04",

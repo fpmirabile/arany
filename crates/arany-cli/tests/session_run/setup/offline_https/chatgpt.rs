@@ -305,16 +305,12 @@ fn catalog_server(started: Arc<AtomicBool>) -> Server {
     server
 }
 
-fn wait_browser_url(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    previous: Option<&url::Url>,
-) -> url::Url {
-    let mut answered = crate::session_picker::PtyResponses::default();
-    let deadline = Instant::now() + Duration::from_secs(10);
+fn wait_browser_url(pty: &mut Pty, previous: Option<&url::Url>) -> url::Url {
+    // A fresh responder counts only this wait's cursor queries; the journey's resumes after it.
+    let journey = std::mem::take(&mut pty.answered);
+    let deadline = Instant::now() + PTY_STAGE_WAIT;
     loop {
-        pump(output, input, transcript, &mut answered);
+        pty.pump();
         if let Ok(file) = std::fs::File::open("/root/browser-url") {
             let mut bytes = Vec::new();
             file.take(4097)
@@ -332,9 +328,10 @@ fn wait_browser_url(
                     continue;
                 }
                 assert_eq!(
-                    answered.cursor_queries, 0,
+                    pty.answered.cursor_queries, 0,
                     "linear setup queried the cursor"
                 );
+                pty.answered = journey;
                 return url;
             }
         }
@@ -346,22 +343,14 @@ fn wait_browser_url(
     }
 }
 
-fn wait_for_stage(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    start: usize,
-    needle: &[u8],
-    signed: Option<&str>,
-) {
+fn wait_for_stage(pty: &mut Pty, start: usize, needle: &[u8], signed: Option<&str>) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(&transcript[start..], needle)
+    while crate::process::pty_text_matches(&pty.transcript[start..], needle)
         .next()
         .is_none()
     {
-        pump(output, input, transcript, answered);
-        let mut diagnostic = tail(transcript)
+        pty.pump();
+        let mut diagnostic = tail(&pty.transcript)
             .replace(ACCESS, "[redacted]")
             .replace(REFRESH, "[redacted]");
         if let Some(signed) = signed {
@@ -375,17 +364,11 @@ fn wait_for_stage(
     }
 }
 
-fn advance_setup_warning_pages(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    (start, resize_confirmation): (usize, bool),
-) {
+fn advance_setup_warning_pages(pty: &mut Pty, (start, resize_confirmation): (usize, bool)) {
     let confirmation = b"empty Enter selects 1. Back\r\nInput:\r\n";
-    acknowledge_linear_pages(output, input, transcript, answered, (start, confirmation));
+    pty.acknowledge_linear_pages((start, confirmation));
     if resize_confirmation {
-        let text = String::from_utf8_lossy(transcript);
+        let text = String::from_utf8_lossy(&pty.transcript);
         let tty_path = text
             .lines()
             .find_map(|line| line.trim_end_matches('\r').strip_prefix("TTY_PATH:"))
@@ -395,14 +378,9 @@ fn advance_setup_warning_pages(
             .write(true)
             .open(tty_path)
             .expect("open setup terminal");
-        let queued_at = transcript.len();
-        input
-            .write_all(b"Accept")
-            .expect("queue old confirmation input");
-        wait_for_stage(
-            output, input, transcript, answered, queued_at, b"Accept", None,
-        );
-        let resized_at = transcript.len();
+        let queued_at = pty.send(b"Accept");
+        wait_for_stage(pty, queued_at, b"Accept", None);
+        let resized_at = pty.transcript.len();
         rustix::termios::tcsetwinsize(
             &tty,
             rustix::termios::Winsize {
@@ -413,15 +391,9 @@ fn advance_setup_warning_pages(
             },
         )
         .expect("resize setup terminal");
-        acknowledge_linear_pages(
-            output,
-            input,
-            transcript,
-            answered,
-            (resized_at, confirmation),
-        );
+        pty.acknowledge_linear_pages((resized_at, confirmation));
         assert!(
-            !String::from_utf8_lossy(&transcript[resized_at..])
+            !String::from_utf8_lossy(&pty.transcript[resized_at..])
                 .contains("Notice: Read every page before accepting"),
             "queued confirmation input reached the restarted warning"
         );
@@ -519,57 +491,33 @@ fn isolated_stage(near_expiry: bool) {
     let mut auth = issuer(receiver, true, 1);
     let catalog_started = Arc::new(AtomicBool::new(false));
     let _api = catalog_server(Arc::clone(&catalog_started));
-    let mut child = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, SHELL)
-        .env("SHELL", "/usr/bin/sh")
-        .env("HOME", "/root")
-        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/root/missing-bus")
-        .env("SSL_CERT_FILE", "/fixture/ca.pem")
-        .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(crate::product::Isolation::Caller, SHELL)
+            .env("SHELL", "/usr/bin/sh")
+            .env("HOME", "/root")
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/root/missing-bus")
+            .env("SSL_CERT_FILE", "/fixture/ca.pem")
+            .spawn(),
+    );
     wait_for_stage(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+        &mut pty,
         0,
         b"empty Enter selects 1. API accounts\r\nInput:\r\n",
         None,
     );
-    let accounts_at = transcript.len();
-    input.write_all(b"API accounts\r").unwrap();
-    acknowledge_linear_pages(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (accounts_at, API_ACCOUNTS_PROMPT),
-    );
-    input.write_all(b"Manage ChatGPT account\r").unwrap();
+    let accounts_at = pty.send(b"API accounts\r");
+    pty.acknowledge_linear_pages((accounts_at, API_ACCOUNTS_PROMPT));
+    pty.send(b"Manage ChatGPT account\r");
     wait_for_stage(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+        &mut pty,
         0,
         b"empty Enter selects 1. Cancel\r\nInput:\r\n",
         None,
     );
-    let warning_at = transcript.len();
-    input.write_all(b"Use private file\r").unwrap();
-    advance_setup_warning_pages(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (warning_at, !near_expiry),
-    );
-    input.write_all(b"Accept\r").unwrap();
-    let authorization = wait_browser_url(&mut output, &mut input, &mut transcript, None);
+    let warning_at = pty.send(b"Use private file\r");
+    advance_setup_warning_pages(&mut pty, (warning_at, !near_expiry));
+    pty.send(b"Accept\r");
+    let authorization = wait_browser_url(&mut pty, None);
     let nonce = authorization
         .query_pairs()
         .find(|(name, _)| name == "nonce")
@@ -589,48 +537,22 @@ fn isolated_stage(near_expiry: bool) {
     }))
     .unwrap();
     sender.send((token, jwks, redirect)).unwrap();
-    let configured_at = transcript.len();
+    let configured_at = pty.transcript.len();
     callback(&authorization);
     wait_for_stage(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+        &mut pty,
         configured_at,
         b"ChatGPT backend route not admitted; update Arany before continuing",
         Some(&signed),
     );
-    wait_for_stage(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        configured_at,
-        b"Input:\r\n",
-        Some(&signed),
-    );
-    let quit_at = transcript.len();
-    input.write_all(b"/exit\r").unwrap();
-    wait_for_stage(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        quit_at,
-        b"TTY_AFTER:",
-        Some(&signed),
-    );
-    assert!(wait_product(child.take()).status.success());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    assert_eq!(answered.cursor_queries, 0);
-    assert!(!transcript.contains(&b'\x1b'));
-    let text = std::str::from_utf8(&transcript).unwrap();
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .unwrap()
-    };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    wait_for_stage(&mut pty, configured_at, b"Input:\r\n", Some(&signed));
+    let quit_at = pty.send(b"/exit\r");
+    wait_for_stage(&mut pty, quit_at, b"TTY_AFTER:", Some(&signed));
+    assert!(pty.finish().status.success());
+    assert_eq!(pty.answered.cursor_queries, 0);
+    assert!(!pty.transcript.contains(&b'\x1b'));
+    let text = std::str::from_utf8(&pty.transcript).unwrap();
+    assert_tty_restored(text);
     assert_eq!(
         text.contains("Saved records from an incompatible version"),
         stage == "archived_records"
@@ -654,7 +576,7 @@ fn isolated_stage(near_expiry: bool) {
     assert_eq!(index["accounts"][0]["client_id"], CLIENT);
     let journal = std::fs::read("/root/state-chatgpt/events.sqlite3").unwrap();
     for secret in [ACCESS, REFRESH, signed.as_str(), ACCOUNT] {
-        for bytes in [&transcript, &journal] {
+        for bytes in [&pty.transcript, &journal] {
             assert!(
                 !bytes
                     .windows(secret.len())

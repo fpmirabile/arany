@@ -1,10 +1,8 @@
 use super::active_terminal::{ProductGuard, tty_settings};
 use super::loopback::write_profile;
-use super::session_picker::{
-    checkpoint_screen, pump, screen_contains, screen_rows, tail, wait_for_screen,
-};
+use super::session_picker::{screen_contains, screen_rows, tail};
+use crate::pty::Pty;
 use arany::{SessionId, StateRoot, Store, create_session, list_sessions};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal, kill_process};
 use std::{
     fs::File,
@@ -366,155 +364,97 @@ fn inline_model_catalog_at_width(width: u16) {
     let command = format!(
         "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-            state.parent().expect("fixture root"),
-        )),
-        command.as_str(),
-    )
-    .session(&state, &workspace)
-    .env("ARANY_TEST_SESSION", saved_id.to_string())
-    .env("OPENAI_API_KEY", NATIVE_TEST_KEY)
-    .term("xterm")
-    .spawn();
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
-    let mut transcript = Vec::new();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            command.as_str(),
+        )
+        .session(&state, &workspace)
+        .env("ARANY_TEST_SESSION", saved_id.to_string())
+        .env("OPENAI_API_KEY", NATIVE_TEST_KEY)
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
     let mut capture_from = 0;
-    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_contains(&transcript, width.into(), 24, "Ask Ara") {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+    while !screen_contains(&pty.transcript, width.into(), 24, "Ask Ara") {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "composer missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let before_menu = capture_from;
-    input
-        .write_all(b"note\x0b")
-        .expect("draft and quick actions");
+    pty.send(b"note\x0b");
     let deadline = Instant::now() + Duration::from_secs(10);
     // Selectors take keys only once their armed frame is drawn.
-    while crate::armed_selector(&transcript, before_menu, width.into(), 24).is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+    while crate::armed_selector(&pty.transcript, before_menu, width.into(), 24).is_none() {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "quick actions missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let before_catalog = capture_from;
-    input.write_all(b"\r").expect("open catalog");
+    pty.send(b"\r");
     let model_label: &str = if width < 20 { "mo…-1" } else { "model-1" };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let complete = crate::armed_selector(&transcript, before_catalog, width.into(), 24)
+        let complete = crate::armed_selector(&pty.transcript, before_catalog, width.into(), 24)
             .is_some_and(|screen| screen.iter().any(|row| row.contains(model_label)));
         if complete {
             break;
         }
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "model catalog missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     assert!(screen_contains(
-        &transcript,
+        &pty.transcript,
         width.into(),
         24,
         "Models · exact"
     ));
     let filtered_at = capture_from;
-    input.write_all(b"z").expect("filter model catalog");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (filtered_at, width.into(), 24),
-        "No matches",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.send(b"z");
+    pty.wait_for_screen((filtered_at, width.into(), 24), "No matches");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let restored_at = capture_from;
-    input
-        .write_all(b"\r\x7f")
-        .expect("no-match Enter and Backspace filter");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (restored_at, width.into(), 24),
-        model_label,
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.send(b"\r\x7f");
+    pty.wait_for_screen((restored_at, width.into(), 24), model_label);
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let before_selection = capture_from;
-    input.write_all(b"\r").expect("select model");
+    pty.send(b"\r");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[before_selection..]
+    while !pty.transcript[before_selection..]
         .windows(b"\x1b[?25h".len())
         .any(|part| part == b"\x1b[?25h")
     {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "model choice missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let before_edit = capture_from;
-    input.write_all(b"X").expect("edit returned draft");
+    pty.send(b"X");
     // The catalog redraws the composer caret too, so wait until its hint is gone.
     let composer_ready = |transcript: &[u8], from: usize, draft: &str, column: usize| {
         crate::composer_caret(transcript, from, width.into(), 24).is_some_and(|(caret, screen)| {
@@ -526,12 +466,12 @@ fn inline_model_catalog_at_width(width: u16) {
         })
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !composer_ready(&transcript, before_edit, "> noteX", 8) {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+    while !composer_ready(&pty.transcript, before_edit, "> noteX", 8) {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "draft not restored: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
@@ -557,71 +497,60 @@ fn inline_model_catalog_at_width(width: u16) {
         ),
         (b"\x1b[B", "› 2. Agents", "armed selector takes later keys"),
     ] {
-        capture_from = checkpoint_screen(
-            &mut transcript,
-            &mut answered,
-            &mut history,
-            (width.into(), 24),
-            capture_from,
-        );
+        capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
         let start = capture_from;
-        input.write_all(keys).expect(label);
+        pty.send(keys);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !crate::armed_selector(&transcript, start, width.into(), 24)
+        while !crate::armed_selector(&pty.transcript, start, width.into(), 24)
             .is_some_and(|screen| screen.iter().any(|row| row.starts_with(focused)))
         {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            pty.pump();
             assert!(
                 Instant::now() < deadline,
                 "{label} at {width} columns: {}",
-                tail(&transcript[start..])
+                tail(&pty.transcript[start..])
             );
             thread::yield_now();
         }
     }
     {
-        let mut transition =
-            |keys: &[u8], text: &str, caret: Option<usize>, hide_cursor: bool, label: &str| {
-                capture_from = checkpoint_screen(
-                    &mut transcript,
-                    &mut answered,
-                    &mut history,
-                    (width.into(), 24),
-                    capture_from,
-                );
-                let start = capture_from;
-                input.write_all(keys).expect(label);
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let before = screen_rows(&transcript[..start], width.into(), 24);
-                loop {
-                    // Each check needs a frame drawn after the keys, never the stale screen.
-                    let complete = if hide_cursor {
-                        crate::armed_selector(&transcript, start, width.into(), 24).is_some_and(
-                            |screen| {
-                                screen != before && screen.iter().any(|row| row.contains(text))
-                            },
-                        )
-                    } else if let Some(column) = caret {
-                        composer_ready(&transcript, start, text, column)
-                    } else {
-                        // Selection notices are inserted into native scrollback above the
-                        // viewport, so they are read from the bytes drawn after the keys.
-                        screen_rows(&transcript, width.into(), 24) != before
-                            && composer_ready(&transcript, start, "> ", 3)
-                            && visible_text_contains(&transcript[start..], text)
-                    };
-                    if complete {
-                        break;
-                    }
-                    pump(&mut output, &mut input, &mut transcript, &mut answered);
-                    assert!(
-                        Instant::now() < deadline,
-                        "{label} at {width} columns: {}",
-                        tail(&transcript)
-                    );
-                    thread::yield_now();
+        let mut transition = |keys: &[u8],
+                              text: &str,
+                              caret: Option<usize>,
+                              hide_cursor: bool,
+                              label: &str| {
+            capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
+            let start = capture_from;
+            pty.send(keys);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let before = screen_rows(&pty.transcript[..start], width.into(), 24);
+            loop {
+                // Each check needs a frame drawn after the keys, never the stale screen.
+                let complete = if hide_cursor {
+                    crate::armed_selector(&pty.transcript, start, width.into(), 24).is_some_and(
+                        |screen| screen != before && screen.iter().any(|row| row.contains(text)),
+                    )
+                } else if let Some(column) = caret {
+                    composer_ready(&pty.transcript, start, text, column)
+                } else {
+                    // Selection notices are inserted into native scrollback above the
+                    // viewport, so they are read from the bytes drawn after the keys.
+                    screen_rows(&pty.transcript, width.into(), 24) != before
+                        && composer_ready(&pty.transcript, start, "> ", 3)
+                        && visible_text_contains(&pty.transcript[start..], text)
+                };
+                if complete {
+                    break;
                 }
-            };
+                pty.pump();
+                assert!(
+                    Instant::now() < deadline,
+                    "{label} at {width} columns: {}",
+                    tail(&pty.transcript)
+                );
+                thread::yield_now();
+            }
+        };
         for (keys, text, caret, hide_cursor, label) in [
             (
                 &b"1"[..],
@@ -709,36 +638,24 @@ fn inline_model_catalog_at_width(width: u16) {
             );
         }
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
-    input.write_all(b"/exit\r").expect("exit attached mode");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if let Some(status) = attached.child().try_wait().expect("product status") {
+        pty.pump();
+        if let Some(status) = pty.child.child().try_wait().expect("product status") {
             assert!(status.success(), "attached process exited successfully");
             break;
         }
         assert!(
             Instant::now() < deadline,
             "product did not exit: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.pump();
+    pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let output = String::from_utf8(history).expect("UTF-8 PTY transcript");
     let before = output
         .lines()
@@ -805,34 +722,30 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let command = format!(
         "stty rows {rows} cols {columns}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --provider custom:local --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
-            state.parent().expect("fixture root"),
-        )),
-        &command,
-    )
-    .session(&state, &workspace)
-    .term("xterm")
-    .spawn();
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
-    let mut transcript = Vec::new();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            &command,
+        )
+        .session(&state, &workspace)
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
     let mut capture_from = 0;
-    let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_contains(&transcript, columns.into(), rows.into(), "Ask Ara") {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+    while !screen_contains(&pty.transcript, columns.into(), rows.into(), "Ask Ara") {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "composer missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let visible = String::from_utf8_lossy(&transcript);
+    let visible = String::from_utf8_lossy(&pty.transcript);
     let shell_pid = visible
         .lines()
         .find_map(|line| line.strip_prefix("SHELL_PID:"))
@@ -855,57 +768,45 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     } else {
         "model-1"
     };
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (columns.into(), rows.into()),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (columns.into(), rows.into()), capture_from);
     let opened_at = capture_from;
-    input.write_all(b"/model\r").expect("open first catalog");
+    pty.send(b"/model\r");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !crate::armed_selector(&transcript, opened_at, columns.into(), rows.into())
+    while !crate::armed_selector(&pty.transcript, opened_at, columns.into(), rows.into())
         .is_some_and(|screen| screen.iter().any(|row| row.contains(catalog_marker)))
     {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "first catalog missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (columns.into(), rows.into()),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (columns.into(), rows.into()), capture_from);
     let prior_len = capture_from;
-    input.write_all(b"\x03").expect("cancel first browser");
+    pty.send(b"\x03");
     let closed_marker: &str = if columns == 16 {
         "Model catalog c"
     } else {
         "Model catalog closed"
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_contains(&transcript, columns.into(), rows.into(), closed_marker)
-        || !transcript[prior_len..]
+    while !screen_contains(&pty.transcript, columns.into(), rows.into(), closed_marker)
+        || !pty.transcript[prior_len..]
             .windows(6)
             .any(|part| part == b"\x1b[?25h")
     {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "browser did not close: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
     assert!(
-        attached
+        pty.child
             .child()
             .try_wait()
             .expect("live shell status")
@@ -918,19 +819,13 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         "composer reacquired raw mode"
     );
 
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (columns.into(), rows.into()),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (columns.into(), rows.into()), capture_from);
     let reopen_at = capture_from;
-    input.write_all(b"/model\r").expect("open second catalog");
+    pty.send(b"/model\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if crate::armed_selector(&transcript, reopen_at, columns.into(), rows.into())
+        pty.pump();
+        if crate::armed_selector(&pty.transcript, reopen_at, columns.into(), rows.into())
             .is_some_and(|screen| screen.iter().any(|row| row.contains(catalog_marker)))
         {
             break;
@@ -938,7 +833,7 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         assert!(
             Instant::now() < deadline,
             "second catalog missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
@@ -947,36 +842,24 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         product_guard.is_owned_and_running(),
         "private product child"
     );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (columns.into(), rows.into()),
-        capture_from,
-    );
+    capture_from = pty.checkpoint_screen(&mut history, (columns.into(), rows.into()), capture_from);
     kill_process(product_pid, Signal::TERM).expect("terminate model browser");
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if let Some(status) = attached.child().try_wait().expect("script status") {
+        pty.pump();
+        if let Some(status) = pty.child.child().try_wait().expect("script status") {
             break status;
         }
         assert!(
             Instant::now() < deadline,
             "signal did not exit: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     };
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    pty.pump();
     assert!(!status.success(), "SIGTERM exits unsuccessfully");
-    checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (columns.into(), rows.into()),
-        capture_from,
-    );
+    pty.checkpoint_screen(&mut history, (columns.into(), rows.into()), capture_from);
     let transcript = String::from_utf8(history).expect("PTY transcript UTF-8");
     let after = transcript
         .split_once("TTY_AFTER:")

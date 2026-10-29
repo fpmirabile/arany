@@ -1,28 +1,16 @@
-use super::{
-    active_terminal::{ProductGuard, product_child_of, transcript_field},
-    session_picker::{PtyResponses, pump, tail},
-};
+use super::{active_terminal::transcript_field, session_picker::tail};
+use crate::pty::Pty;
 use arany::{
     CompactionRecord, CompactionStatus, Event, EventEnvelope, SessionId, StateRoot, Store,
 };
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-use std::{
-    io::{Read, Write},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-fn wait(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-    from: usize,
-    needle: &[u8],
-) -> usize {
+fn wait(pty: &mut Pty, from: usize, needle: &[u8]) -> usize {
     let end = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(output, input, transcript, answered);
-        if let Some(matched) = crate::process::pty_text_matches(&transcript[from..], needle).next()
+        pty.pump();
+        if let Some(matched) =
+            crate::process::pty_text_matches(&pty.transcript[from..], needle).next()
         {
             return from + matched.end;
         }
@@ -30,7 +18,7 @@ fn wait(
             Instant::now() < end,
             "rewind PTY missing {}: {}",
             tail(needle),
-            tail(transcript)
+            tail(&pty.transcript)
         );
         std::thread::yield_now();
     }
@@ -87,197 +75,90 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
         let shell = format!(
             "trap : INT; stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode} --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$code\""
         );
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(root.path())),
-            &shell,
-        )
-        .session(&state, &workspace)
-        .env("ARANY_TEST_SESSION", source.to_string())
-        .env("OPENAI_API_KEY", "synthetic-test-key")
-        .term("xterm-256color")
-        .spawn();
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        fcntl_setfl(&output, fcntl_getfl(&output).unwrap() | OFlags::NONBLOCK).unwrap();
-        let mut transcript = Vec::new();
-        let mut answered = PtyResponses::default();
+        let mut pty = Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(root.path())),
+                &shell,
+            )
+            .session(&state, &workspace)
+            .env("ARANY_TEST_SESSION", source.to_string())
+            .env("OPENAI_API_KEY", "synthetic-test-key")
+            .term("xterm-256color")
+            .spawn(),
+        );
         let linear = mode == "--screen-reader";
         wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             0,
             if linear { b"Input:\r\n" } else { b"\x1b[?25h" },
         );
-        let shell_pid = transcript_field(&String::from_utf8_lossy(&transcript), "SHELL_PID:")
-            .parse::<u32>()
-            .unwrap();
-        let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+        pty.adopt_product(&state);
         if !linear {
             if mode == "--classic" {
                 // Folder consent consumes the first Escape; typing before the composer returns would join it as Alt.
-                wait(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    0,
-                    b"Ask Arany",
-                );
+                wait(&mut pty, 0, b"Ask Arany");
             }
-            let from = transcript.len();
+            let from = pty.transcript.len();
             // Crossterm collapses adjacent legacy Escape bytes into one event.
-            input.write_all(b"saved draft\x1b[27u\x1b[27u").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Esc again",
-            );
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"history;",
-            );
-            let from = transcript.len();
-            input.write_all(b"\x1b[A").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Hsaved",
-            );
-            input.write_all(b"\x03").unwrap();
+            pty.send(b"saved draft\x1b[27u\x1b[27u");
+            wait(&mut pty, from, b"Esc again");
+            wait(&mut pty, from, b"history;");
+            let from = pty.send(b"\x1b[A");
+            wait(&mut pty, from, b"Hsaved");
+            pty.send(b"\x03");
         }
-        let from = transcript.len();
-        input.write_all(b"/rewind\r").unwrap();
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Choose a checkpoint",
-        );
+        let from = pty.send(b"/rewind\r");
+        wait(&mut pty, from, b"Choose a checkpoint");
         if linear {
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b" UTC",
-            );
-            assert!(!String::from_utf8_lossy(&transcript[from..]).contains(" ms UTC"));
+            wait(&mut pty, from, b" UTC");
+            assert!(!String::from_utf8_lossy(&pty.transcript[from..]).contains(" ms UTC"));
         }
         if !linear {
-            let from = transcript.len();
-            input.write_all(b"\x1b").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"cancelled",
-            );
-            let from = transcript.len();
-            input.write_all(b"\x1b[27u\x1b[27u").unwrap();
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Esc again",
-            );
-            wait(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Choose a checkpoint",
-            );
+            let from = pty.send(b"\x1b");
+            wait(&mut pty, from, b"cancelled");
+            let from = pty.send(b"\x1b[27u\x1b[27u");
+            wait(&mut pty, from, b"Esc again");
+            wait(&mut pty, from, b"Choose a checkpoint");
         }
-        let from = transcript.len();
-        input
-            .write_all(if linear { b"2\r" } else { b"\r" })
-            .unwrap();
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"conversation",
-        );
-        let from = transcript.len();
-        input
-            .write_all(if linear {
-                b"Restore conversation\r"
-            } else {
-                b"\x1b[A\r"
-            })
-            .unwrap();
+        let from = pty.send(if linear { b"2\r" } else { b"\r" });
+        wait(&mut pty, from, b"conversation");
+        let from = pty.send(if linear {
+            b"Restore conversation\r"
+        } else {
+            b"\x1b[A\r"
+        });
         let restored = wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             from,
             if linear { b"Second prompt" } else { b"Second" },
         );
         if linear {
-            assert!(String::from_utf8_lossy(&transcript[from..]).contains("Draft (not sent):"));
+            assert!(String::from_utf8_lossy(&pty.transcript[from..]).contains("Draft (not sent):"));
         }
         wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             restored,
             if linear { b"Input:\r\n" } else { b"\x1b[?25h" },
         );
-        let from = transcript.len();
-        input.write_all(b"\x03").unwrap();
+        let from = pty.send(b"\x03");
         wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             from,
             if linear { b"Input:\r\n" } else { b"\x1b[?25h" },
         );
-        let from = transcript.len();
-        input.write_all(b"/exit\r").unwrap();
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"TTY_AFTER:",
-        );
+        let from = pty.send(b"/exit\r");
+        wait(&mut pty, from, b"TTY_AFTER:");
         let end = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            if let Some(status) = child.child().try_wait().unwrap() {
+            pty.pump();
+            if let Some(status) = pty.child.child().try_wait().unwrap() {
                 assert!(status.success());
                 break;
             }
             assert!(Instant::now() < end, "PTY exit deadline");
             std::thread::yield_now();
         }
-        let text = String::from_utf8_lossy(&transcript);
+        let text = String::from_utf8_lossy(&pty.transcript);
         assert_eq!(
             transcript_field(&text, "TTY_BEFORE:"),
             transcript_field(&text, "TTY_AFTER:")

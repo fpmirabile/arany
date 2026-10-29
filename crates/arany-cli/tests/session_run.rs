@@ -262,28 +262,6 @@ impl PtyResponses {
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-pub(crate) fn pump(
-    output: &mut impl std::io::Read,
-    input: &mut impl std::io::Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-) {
-    drain_pty(output, transcript);
-    reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
-    if answered.auto_consent {
-        let mut declined = false;
-        process::decline_workspace_consent(
-            input,
-            &transcript[answered.consent_from..],
-            &mut declined,
-        );
-        if declined {
-            answered.consent_from = transcript.len();
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(crate) fn drain_pty(output: &mut impl std::io::Read, transcript: &mut Vec<u8>) {
     loop {
         let mut chunk = [0; 4096];
@@ -825,6 +803,10 @@ mod active_terminal;
 #[cfg(target_os = "linux")]
 #[path = "session_run/chat_mouse.rs"]
 mod chat_mouse;
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[path = "session_run/pty.rs"]
+mod pty;
 #[cfg(target_os = "linux")]
 #[path = "session_run/session_picker.rs"]
 mod session_picker;
@@ -3715,10 +3697,7 @@ fn acp_refuses_terminal_input_before_state_admission() {
 #[test]
 fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
     use arany::test_support::scenario::{ScriptedProvider, request};
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -3773,45 +3752,28 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
     );
     let report_ready = format!("{expected}Input:\n");
     for _ in 0..2 {
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
-            "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"",
-        )
-        .session(&state, &workspace)
-        .env("ARANY_TEST_SESSION", id.to_string())
-        .spawn();
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let flags = fcntl_getfl(&output).unwrap();
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-        let mut bytes = Vec::new();
-        let mut answered = session_picker::PtyResponses::default();
+        let mut pty = pty::Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+                "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"",
+            )
+            .session(&state, &workspace)
+            .env("ARANY_TEST_SESSION", id.to_string())
+            .spawn(),
+        );
         for (needle, action) in [("Input:\n", "/usage\n"), (report_ready.as_str(), "/exit\n")] {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !String::from_utf8_lossy(&bytes)
-                .replace('\r', "")
-                .contains(needle)
-            {
-                session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
-                assert!(
-                    Instant::now() < deadline,
-                    "usage PTY stage: waiting for {needle:?}"
-                );
-                std::thread::yield_now();
-            }
-            input.write_all(action.as_bytes()).unwrap();
+            pty.pump_until(
+                &format!("usage PTY stage: waiting for {needle:?}"),
+                |bytes| {
+                    String::from_utf8_lossy(bytes)
+                        .replace('\r', "")
+                        .contains(needle)
+                },
+            );
+            pty.send(action.as_bytes());
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
-            if let Some(status) = child.child().try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
-            assert!(Instant::now() < deadline, "usage PTY exit");
-            std::thread::yield_now();
-        }
-        let text = String::from_utf8(bytes).unwrap().replace('\r', "");
+        assert!(pty.wait_exit("usage PTY exit").success());
+        let text = String::from_utf8(pty.transcript).unwrap().replace('\r', "");
         let start = text.find("Usage page 1 of 1\n").unwrap();
         assert_eq!(&text[start..start + expected.len()], expected);
         assert!(!text.contains('\u{1b}'));

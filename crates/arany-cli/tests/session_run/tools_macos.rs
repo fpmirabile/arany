@@ -901,6 +901,8 @@ async fn native_file_journey_helper() {
                 assert!(matches!(
                     observation.intent.call,
                     ToolCall::Read { .. }
+                        | ToolCall::List { .. }
+                        | ToolCall::Glob { .. }
                         | ToolCall::Search { .. }
                         | ToolCall::Skill { .. }
                         | ToolCall::Write { .. }
@@ -914,7 +916,11 @@ async fn native_file_journey_helper() {
                 if observation.disposition == ToolDisposition::Succeeded
                     && !matches!(
                         observation.intent.call,
-                        ToolCall::Read { .. } | ToolCall::Search { .. } | ToolCall::Skill { .. }
+                        ToolCall::Read { .. }
+                            | ToolCall::List { .. }
+                            | ToolCall::Glob { .. }
+                            | ToolCall::Search { .. }
+                            | ToolCall::Skill { .. }
                     )
                 {
                     assert!(receipt.is_some());
@@ -1024,13 +1030,13 @@ async fn native_file_journey_helper() {
     assert_eq!(replay.runs[1], fresh_outcome.run);
     store.close().await.unwrap();
     trace_case(root, "refusal");
-    let discovery = outcome
+    let admitted = outcome
         .run
         .tools
         .iter()
         .find(|tool| matches!(tool.intent.call, ToolCall::List { .. }))
-        .expect("recorded Guard discovery intent");
-    guard_refuses_before_go(root, &workspace, &discovery.intent);
+        .expect("recorded non-process intent");
+    guard_refuses_before_go(root, &workspace, &admitted.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
     shell::refuse_options(root, &workspace, &config).await;
 }
@@ -2819,9 +2825,11 @@ fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &
 }
 
 fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::EffectIntent) {
+    use base64::Engine as _;
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    const DEFINITION: &[u8] = b"---\nname: refusal\ndescription: Guard refusal base\n---\n";
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
@@ -2830,7 +2838,6 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         ("unknown_task_field", "admission"),
         ("invalid_go", "admission"),
         ("early_go", "admission"),
-        ("stale_workspace", "workspace"),
         ("resource_mismatch", "admission"),
         ("catalogue_tamper", "admission"),
         ("truncated_task", "admission"),
@@ -2848,11 +2855,11 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
                 content: "must not be created".into(),
             }
         } else {
-            ToolCall::List { path: "src".into() }
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: Sha256::digest(DEFINITION).into(),
+            }
         };
-        if case == "stale_workspace" {
-            intent.workspace_inode += 1;
-        }
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
@@ -2860,7 +2867,8 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
             "command_deadline": null,
             "config": serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
             "intent": intent,
-            "definition": null,
+            "definition": matches!(intent.call, ToolCall::ParseAgentDefinition { .. })
+                .then(|| base64::engine::general_purpose::STANDARD.encode(DEFINITION)),
             "handover": null,
             "workspace": workspace,
             "guard_executable": env!("CARGO_BIN_EXE_arany")
@@ -2879,7 +2887,8 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
                 json!({"programs":[["/bin/launchctl",[0,0,0,0,0,0,0]]]});
         }
         let mut task = serde_json::to_vec(&task_value).unwrap();
-        const TASK_BYTES_CAP: usize = 1024 * 1024;
+        // A definition task may exceed the common 1 MiB cap by its base64 definition.
+        const TASK_BYTES_CAP: usize = 1024 * 1024 + (64 * 1024_usize).div_ceil(3) * 4;
         match case {
             "malformed_task" => task = b"{".to_vec(),
             "maximum_task" => task.resize(TASK_BYTES_CAP, b' '),

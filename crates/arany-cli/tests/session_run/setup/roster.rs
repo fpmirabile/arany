@@ -83,7 +83,7 @@ fn roster_manager_creates_previews_saves_and_removes_without_activation_in_every
     }
 }
 
-fn create_draft(pty: &mut SetupPty, presentation: Presentation) {
+fn create_draft(pty: &mut Pty, presentation: Presentation) {
     open(pty, presentation);
     select(pty, presentation, 1, "Route profiles");
     add_profile(pty, presentation, 1, "main", (2, "gpt-5.4"));
@@ -95,47 +95,36 @@ fn create_draft(pty: &mut SetupPty, presentation: Presentation) {
     select(pty, presentation, 4, "Roster profiles");
 }
 
-fn open(pty: &mut SetupPty, presentation: Presentation) {
+fn open(pty: &mut Pty, presentation: Presentation) {
     let from = presentation.choose(pty, 4);
     presentation.menu(pty, from, "Roster profiles");
     let fresh = String::from_utf8_lossy(&pty.transcript[from..]);
     assert!(!fresh.contains("Clear role routing"));
 }
 
-fn select(pty: &mut SetupPty, presentation: Presentation, choice: usize, title: &str) {
+fn select(pty: &mut Pty, presentation: Presentation, choice: usize, title: &str) {
     let from = presentation.choose(pty, choice);
     presentation.menu(pty, from, title);
 }
 
 fn field(
-    pty: &mut SetupPty,
+    pty: &mut Pty,
     presentation: Presentation,
     from: usize,
     title: &str,
     value: &str,
 ) -> usize {
     match presentation {
-        Presentation::ScreenReader => wait_for_after(
-            &mut pty.output,
-            &mut pty.input,
-            &mut pty.transcript,
-            &mut pty.answered,
-            from,
-            b"Input:\r\n",
-        ),
+        Presentation::ScreenReader => pty.wait_for_after(from, b"Input:\r\n"),
         Presentation::Inline => {
             inline_frame(pty, from, title);
         }
     }
-    let from = pty.transcript.len();
-    pty.input
-        .write_all(format!("{value}\r").as_bytes())
-        .unwrap();
-    from
+    pty.send(format!("{value}\r").as_bytes())
 }
 
 fn add_profile(
-    pty: &mut SetupPty,
+    pty: &mut Pty,
     presentation: Presentation,
     add: usize,
     name: &str,
@@ -152,13 +141,7 @@ fn add_profile(
     select(pty, presentation, 3, "Route profiles");
 }
 
-fn add_preset(
-    pty: &mut SetupPty,
-    presentation: Presentation,
-    add: usize,
-    name: &str,
-    child: usize,
-) {
+fn add_preset(pty: &mut Pty, presentation: Presentation, add: usize, name: &str, child: usize) {
     let from = presentation.choose(pty, add);
     let from = field(pty, presentation, from, "Roster name", name);
     presentation.menu(pty, from, "Preset roles");
@@ -239,13 +222,10 @@ fn remove_presets(
     select(&mut pty, presentation, 1, "Route profiles");
     select(&mut pty, presentation, 1, "Profile action");
     select(&mut pty, presentation, 1, "Roster chain");
-    let from = pty.transcript.len();
-    pty.input
-        .write_all(match presentation {
-            Presentation::ScreenReader => b"\x03",
-            Presentation::Inline => b"\x1b",
-        })
-        .unwrap();
+    let from = pty.send(match presentation {
+        Presentation::ScreenReader => b"\x03",
+        Presentation::Inline => b"\x1b",
+    });
     presentation.menu(&mut pty, from, "Route profiles");
     select(&mut pty, presentation, 1, "Profile action");
     let from = presentation.choose(&mut pty, 2);
@@ -280,17 +260,10 @@ fn concurrent_clear_failure_retains_the_edited_roster_and_settles_before_save() 
     edit_saved_child(&mut pty, presentation);
     select(&mut pty, presentation, 3, "Roster profiles");
     let from = presentation.choose(&mut pty, 5);
-    acknowledge_linear_pages(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (from, b"empty Enter selects 1. Back\r\nInput:\r\n"),
-    );
+    pty.acknowledge_linear_pages((from, b"empty Enter selects 1. Back\r\nInput:\r\n"));
     let concurrent = [routing, b"\n"].concat();
     super::super::private_file(&state.join("provider-routing.json"), &concurrent);
-    let from = pty.transcript.len();
-    pty.input.write_all(b"2\r").unwrap();
+    let from = pty.send(b"2\r");
     let (from, result) = acknowledge_result(&mut pty, presentation, from);
     assert_result_contains(&result, "changed");
     presentation.menu(&mut pty, from, "Roster profiles");
@@ -349,13 +322,7 @@ fn routing_inspection_failures_retain_roster_edits_until_a_reviewed_save() {
     );
 
     let from = presentation.choose(&mut pty, 4);
-    wait_linear_page(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        (from, 1),
-    );
+    pty.wait_linear_page((from, 1));
     std::fs::set_permissions(&routing_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (from, error) = acknowledge_result(&mut pty, presentation, from);
     assert_result_contains(&error, "state directory is not private");
@@ -400,7 +367,7 @@ fn prepare_saved_roster(state: &Path) -> &'static [u8] {
     routing
 }
 
-fn edit_saved_child(pty: &mut SetupPty, presentation: Presentation) {
+fn edit_saved_child(pty: &mut Pty, presentation: Presentation) {
     select(pty, presentation, 4, "Roster profiles");
     select(pty, presentation, 2, "Named presets");
     select(pty, presentation, 1, "Preset action");

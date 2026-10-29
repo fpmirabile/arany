@@ -108,58 +108,8 @@ esac
         let shell = format!(
             "trap ':' INT; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; /arany --screen-reader --provider openai --model gpt-5.4 --resume {saved_id} --state-dir /data/state --workspace /data/workspace; code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$code\""
         );
-        let mut command = Command::new("/usr/bin/bwrap");
-        command
-            .env_clear()
-            .current_dir(dir)
-            .args([
-                "--unshare-user",
-                "--uid",
-                "0",
-                "--gid",
-                "0",
-                "--unshare-pid",
-                "--unshare-net",
-                "--die-with-parent",
-                "--tmpfs",
-                "/",
-                "--dir",
-                "/usr",
-                "--dir",
-                "/usr/bin",
-                "--dir",
-                "/etc",
-                "--ro-bind",
-                "/usr/lib",
-                "/usr/lib",
-                "--symlink",
-                "usr/lib",
-                "/lib",
-                "--ro-bind-try",
-                "/lib64",
-                "/lib64",
-                "--proc",
-                "/proc",
-                "--dev-bind",
-                "/dev",
-                "/dev",
-                "--bind",
-            ])
-            .arg(dir)
-            .arg("/data")
-            .arg("--ro-bind")
-            .arg(dir.join("passwd"))
-            .arg("/etc/passwd");
-        for program in ["sh", "script", "stty", "cat"] {
-            command
-                .arg("--ro-bind")
-                .arg(format!("/usr/bin/{program}"))
-                .arg(format!("/usr/bin/{program}"));
-        }
-        command
-            .arg("--ro-bind")
-            .arg(env!("CARGO_BIN_EXE_arany"))
-            .arg("/arany");
+        let mut command = sandbox(&["--unshare-net"], dir, Path::new("/data"));
+        command.env_clear().current_dir(dir);
         for client in ["wl-paste", "xclip"] {
             command
                 .arg("--ro-bind")
@@ -216,21 +166,19 @@ esac
             ]);
         }
         command.args(["--chdir", "/data/workspace", "--"]);
-        let mut child =
+        let mut pty = Pty::new(
             crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(command), &shell)
-                .spawn();
-        let mut input = child.child().stdin.take().expect("PTY input");
-        let mut output = child.child().stdout.take().expect("PTY output");
-        let mut transcript = Vec::new();
-        let mut answered = crate::session_picker::PtyResponses::default();
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            b"Input:\r\n",
+                .spawn(),
         );
+        pty.wait_for(b"Input:\r\n");
         assert!(!dir.join("client-log").exists(), "startup read clipboard");
+        let offer = |types: &[u8], mode: &str, payload: &[u8]| {
+            std::fs::write(dir.join("types"), types).expect("offered clipboard types");
+            std::fs::write(dir.join("mode"), mode).expect("client mode");
+            std::fs::write(dir.join("payload"), payload).expect("clipboard payload");
+            std::fs::write(dir.join("client-log"), b"").expect("fresh client log");
+        };
+        let client_calls = || std::fs::read(dir.join("client-log")).expect("client calls");
         let large_text = "synthetic paste ".repeat(600);
         let large_preview = format!(
             "Draft (not sent):\r\n  [Pasted Content 9600 chars]\r\nExpanded text (not sent):\r\n  {large_text}\r\nDraft: 9600 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n"
@@ -258,49 +206,14 @@ esac
                 "types\npayload\n",
             ),
         ] {
-            std::fs::write(dir.join("types"), types).expect("offered clipboard types");
-            std::fs::write(dir.join("mode"), mode).expect("client mode");
-            std::fs::write(dir.join("payload"), payload).expect("clipboard payload");
-            std::fs::write(dir.join("client-log"), b"").expect("fresh client log");
-            let from = transcript.len();
-            input.write_all(b"/paste\r").expect("explicit paste");
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                expected.as_bytes(),
-            );
-            assert_eq!(
-                std::fs::read(dir.join("client-log")).expect("client calls"),
-                calls.as_bytes()
-            );
+            offer(types.as_bytes(), mode, payload);
+            pty.send_and_wait(b"/paste\r", expected.as_bytes());
+            assert_eq!(client_calls(), calls.as_bytes());
             if types == "text/plain\n" {
-                let from = transcript.len();
-                input.write_all(b"\x03").expect("clear pasted text");
-                wait_for_after(
-                    &mut output,
-                    &mut input,
-                    &mut transcript,
-                    &mut answered,
-                    from,
-                    b"Input:\r\n",
-                );
+                pty.send_and_wait(b"\x03", b"Input:\r\n");
             }
         }
-        let from = transcript.len();
-        input
-            .write_all(b"/new\r")
-            .expect("reject switching with an attachment");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Notice: Error: Submit or clear image attachments before switching Sessions\r\nInput:\r\n",
-        );
+        pty.send_and_wait(b"/new\r", b"Notice: Error: Submit or clear image attachments before switching Sessions\r\nInput:\r\n");
         for (types, mode, payload, diagnostic, calls) in [
             (
                 b"image/jpeg\ntext/plain\n".to_vec(),
@@ -373,123 +286,42 @@ esac
                 "types\npayload\n",
             ),
         ] {
-            std::fs::write(dir.join("types"), types).expect("offered clipboard types");
-            std::fs::write(dir.join("mode"), mode).expect("client mode");
-            std::fs::write(dir.join("payload"), payload).expect("hostile clipboard payload");
-            std::fs::write(dir.join("client-log"), b"").expect("fresh client log");
-            let from = transcript.len();
-            input.write_all(b"/paste\r").expect("reject hostile paste");
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
+            offer(&types, mode, &payload);
+            pty.send_and_wait(
+                b"/paste\r",
                 format!("Notice: Error: {diagnostic}; draft unchanged\r\nInput:\r\n").as_bytes(),
             );
-            assert_eq!(
-                std::fs::read(dir.join("client-log")).expect("client calls"),
-                calls.as_bytes()
-            );
+            assert_eq!(client_calls(), calls.as_bytes());
         }
         std::fs::write(dir.join("types"), b"image/png\n").expect("offered PNG");
         std::fs::write(dir.join("mode"), b"success").expect("successful client");
         std::fs::write(dir.join("payload"), &png).expect("valid PNG");
-        let from = transcript.len();
-        input
-            .write_all(b"/paste\r")
-            .expect("retain previous image after rejections");
-        wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Image 2: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
-        let from = transcript.len();
-        input.write_all(b"\x03").expect("clear images explicitly");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Input:\r\n",
-        );
+        pty.send_and_wait(b"/paste\r", b"Image 2: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
+        pty.send_and_wait(b"\x03", b"Input:\r\n");
         std::fs::write(dir.join("types"), b"text/plain\n").expect("held text offer");
         std::fs::write(dir.join("mode"), b"held").expect("held client");
         std::fs::write(dir.join("ready"), b"").expect("new cancellation readiness");
-        input
-            .write_all(b"/paste\r")
-            .expect("start cancellable clipboard read");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::fs::read(dir.join("ready")).ok().as_deref() != Some(b"ready\n") {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "held clipboard client did not start"
-            );
-            thread::yield_now();
-        }
-        let from = transcript.len();
-        input
-            .write_all(b"kept\x04")
-            .expect("edit during clipboard read");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send(b"/paste\r");
+        pty.pump_until("held clipboard client did not start", |_| {
+            std::fs::read(dir.join("ready")).ok().as_deref() == Some(b"ready\n")
+        });
+        pty.send_and_wait(
+            b"kept\x04",
             b"Notice: Draft: 4 characters; Enter submits\r\nInput:\r\n",
         );
-        let from = transcript.len();
-        input
-            .write_all(b"\x03")
-            .expect("cancel owned clipboard process");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(
+            b"\x03",
             b"Notice: Clipboard read cancelled; draft retained\r\nInput:\r\n",
         );
-        let from = transcript.len();
-        input
-            .write_all(b"\x04")
-            .expect("check retained draft without submitting");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(
+            b"\x04",
             b"Notice: Draft retained; press Enter to submit or Ctrl+C to clear\r\nInput:\r\n",
         );
-        let from = transcript.len();
-        input.write_all(b"\x03").expect("clear retained text");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Input:\r\n",
-        );
+        pty.send_and_wait(b"\x03", b"Input:\r\n");
         std::fs::write(dir.join("mode"), b"success").expect("recover after cancellation");
         std::fs::write(dir.join("payload"), b"recovered").expect("post-cancel text");
-        let from = transcript.len();
-        input
-            .write_all(b"/paste\r")
-            .expect("verify process cleanup through next read");
-        wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Draft (not sent):\r\n  recovered\r\nDraft: 9 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
-        let from = transcript.len();
-        input.write_all(b"\x03").expect("clear recovered text");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Input:\r\n",
-        );
+        pty.send_and_wait(b"/paste\r", b"Draft (not sent):\r\n  recovered\r\nDraft: 9 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
+        pty.send_and_wait(b"\x03", b"Input:\r\n");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("public lifecycle runtime");
@@ -527,28 +359,17 @@ esac
             events
         });
         assert_eq!(prefix.len(), 3, "clipboard persisted transient data");
-        let from = transcript.len();
-        input
-            .write_all(format!("/resume {session_id}\r").as_bytes())
-            .expect("reload saved-account selection");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(
+            format!("/resume {session_id}\r").as_bytes(),
             b"Notice: Resumed: Empty conversation\r\nInput:\r\n",
         );
-        let from = transcript.len();
-        input
-            .write_all(b"synthetic credential-wait objective\r")
-            .expect("enter bounded preparation");
+        let from = pty.send(b"synthetic credential-wait objective\r");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut connection = loop {
             match listener.accept() {
                 Ok((connection, _)) => break connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    pump(&mut output, &mut input, &mut transcript, &mut answered);
+                    pty.pump();
                     assert!(
                         Instant::now() < deadline,
                         "credential helper did not connect"
@@ -558,21 +379,11 @@ esac
                 Err(error) => panic!("synthetic bus accept: {error}"),
             }
         };
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Notice: Preparing request... Ctrl+C cancels\r\n",
-        );
+        pty.wait_for_after(from, b"Notice: Preparing request... Ctrl+C cancels\r\n");
         std::fs::write(dir.join("types"), b"image/png\n").expect("preparing PNG offer");
         std::fs::write(dir.join("payload"), &png).expect("preparing PNG");
-        let from = transcript.len();
-        input.write_all(b"/paste\r").expect("paste while preparing");
-        wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\n");
-        let pasted = String::from_utf8_lossy(&transcript[from..]);
+        let from = pty.send_and_wait(b"/paste\r", b"Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\n");
+        let pasted = String::from_utf8_lossy(&pty.transcript[from..]);
         assert!(
             !pasted.contains("Error:"),
             "paste waited for admission failure"
@@ -597,52 +408,15 @@ esac
                 Err(error) => panic!("synthetic handshake: {error}"),
             }
         }
-        let from = transcript.len();
-        input.write_all(b"\x03").expect("interrupt preparation");
-        wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Notice: Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.\r\nInput:\r\n");
-        let from = transcript.len();
-        input.write_all(b"\x04").expect("image draft retained");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(b"\x03", b"Notice: Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.\r\nInput:\r\n");
+        pty.send_and_wait(
+            b"\x04",
             b"Notice: Draft retained; press Enter to submit or Ctrl+C to clear\r\nInput:\r\n",
         );
-        let from = transcript.len();
-        input.write_all(b"\x03").expect("clear retained image");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Input:\r\n",
-        );
-        input
-            .write_all(b"/exit\r")
-            .expect("exit without submitting");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            if child
-                .child()
-                .try_wait()
-                .expect("namespace status")
-                .is_some()
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "clipboard namespace did not exit"
-            );
-            thread::yield_now();
-        }
-        assert!(child.take().wait().expect("namespace reap").success());
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.send_and_wait(b"\x03", b"Input:\r\n");
+        pty.send(b"/exit\r");
+        assert!(pty.wait_exit("clipboard namespace did not exit").success());
+        pty.pump();
         for omitted in [
             b"PRIVATE_CLIPBOARD_ERROR".as_slice(),
             b"synthetic-clipboard-key",
@@ -650,19 +424,14 @@ esac
             b"iVBORw0KGgo",
         ] {
             assert!(
-                !transcript
+                !pty.transcript
                     .windows(omitted.len())
                     .any(|part| part == omitted),
                 "private clipboard bytes escaped"
             );
         }
-        let text = String::from_utf8_lossy(&transcript);
-        let marker = |name: &str| {
-            text.lines()
-                .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-                .expect("terminal marker")
-        };
-        assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+        let text = String::from_utf8_lossy(&pty.transcript);
+        assert_tty_restored(&text);
         connection
             .set_nonblocking(false)
             .expect("blocking final handshake");
@@ -845,63 +614,14 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             ),
         )
         .unwrap();
-        let mut command = Command::new("/usr/bin/bwrap");
+        let mut command = sandbox(&[], root, root);
         command
-            .args([
-                "--unshare-user",
-                "--uid",
-                "0",
-                "--gid",
-                "0",
-                "--unshare-pid",
-                "--die-with-parent",
-                "--tmpfs",
-                "/",
-                "--dir",
-                "/usr",
-                "--dir",
-                "/usr/bin",
-                "--dir",
-                "/etc",
-                "--ro-bind",
-                "/usr/lib",
-                "/usr/lib",
-                "--symlink",
-                "usr/lib",
-                "/lib",
-                "--ro-bind-try",
-                "/lib64",
-                "/lib64",
-                "--symlink",
-                "usr/bin",
-                "/bin",
-                "--proc",
-                "/proc",
-                "--dev-bind",
-                "/dev",
-                "/dev",
-                "--bind",
-            ])
-            .arg(root)
-            .arg(root)
-            .arg("--ro-bind")
-            .arg(root.join("passwd"))
-            .arg("/etc/passwd")
-            .arg("--ro-bind")
-            .arg(env!("CARGO_BIN_EXE_arany"))
-            .arg("/arany")
-            .arg("--ro-bind")
+            .args(["--symlink", "usr/bin", "/bin", "--ro-bind"])
             .arg(&clipboard)
             .arg("/usr/bin/wl-paste")
             .arg("--ro-bind")
             .arg(root.join("payload"))
             .arg("/clipboard-payload");
-        for program in ["sh", "script", "stty", "cat"] {
-            command
-                .arg("--ro-bind")
-                .arg(format!("/usr/bin/{program}"))
-                .arg(format!("/usr/bin/{program}"));
-        }
         // The HTTP client loads system roots even for loopback HTTP; preserve bundle symlink targets.
         if std::path::Path::new("/etc/ssl").is_dir() {
             command.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
@@ -920,7 +640,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         let shell = format!(
             "trap ':' INT; stty rows 24 cols 120; exec \"$ARANY_TEST_EXE\" {mode} --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume {id} --provider custom:local --model model-1"
         );
-        let mut child =
+        let mut pty = Pty::new(
             crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(command), &shell)
                 .session(&state, &workspace)
                 .executable("/arany")
@@ -929,55 +649,29 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 .env("XDG_RUNTIME_DIR", &wayland)
                 .env("WAYLAND_DISPLAY", "wayland-0")
                 .term(if linear { "dumb" } else { "xterm" })
-                .spawn();
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let mut transcript = Vec::new();
-        let mut answered = crate::session_picker::PtyResponses::default();
-        let wait_text = |output: &mut std::process::ChildStdout,
-                         input: &mut std::process::ChildStdin,
-                         transcript: &mut Vec<u8>,
-                         answered: &mut crate::session_picker::PtyResponses,
-                         from: usize,
-                         text: &str| {
+                .spawn(),
+        );
+        let wait_text = |pty: &mut Pty, from: usize, text: &str| {
             if linear {
-                wait_for_after(output, input, transcript, answered, from, text.as_bytes());
-                from + crate::process::pty_text_matches(&transcript[from..], text.as_bytes())
+                pty.wait_for_after(from, text.as_bytes());
+                from + crate::process::pty_text_matches(&pty.transcript[from..], text.as_bytes())
                     .next()
                     .expect("observed linear text")
                     .end
             } else {
-                wait_for_screen(output, input, transcript, answered, (from, 120, 24), text);
-                transcript.len()
+                pty.wait_for_screen((from, 120, 24), text);
+                pty.transcript.len()
             }
         };
-        wait_text(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            0,
-            if linear { "Input:\r\n" } else { "Ask Arany" },
-        );
+        wait_text(&mut pty, 0, if linear { "Input:\r\n" } else { "Ask Arany" });
         if linear {
-            fresh_capture(&mut transcript, &mut answered);
+            pty.fresh_capture();
         } else {
-            wait_for_caret(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                0,
-                3,
-            );
+            wait_for_caret(&mut pty, 0, 3);
         }
-        let from = transcript.len();
-        input.write_all(b"/goal continue\r").unwrap();
+        let from = pty.send(b"/goal continue\r");
         let refused = wait_text(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+            &mut pty,
             from,
             &arany::EngineError::GoalIncludesUnavailable.to_string(),
         );
@@ -998,184 +692,74 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             store.close().await.unwrap();
         });
         if !linear {
-            let from = transcript.len();
-            input.write_all(b"\x03").unwrap();
-            wait_for_caret(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                3,
-            );
+            let from = pty.send(b"\x03");
+            wait_for_caret(&mut pty, from, 3);
         } else {
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                refused,
-                b"Input:\r\n",
-            );
+            pty.wait_for_after(refused, b"Input:\r\n");
         }
         if linear {
-            fresh_capture(&mut transcript, &mut answered);
+            pty.fresh_capture();
         }
-        let from = transcript.len();
+        let from = pty.transcript.len();
         if linear {
-            input.write_all(b"/paste\r").unwrap();
+            pty.send(b"/paste\r");
         } else {
-            input
-                .write_all(format!("{prefix}\x1b[200~{payload}\x1b[201~").as_bytes())
-                .unwrap();
+            pty.send(format!("{prefix}\x1b[200~{payload}\x1b[201~").as_bytes());
         }
         let label = format!("[Pasted Content {} chars]", payload.chars().count());
-        let pasted = wait_text(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            &label,
-        );
+        let pasted = wait_text(&mut pty, from, &label);
         if linear {
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                pasted,
-                b"Input:\r\n",
-            );
+            pty.wait_for_after(pasted, b"Input:\r\n");
         } else {
             wait_for_caret(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
+                &mut pty,
                 from,
                 u16::try_from(3 + prefix.len() + label.len()).unwrap(),
             );
         }
         if linear {
-            fresh_capture(&mut transcript, &mut answered);
+            pty.fresh_capture();
         }
-        let from = transcript.len();
-        input.write_all(b" typed suffix").unwrap();
+        let from = pty.send(b" typed suffix");
         if !linear {
             wait_for_caret(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
+                &mut pty,
                 from,
                 u16::try_from(3 + prefix.len() + label.len() + " typed suffix".len()).unwrap(),
             );
         }
         submit.send(()).expect("arm attachment request deadline");
-        input.write_all(b"\r").unwrap();
-        let answer = wait_text(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            "Attachment received",
-        );
+        pty.send(b"\r");
+        let answer = wait_text(&mut pty, from, "Attachment received");
         requests
             .recv_timeout(Duration::from_secs(10))
             .expect("attachment request");
         server.join().unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump_until("attachment Goal did not commit completion", |_| {
             let view = runtime.block_on(store.load_view(id)).unwrap().unwrap();
-            if view
-                .goals
+            view.goals
                 .last()
                 .is_some_and(|goal| goal.status == arany::GoalStatus::Completed)
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "attachment Goal did not commit completion: {}",
-                tail(&transcript[from..])
-            );
-            thread::yield_now();
-        }
+        });
         runtime.block_on(store.close()).unwrap();
         if linear {
-            let receipt = wait_text(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                answer,
-                "Status: finished\r\n",
-            );
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                receipt,
-                b"Input:\r\n",
-            );
+            let receipt = wait_text(&mut pty, answer, "Status: finished\r\n");
+            pty.wait_for_after(receipt, b"Input:\r\n");
         } else {
-            wait_for_screen(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                (from, 120, 24),
-                "ready · custom:local/model-1",
-            );
-            wait_for_caret(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                3,
-            );
+            pty.wait_for_screen((from, 120, 24), "ready · custom:local/model-1");
+            wait_for_caret(&mut pty, from, 3);
         }
-        let exit_from = transcript.len();
-        input.write_all(b"/exit").unwrap();
+        let exit_from = pty.send(b"/exit");
         if !linear {
-            wait_for_screen(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                (exit_from, 120, 24),
-                "> /exit",
-            );
-            wait_for_caret(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                exit_from,
-                8,
-            );
+            pty.wait_for_screen((exit_from, 120, 24), "> /exit");
+            wait_for_caret(&mut pty, exit_from, 8);
         }
-        input.write_all(b"\r").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            if let Some(status) = child.child().try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "attachment journey did not exit (linear={linear}, prefix={prefix:?}): {}",
-                tail(&transcript[exit_from..])
-            );
-            thread::yield_now();
-        }
+        pty.send(b"\r");
+        let status = pty.wait_exit(&format!(
+            "attachment journey did not exit (linear={linear}, prefix={prefix:?})"
+        ));
+        assert!(status.success());
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
             let view = store.load_view(id).await.unwrap().unwrap();
@@ -1187,4 +771,62 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             store.close().await.unwrap();
         });
     }
+}
+
+// A private root holding system libraries, the PTY shell tools, the product at `/arany` and `root`
+// bound at `at`.
+fn sandbox(namespaces: &[&str], root: &Path, at: &Path) -> Command {
+    let mut command = Command::new("/usr/bin/bwrap");
+    command
+        .args([
+            "--unshare-user",
+            "--uid",
+            "0",
+            "--gid",
+            "0",
+            "--unshare-pid",
+        ])
+        .args(namespaces)
+        .args([
+            "--die-with-parent",
+            "--tmpfs",
+            "/",
+            "--dir",
+            "/usr",
+            "--dir",
+            "/usr/bin",
+            "--dir",
+            "/etc",
+            "--ro-bind",
+            "/usr/lib",
+            "/usr/lib",
+            "--symlink",
+            "usr/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev-bind",
+            "/dev",
+            "/dev",
+            "--bind",
+        ])
+        .arg(root)
+        .arg(at)
+        .arg("--ro-bind")
+        .arg(root.join("passwd"))
+        .arg("/etc/passwd");
+    for program in ["sh", "script", "stty", "cat"] {
+        command
+            .arg("--ro-bind")
+            .arg(format!("/usr/bin/{program}"))
+            .arg(format!("/usr/bin/{program}"));
+    }
+    command
+        .arg("--ro-bind")
+        .arg(env!("CARGO_BIN_EXE_arany"))
+        .arg("/arany");
+    command
 }

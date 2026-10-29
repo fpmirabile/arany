@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::pty::Pty;
 use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 
@@ -465,65 +467,46 @@ fn attached_pty_refusal(
     account_root: Option<&Path>,
     refusal: &[u8],
 ) {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
     use std::time::{Duration, Instant};
 
     let shell = "stty rows 24 cols 80; /arany --screen-reader --no-color --profile coding --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" answer";
-    let mut child = crate::product::PtyLaunch::new(
-        crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp)),
-        shell,
-    )
-    .session(state, workspace)
-    .envs(account_root.map(|root| ("ARANY_TEST_ACCOUNT_ROOT", root)))
-    .spawn();
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = super::session_picker::PtyResponses::manual_consent();
-    fn wait(
-        output: &mut std::process::ChildStdout,
-        input: &mut std::process::ChildStdin,
-        transcript: &mut Vec<u8>,
-        answered: &mut super::session_picker::PtyResponses,
-        needle: &[u8],
-    ) {
+    let mut pty = Pty::with_responses(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp)),
+            shell,
+        )
+        .session(state, workspace)
+        .envs(account_root.map(|root| ("ARANY_TEST_ACCOUNT_ROOT", root)))
+        .spawn(),
+        crate::PtyResponses::manual_consent(),
+    );
+    fn wait(pty: &mut Pty, needle: &[u8]) {
         // Watchdog only: it aborts a hung child and never decides the assertion.
         let watchdog = Instant::now() + Duration::from_secs(120);
-        while !transcript.windows(needle.len()).any(|part| part == needle) {
-            super::session_picker::pump(output, input, transcript, answered);
+        while !pty
+            .transcript
+            .windows(needle.len())
+            .any(|part| part == needle)
+        {
+            pty.pump();
             assert!(
                 Instant::now() < watchdog,
                 "missing {}: {}",
                 String::from_utf8_lossy(needle),
-                super::session_picker::tail(transcript)
+                super::session_picker::tail(&pty.transcript)
             );
             std::thread::yield_now();
         }
     }
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Do you trust this folder?",
-    );
+    wait(&mut pty, b"Do you trust this folder?");
     assert!(
-        !transcript
+        !pty.transcript
             .windows(b"refused".len())
             .any(|part| part == b"refused"),
         "roster admission must wait for folder consent"
     );
-    input.write_all(b"read only\r").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        refusal,
-    );
+    pty.send(b"read only\r");
+    wait(&mut pty, refusal);
     assert_eq!(
         std::fs::metadata(state.join("events.sqlite3"))
             .unwrap()
@@ -884,31 +867,26 @@ mod journey {
         held_rx: &mpsc::Receiver<()>,
         served: &AtomicUsize,
     ) -> (SessionId, GoalId) {
-        use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-        use std::{io::Write, time::Instant};
+        use std::time::Instant;
 
         let shell = "stty rows 24 cols 80; exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --profile coding --provider custom:local --model model-1 --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"";
-        let mut child = crate::product::PtyLaunch::new(
-            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp)),
-            shell,
-        )
-        .session(state, workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .spawn();
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let flags = fcntl_getfl(&output).unwrap();
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-        let mut transcript = Vec::new();
-        let mut answered = super::super::session_picker::PtyResponses::default();
+        let mut pty = Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp)),
+                shell,
+            )
+            .session(state, workspace)
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .spawn(),
+        );
         // Watchdog only: it aborts a hung child and never decides the assertion.
         let watchdog = Instant::now() + Duration::from_secs(120);
-        let mut pump = |input: &mut std::process::ChildStdin, transcript: &mut Vec<u8>| {
-            super::super::session_picker::pump(&mut output, input, transcript, &mut answered);
+        let pump = |pty: &mut Pty| {
+            pty.pump();
             assert!(
                 Instant::now() < watchdog,
                 "attached journey stalled: {}",
-                super::super::session_picker::tail(transcript)
+                super::super::session_picker::tail(&pty.transcript)
             );
             thread::yield_now();
         };
@@ -916,15 +894,19 @@ mod journey {
             (&b"Input:"[..], &b"/agents team 1\r"[..]),
             (&b"Next-Run collaboration: team"[..], &b"answer\r"[..]),
         ] {
-            while !transcript.windows(needle.len()).any(|part| part == needle) {
-                pump(&mut input, &mut transcript);
+            while !pty
+                .transcript
+                .windows(needle.len())
+                .any(|part| part == needle)
+            {
+                pump(&mut pty);
             }
-            input.write_all(send).unwrap();
+            pty.send(send);
         }
         while held_rx.try_recv().is_err() {
-            pump(&mut input, &mut transcript);
+            pump(&mut pty);
         }
-        input.write_all(b"\x03").unwrap();
+        pty.send(b"\x03");
         for (needle, send) in [
             (
                 &b"Interrupted. Send a message to continue."[..],
@@ -932,21 +914,25 @@ mod journey {
             ),
             (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
         ] {
-            while !transcript.windows(needle.len()).any(|part| part == needle) {
-                pump(&mut input, &mut transcript);
+            while !pty
+                .transcript
+                .windows(needle.len())
+                .any(|part| part == needle)
+            {
+                pump(&mut pty);
             }
-            input.write_all(send).unwrap();
+            pty.send(send);
         }
         let status = loop {
-            if let Some(status) = child.child().try_wait().unwrap() {
+            if let Some(status) = pty.child.child().try_wait().unwrap() {
                 break status;
             }
-            pump(&mut input, &mut transcript);
+            pump(&mut pty);
         };
         assert!(
             status.success(),
             "attached exit: {status:?}: {}",
-            super::super::session_picker::tail(&transcript)
+            super::super::session_picker::tail(&pty.transcript)
         );
         assert_eq!(served.load(Ordering::SeqCst), 2);
         let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
