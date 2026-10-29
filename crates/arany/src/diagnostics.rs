@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 const MAX_RECORD_BYTES: usize = 24 * 1024;
 static ROOT: OnceLock<Mutex<StateRoot>> = OnceLock::new();
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use crate::test_process;
 
 /// Enables bounded local diagnostics in debug builds after ordinary state admission.
@@ -288,7 +288,7 @@ impl Write for BoundedRecord {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use crate::provider::diagnostics::{
         StreamCounts, SubscriptionFailureStage, ToolArgumentShape, failure_record,

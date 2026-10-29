@@ -261,7 +261,6 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     not(arany_ci),
     ignore = "file-backed 256 MiB database-capacity admission and recovery"

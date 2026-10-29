@@ -8,7 +8,6 @@ use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
     GoalId, GoalPhase, GoalRequest, GoalStatus, MAX_USER_MESSAGE_BYTES, Provider, RunRequest,
     RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
-    native_protection_supported,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr, sync::Arc};
@@ -369,12 +368,6 @@ async fn submit_and_wait(
     let session_id = admission.session_id;
     let output = args.output;
     let tools = if args.tools {
-        if !native_protection_supported() {
-            return Err(
-                "Tools require native OS protection, unavailable on this host; rerun without --tools"
-                    .to_owned(),
-            );
-        }
         ToolGrant::Configured
     } else {
         ToolGrant::None

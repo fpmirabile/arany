@@ -399,7 +399,7 @@ fn context_record(
     record
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

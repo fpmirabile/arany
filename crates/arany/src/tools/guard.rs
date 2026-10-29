@@ -61,10 +61,6 @@ pub(super) fn git_writes_available() -> bool {
     {
         true
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        false
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -84,9 +80,7 @@ pub(super) use macos::{
     RUNTIME_COMPAT_BYTES, RUNTIME_COMPAT_FILE, SystemPrograms, macos_enforcement_digest,
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod cache_directory;
 mod cache_recovery;
 pub use cache_recovery::recover_build_cache;
@@ -96,13 +90,7 @@ pub(super) mod transfer;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
     check_available()?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     return admission::recover_private(ids).await;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = ids;
-        Err(ToolError::ProtectionUnavailable)
-    }
 }
 
 pub(super) fn runtime_roots() -> &'static [&'static str] {
@@ -223,7 +211,6 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) directory: Option<cache_directory::Session>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
@@ -253,7 +240,6 @@ pub(super) fn build_cache_session(
         .begin_build_cache_with_limit(identity.clone(), intent.limits.cache_candidate_bytes)
     {
         Ok(lease) => lease,
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Err(StoreError::StorageFull) if cache_directory::selected(intent) => {
             return Err(ToolError::Limit);
         }
@@ -262,7 +248,6 @@ pub(super) fn build_cache_session(
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         directory: None,
         lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
@@ -332,7 +317,6 @@ pub(super) async fn publish_cache_candidate(
         }
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 if cache.directory.is_some() {
                     return cache_directory::publish(cache);
                 }
@@ -675,14 +659,9 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     {
         macos::check_available()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err(ToolError::ProtectionUnavailable)
-    }
 }
 
 pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8; 32], ToolError> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let jobs = ToolLimits::default().build_jobs;
     #[cfg(target_os = "linux")]
     {
@@ -691,10 +670,6 @@ pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8;
     #[cfg(target_os = "macos")]
     {
         bind_runtime_grants(macos::enforcement_digest()?, runtime_grants, jobs)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err(ToolError::ProtectionUnavailable)
     }
 }
 
@@ -751,8 +726,6 @@ fn verify_runtime_grants(
         grant.verify_at(&grant.mounted_path(cache_enabled)?)?;
         #[cfg(target_os = "macos")]
         grant.verify_host()?;
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        return Err(ToolError::ProtectionUnavailable);
     }
     Ok(())
 }
@@ -779,8 +752,6 @@ fn attest_runtime_mounts(
     linux::verify_runtime_mounts(grants, cache_enabled)?;
     #[cfg(target_os = "macos")]
     macos::verify_runtime_mounts(grants)?;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return Err(ToolError::ProtectionUnavailable);
     Ok(())
 }
 
@@ -839,11 +810,6 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 encode_task(&task)
             })
             .is_ok()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (runtime, intent);
-        false
     }
 }
 
@@ -977,8 +943,6 @@ pub(super) async fn execute(
         &mut dispatched,
     ))
     .await;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let result = Err(ToolError::ProtectionUnavailable);
     // Unless cleanup failed the unit is stopped, so leftover Git locks are reported, never moved.
     let stale = if dispatched
         && intent.call.is_git()
@@ -1490,10 +1454,7 @@ fn send_ready(task: &Task) -> Result<(), ToolError> {
         pid: std::process::id(),
         #[cfg(target_os = "linux")]
         namespaces: profile::Namespaces::read()?,
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         profile_digest: task.enforcement_digest()?,
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        profile_digest: [0; 32],
     };
     #[cfg(target_os = "linux")]
     if !ready.namespaces.isolated_from(&task.parent_namespaces) {
@@ -2990,7 +2951,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn enforcement_causes_require_guard_evidence() {
         let mut observation = command_observation();
@@ -3377,7 +3337,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn drifted_runtime_grant_rejects_commands_and_keeps_file_intents() {
         use std::os::unix::fs::PermissionsExt;

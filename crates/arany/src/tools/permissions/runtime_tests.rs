@@ -47,7 +47,6 @@ fn old_host_rules_are_inactive_and_preserved() {
     assert_eq!(std::fs::read(archive).unwrap(), bytes);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn restricted_read_paths_stay_out_of_list_search_and_glob_results_unopened() {
     use std::os::unix::fs::PermissionsExt;

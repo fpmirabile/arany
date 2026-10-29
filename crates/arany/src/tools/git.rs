@@ -1140,11 +1140,6 @@ fn spawn_confined_before(
         let _ = writable;
         super::guard::spawn_before(command, deadline)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (command, writable);
-        Err(ToolError::ProtectionUnavailable)
-    }
 }
 
 async fn spawn_git_with(
@@ -3750,7 +3745,6 @@ pub(super) mod tests {
         ));
 
         std::fs::remove_file(workspace.join(".gitignore")).unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink("missing", workspace.join(".gitignore")).unwrap();
         assert!(matches!(
             GitDisclosure::new(

@@ -6,9 +6,7 @@ use sha2::{Digest, Sha256};
 use std::io;
 use std::path::{Component, Path};
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod directory;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use directory::{CacheChange, CacheGuardRecovery};
 #[cfg(test)]
 mod tests;
@@ -166,7 +164,6 @@ impl StateRoot {
         self.admit_identity(identity)?;
         let dir = cache_directory(self, true)?;
         let token = identity.token();
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         directory::directory_available(&dir, &token)?;
         match open_regular(&dir, &identity_lock_name(&token), 0) {
             Ok(lock) => touch(&lock)?,
@@ -235,7 +232,6 @@ impl StateRoot {
         }
         let (identity_file, _) = open_lock_file(&dir, &identity_lock_name(&token))?;
         let identity_lock = FlockGuard::acquire(identity_file, true)?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             directory::guard::admit(&dir, &token)?;
             directory::directory_available(&dir, &token)?;
@@ -264,7 +260,6 @@ impl StateRoot {
         let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
         let (identity_file, _) = open_lock_file(&dir, &identity_lock_name(&token))?;
         let _identity_lock = FlockGuard::acquire(identity_file, true)?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         directory::guard::admit(&dir, &token)?;
         remove_identity(&dir, &token)
     }
@@ -303,7 +298,6 @@ impl StateRoot {
             validate_token(token)?;
             let file = open_regular(&dir, &identity_lock_name(token), 0)?;
             held.push(FlockGuard::acquire(file, true)?);
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
             directory::guard::admit(&dir, token)?;
         }
         for (count, entry) in dir.entries()?.enumerate() {
@@ -379,7 +373,6 @@ fn evict_lru(
             Err(StoreError::BuildCacheBusy) => continue,
             Err(error) => return Err(error),
         };
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if directory::guard::active(dir, &token)? {
             continue;
         }
@@ -676,18 +669,12 @@ fn check_private(file: &File, max: u64) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn own_tree_bytes(dir: &Dir, token: &str) -> Result<u64, StoreError> {
     let name = directory::tree_name(token);
     if !file_exists(dir, &name)? {
         return Ok(0);
     }
     directory::measure(&dir.open_dir_nofollow(&name)?)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn own_tree_bytes(_dir: &Dir, _token: &str) -> Result<u64, StoreError> {
-    Ok(0)
 }
 
 fn superseded_record(name: &str) -> bool {

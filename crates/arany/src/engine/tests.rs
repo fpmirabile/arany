@@ -1,7 +1,6 @@
 use super::*;
 use crate::session::WorkspaceIdentity;
 
-#[cfg(unix)]
 mod goal_workspace_lease_tests {
     use super::*;
     use crate::provider::{ProviderError, ProviderResponse};

@@ -120,9 +120,6 @@ impl Threads {
             crate::cli::admit_workspace(Some(PathBuf::from(&params.cwd)), Some(state_dir.into()))
                 .map_err(|_| Fault::params())?;
         let grant = if params.tools.unwrap_or(false) {
-            if !arany::native_protection_supported() {
-                return Err(Fault::engine(arany::EngineError::GuardUnavailable));
-            }
             ToolGrant::Configured
         } else {
             ToolGrant::None

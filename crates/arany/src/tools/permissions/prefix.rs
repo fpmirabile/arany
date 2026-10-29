@@ -699,7 +699,7 @@ fn rows(entries: &[TypedRule]) -> Value {
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

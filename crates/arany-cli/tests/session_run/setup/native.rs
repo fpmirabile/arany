@@ -1572,7 +1572,6 @@ fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 #[ignore = "requires a native unlocked OS credential store"]
 fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
@@ -1633,7 +1632,6 @@ fn native_credential_helper_round_trips_a_synthetic_isolated_slot() {
         .expect("remove synthetic account");
 }
 
-#[cfg(unix)]
 fn credential_helper_command(operation: &str, slot: &str, directory: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command

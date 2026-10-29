@@ -391,7 +391,7 @@ impl RuntimeGrant {
     }
 
     fn multi_layout_matches(&self) -> bool {
-        if !cfg!(any(target_os = "linux", target_os = "macos")) || self.version.is_some() {
+        if self.version.is_some() {
             return false;
         }
         match self.kind {
@@ -572,11 +572,7 @@ pub(crate) fn discover_user_environment(
     home: &Path,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Vec<Candidate>, ToolError> {
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
-        discover_user_programs(home, path, &HOMEBREW_PREFIXES)
-    } else {
-        Ok(Vec::new())
-    }
+    discover_user_programs(home, path, &HOMEBREW_PREFIXES)
 }
 
 pub(crate) fn discover_user_programs(
@@ -973,14 +969,9 @@ fn executable_file(file: &std::fs::File) -> bool {
     if !metadata.is_file() {
         return false;
     }
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        false
     }
 }
 
@@ -1349,7 +1340,7 @@ fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Resul
     Ok(())
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
 mod user_environment_tests {
     use super::*;
 
@@ -1664,20 +1655,16 @@ mod tests {
         }
         let path = std::env::join_paths([&local, &home.join(".cargo/bin")]).unwrap();
         let candidates = discover_user_environment(home, Some(&path)).unwrap();
-        if cfg!(any(target_os = "linux", target_os = "macos")) {
-            assert_eq!(candidates.len(), 2);
-            let grants = candidates
-                .iter()
-                .map(|candidate| candidate.grant.clone())
-                .collect::<Vec<_>>();
-            assert_eq!(grants[0].kind, RuntimeKind::UserPrograms);
-            assert_eq!(grants[1].kind, RuntimeKind::ManagerShims);
-            validate_selection(&grants).unwrap();
-            for grant in grants {
-                grant.verify_host().unwrap();
-            }
-        } else {
-            assert!(candidates.is_empty());
+        assert_eq!(candidates.len(), 2);
+        let grants = candidates
+            .iter()
+            .map(|candidate| candidate.grant.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(grants[0].kind, RuntimeKind::UserPrograms);
+        assert_eq!(grants[1].kind, RuntimeKind::ManagerShims);
+        validate_selection(&grants).unwrap();
+        for grant in grants {
+            grant.verify_host().unwrap();
         }
     }
 

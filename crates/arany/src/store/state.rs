@@ -12,24 +12,20 @@ pub(super) use archive::identity_of;
 pub use archive::{ArchivedHistory, ArchivedRecords};
 use archive::{private_subdirectory, rename, sync};
 mod build_cache;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use build_cache::{
     CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_path as validate_cache_path,
 };
 pub(crate) mod checkpoints;
-#[cfg(unix)]
 mod inventory;
 mod lock;
 pub(crate) mod spill;
 pub(crate) use build_cache::{
     BuildCacheIdentity, BuildCacheLease, DEFAULT_VIEW_BYTES as BUILD_CACHE_DEFAULT_VIEW_BYTES,
 };
-#[cfg(unix)]
 pub use inventory::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,
 };
-#[cfg(unix)]
 pub(crate) use lock::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
 pub(crate) use lock::{ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
 
@@ -48,7 +44,6 @@ pub struct HistoryReset {
 
 impl HistoryReset {
     pub fn apply(self) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
 
@@ -75,10 +70,6 @@ impl HistoryReset {
                 .open_with(".", OpenOptions::new().read(true))?
                 .sync_all()?;
             Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            Err(StoreError::InvalidStateDirectory)
         }
     }
 }
@@ -268,7 +259,6 @@ impl Record<'_> {
 pub struct StateRoot {
     path: PathBuf,
     pub(super) dir: Dir,
-    #[cfg(unix)]
     ancestors: Vec<(u64, u64)>,
 }
 
@@ -277,7 +267,6 @@ impl StateRoot {
         Ok(Self {
             path: self.path.clone(),
             dir: self.dir.try_clone()?,
-            #[cfg(unix)]
             ancestors: self.ancestors.clone(),
         })
     }
@@ -320,18 +309,17 @@ impl StateRoot {
     }
 
     fn debug_account_root() -> Option<PathBuf> {
-        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
+        #[cfg(debug_assertions)]
         {
             std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").map(PathBuf::from)
         }
-        #[cfg(not(all(debug_assertions, any(target_os = "linux", target_os = "macos"))))]
+        #[cfg(not(debug_assertions))]
         {
             None
         }
     }
 
     fn configured_account_path() -> Result<PathBuf, StoreError> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use nix::unistd::{User, geteuid};
 
@@ -346,10 +334,6 @@ impl StateRoot {
             #[cfg(target_os = "macos")]
             let suffix = "Library/Application Support/dev.Arany.arany";
             Ok(user.dir.join(suffix))
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            Self::default_path()
         }
     }
 
@@ -378,7 +362,6 @@ impl StateRoot {
 
     pub(crate) fn readmit(&self) -> Result<(), StoreError> {
         let current = Self::open_existing(&self.path)?;
-        #[cfg(unix)]
         if directory_identity(&current.dir)? == directory_identity(&self.dir)? {
             return Ok(());
         }
@@ -387,7 +370,6 @@ impl StateRoot {
 
     fn open(path: &Path, create: bool) -> Result<Self, StoreError> {
         let directory = crate::private_fs::open_directory(path, create)?;
-        #[cfg(unix)]
         if create {
             lock::prepare_history_lock(&directory.dir)?;
         }
@@ -395,7 +377,6 @@ impl StateRoot {
         Ok(Self {
             path: directory.path,
             dir: directory.dir,
-            #[cfg(unix)]
             ancestors: directory.ancestors,
         })
     }
@@ -435,7 +416,6 @@ impl StateRoot {
         name: &str,
         limit: usize,
     ) -> Result<Option<cap_std::fs::Metadata>, StoreError> {
-        #[cfg(unix)]
         {
             let Some(file) = self.open_record_file(name)? else {
                 return Ok(None);
@@ -445,15 +425,9 @@ impl StateRoot {
             crate::fault::private_record_admission(&self.path, name);
             sidecar_metadata(metadata, limit)
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     pub(crate) fn append_development_diagnostic(&self, record: &[u8]) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
             use std::io::{Seek, SeekFrom};
@@ -482,11 +456,6 @@ impl StateRoot {
             file.seek(SeekFrom::End(0))?;
             file.write_all(record)?;
             Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = record;
-            Err(StoreError::InvalidStateDirectory)
         }
     }
 
@@ -529,7 +498,6 @@ impl StateRoot {
         pending: &str,
         limit: usize,
     ) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             crate::fault::record_publication(&self.path, name)?;
             let record = self.open_private_record(name, limit)?;
@@ -549,11 +517,6 @@ impl StateRoot {
                 .sync_all()
                 .map_err(unconfirmed)?;
             Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, pending, limit);
-            Err(StoreError::InvalidStateDirectory)
         }
     }
 
@@ -578,7 +541,6 @@ impl StateRoot {
         name: &str,
         limit: usize,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        #[cfg(unix)]
         {
             let unsafe_link = |error: io::Error| match error.raw_os_error() {
                 Some(code) if code == nix::libc::ELOOP || code == nix::libc::ENOTDIR => {
@@ -610,11 +572,6 @@ impl StateRoot {
                 .read_to_end(&mut bytes)?;
             Ok(Some(bytes))
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (directory, name, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     fn open_private_record(
@@ -622,7 +579,6 @@ impl StateRoot {
         name: &str,
         limit: usize,
     ) -> Result<Option<cap_std::fs::File>, StoreError> {
-        #[cfg(unix)]
         {
             let Some(file) = self.open_record_file(name)? else {
                 return Ok(None);
@@ -631,14 +587,8 @@ impl StateRoot {
             check_private_record_file(&file, limit)?;
             Ok(Some(file))
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
-    #[cfg(unix)]
     fn open_record_file(&self, name: &str) -> Result<Option<cap_std::fs::File>, StoreError> {
         let mut options = OpenOptions::new();
         options.read(true);
@@ -658,7 +608,6 @@ impl StateRoot {
         record: &[u8],
         limit: usize,
     ) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
 
@@ -690,14 +639,8 @@ impl StateRoot {
             crate::fault::record_sync(&self.path, name)?;
             sync(&self.dir).map_err(|_| StoreError::ReplaceUnconfirmed)
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, pending, record, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
-    #[cfg(unix)]
     pub(crate) fn ensure_outside_workspace(&self, workspace: &Dir) -> Result<(), StoreError> {
         let identity = directory_identity(workspace)?;
         if self.ancestors.contains(&identity) {
@@ -707,7 +650,6 @@ impl StateRoot {
     }
 }
 
-#[cfg(unix)]
 fn sidecar_metadata(
     metadata: cap_std::fs::Metadata,
     limit: usize,
@@ -721,7 +663,6 @@ fn sidecar_metadata(
     Ok(Some(metadata))
 }
 
-#[cfg(unix)]
 pub(super) fn check_private_record_file(
     file: &cap_std::fs::File,
     limit: usize,
@@ -730,7 +671,6 @@ pub(super) fn check_private_record_file(
     check_private_metadata(&file.metadata()?, limit)
 }
 
-#[cfg(unix)]
 fn check_private_metadata(
     metadata: &cap_std::fs::Metadata,
     limit: usize,
@@ -747,13 +687,11 @@ fn check_private_metadata(
     Ok(())
 }
 
-#[cfg(unix)]
 pub(super) fn nonblocking(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt;
     options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
 }
 
-#[cfg(unix)]
 fn directory_identity(dir: &Dir) -> Result<(u64, u64), StoreError> {
     use cap_std::fs::MetadataExt;
     let metadata = dir.dir_metadata()?;
@@ -765,7 +703,6 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         options.follow(FollowSymlinks::No);
-        #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
             options.mode(0o600);
@@ -783,16 +720,13 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
         existing.write(true);
     }
     existing.follow(FollowSymlinks::No);
-    #[cfg(unix)]
     nonblocking(&mut existing);
     let file = dir.open_with(DATABASE_FILE, &existing)?;
-    #[cfg(unix)]
     crate::private_fs::check_acl(&file, true)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > MAX_DATABASE_BYTES as u64 {
         return Err(StoreError::StateNotPrivate);
     }
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         if meta.uid() != rustix::process::geteuid().as_raw()
@@ -805,7 +739,7 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use nix::{sys::stat::Mode, unistd::mkfifo};
@@ -1703,7 +1637,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod roster_tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};

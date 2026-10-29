@@ -46,7 +46,6 @@ fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
     let mut attached = crate::terminal::clipboard::cleanup_tests::released_terminal(None);

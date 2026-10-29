@@ -3,7 +3,6 @@ use crate::tools::tests::config_value;
 use crate::tools::types::*;
 use serde_json::json;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn command_snapshots_exceed_previous_capacity_and_reject_new_limits() {
     let temp = tempfile::tempdir().unwrap();

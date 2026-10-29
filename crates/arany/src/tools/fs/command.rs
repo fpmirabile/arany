@@ -231,7 +231,6 @@ fn select_command(
 
 #[cfg(any(test, target_os = "macos"))]
 fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         (
@@ -252,15 +251,9 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
             b.ctime_nsec(),
         )
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (a, b);
-        false
-    }
 }
 
 fn command_metadata(file: &File) -> Result<std::fs::Metadata, ToolError> {
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if file.metadata().map_err(|_| ToolError::Path)?.mode() & 0o6000 != 0 {
@@ -275,7 +268,6 @@ fn safe_metadata(file: &File) -> Result<std::fs::Metadata, ToolError> {
     if !metadata.is_dir() && !metadata.is_file() {
         return Err(ToolError::Path);
     }
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.mode() & 0o6000 != 0 || metadata.is_file() && metadata.nlink() != 1 {
@@ -425,13 +417,10 @@ impl Inputs<'_> {
         let content = read_regular(file, MAX_FILE_BYTES)?;
         self.budget.content(content.len())?;
         self.retain()?;
-        #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
             metadata.permissions().mode() & 0o111 != 0
         };
-        #[cfg(not(unix))]
-        let executable = false;
         // Keeping the source time lets incremental builds such as Cargo treat unchanged inputs as fresh.
         write_new(self.target, path, &content, executable)?
             .set_modified(metadata.modified().map_err(|_| ToolError::Path)?)
@@ -646,13 +635,10 @@ impl CommandCapture<'_> {
         let remaining = COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget_bytes());
         let content = read_regular(file, MAX_FILE_BYTES.min(remaining))?;
         self.budget.content(content.len())?;
-        #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
             metadata.permissions().mode() & 0o111 != 0
         };
-        #[cfg(not(unix))]
-        let executable = false;
         if old.is_some_and(|entry| {
             entry.content.as_deref() == Some(content.as_slice()) && entry.executable == executable
         }) {

@@ -11,9 +11,7 @@ use crossterm::{
     },
 };
 use ratatui::{Terminal, backend::Backend, buffer::CellWidth, layout::Rect};
-#[cfg(unix)]
 use rustix::process::{Signal, getpid, kill_process};
-#[cfg(unix)]
 use rustix::termios::{
     LocalModes, OptionalActions, QueueSelector, Termios, tcflush, tcgetattr, tcsetattr,
 };
@@ -455,7 +453,6 @@ struct Panels {
     panel_selection: PanelSelection,
     panel_copy: Option<PanelCopy>,
     selection_cue: Option<String>,
-    #[cfg(unix)]
     session_picker_area: Option<Rect>,
     agent_picker_area: Option<Rect>,
     help_selected: Option<usize>,
@@ -652,13 +649,9 @@ const MOUSE_CAPTURE_WITH_MOTION: [&[u8]; 2] = [
     b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l",
 ];
 const ALTERNATE_SCROLL: [&[u8]; 2] = [b"\x1b[?1007h", b"\x1b[?1003l\x1b[?1007l"];
-#[cfg(unix)]
 const BRACKETED_PASTE: [&[u8]; 2] = [b"\x1b[?2004h", b"\x1b[?2004l"];
-#[cfg(unix)]
 const KEYBOARD_DISAMBIGUATION: [&[u8]; 2] = [b"\x1b[>1u", b"\x1b[<u"];
-#[cfg(unix)]
 const KEYBOARD_ONLY_QUERY: &[u8] = b"\x1b[?u\x1b[c";
-#[cfg(unix)]
 const KEYBOARD_QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[?u\x1b[c";
 static SELECTION_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -696,14 +689,12 @@ fn mouse_capture_enabled() -> bool {
     !std::env::var_os("ARANY_DISABLE_MOUSE").is_some_and(|value| value != "0")
 }
 
-#[cfg(unix)]
 fn graphics_probe_allowed(mode: TerminalMode) -> bool {
     mode == TerminalMode::Fullscreen
         && mouse_capture_enabled()
         && std::env::var_os("TMUX").is_none()
 }
 
-#[cfg(unix)]
 fn graphics_protocol(
     kitty_supported: bool,
     sixel_cell: Option<graphics::sixel::CellPixels>,
@@ -724,7 +715,6 @@ fn graphics_protocol(
     }
 }
 
-#[cfg(unix)]
 fn detected_graphics_protocol(input: &TerminalReader, probe: bool) -> Option<GraphicsProtocol> {
     if !probe {
         return None;
@@ -788,9 +778,7 @@ struct OwnedTerminal {
     input: Option<TerminalReader>,
     alternate: Option<AlternateScreen>,
     terminal: Option<Terminal<TerminalBackend>>,
-    #[cfg(unix)]
     bracketed_paste: Option<ModeGuard>,
-    #[cfg(unix)]
     keyboard: Option<ModeGuard>,
     graphics_protocol: Option<GraphicsProtocol>,
     pointer_modes: Option<ModeGuard>,
@@ -803,9 +791,7 @@ impl OwnedTerminal {
             input: None,
             alternate: None,
             terminal: None,
-            #[cfg(unix)]
             bracketed_paste: None,
-            #[cfg(unix)]
             keyboard: None,
             graphics_protocol: None,
             pointer_modes: None,
@@ -847,11 +833,9 @@ impl OwnedTerminal {
         if let Some(mut modes) = self.pointer_modes.take() {
             attempt_cleanup(first_error, || modes.release());
         }
-        #[cfg(unix)]
         if let Some(mut keyboard) = self.keyboard.take() {
             attempt_cleanup(first_error, || keyboard.release());
         }
-        #[cfg(unix)]
         if let Some(mut paste) = self.bracketed_paste.take() {
             attempt_cleanup(first_error, || paste.release());
         }
@@ -879,16 +863,12 @@ impl OwnedTerminal {
     }
 }
 
-#[cfg(unix)]
 struct TerminalSignals {
     interrupt: tokio::signal::unix::Signal,
     suspend: tokio::signal::unix::Signal,
     hangup: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
 }
-
-#[cfg(not(unix))]
-struct TerminalSignals;
 
 impl AttachedTerminal {
     fn from_acquired(
@@ -917,7 +897,6 @@ impl AttachedTerminal {
             hovered_image_digest: None,
             sixel_preview: graphics::SixelPreview::default(),
             linear: mode_label.map(LinearState::new),
-            #[cfg(unix)]
             secret_echo: None,
             agent_panel: None,
             agent_chat: None,
@@ -930,13 +909,9 @@ impl AttachedTerminal {
             shutdown_clipboard_on_drop: true,
             requested_screen_reader: screen_reader,
             color_enabled: std::env::var_os("NO_COLOR").is_none(),
-            #[cfg(unix)]
             interrupt: _signals.interrupt,
-            #[cfg(unix)]
             suspend: _signals.suspend,
-            #[cfg(unix)]
             hangup: _signals.hangup,
-            #[cfg(unix)]
             terminate: _signals.terminate,
         }
     }
@@ -957,9 +932,7 @@ impl OwnedTerminal {
 impl Drop for OwnedTerminal {
     fn drop(&mut self) {
         self.pointer_modes.take();
-        #[cfg(unix)]
         self.keyboard.take();
-        #[cfg(unix)]
         self.bracketed_paste.take();
         self.terminal.take();
         self.alternate.take();
@@ -1032,23 +1005,17 @@ impl OwnedTerminal {
                     resources.terminal = acquire_visual_terminal(mode, mode_label, resources)?;
                 }
                 AcquisitionStep::BracketedPaste => {
-                    #[cfg(unix)]
-                    {
-                        resources.bracketed_paste = mode_label
-                            .is_none()
-                            .then(|| ModeGuard::acquire(BRACKETED_PASTE))
-                            .transpose()?;
-                    }
+                    resources.bracketed_paste = mode_label
+                        .is_none()
+                        .then(|| ModeGuard::acquire(BRACKETED_PASTE))
+                        .transpose()?;
                 }
                 AcquisitionStep::KeyboardMode => {
-                    #[cfg(unix)]
-                    {
-                        let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
-                        let reader = resources.input.as_ref().expect("terminal reader acquired");
-                        resources.keyboard = keyboard_mode(reader, graphics_probe)?;
-                        resources.graphics_protocol =
-                            detected_graphics_protocol(reader, graphics_probe);
-                    }
+                    let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
+                    let reader = resources.input.as_ref().expect("terminal reader acquired");
+                    resources.keyboard = keyboard_mode(reader, graphics_probe)?;
+                    resources.graphics_protocol =
+                        detected_graphics_protocol(reader, graphics_probe);
                 }
                 AcquisitionStep::PointerModes => {
                     resources.pointer_modes = pointer_modes(
@@ -1318,13 +1285,11 @@ impl Drop for RawMode {
     }
 }
 
-#[cfg(unix)]
 struct SecretEcho {
     original: Termios,
     active: bool,
 }
 
-#[cfg(unix)]
 impl SecretEcho {
     fn acquire() -> io::Result<Self> {
         let original = tcgetattr(io::stdin()).map_err(io::Error::from)?;
@@ -1347,7 +1312,6 @@ impl SecretEcho {
     }
 }
 
-#[cfg(unix)]
 impl Drop for SecretEcho {
     fn drop(&mut self) {
         let _ = self.release();
@@ -1476,7 +1440,6 @@ fn pointer_modes(
     .map(Some)
 }
 
-#[cfg(unix)]
 fn keyboard_mode(input: &TerminalReader, graphics: bool) -> io::Result<Option<ModeGuard>> {
     match input.probe_keyboard(&mut io::stderr(), graphics)? {
         input::KeyboardSupport::Disambiguated => {
@@ -1504,7 +1467,6 @@ pub struct AttachedTerminal {
     hovered_image_digest: Option<[u8; 32]>,
     sixel_preview: graphics::SixelPreview,
     linear: Option<LinearState>,
-    #[cfg(unix)]
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
     agent_chat: Option<AgentChat>,
@@ -1517,13 +1479,9 @@ pub struct AttachedTerminal {
     shutdown_clipboard_on_drop: bool,
     requested_screen_reader: bool,
     color_enabled: bool,
-    #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
-    #[cfg(unix)]
     suspend: tokio::signal::unix::Signal,
-    #[cfg(unix)]
     hangup: tokio::signal::unix::Signal,
-    #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
 }
 
@@ -1755,7 +1713,6 @@ impl AttachedTerminal {
         if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
             return Err(TerminalError::Ineligible);
         }
-        #[cfg(unix)]
         let signals = TerminalSignals {
             interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
             suspend: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(
@@ -1764,8 +1721,6 @@ impl AttachedTerminal {
             hangup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?,
             terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
         };
-        #[cfg(not(unix))]
-        let signals = TerminalSignals;
         let height = size().ok().map(|(_, height)| height);
         let mut mode_label = if screen_reader {
             Some("screen-reader")
@@ -1778,10 +1733,6 @@ impl AttachedTerminal {
         } else {
             None
         };
-        #[cfg(not(unix))]
-        if mode == TerminalMode::Classic && !io::stdout().is_terminal() && mode_label.is_none() {
-            mode_label = Some("linear fallback (console cursor unavailable)");
-        }
         let owned = OwnedTerminal::acquire(mode, &mut mode_label)?;
         Ok(Self::from_acquired(
             owned,
@@ -1794,7 +1745,6 @@ impl AttachedTerminal {
     }
 
     fn keyboard_support(&self) -> input::KeyboardSupport {
-        #[cfg(unix)]
         if self.owned.keyboard.is_some() {
             return input::KeyboardSupport::Disambiguated;
         }
@@ -1847,7 +1797,6 @@ impl AttachedTerminal {
             .input
             .as_ref()
             .is_some_and(TerminalReader::paste_ready);
-        #[cfg(unix)]
         let input = tokio::select! {
             input = self.owned.reader().recv() => InputRead::Input(input?),
             signal = self.interrupt.recv() => {
@@ -1866,24 +1815,6 @@ impl AttachedTerminal {
                 signal.ok_or(TerminalError::InputClosed)?;
                 InputRead::Input(TerminalInput::Shutdown(ShutdownSignal::Terminate))
             },
-            paste = async {
-                match self.clipboard.as_mut() {
-                    Some(read) => read.recv().await,
-                    None => std::future::pending().await,
-                }
-            }, if clipboard_ready => {
-                self.clipboard.take();
-                self.clipboard_paste = Some(paste);
-                InputRead::Input(TerminalInput::Paste)
-            },
-            () = self.sixel_preview.wait() => InputRead::GraphicsReady,
-            result = wait_panel_copy(&mut self.panels.panel_copy) => {
-                InputRead::PanelCopy(result)
-            },
-        };
-        #[cfg(not(unix))]
-        let input = tokio::select! {
-            input = self.owned.reader().recv() => InputRead::Input(input?),
             paste = async {
                 match self.clipboard.as_mut() {
                     Some(read) => read.recv().await,
@@ -2142,7 +2073,6 @@ impl AttachedTerminal {
         if let Some(mut modes) = self.owned.pointer_modes.take() {
             modes.release()?;
         }
-        #[cfg(unix)]
         if let Some(mut keyboard) = self.owned.keyboard.take() {
             keyboard.release()?;
         }
@@ -2164,7 +2094,6 @@ impl AttachedTerminal {
         }
         self.owned.alternate = Some(AlternateScreen::acquire()?);
         self.transcript.scrollback_dump = false;
-        #[cfg(unix)]
         {
             let graphics_probe = graphics_probe_allowed(self.mode);
             self.owned.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
@@ -2781,7 +2710,6 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    #[cfg(unix)]
     pub fn suspend_and_resume(&mut self, input_capacity: usize) -> Result<(), TerminalError> {
         let screen_reader = self.requested_screen_reader;
         let secret_input = self.secret_echo.is_some();
@@ -2809,14 +2737,6 @@ impl AttachedTerminal {
             self.transcript.history.set_details(true);
         }
         Ok(())
-    }
-
-    #[cfg(not(unix))]
-    pub fn suspend_and_resume(&mut self, _input_capacity: usize) -> Result<(), TerminalError> {
-        Err(TerminalError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "terminal suspension is unavailable",
-        )))
     }
 
     pub fn draw(
@@ -3554,23 +3474,16 @@ impl AttachedTerminal {
 
     pub fn begin_secret_input(&mut self) -> Result<(), TerminalError> {
         if self.linear.is_some() {
-            #[cfg(unix)]
             {
                 if self.secret_echo.is_none() {
                     self.secret_echo = Some(SecretEcho::acquire()?);
                 }
             }
-            #[cfg(not(unix))]
-            return Err(TerminalError::Io(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "hidden input unavailable in linear mode",
-            )));
         }
         Ok(())
     }
 
     pub fn end_secret_input(&mut self) -> Result<(), TerminalError> {
-        #[cfg(unix)]
         if let Some(mut echo) = self.secret_echo.take() {
             writeln!(io::stderr())?;
             echo.release()?;
@@ -4022,7 +3935,6 @@ impl AttachedTerminal {
     }
 
     pub fn close_agents_at_run_end(&mut self) -> Result<(), TerminalError> {
-        #[cfg(unix)]
         if self.agent_panel.is_some() && self.linear.is_some() {
             tcflush(io::stdin(), QueueSelector::IFlush).map_err(io::Error::from)?;
         }
@@ -4158,7 +4070,6 @@ impl AttachedTerminal {
         attempt_cleanup(&mut first_error, || self.delete_graphics_placement());
         let owned = &mut self.owned;
         let scrollback_dump = &mut self.transcript.scrollback_dump;
-        #[cfg(unix)]
         let secret_echo = &mut self.secret_echo;
         let session_picker_area = &mut self.panels.session_picker_area;
         let agent_picker_area = &mut self.panels.agent_picker_area;
@@ -4170,7 +4081,6 @@ impl AttachedTerminal {
             scrollback_dump,
             &mut first_error,
             |first_error| {
-                #[cfg(unix)]
                 if let Some(mut echo) = secret_echo.take() {
                     attempt_cleanup(first_error, || echo.release());
                 }
@@ -4211,7 +4121,6 @@ impl AttachedTerminal {
             new.keep_written_tools(self.transcript.kept_tools);
         }
         replacement.classic_pinned = self.classic_pinned;
-        #[cfg(unix)]
         {
             // Preserve notifications received before the new listeners were registered.
             std::mem::swap(&mut self.interrupt, &mut replacement.interrupt);
@@ -4474,7 +4383,6 @@ mod graphics_lifecycle_tests {
         assert_eq!(hovered_image_at(&new_chip, position.0, position.1), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn drop_after_failed_delete_does_not_expect_an_owned_terminal() {
         tokio::runtime::Builder::new_current_thread()
@@ -4500,7 +4408,6 @@ mod graphics_lifecycle_tests {
             });
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn opening_agent_chat_clears_preview_and_propagates_delete_failure() {
         let backend = TerminalBackend::failing_graphics_writer(80, 24);
@@ -4674,7 +4581,6 @@ mod terminal_lifecycle_tests {
                 steps.clone(),
                 failure == "pointer",
             ));
-            #[cfg(unix)]
             {
                 terminal.owned.keyboard = Some(super::ModeGuard::tracked_for_test(
                     "keyboard",
@@ -4722,7 +4628,6 @@ mod terminal_lifecycle_tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn release_keeps_first_error_and_retries_failed_mode_reset_on_drop() {
         let steps = Rc::new(RefCell::new(Vec::new()));
@@ -4749,7 +4654,6 @@ mod terminal_lifecycle_tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn failed_reacquisition_keeps_terminal_released() {
         let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
@@ -5360,7 +5264,7 @@ mod insert_rows_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod pointer_tests {
     use super::{ClipboardContent, Composer, TerminalInput, TerminalMode, TerminalNotice};
 
@@ -5730,7 +5634,6 @@ mod panel_selection_tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn panel_copy_journey_keeps_failed_selection_and_escape_precedes_close() {
         tokio::runtime::Builder::new_current_thread()

@@ -4,13 +4,11 @@ pub mod engine;
 pub mod git;
 pub mod goals;
 pub mod latency;
-#[cfg(unix)]
 pub mod process;
 pub mod routing;
 pub mod scenario;
 #[cfg(target_os = "linux")]
 pub use crate::session::selection_failure_session;
-#[cfg(unix)]
 pub mod worker_teams;
 
 pub use crate::provider::test_image;
@@ -29,7 +27,6 @@ pub const fn max_changeset_files() -> usize {
     crate::tools::types::MAX_CHANGESET_FILES
 }
 
-#[cfg(unix)]
 pub fn private_file(path: &std::path::Path, bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, bytes).unwrap();
@@ -133,7 +130,6 @@ pub fn test_clock(now_ms: u64) -> TestClock {
 }
 
 static ACCOUNT_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-#[cfg(unix)]
 static ACCOUNT_LEASE: std::sync::OnceLock<cap_std::fs::File> = std::sync::OnceLock::new();
 
 #[cfg(all(test, target_os = "linux"))]
@@ -155,14 +151,12 @@ pub fn isolate_account_root() -> &'static std::path::Path {
             if let Some(path) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
                 let path = std::path::PathBuf::from(path);
                 assert!(path.is_absolute(), "absolute inherited test account root");
-                #[cfg(unix)]
                 if let Some(lease) = account_roots::inherit(&path).expect("inherited account lease")
                 {
                     ACCOUNT_LEASE.set(lease).expect("one account lease");
                 }
                 return path;
             }
-            #[cfg(unix)]
             {
                 // macOS `/tmp` is a symlink, which private admission refuses.
                 let parent = std::fs::canonicalize(std::env::temp_dir())
@@ -180,10 +174,6 @@ pub fn isolate_account_root() -> &'static std::path::Path {
                 );
                 path
             }
-            #[cfg(not(unix))]
-            tempfile::tempdir()
-                .expect("private test account root")
-                .keep()
         })
         .as_path()
 }
@@ -241,7 +231,6 @@ pub fn recorded_tool_failure(intent: uuid::Uuid) -> Option<String> {
         })
 }
 
-#[cfg(unix)]
 mod account_roots {
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
     use cap_std::fs::{

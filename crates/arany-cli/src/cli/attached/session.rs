@@ -11,7 +11,7 @@ use crate::terminal::{
     AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand,
     Submission, TerminalInput, TerminalMode, transcript_agents,
 };
-use arany::{Engine, SessionId, SessionView, native_protection_supported};
+use arany::{Engine, SessionId, SessionView};
 use std::{io::Write, time::Instant};
 
 pub(super) struct AttachedSession {
@@ -951,17 +951,7 @@ impl AttachedSession {
             FolderPermissions::Handled => return Ok(IdleAction::Handled),
             FolderPermissions::Close => return Ok(IdleAction::Close),
         };
-        self.ui.notice = Some(Feedback::History(if !native_protection_supported() {
-            format!(
-                "Folder {} · {}",
-                if access.is_trusted() {
-                    "trusted"
-                } else {
-                    "read only"
-                },
-                permissions::UNAVAILABLE_NOTICE
-            )
-        } else if access.is_trusted() {
+        self.ui.notice = Some(Feedback::History(if access.is_trusted() {
             format!(
                 "Folder trusted · {} · Shift+Tab changes mode",
                 access.mode().label()

@@ -67,14 +67,12 @@ pub(in crate::cli) fn stop_step(cancelling: bool, signal: StopSignal) -> StopSte
     }
 }
 
-#[cfg(unix)]
 pub(in crate::cli) struct StopSignals {
     interrupt: tokio::signal::unix::Signal,
     hangup: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
 }
 
-#[cfg(unix)]
 impl StopSignals {
     pub(in crate::cli) fn install() -> std::io::Result<Self> {
         // Tokio never restores default signal dispositions, so a SIGINT after the Run is absorbed.
@@ -92,20 +90,6 @@ impl StopSignals {
             _ = self.hangup.recv() => StopSignal::Hangup,
             _ = self.terminate.recv() => StopSignal::Terminate,
         }
-    }
-}
-
-#[cfg(not(unix))]
-pub(in crate::cli) struct StopSignals;
-
-#[cfg(not(unix))]
-impl StopSignals {
-    pub(in crate::cli) fn install() -> std::io::Result<Self> {
-        Ok(Self)
-    }
-
-    pub(in crate::cli) async fn next(&mut self) -> StopSignal {
-        std::future::pending().await
     }
 }
 

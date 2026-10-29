@@ -134,10 +134,6 @@ pub(crate) use workspace::WORKSPACE_PERMISSIONS;
 pub use workspace::{
     RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
 };
-/// Whether this OS implements admitted native Tool protection.
-pub const fn native_protection_supported() -> bool {
-    cfg!(any(target_os = "linux", target_os = "macos"))
-}
 
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?

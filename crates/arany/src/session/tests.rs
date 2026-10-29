@@ -305,7 +305,6 @@ fn uncovered_run_file_hints_append_with_or_without_a_summary() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn oversized_file_includes_attach_a_head_or_a_reference_never_a_refusal() {
     use sha2::{Digest, Sha256};
@@ -388,7 +387,6 @@ fn oversized_file_includes_attach_a_head_or_a_reference_never_a_refusal() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
     use sha2::{Digest, Sha256};
@@ -618,7 +616,6 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     .ok()
     .expect("instructions fit");
     assert_eq!(context.context_usage.used_bytes, 4 + 89);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let global = temp.path().join("state/AGENTS.md");
@@ -649,7 +646,6 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     use crate::session::InstructionFile;
@@ -819,7 +815,6 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     assert!(matches!(load(Some(&deep)), Err(InputError::NotRegular)));
 }
 
-#[cfg(unix)]
 #[test]
 fn user_instructions_have_an_independent_budget_and_fixed_label() {
     use input::{InputError, WorkspaceInputs};

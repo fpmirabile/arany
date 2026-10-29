@@ -1,38 +1,24 @@
-#[cfg(unix)]
 use super::nonblocking;
 use super::{StateRoot, StoreError};
 use crate::session::{SessionId, WorkspaceIdentity};
-#[cfg(unix)]
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-#[cfg(unix)]
 use cap_std::ambient_authority;
-#[cfg(unix)]
 use cap_std::fs::OpenOptions;
 use cap_std::fs::{Dir, File};
-#[cfg(unix)]
 use std::io;
 use std::path::Path;
 
-#[cfg(unix)]
 const LOCK_NAMESPACE_FILE: &str = "session-locks.guard";
-#[cfg(unix)]
 const ACCOUNT_LOCK_FILE: &str = "account-credentials.lock";
-#[cfg(unix)]
 // history.lock stays separate from the database: a macOS flock on the SQLite file conflicts with SQLite's own locking.
 const HISTORY_LOCK_FILE: &str = "history.lock";
-#[cfg(unix)]
 pub(crate) const MAX_SESSION_LOCK_FILES: usize = 65_536;
-#[cfg(unix)]
 const WORKSPACE_LOCK_NAMESPACE_FILE: &str = "workspace-locks.guard";
-#[cfg(unix)]
 pub(crate) const MAX_WORKSPACE_LOCK_FILES: usize = 4096;
-#[cfg(unix)]
 pub(crate) const MAX_STATE_OVERHEAD_FILES: usize = 32;
 
-#[cfg(unix)]
 struct NamespaceLock(File);
 
-#[cfg(unix)]
 impl Drop for NamespaceLock {
     fn drop(&mut self) {
         // Explicit unlock: relying on descriptor closure caused flaky self-contention in parallel tests.
@@ -40,22 +26,18 @@ impl Drop for NamespaceLock {
     }
 }
 
-#[cfg(unix)]
 struct AccountLock(File);
 
-#[cfg(unix)]
 thread_local! {
     // The State directory whose account lock this thread holds, so a record upgrade inside it reuses the lock.
     static HELD_ACCOUNT_LOCK: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(unix)]
 struct HeldAccountLock {
     _lock: AccountLock,
     previous: Option<(u64, u64)>,
 }
 
-#[cfg(unix)]
 impl HeldAccountLock {
     fn acquire(state: &StateRoot) -> Result<Self, StoreError> {
         let identity = super::directory_identity(&state.dir)?;
@@ -67,7 +49,6 @@ impl HeldAccountLock {
     }
 }
 
-#[cfg(unix)]
 impl Drop for HeldAccountLock {
     fn drop(&mut self) {
         HELD_ACCOUNT_LOCK.set(self.previous);
@@ -78,12 +59,10 @@ pub(crate) struct HistoryLock(pub(super) File);
 
 impl Drop for HistoryLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
         let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
     }
 }
 
-#[cfg(unix)]
 impl Drop for AccountLock {
     fn drop(&mut self) {
         let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
@@ -102,14 +81,12 @@ pub(crate) struct ProviderCheckLock(File);
 
 impl Drop for ProviderCheckLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
         let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
     }
 }
 
 impl Drop for WorkspaceRunLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
         let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
     }
 }
@@ -122,22 +99,17 @@ impl SessionRunLock {
 
 impl Drop for SessionRunLock {
     fn drop(&mut self) {
-        if self.remove_on_drop {
-            #[cfg(unix)]
-            if let Ok(_namespace) = lock_namespace(&self.dir) {
-                remove_matching_file(&self.dir, &self.name, &self.file);
-            }
-            #[cfg(not(unix))]
-            let _ = self.dir.remove_file(&self.name);
+        if self.remove_on_drop
+            && let Ok(_namespace) = lock_namespace(&self.dir)
+        {
+            remove_matching_file(&self.dir, &self.name, &self.file);
         }
-        #[cfg(unix)]
         let _ = rustix::fs::flock(&self.file, rustix::fs::FlockOperation::Unlock);
     }
 }
 
 impl StateRoot {
     pub(crate) fn lock_provider_check(&self) -> Result<ProviderCheckLock, StoreError> {
-        #[cfg(unix)]
         {
             use rustix::fs::{FlockOperation, flock};
             let (file, _) = open_private_lock_file(&self.dir, "provider-check.lock", || Ok(()))?;
@@ -149,12 +121,9 @@ impl StateRoot {
                 ))),
             }
         }
-        #[cfg(not(unix))]
-        Err(StoreError::InvalidStateDirectory)
     }
 
     pub(crate) fn lock_history(&self, exclusive: bool) -> Result<HistoryLock, StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             use rustix::fs::{FlockOperation, flock};
@@ -181,11 +150,6 @@ impl StateRoot {
             self.history_records()?;
             Ok(guard)
         }
-        #[cfg(not(unix))]
-        {
-            let _ = exclusive;
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     pub fn with_account_replacement_lock<T>(
@@ -194,29 +158,17 @@ impl StateRoot {
         operation: impl FnOnce() -> T,
     ) -> Result<T, StoreError> {
         self.check_outside_workspace(workspace)?;
-        #[cfg(unix)]
         {
             let _lock = HeldAccountLock::acquire(self)?;
             Ok(operation())
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = operation;
-            Err(StoreError::InvalidStateDirectory)
         }
     }
 
     // Records publish by synced rename, so read-only lookups need this check but not the account lock.
     pub fn check_outside_workspace(&self, workspace: &Path) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             let workspace = Dir::open_ambient_dir(workspace, ambient_authority())?;
             self.ensure_outside_workspace(&workspace)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = workspace;
-            Err(StoreError::InvalidStateDirectory)
         }
     }
 
@@ -225,7 +177,6 @@ impl StateRoot {
         &self,
         operation: impl FnOnce() -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        #[cfg(unix)]
         {
             if HELD_ACCOUNT_LOCK.get() == Some(super::directory_identity(&self.dir)?) {
                 return operation();
@@ -233,18 +184,12 @@ impl StateRoot {
             let _lock = HeldAccountLock::acquire(self)?;
             operation()
         }
-        #[cfg(not(unix))]
-        {
-            let _ = operation;
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     pub(crate) fn lock_session_read_only(
         &self,
         session_id: SessionId,
     ) -> Result<SessionRunLock, StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             use rustix::fs::{FlockOperation, flock};
@@ -270,41 +215,19 @@ impl StateRoot {
             }
             Ok(guard)
         }
-        #[cfg(not(unix))]
-        {
-            let _ = session_id;
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     pub(crate) fn lock_session(&self, session_id: SessionId) -> Result<SessionRunLock, StoreError> {
-        #[cfg(unix)]
-        {
-            lock_session(self, session_id)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = session_id;
-            Err(StoreError::InvalidStateDirectory)
-        }
+        lock_session(self, session_id)
     }
 
     pub(crate) fn lock_workspace(
         &self,
         identity: WorkspaceIdentity,
     ) -> Result<WorkspaceRunLock, StoreError> {
-        #[cfg(unix)]
-        {
-            self.lock_workspace_in(&StateRoot::account_path()?, identity)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = identity;
-            Err(StoreError::InvalidStateDirectory)
-        }
+        self.lock_workspace_in(&StateRoot::account_path()?, identity)
     }
 
-    #[cfg(unix)]
     pub(crate) fn lock_workspace_in(
         &self,
         account_root: &Path,
@@ -314,12 +237,10 @@ impl StateRoot {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn prepare_history_lock(dir: &Dir) -> Result<(), StoreError> {
     open_private_lock_file(dir, HISTORY_LOCK_FILE, || Ok(())).map(|_| ())
 }
 
-#[cfg(unix)]
 fn lock_account(state: &StateRoot) -> Result<AccountLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
@@ -333,12 +254,10 @@ fn lock_account(state: &StateRoot) -> Result<AccountLock, StoreError> {
     }
 }
 
-#[cfg(unix)]
 fn lock_session(state: &StateRoot, session_id: SessionId) -> Result<SessionRunLock, StoreError> {
     lock_session_with_limit(state, session_id, MAX_SESSION_LOCK_FILES)
 }
 
-#[cfg(unix)]
 fn lock_session_with_limit(
     state: &StateRoot,
     session_id: SessionId,
@@ -372,7 +291,6 @@ fn lock_session_with_limit(
     })
 }
 
-#[cfg(unix)]
 fn lock_workspace(
     account_root: &Path,
     identity: WorkspaceIdentity,
@@ -405,7 +323,6 @@ fn lock_workspace(
     Ok(WorkspaceRunLock(file))
 }
 
-#[cfg(unix)]
 fn lock_namespace(dir: &Dir) -> Result<NamespaceLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
@@ -415,7 +332,6 @@ fn lock_namespace(dir: &Dir) -> Result<NamespaceLock, StoreError> {
     Ok(NamespaceLock(file))
 }
 
-#[cfg(unix)]
 fn lock_named_namespace(dir: &Dir, name: &str) -> Result<NamespaceLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
@@ -425,7 +341,6 @@ fn lock_named_namespace(dir: &Dir, name: &str) -> Result<NamespaceLock, StoreErr
     Ok(NamespaceLock(file))
 }
 
-#[cfg(unix)]
 pub(super) fn open_private_lock_file(
     dir: &Dir,
     name: &str,
@@ -468,7 +383,6 @@ pub(super) fn open_private_lock_file(
     Ok((file, created))
 }
 
-#[cfg(unix)]
 fn check_lock_file_quota(dir: &Dir, limit: usize) -> Result<(), StoreError> {
     if limit == 0 {
         return Err(StoreError::StorageFull);
@@ -494,7 +408,6 @@ fn check_lock_file_quota(dir: &Dir, limit: usize) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(unix)]
 fn check_named_lock_file_quota(dir: &Dir, prefix: &str, limit: usize) -> Result<(), StoreError> {
     if limit == 0 {
         return Err(StoreError::StorageFull);
@@ -520,7 +433,6 @@ fn check_named_lock_file_quota(dir: &Dir, prefix: &str, limit: usize) -> Result<
     Ok(())
 }
 
-#[cfg(unix)]
 fn remove_matching_file(dir: &Dir, name: &str, file: &File) {
     use cap_std::fs::MetadataExt;
 
@@ -532,7 +444,7 @@ fn remove_matching_file(dir: &Dir, name: &str, file: &File) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};

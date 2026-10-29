@@ -37,9 +37,7 @@ pub(crate) use state::{
     BUILD_CACHE_DEFAULT_VIEW_BYTES, BuildCacheIdentity, BuildCacheLease, ProviderCheckLock,
     SessionRunLock, WorkspaceRunLock,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use state::{CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_cache_path};
-#[cfg(unix)]
 pub(crate) use state::{
     MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES,
 };
@@ -900,7 +898,6 @@ impl Drop for Store {
     }
 }
 
-#[cfg(unix)]
 pub use state::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,

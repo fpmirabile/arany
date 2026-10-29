@@ -51,13 +51,11 @@ impl ClipboardWorker {
 
 pub(super) fn shutdown() -> std::io::Result<()> {
     WORKER.shutdown(CLEANUP_TIMEOUT).map_err(|message| {
-        #[cfg(unix)]
         warn_cleanup_unconfirmed();
         std::io::Error::other(message)
     })
 }
 
-#[cfg(unix)]
 fn warn_cleanup_unconfirmed() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if WARNED.swap(true, Ordering::Relaxed) {
@@ -178,11 +176,6 @@ impl<T> Drop for ClipboardJob<T> {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
     }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn read(_cancelled: &AtomicBool, _cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
-    Err("explicit clipboard access is unavailable on this platform")
 }
 
 #[cfg(target_os = "linux")]
@@ -416,7 +409,6 @@ fn local_x11_display(display: &str) -> bool {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn installed(name: &str) -> Result<std::path::PathBuf, &'static str> {
     use std::os::unix::fs::MetadataExt;
     #[cfg(target_os = "linux")]
@@ -443,14 +435,12 @@ fn installed(name: &str) -> Result<std::path::PathBuf, &'static str> {
     Err("trusted clipboard client unavailable; use terminal paste")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct OwnedChild<'a> {
     child: Option<std::process::Child>,
     group: Option<rustix::process::Pid>,
     cleanup: &'a mut Cleanup,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl OwnedChild<'_> {
     fn spawn<'a>(
         command: &mut std::process::Command,
@@ -537,7 +527,6 @@ impl OwnedChild<'_> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for OwnedChild<'_> {
     fn drop(&mut self) {
         self.kill();
@@ -547,7 +536,6 @@ impl Drop for OwnedChild<'_> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn set_nonblocking(pipe: &impl std::os::fd::AsFd) -> Result<(), &'static str> {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     fcntl_setfl(
@@ -557,7 +545,6 @@ fn set_nonblocking(pipe: &impl std::os::fd::AsFd) -> Result<(), &'static str> {
     .map_err(|_| "clipboard pipe unavailable")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_process(
     command: &mut std::process::Command,
     cancelled: &AtomicBool,
@@ -829,17 +816,6 @@ pub(super) async fn copy(
     copy_to_terminal(&request, terminal)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn copy_locally(
-    _destinations: &[Destination],
-    _payload: &[u8],
-    _cancelled: &AtomicBool,
-    _cleanup: &mut Cleanup,
-) -> Result<&'static str, &'static str> {
-    Err("native clipboard copy is unavailable on this platform")
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn copy_locally(
     destinations: &[Destination],
     payload: &[u8],
@@ -907,13 +883,11 @@ fn native_writer(
     Ok((command, "clipboard (pbcopy)", false))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct TmuxSocket {
     path: std::path::PathBuf,
     identity: (u64, u64),
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl TmuxSocket {
     fn admit(value: &std::ffi::OsStr) -> Result<Self, &'static str> {
         use std::os::unix::{
@@ -966,7 +940,6 @@ impl TmuxSocket {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn tmux_writer(
     value: &std::ffi::OsStr,
 ) -> Result<(std::process::Command, TmuxSocket), &'static str> {
@@ -980,7 +953,6 @@ fn tmux_writer(
     Ok((command, socket))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn write_process(
     command: &mut std::process::Command,
     payload: &[u8],
@@ -1053,7 +1025,6 @@ pub(super) mod cleanup_tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
 
-    #[cfg(unix)]
     pub(in crate::terminal) fn released_terminal(
         linear: Option<crate::terminal::linear::LinearState>,
     ) -> super::super::AttachedTerminal {
@@ -1099,7 +1070,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn written_tool_rows_survive_release_and_reacquisition() {
         use crate::terminal::linear::LinearState;
@@ -1156,19 +1126,15 @@ pub(super) mod cleanup_tests {
             });
     }
 
-    #[cfg(unix)]
     struct WarningWriteGate {
         ready: mpsc::SyncSender<()>,
         release: mpsc::Receiver<()>,
     }
 
-    #[cfg(unix)]
     static WARNING_WRITE_GATE: Mutex<Option<WarningWriteGate>> = Mutex::new(None);
 
-    #[cfg(unix)]
     pub(super) struct WarningMessage(pub(super) &'static str);
 
-    #[cfg(unix)]
     impl std::fmt::Display for WarningMessage {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str(self.0)?;
@@ -1181,7 +1147,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn clipboard_cleanup_warning_never_waits_for_a_lock_or_full_pipe() {
         use arany::test_support::process::capture;
@@ -1242,7 +1207,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     #[ignore = "blocked stderr fixture for the clipboard cleanup owner"]
     fn clipboard_warning_fixture() {
@@ -1369,7 +1333,6 @@ pub(super) mod cleanup_tests {
         drop(read);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn clipboard_process_cleanup_preserves_reap_evidence_and_reports_deadline_faults() {
         use rustix::process::{Pid, WaitId, WaitIdOptions, test_kill_process, waitid};
@@ -1555,7 +1518,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     #[ignore = "held subprocess fixture for the clipboard cleanup owner"]
     fn clipboard_child_fixture() {
@@ -1767,7 +1729,6 @@ mod copy_tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn tmux_copy_requires_an_absolute_private_socket_under_unreplaceable_ancestors() {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -1841,7 +1802,6 @@ mod copy_tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn copy_client_receives_the_whole_payload_and_a_serving_descendant_survives() {
         use rustix::process::{Pid, Signal, kill_process, test_kill_process};

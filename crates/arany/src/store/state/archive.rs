@@ -175,7 +175,6 @@ pub(in crate::store) fn publish(
         .create(true)
         .truncate(true)
         .follow(FollowSymlinks::No);
-    #[cfg(unix)]
     cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
     nonblocking(&mut options);
     let mut file = dir.open_with(temp, &options)?;
@@ -210,7 +209,6 @@ fn check_history(root: &StateRoot) -> Result<(), StoreError> {
 
 pub(in crate::store) fn private_subdirectory(parent: &Dir, name: &str) -> Result<Dir, StoreError> {
     let mut builder = DirBuilder::new();
-    #[cfg(unix)]
     cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
     match parent.create_dir_with(name, &builder) {
         Ok(()) => {}

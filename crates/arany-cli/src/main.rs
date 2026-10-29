@@ -1,11 +1,14 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("Arany supports Linux and macOS; on Windows use WSL2");
+
 mod accounts;
 mod cli;
 mod files;
 use arany_cli::{presentation, terminal, terminal::report_error};
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use arany::test_support::process as test_process;
 
 use crate::presentation::render_session;
@@ -414,7 +417,6 @@ mod tests {
             tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>()).await
         });
         assert!(result.is_err());
-        #[cfg(unix)]
         runtime.block_on(async {
             let (socket, _peer) = tokio::net::UnixStream::pair().expect("local socket pair");
             socket.writable().await.expect("runtime I/O driver");

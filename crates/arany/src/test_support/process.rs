@@ -403,7 +403,6 @@ pub fn file_output(command: &mut Command, input: Option<&[u8]>) -> Output {
 }
 
 /// Opens a PTY whose master and slave close on exec; returns `(master, slave)`.
-#[cfg(unix)]
 pub fn cloexec_pty(geometry: Option<&nix::pty::Winsize>) -> (std::fs::File, std::fs::File) {
     let pty = nix::pty::openpty(geometry, None).unwrap();
     let pair = (
@@ -451,7 +450,6 @@ pub fn assert_single_test_completed(stdout: &[u8], context: &str) {
     );
 }
 
-#[cfg(unix)]
 pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
     let settings = nix::sys::termios::tcgetattr(terminal).expect("native terminal settings");
     #[cfg(target_os = "macos")]
@@ -465,7 +463,6 @@ pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
     settings
 }
 
-#[cfg(unix)]
 pub fn capture_terminal(
     child: &mut Child,
     terminal: std::fs::File,
@@ -569,7 +566,6 @@ fn drain(pipe: &mut Option<impl Read>, bytes: &mut Vec<u8>, cap: usize, channel:
     }
 }
 
-#[cfg(unix)]
 pub fn wait_readable(fd: impl AsFd) {
     use rustix::event::{PollFd, PollFlags, Timespec};
     let timeout = Timespec {

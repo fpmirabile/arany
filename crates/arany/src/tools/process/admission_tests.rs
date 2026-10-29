@@ -80,7 +80,6 @@ fn command_changeset_limits_cover_content_serialization_and_internal_context() {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
     let temp = tempfile::tempdir().unwrap();

@@ -1,23 +1,14 @@
-#[cfg(unix)]
 use super::composer::{MAX_DRAFT_BYTES, MAX_PASTE_BYTES, MAX_PRIMARY_DRAFT_BYTES};
 use super::{NewlineShortcut, TerminalError};
-#[cfg(not(unix))]
-use crossterm::event;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-#[cfg(unix)]
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
-#[cfg(unix)]
 use rustix::fs::{Mode, OFlags, fstat, open};
-#[cfg(unix)]
 use std::collections::VecDeque;
-#[cfg(unix)]
 use std::fs::File;
 use std::io;
-#[cfg(unix)]
 use std::io::Read;
-#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::{
     Arc, Condvar, Mutex,
@@ -25,11 +16,9 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
-#[cfg(unix)]
 use std::time::Instant;
 
 use tokio::sync::mpsc;
-#[cfg(unix)]
 use tokio::sync::oneshot;
 
 // The reader's admission epoch when it read the bytes behind this result.
@@ -37,14 +26,12 @@ type Observed<T> = (u64, io::Result<T>);
 
 const INPUT_QUEUE_CAPACITY: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-#[cfg(unix)]
 const KEYBOARD_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
-#[cfg(unix)]
 mod raw;
 // Stay below canonical buffers so discarded suffixes cannot become accepted input.
 #[cfg(target_os = "linux")]
 pub(super) const MAX_LINEAR_LINE_BYTES: usize = 4094;
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
 pub(super) const MAX_LINEAR_LINE_BYTES: usize = 1023;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,14 +113,12 @@ impl TerminalInput {
 
 pub(super) enum TerminalReader {
     Keys(InputReader),
-    #[cfg(unix)]
     Lines(LineReader),
     #[cfg(test)]
     Test(std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>),
 }
 
 impl TerminalReader {
-    #[cfg(unix)]
     pub(super) fn probe_keyboard(
         &self,
         output: &mut impl io::Write,
@@ -154,12 +139,10 @@ impl TerminalReader {
         }
     }
 
-    #[cfg(unix)]
     pub(super) fn kitty_graphics_supported(&self) -> bool {
         matches!(self, Self::Keys(reader) if reader.queries.graphics_supported())
     }
 
-    #[cfg(unix)]
     pub(super) fn sixel_cell_pixels(&self) -> Option<super::graphics::sixel::CellPixels> {
         let Self::Keys(reader) = self else {
             return None;
@@ -168,7 +151,6 @@ impl TerminalReader {
     }
 
     pub(super) fn set_chat_input(&mut self, chat: bool, child: bool, primary_capacity: usize) {
-        #[cfg(unix)]
         if let Self::Lines(reader) = self {
             let leaving_child = reader.child && !child;
             reader.chat = chat;
@@ -179,21 +161,17 @@ impl TerminalReader {
                 reader.remaining_bytes = primary_capacity;
             }
         }
-        #[cfg(not(unix))]
-        let _ = (chat, child, primary_capacity);
     }
 
     pub(super) fn cursor_query(&self) -> Option<TerminalQueries> {
         match self {
             Self::Keys(reader) => Some(reader.queries.clone()),
-            #[cfg(unix)]
             Self::Lines(_) => None,
             #[cfg(test)]
             Self::Test(_) => None,
         }
     }
     pub(super) fn start(linear: bool) -> io::Result<Self> {
-        #[cfg(unix)]
         if linear {
             return LineReader::start().map(Self::Lines);
         }
@@ -204,7 +182,6 @@ impl TerminalReader {
     pub(super) async fn recv(&mut self) -> Result<TerminalInput, TerminalError> {
         match self {
             Self::Keys(reader) => reader.recv().await,
-            #[cfg(unix)]
             Self::Lines(reader) => reader.recv().await,
             #[cfg(test)]
             Self::Test(_) => Err(TerminalError::Io(io::Error::other("test reader"))),
@@ -214,7 +191,6 @@ impl TerminalReader {
     pub(super) fn stop(&mut self) {
         match self {
             Self::Keys(reader) => reader.stop(),
-            #[cfg(unix)]
             Self::Lines(reader) => reader.stop(),
             #[cfg(test)]
             Self::Test(steps) => steps.borrow_mut().push("reader"),
@@ -222,12 +198,6 @@ impl TerminalReader {
     }
 
     pub(super) async fn discard_typeahead(&mut self) -> Result<(), TerminalError> {
-        #[cfg(not(unix))]
-        return Err(TerminalError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "terminal input admission unavailable",
-        )));
-        #[cfg(unix)]
         match self {
             Self::Keys(reader) => {
                 reader.epoch = reader.admission.barrier().await?;
@@ -240,12 +210,10 @@ impl TerminalReader {
             #[cfg(test)]
             Self::Test(_) => {}
         }
-        #[cfg(unix)]
         Ok(())
     }
 
     pub(super) fn reset_draft(&mut self) {
-        #[cfg(unix)]
         if let Self::Lines(reader) = self {
             reader.reset_draft();
         }
@@ -254,7 +222,6 @@ impl TerminalReader {
     pub(super) fn take_paste(&mut self) -> Option<Result<String, &'static str>> {
         match self {
             Self::Keys(reader) => reader.paste.take(),
-            #[cfg(unix)]
             Self::Lines(_) => None,
             #[cfg(test)]
             Self::Test(_) => None,
@@ -264,7 +231,6 @@ impl TerminalReader {
     pub(super) fn paste_ready(&self) -> bool {
         match self {
             Self::Keys(_) => true,
-            #[cfg(unix)]
             Self::Lines(reader) => reader.pending.is_empty(),
             #[cfg(test)]
             Self::Test(_) => true,
@@ -272,7 +238,6 @@ impl TerminalReader {
     }
 
     pub(super) fn restore_input_capacity(&mut self, capacity: usize) -> io::Result<()> {
-        #[cfg(unix)]
         {
             if capacity > MAX_PRIMARY_DRAFT_BYTES {
                 return Err(io::Error::new(
@@ -284,13 +249,10 @@ impl TerminalReader {
                 reader.remaining_bytes = capacity;
             }
         }
-        #[cfg(not(unix))]
-        let _ = capacity;
         Ok(())
     }
 }
 
-#[cfg(unix)]
 enum LineEvent {
     Submitted(Vec<u8>),
     Continued(Vec<u8>),
@@ -299,7 +261,6 @@ enum LineEvent {
     Resize,
 }
 
-#[cfg(unix)]
 pub(super) struct LineReader {
     receiver: mpsc::Receiver<Observed<LineEvent>>,
     shutdown: Arc<AtomicBool>,
@@ -309,11 +270,9 @@ pub(super) struct LineReader {
     chat: bool,
     child: bool,
     epoch: u64,
-    #[cfg(unix)]
     admission: InputAdmission,
 }
 
-#[cfg(unix)]
 fn terminal_input() -> io::Result<File> {
     let stdin = io::stdin();
     let admitted = fstat(&stdin)?;
@@ -337,7 +296,6 @@ fn terminal_input() -> io::Result<File> {
     Ok(File::from(input))
 }
 
-#[cfg(unix)]
 impl LineReader {
     fn start() -> io::Result<Self> {
         let mut input = terminal_input()?;
@@ -457,20 +415,17 @@ impl LineReader {
     }
 }
 
-#[cfg(unix)]
 impl Drop for LineReader {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-#[cfg(unix)]
 pub(super) struct InputAdmission {
     sender: mpsc::Sender<oneshot::Sender<u64>>,
     wake: mio::Waker,
 }
 
-#[cfg(unix)]
 impl InputAdmission {
     fn new(poll: &Poll) -> io::Result<(Self, mpsc::Receiver<oneshot::Sender<u64>>)> {
         let (sender, requests) = mpsc::channel(1);
@@ -498,7 +453,6 @@ impl InputAdmission {
     }
 }
 
-#[cfg(unix)]
 fn admit_input(
     input: &File,
     requests: &mut mpsc::Receiver<oneshot::Sender<u64>>,
@@ -515,7 +469,6 @@ fn admit_input(
     Ok(())
 }
 
-#[cfg(unix)]
 fn read_lines(
     poll: &mut Poll,
     input: &mut File,
@@ -591,7 +544,6 @@ fn read_lines(
     Ok(())
 }
 
-#[cfg(unix)]
 #[derive(Default)]
 struct LineDecoder {
     started: Option<Instant>,
@@ -599,7 +551,6 @@ struct LineDecoder {
     delimiter: usize,
 }
 
-#[cfg(unix)]
 impl LineDecoder {
     fn expire(&self, now: Instant) -> io::Result<()> {
         if self
@@ -648,7 +599,6 @@ impl LineDecoder {
     }
 }
 
-#[cfg(unix)]
 fn decode_line(bytes: &[u8]) -> LineEvent {
     let submitted = bytes.ends_with(b"\n");
     let line = bytes.strip_suffix(b"\n").unwrap_or(bytes);
@@ -662,7 +612,6 @@ fn decode_line(bytes: &[u8]) -> LineEvent {
     }
 }
 
-#[cfg(unix)]
 fn validate_segment(bytes: Vec<u8>, remaining_bytes: usize) -> Option<String> {
     let line = String::from_utf8(bytes).ok()?;
     if line.chars().any(char::is_control) || line.len() > remaining_bytes {
@@ -673,16 +622,11 @@ fn validate_segment(bytes: Vec<u8>, remaining_bytes: usize) -> Option<String> {
 
 enum ReaderEvent {
     Event(Event),
-    #[cfg(unix)]
     Pointer(TerminalInput),
     Paste(Result<String, &'static str>),
-    #[cfg(unix)]
     CursorPosition(u16, u16),
-    #[cfg(unix)]
     KeyboardReply(KeyboardReply),
-    #[cfg(unix)]
     GraphicsReply,
-    #[cfg(unix)]
     CellPixels(super::graphics::sixel::CellPixels),
 }
 
@@ -692,14 +636,12 @@ pub(super) enum KeyboardSupport {
     Disambiguated,
 }
 
-#[cfg(unix)]
 #[derive(Clone)]
 enum KeyboardReply {
     Flags,
     DeviceAttributes(Vec<u32>),
 }
 
-#[cfg(unix)]
 #[derive(Default, PartialEq)]
 enum KeyboardProbe {
     #[default]
@@ -713,27 +655,18 @@ pub(super) struct TerminalQueries(Arc<(Mutex<QueryState>, Condvar)>);
 
 #[derive(Default)]
 struct QueryState {
-    #[cfg(unix)]
     keyboard: KeyboardProbe,
-    #[cfg(unix)]
     keyboard_supported: bool,
-    #[cfg(unix)]
     graphics: bool,
-    #[cfg(unix)]
     kitty_graphics: bool,
-    #[cfg(unix)]
     device_attributes: Option<Vec<u32>>,
-    #[cfg(unix)]
     cell_pixels: Option<super::graphics::sixel::CellPixels>,
-    #[cfg(unix)]
     waiting: bool,
-    #[cfg(unix)]
     position: Option<(u16, u16)>,
     closed: bool,
 }
 
 impl TerminalQueries {
-    #[cfg(unix)]
     fn probe_keyboard_within(
         &self,
         output: &mut impl io::Write,
@@ -795,7 +728,6 @@ impl TerminalQueries {
         Ok(support)
     }
 
-    #[cfg(unix)]
     fn keyboard_reply(&self, reply: KeyboardReply) {
         let (state, ready) = &*self.0;
         if let Ok(mut state) = state.lock()
@@ -817,7 +749,6 @@ impl TerminalQueries {
         }
     }
 
-    #[cfg(unix)]
     fn graphics_reply(&self) {
         if let Ok(mut state) = self.0.0.lock()
             && state.graphics
@@ -827,7 +758,6 @@ impl TerminalQueries {
         }
     }
 
-    #[cfg(unix)]
     fn sixel_cell_pixels(&self) -> Option<super::graphics::sixel::CellPixels> {
         let state = self.0.0.lock().ok()?;
         (state.graphics
@@ -841,7 +771,6 @@ impl TerminalQueries {
         .flatten()
     }
 
-    #[cfg(unix)]
     fn cell_pixels_reply(&self, cell: super::graphics::sixel::CellPixels) {
         if let Ok(mut state) = self.0.0.lock()
             && state.graphics
@@ -852,7 +781,6 @@ impl TerminalQueries {
         }
     }
 
-    #[cfg(unix)]
     pub(super) fn graphics_supported(&self) -> bool {
         self.0
             .0
@@ -860,7 +788,6 @@ impl TerminalQueries {
             .is_ok_and(|state| state.kitty_graphics && state.device_attributes.is_some())
     }
 
-    #[cfg(unix)]
     fn waiting(&self) -> bool {
         let (state, _) = &*self.0;
         state.lock().is_ok_and(|state| {
@@ -869,7 +796,6 @@ impl TerminalQueries {
         })
     }
 
-    #[cfg(unix)]
     pub(super) fn query(&self, output: &mut impl io::Write) -> io::Result<(u16, u16)> {
         let (state, ready) = &*self.0;
         let mut state = state
@@ -905,7 +831,6 @@ impl TerminalQueries {
         })
     }
 
-    #[cfg(unix)]
     pub(super) fn respond(&self, column: u16, row: u16) {
         let (state, ready) = &*self.0;
         if let Ok(mut state) = state.lock()
@@ -932,7 +857,6 @@ pub(super) struct InputReader {
     paste: Option<Result<String, &'static str>>,
     queries: TerminalQueries,
     epoch: u64,
-    #[cfg(unix)]
     admission: InputAdmission,
 }
 
@@ -942,30 +866,7 @@ impl InputReader {
         let shutdown = Arc::new(AtomicBool::new(false));
         let should_stop = Arc::clone(&shutdown);
         let queries = TerminalQueries::default();
-        #[cfg(unix)]
         let (thread, admission) = raw::start(sender, should_stop, queries.clone())?;
-        #[cfg(not(unix))]
-        let thread = std::thread::Builder::new()
-            .name("arany-terminal-input".into())
-            .spawn(move || {
-                while !should_stop.load(Ordering::Acquire) {
-                    match event::poll(INPUT_POLL_INTERVAL) {
-                        Ok(false) => continue,
-                        Ok(true) => {
-                            if sender
-                                .blocking_send((0, event::read().map(ReaderEvent::Event)))
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            let _ = sender.blocking_send((0, Err(error)));
-                            break;
-                        }
-                    }
-                }
-            })?;
         Ok(Self {
             receiver,
             shutdown,
@@ -973,7 +874,6 @@ impl InputReader {
             paste: None,
             queries,
             epoch: 0,
-            #[cfg(unix)]
             admission,
         })
     }
@@ -1015,18 +915,14 @@ impl InputReader {
                         return Ok(input);
                     }
                 }
-                #[cfg(unix)]
                 ReaderEvent::Pointer(_) if stale => continue,
-                #[cfg(unix)]
                 ReaderEvent::Pointer(input) => return Ok(input),
                 ReaderEvent::Paste(_) if stale => continue,
                 ReaderEvent::Paste(text) => {
                     self.paste = Some(text);
                     return Ok(TerminalInput::Paste);
                 }
-                #[cfg(unix)]
                 ReaderEvent::CursorPosition(_, _) => {}
-                #[cfg(unix)]
                 ReaderEvent::KeyboardReply(_)
                 | ReaderEvent::GraphicsReply
                 | ReaderEvent::CellPixels(_) => {}
@@ -1157,7 +1053,6 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn kitty_probe_requires_both_exact_graphics_reply_and_da1() {
         let queries = TerminalQueries::default();
@@ -1185,7 +1080,6 @@ mod tests {
         assert_eq!(query, expected);
     }
 
-    #[cfg(unix)]
     #[test]
     fn leaving_child_chat_restores_saved_primary_capacity() {
         let (_, receiver) = mpsc::channel(1);
@@ -1218,7 +1112,6 @@ mod tests {
         assert_eq!(reader.pending.back(), Some(&TerminalInput::Submit));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn approval_typeahead_discards_old_enter_and_digits_but_preserves_cancellation() {
         let (sender, receiver) = mpsc::channel(8);
@@ -1299,7 +1192,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn canonical_text_beside_chips_rejects_whole_segments_at_either_limit() {
         use crate::terminal::{Composer, ComposerEdit};
@@ -1859,7 +1751,6 @@ mod tests {
             assert_eq!(map_input(event), expected);
         }
 
-        #[cfg(unix)]
         {
             use std::time::Instant;
             let now = Instant::now();

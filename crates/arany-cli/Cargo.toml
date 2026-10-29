@@ -16,6 +16,8 @@ arany = { path = "../arany" }
 aws-lc-rs.workspace = true
 base64.workspace = true
 clap.workspace = true
+mio.workspace = true
+nix.workspace = true
 crossterm.workspace = true
 getrandom.workspace = true
 keyring.workspace = true
@@ -24,6 +26,7 @@ png.workspace = true
 ratatui.workspace = true
 rusqlite.workspace = true
 reqwest.workspace = true
+rustix.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,11 +38,6 @@ unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-mio.workspace = true
-rustix.workspace = true
-nix.workspace = true
-
 [target.'cfg(target_os = "macos")'.dependencies]
 cap-fs-ext.workspace = true
 cap-std.workspace = true
@@ -48,6 +46,7 @@ security-framework.workspace = true
 [dev-dependencies]
 arany = { path = "../arany", features = ["test-support"] }
 async-trait.workspace = true
+nix = { workspace = true, features = ["fs", "term"] }
 jsonschema.workspace = true
 opentelemetry-proto.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
@@ -58,9 +57,6 @@ tokio = { workspace = true, features = ["test-util", "io-util"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rustix = { workspace = true, features = ["pipe", "pty"] }
 seccompiler.workspace = true
-
-[target.'cfg(unix)'.dev-dependencies]
-nix = { workspace = true, features = ["fs", "term"] }
 
 [lints]
 workspace = true

@@ -357,7 +357,6 @@ impl CommandSnapshotBuilder<'_> {
     fn entry(&mut self, path: String) -> Result<(), ToolError> {
         let file = open_file(self.root, &path)?;
         let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if metadata.mode() & 0o6000 != 0 {
@@ -373,13 +372,10 @@ impl CommandSnapshotBuilder<'_> {
                 executable: false,
             }
         } else {
-            #[cfg(unix)]
             let executable = {
                 use std::os::unix::fs::PermissionsExt;
                 metadata.permissions().mode() & 0o111 != 0
             };
-            #[cfg(not(unix))]
-            let executable = false;
             let cap = MAX_FILE_BYTES.min(COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget.bytes));
             let content = read_regular(file, cap)?;
             self.budget.content(content.len())?;
@@ -485,16 +481,10 @@ pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
 }
 
 pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         let meta = dir.dir_metadata().map_err(|_| ToolError::Path)?;
         Ok((meta.dev(), meta.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Err(ToolError::ProtectionUnavailable)
     }
 }
 
@@ -589,11 +579,6 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         }
         Ok(file)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (root, path);
-        Err(ToolError::ProtectionUnavailable)
-    }
 }
 
 // Walks resolve each child from its admitted parent handle instead of re-resolving from the root.
@@ -646,11 +631,6 @@ pub(super) fn open_child(parent: &Dir, name: &str, device: u64) -> Result<File, 
         }
         Ok(file)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (parent, name, device);
-        Err(ToolError::ProtectionUnavailable)
-    }
 }
 
 // A `.git` entry below the Workspace root marks a nested repository or worktree that walks skip.
@@ -663,7 +643,6 @@ pub(super) fn nested_repository(directory: &Dir) -> Result<bool, ToolError> {
 }
 
 fn non_directory_error(file: &File) -> ToolError {
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if file
@@ -698,7 +677,6 @@ pub(crate) fn read_regular(mut file: File, cap: usize) -> Result<Vec<u8>, ToolEr
     if !metadata.is_file() {
         return Err(ToolError::Path);
     }
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.nlink() != 1 {
@@ -747,7 +725,6 @@ fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
     let leaf = parts.pop().ok_or(ToolError::Path)?.to_owned();
     let mut dir = root.try_clone().map_err(|_| ToolError::Operation)?;
     let mut builder = DirBuilder::new();
-    #[cfg(unix)]
     {
         use cap_std::fs::DirBuilderExt;
         builder.mode(0o700);
@@ -779,7 +756,6 @@ pub(super) fn write_new(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
-    #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
         options.mode(if executable { 0o700 } else { 0o600 });
@@ -797,7 +773,6 @@ fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
     } else {
         let (parent, leaf) = create_parents(root, &entry.path)?;
         let mut builder = DirBuilder::new();
-        #[cfg(unix)]
         {
             use cap_std::fs::DirBuilderExt;
             builder.mode(0o700);
@@ -993,13 +968,10 @@ fn collect_open(
             )?;
         }
     } else if keep(path) {
-        #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
             metadata.permissions().mode() & 0o111 != 0
         };
-        #[cfg(not(unix))]
-        let executable = false;
         let content = read_regular(file, MAX_FILE_BYTES)?;
         budget.bytes = budget
             .bytes
@@ -1245,7 +1217,6 @@ impl CommandSeedCopy<'_> {
     fn entry(&mut self, path: String) -> Result<(), ToolError> {
         let file = open_file(self.root, &path)?;
         let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if metadata.mode() & 0o6000 != 0 {
@@ -1263,13 +1234,10 @@ impl CommandSeedCopy<'_> {
         let content = read_regular(file, cap)?;
         self.budget.content(content.len())?;
         self.retain()?;
-        #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
             metadata.permissions().mode() & 0o111 != 0
         };
-        #[cfg(not(unix))]
-        let executable = false;
         put_entry(
             self.target,
             Entry {
@@ -1425,7 +1393,6 @@ pub(super) fn inspect(
             if !metadata.is_file() {
                 return Err(ToolError::Path);
             }
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
                 if metadata.nlink() != 1 {
@@ -1664,7 +1631,6 @@ pub(super) fn mutate(
         ToolCall::Mkdir { path } => {
             let (parent, leaf) = parent(root, path)?;
             let mut builder = DirBuilder::new();
-            #[cfg(unix)]
             {
                 use cap_std::fs::DirBuilderExt;
                 builder.mode(0o755);
@@ -1892,7 +1858,6 @@ fn check_change_directory(root: &Dir, directory: &Dir) -> Result<(), ToolError> 
     if !metadata.is_dir() || identity(directory)?.0 != identity(root)?.0 {
         return Err(ToolError::Path);
     }
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         if metadata.mode() & 0o6000 != 0 {
@@ -1919,13 +1884,10 @@ fn check_change_file(
     };
     let file = open_file(parent, leaf).map_err(|_| ToolError::Conflict)?;
     let metadata = file.metadata().map_err(|_| ToolError::Conflict)?;
-    #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt;
         metadata.permissions().mode()
     };
-    #[cfg(not(unix))]
-    let mode = 0o600;
     if mode & 0o6000 != 0 {
         return Err(ToolError::Path);
     }
@@ -2039,7 +2001,6 @@ fn apply_files_controlled(
                     parent.directory = std::sync::Arc::new(live);
                 } else {
                     let mut builder = DirBuilder::new();
-                    #[cfg(unix)]
                     {
                         use cap_std::fs::DirBuilderExt;
                         builder.mode(0o700);
@@ -2120,13 +2081,10 @@ fn replace(
     let (parent, leaf) = parent(root, path)?;
     let inspect = || match open_file(&parent, &leaf) {
         Ok(file) => {
-            #[cfg(unix)]
             let mode = {
                 use std::os::unix::fs::MetadataExt;
                 file.metadata().map_err(|_| ToolError::Operation)?.mode() & 0o777
             };
-            #[cfg(not(unix))]
-            let mode = 0o600;
             let current = read_regular(file, MAX_FILE_BYTES)?;
             let sha256 = hex_digest(&current);
             if expected != Some(sha256.as_str()) {
@@ -2185,7 +2143,6 @@ fn replace_file(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
-    #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
         options.mode(mode);
@@ -2197,7 +2154,6 @@ fn replace_file(
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|_| ToolError::Operation)?;
-        #[cfg(unix)]
         {
             use cap_std::fs::PermissionsExt;
             file.set_permissions(cap_std::fs::Permissions::from_mode(mode))
@@ -2205,7 +2161,6 @@ fn replace_file(
         }
         verify()?;
         control.commit()?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             if create {
                 rustix::fs::renameat_with(
@@ -2223,10 +2178,6 @@ fn replace_file(
             }
             control.sync_parent(parent)?;
             Ok(())
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            Err(ToolError::ProtectionUnavailable)
         }
     })();
     let _ = parent.remove_file(&temporary);
@@ -2482,7 +2433,7 @@ mod read_page_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
 mod path_tests {
     use super::*;
 

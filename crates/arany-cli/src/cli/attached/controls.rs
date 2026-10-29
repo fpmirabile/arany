@@ -2790,7 +2790,6 @@ mod tests {
                 .unwrap(),
             original
         );
-        #[cfg(unix)]
         {
             use std::os::unix::fs::{PermissionsExt, symlink};
             let pending = admission.state_dir.join("ui-preferences.pending");
@@ -3055,7 +3054,6 @@ mod tests {
         .expect("provider change");
         assert_eq!(view.defaults.effort, None);
 
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let file = admission.state_dir.join("provider-profiles.json");
@@ -3134,7 +3132,6 @@ mod tests {
         );
         assert_eq!(session_id, original_id);
 
-        #[cfg(unix)]
         {
             use rustix::fs::{FlockOperation, flock};
             let held = std::fs::File::open(

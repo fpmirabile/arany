@@ -177,7 +177,6 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn checked_tool_files_reject_links_traversal_and_special_objects() {
     use nix::{sys::stat::Mode, unistd::mkfifo};

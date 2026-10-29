@@ -177,7 +177,6 @@ impl Backend for TerminalBackend {
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        #[cfg(unix)]
         {
             let (column, row) = self
                 .queries
@@ -193,8 +192,6 @@ impl Backend for TerminalBackend {
             }
             Ok(Position::new(column, row))
         }
-        #[cfg(not(unix))]
-        self.inner.get_cursor_position()
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {

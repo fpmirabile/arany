@@ -2152,7 +2152,6 @@ fn endpoint_precedence_and_loopback_admission_are_closed() {
             .0,
         "http://[::1]:4318/exact"
     );
-    #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
         assert!(

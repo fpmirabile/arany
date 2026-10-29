@@ -782,7 +782,6 @@ mod tests {
         let state = StateRoot::admit(&temp.join("state")).expect("private state root");
         let file = state.path().join("provider-profiles.json");
         std::fs::write(&file, body).expect("profile file");
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
@@ -1391,7 +1390,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn profile_file_rejects_links_public_modes_and_oversize() {
         use std::os::unix::fs::{PermissionsExt, symlink};

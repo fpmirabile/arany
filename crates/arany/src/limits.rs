@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use crate::store::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
 use crate::{
     provider::{
@@ -218,21 +217,18 @@ pub const LIMITS: LimitsTable = LimitsTable {
             unit: "bytes",
             owner: "crates/arany/src/store.rs",
         },
-        #[cfg(unix)]
         Limit {
             name: "MAX_SESSION_LOCK_FILES",
             value: MAX_SESSION_LOCK_FILES as u64,
             unit: "files",
             owner: "crates/arany/src/store/state/lock.rs",
         },
-        #[cfg(unix)]
         Limit {
             name: "MAX_STATE_OVERHEAD_FILES",
             value: MAX_STATE_OVERHEAD_FILES as u64,
             unit: "files",
             owner: "crates/arany/src/store/state/lock.rs",
         },
-        #[cfg(unix)]
         Limit {
             name: "MAX_WORKSPACE_LOCK_FILES",
             value: MAX_WORKSPACE_LOCK_FILES as u64,

@@ -33,7 +33,6 @@ pub(super) fn read(
         return Err(ToolError::ChangedInput);
     }
     let file = fs::open_file(root, resource)?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if file.metadata().map_err(|_| ToolError::Path)?.mode() & 0o6000 != 0 {
@@ -97,7 +96,6 @@ pub fn project_skills(workspace: &Path) -> Result<ProjectSkills, ToolError> {
             if !metadata.is_file() {
                 return Err(ToolError::Path);
             }
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
                 if metadata.nlink() != 1 {

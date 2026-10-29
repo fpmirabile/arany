@@ -127,7 +127,6 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
     use crate::store::StateRoot;

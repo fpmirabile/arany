@@ -25,8 +25,6 @@ pub(in crate::cli) enum RunFailure {
     Routing(RoutingError),
     #[error("state directory unavailable or unsafe")]
     StateUnavailable,
-    #[error("{}", crate::cli::attached::permissions::UNAVAILABLE_NOTICE)]
-    ToolsUnavailable,
     #[error(transparent)]
     Engine(arany::EngineError),
     #[error("{0}")]
@@ -428,9 +426,6 @@ fn tool_grant(
     permissions: Option<&arany::WorkspacePermissions>,
 ) -> Result<arany::ToolGrant, RunAttemptError> {
     if configured {
-        if !arany::native_protection_supported() {
-            return Err(RunAttemptError::Failed(RunFailure::ToolsUnavailable));
-        }
         return Ok(arany::ToolGrant::Configured);
     }
     let trusted_tools = crate::cli::attached::permissions::supports_tools(Some(

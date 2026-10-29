@@ -260,7 +260,6 @@ fn assert_admission_history_items(run: &arany::RunView) {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_including_uncertain()
 {

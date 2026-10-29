@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 pub use arany::test_support::process;
 use process::BoundedOutput;
 

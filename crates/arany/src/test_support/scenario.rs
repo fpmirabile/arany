@@ -720,7 +720,6 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 12] {
     ]
 }
 
-#[cfg(unix)]
 pub fn offline_cargo_fixture(home: &Path, workspace: &Path) {
     const REGISTRY: &str = "index.crates.io-1949cf8c6b5b557f";
     use std::os::unix::fs::PermissionsExt;
@@ -1063,7 +1062,6 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
     }
 }
 
-#[cfg(unix)]
 pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
     use crate::{
         ApprovalMode, CacheUpdate, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion,

@@ -405,7 +405,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "native Unix callback connection-deadline release gate"]
     async fn stalled_connection_expires_then_valid_callback_succeeds() {

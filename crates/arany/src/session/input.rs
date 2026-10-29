@@ -169,12 +169,10 @@ pub(crate) struct WorkspaceInputs {
 }
 
 impl WorkspaceInputs {
-    #[cfg(unix)]
     pub(crate) fn root_identity(&self) -> Result<WorkspaceIdentity, InputError> {
         Self::identity(&self._root)
     }
 
-    #[cfg(unix)]
     pub(crate) fn admit_identity(
         workspace: &Path,
         state: &StateRoot,
@@ -183,7 +181,6 @@ impl WorkspaceInputs {
         Self::identity(&root)
     }
 
-    #[cfg(unix)]
     fn identity(root: &Dir) -> Result<WorkspaceIdentity, InputError> {
         use cap_std::fs::MetadataExt;
         let metadata = root.dir_metadata()?;
@@ -195,12 +192,9 @@ impl WorkspaceInputs {
 
     fn open_root(workspace: &Path, state: &StateRoot) -> Result<Dir, InputError> {
         let root = Dir::open_ambient_dir(workspace, ambient_authority())?;
-        #[cfg(unix)]
         state
             .ensure_outside_workspace(&root)
             .map_err(|_error: StoreError| InputError::StateOverlap)?;
-        #[cfg(not(unix))]
-        return Err(InputError::InvalidPath);
         Ok(root)
     }
 
@@ -284,7 +278,6 @@ fn read_relative(
         let next = directory
             .open_dir_nofollow(name)
             .map_err(|error| include_io_error(&directory, name, error))?;
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if next.dir_metadata()?.dev() != directory.dir_metadata()?.dev() {
@@ -303,7 +296,6 @@ fn read_relative(
 }
 
 fn include_io_error(directory: &Dir, name: &std::ffi::OsStr, error: io::Error) -> InputError {
-    #[cfg(unix)]
     {
         if error.raw_os_error() == Some(nix::libc::EXDEV) {
             return crate::tools::ToolError::FilesystemBoundary.into();
@@ -414,7 +406,6 @@ fn read_file(
     let mut options = OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
-    #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
         options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
@@ -427,7 +418,6 @@ fn read_file(
     };
     let metadata = file.metadata()?;
     if include {
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if metadata.dev() != directory.dir_metadata()?.dev() {
@@ -452,7 +442,6 @@ fn read_file(
     if !metadata.is_file() {
         return Err(InputError::NotRegular);
     }
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         if metadata.nlink() != 1 {
@@ -557,7 +546,6 @@ fn read_directory(directory: Dir, path: String, limit: usize) -> Result<InputSna
         if !metadata.is_file() && !metadata.is_dir() {
             continue;
         }
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if metadata.dev() != directory.dir_metadata()?.dev()
@@ -594,7 +582,6 @@ fn read_directory(directory: Dir, path: String, limit: usize) -> Result<InputSna
     })
 }
 
-#[cfg(unix)]
 fn relative_components(path: &Path) -> Result<Vec<&std::ffi::OsStr>, InputError> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
@@ -615,11 +602,6 @@ fn relative_components(path: &Path) -> Result<Vec<&std::ffi::OsStr>, InputError>
         })
         .collect::<Result<_, _>>()?;
     Ok(names)
-}
-
-#[cfg(not(unix))]
-fn relative_components(_path: &Path) -> Result<Vec<&std::ffi::OsStr>, InputError> {
-    Err(InputError::InvalidPath)
 }
 
 #[cfg(all(test, target_os = "linux"))]

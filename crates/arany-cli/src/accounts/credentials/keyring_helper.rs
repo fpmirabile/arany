@@ -158,7 +158,6 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
     command
         .args(["--internal-credential-helper", operation, slot])
         .env_clear();
-    #[cfg(unix)]
     command.current_dir("/");
     #[cfg(target_os = "linux")]
     let forwarded = [
@@ -323,7 +322,202 @@ fn helper_reply(
     }
 }
 
-#[cfg(all(test, unix))]
+struct OwnedChild(Child);
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl OwnedChild {
+    fn stop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn slot_record_limit(slot: &str) -> Option<usize> {
+    if slot == PROBE_SLOT {
+        Some(0)
+    } else if slot == DEFAULT_ACCOUNT
+        || ["native-test-", "native-client-test-"]
+            .iter()
+            .any(|prefix| {
+                slot.strip_prefix(prefix)
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok())
+            })
+    {
+        Some(RecordKind::SavedAccount.limit())
+    } else if slot.strip_prefix("chatgpt-").is_some_and(|suffix| {
+        suffix.len() == 43
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    }) {
+        Some(MAX_TOKEN_RECORD_BYTES)
+    } else {
+        None
+    }
+}
+
+fn valid_slot(slot: &str) -> bool {
+    slot_record_limit(slot).is_some()
+}
+
+fn valid_record(slot: &str, bytes: &[u8]) -> bool {
+    if slot.starts_with("chatgpt-") {
+        valid_keyring_record(slot, bytes)
+    } else {
+        serde_json::from_slice::<SavedAccount>(bytes)
+            .is_ok_and(|account| account.validate().is_ok())
+    }
+}
+
+fn valid_native_identity(slot: &str, id: Uuid, provider: &str) -> bool {
+    slot == DEFAULT_ACCOUNT
+        && id.get_version() == Some(uuid::Version::SortRand)
+        && ProviderKind::parse(provider).is_some_and(ProviderKind::is_native_api)
+}
+
+fn valid_written_record(slot: &str, bytes: &[u8]) -> bool {
+    if slot.starts_with("chatgpt-") {
+        valid_written_keyring_record(slot, bytes)
+    } else {
+        valid_record(slot, bytes)
+    }
+}
+
+fn valid_authorized_record(slot: &str, record: &str, expected: Option<(Uuid, String)>) -> bool {
+    record.len() <= slot_record_limit(slot).unwrap_or(0)
+        && if slot.starts_with("chatgpt-") {
+            valid_record(slot, record.as_bytes()) && expected.is_none()
+        } else {
+            super::decode_account(record.as_bytes()).is_ok_and(|account| {
+                expected.is_none_or(|(id, provider)| {
+                    account.id == id && account.provider.profile() == provider
+                })
+            })
+        }
+}
+
+fn locked_reply(_error: &(dyn std::error::Error + Send + Sync + 'static)) -> ExitCode {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(category) = macos::locked_category(_error) else {
+            return ExitCode::FAILURE;
+        };
+        if std::io::stdout().write_all(category.as_bytes()).is_err() {
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::from(EXIT_LOCKED)
+}
+
+pub(super) fn main() -> ExitCode {
+    let mut args = std::env::args_os().skip(2);
+    let (Some(operation), Some(slot)) = (args.next(), args.next()) else {
+        return ExitCode::FAILURE;
+    };
+    let (Some(operation), Some(slot)) = (operation.to_str(), slot.to_str()) else {
+        return ExitCode::FAILURE;
+    };
+    let expected = match (args.next(), args.next(), args.next()) {
+        (None, None, None) if operation != "authorize" || slot.starts_with("chatgpt-") => None,
+        (Some(id), Some(provider), None) if operation == "authorize" => {
+            let Some((id, provider)) = id.to_str().zip(provider.to_str()) else {
+                return ExitCode::FAILURE;
+            };
+            let Ok(id) = Uuid::parse_str(id) else {
+                return ExitCode::FAILURE;
+            };
+            if !valid_native_identity(slot, id, provider) {
+                return ExitCode::FAILURE;
+            }
+            Some((id, provider.to_owned()))
+        }
+        _ => return ExitCode::FAILURE,
+    };
+    if !matches!(
+        operation,
+        "read" | "write" | "probe" | "delete" | "authorize"
+    ) || !valid_slot(slot)
+        || (operation == "probe" && slot != PROBE_SLOT)
+        || (operation != "probe" && slot == PROBE_SLOT)
+        || (operation == "delete" && slot != DEFAULT_ACCOUNT && !slot.starts_with("chatgpt-"))
+        || admit_transport().is_err()
+    {
+        return ExitCode::FAILURE;
+    }
+    if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
+        return ExitCode::FAILURE;
+    }
+    match operation {
+        "authorize" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
+            Ok(record) => {
+                if valid_authorized_record(slot, &record, expected) {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(EXIT_IDENTITY_MISMATCH)
+                }
+            }
+            Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
+            Err(_) => ExitCode::FAILURE,
+        },
+        "probe" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
+            Ok(_) | Err(Error::NoEntry) => ExitCode::SUCCESS,
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
+            Err(_) => ExitCode::FAILURE,
+        },
+        "read" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
+            Ok(record) if record.len() <= slot_record_limit(slot).unwrap_or(0) => {
+                if std::io::stdout().write_all(record.as_bytes()).is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Ok(_) => ExitCode::FAILURE,
+            Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
+            Err(_) => ExitCode::FAILURE,
+        },
+        "write" => {
+            let mut record = Vec::new();
+            if std::io::stdin()
+                .take((slot_record_limit(slot).unwrap_or(0) + 1) as u64)
+                .read_to_end(&mut record)
+                .is_err()
+                || record.is_empty()
+                || record.len() > slot_record_limit(slot).unwrap_or(0)
+            {
+                return ExitCode::FAILURE;
+            }
+            let Ok(record) = String::from_utf8(record) else {
+                return ExitCode::FAILURE;
+            };
+            if !valid_written_record(slot, record.as_bytes()) {
+                return ExitCode::FAILURE;
+            }
+            match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
+                Err(_) => ExitCode::FAILURE,
+            }
+        }
+        "delete" => match Entry::new(SERVICE, slot).and_then(|entry| entry.delete_credential()) {
+            Ok(()) | Err(Error::NoEntry) => ExitCode::SUCCESS,
+            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
+            Err(_) => ExitCode::FAILURE,
+        },
+        _ => ExitCode::FAILURE,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{os::unix::net::UnixListener, thread};
@@ -843,200 +1037,5 @@ mod tests {
             connection.read(&mut stage).expect("helper connection EOF"),
             0
         );
-    }
-}
-
-struct OwnedChild(Child);
-
-impl Drop for OwnedChild {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-impl OwnedChild {
-    fn stop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-}
-
-fn slot_record_limit(slot: &str) -> Option<usize> {
-    if slot == PROBE_SLOT {
-        Some(0)
-    } else if slot == DEFAULT_ACCOUNT
-        || ["native-test-", "native-client-test-"]
-            .iter()
-            .any(|prefix| {
-                slot.strip_prefix(prefix)
-                    .is_some_and(|id| Uuid::parse_str(id).is_ok())
-            })
-    {
-        Some(RecordKind::SavedAccount.limit())
-    } else if slot.strip_prefix("chatgpt-").is_some_and(|suffix| {
-        suffix.len() == 43
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    }) {
-        Some(MAX_TOKEN_RECORD_BYTES)
-    } else {
-        None
-    }
-}
-
-fn valid_slot(slot: &str) -> bool {
-    slot_record_limit(slot).is_some()
-}
-
-fn valid_record(slot: &str, bytes: &[u8]) -> bool {
-    if slot.starts_with("chatgpt-") {
-        valid_keyring_record(slot, bytes)
-    } else {
-        serde_json::from_slice::<SavedAccount>(bytes)
-            .is_ok_and(|account| account.validate().is_ok())
-    }
-}
-
-fn valid_native_identity(slot: &str, id: Uuid, provider: &str) -> bool {
-    slot == DEFAULT_ACCOUNT
-        && id.get_version() == Some(uuid::Version::SortRand)
-        && ProviderKind::parse(provider).is_some_and(ProviderKind::is_native_api)
-}
-
-fn valid_written_record(slot: &str, bytes: &[u8]) -> bool {
-    if slot.starts_with("chatgpt-") {
-        valid_written_keyring_record(slot, bytes)
-    } else {
-        valid_record(slot, bytes)
-    }
-}
-
-fn valid_authorized_record(slot: &str, record: &str, expected: Option<(Uuid, String)>) -> bool {
-    record.len() <= slot_record_limit(slot).unwrap_or(0)
-        && if slot.starts_with("chatgpt-") {
-            valid_record(slot, record.as_bytes()) && expected.is_none()
-        } else {
-            super::decode_account(record.as_bytes()).is_ok_and(|account| {
-                expected.is_none_or(|(id, provider)| {
-                    account.id == id && account.provider.profile() == provider
-                })
-            })
-        }
-}
-
-fn locked_reply(_error: &(dyn std::error::Error + Send + Sync + 'static)) -> ExitCode {
-    #[cfg(target_os = "macos")]
-    {
-        let Some(category) = macos::locked_category(_error) else {
-            return ExitCode::FAILURE;
-        };
-        if std::io::stdout().write_all(category.as_bytes()).is_err() {
-            return ExitCode::FAILURE;
-        }
-    }
-    ExitCode::from(EXIT_LOCKED)
-}
-
-pub(super) fn main() -> ExitCode {
-    let mut args = std::env::args_os().skip(2);
-    let (Some(operation), Some(slot)) = (args.next(), args.next()) else {
-        return ExitCode::FAILURE;
-    };
-    let (Some(operation), Some(slot)) = (operation.to_str(), slot.to_str()) else {
-        return ExitCode::FAILURE;
-    };
-    let expected = match (args.next(), args.next(), args.next()) {
-        (None, None, None) if operation != "authorize" || slot.starts_with("chatgpt-") => None,
-        (Some(id), Some(provider), None) if operation == "authorize" => {
-            let Some((id, provider)) = id.to_str().zip(provider.to_str()) else {
-                return ExitCode::FAILURE;
-            };
-            let Ok(id) = Uuid::parse_str(id) else {
-                return ExitCode::FAILURE;
-            };
-            if !valid_native_identity(slot, id, provider) {
-                return ExitCode::FAILURE;
-            }
-            Some((id, provider.to_owned()))
-        }
-        _ => return ExitCode::FAILURE,
-    };
-    if !matches!(
-        operation,
-        "read" | "write" | "probe" | "delete" | "authorize"
-    ) || !valid_slot(slot)
-        || (operation == "probe" && slot != PROBE_SLOT)
-        || (operation != "probe" && slot == PROBE_SLOT)
-        || (operation == "delete" && slot != DEFAULT_ACCOUNT && !slot.starts_with("chatgpt-"))
-        || admit_transport().is_err()
-    {
-        return ExitCode::FAILURE;
-    }
-    if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
-        return ExitCode::FAILURE;
-    }
-    match operation {
-        "authorize" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
-            Ok(record) => {
-                if valid_authorized_record(slot, &record, expected) {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::from(EXIT_IDENTITY_MISMATCH)
-                }
-            }
-            Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
-            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
-            Err(_) => ExitCode::FAILURE,
-        },
-        "probe" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
-            Ok(_) | Err(Error::NoEntry) => ExitCode::SUCCESS,
-            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
-            Err(_) => ExitCode::FAILURE,
-        },
-        "read" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
-            Ok(record) if record.len() <= slot_record_limit(slot).unwrap_or(0) => {
-                if std::io::stdout().write_all(record.as_bytes()).is_ok() {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                }
-            }
-            Ok(_) => ExitCode::FAILURE,
-            Err(Error::NoEntry) => ExitCode::from(EXIT_NOT_FOUND),
-            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
-            Err(_) => ExitCode::FAILURE,
-        },
-        "write" => {
-            let mut record = Vec::new();
-            if std::io::stdin()
-                .take((slot_record_limit(slot).unwrap_or(0) + 1) as u64)
-                .read_to_end(&mut record)
-                .is_err()
-                || record.is_empty()
-                || record.len() > slot_record_limit(slot).unwrap_or(0)
-            {
-                return ExitCode::FAILURE;
-            }
-            let Ok(record) = String::from_utf8(record) else {
-                return ExitCode::FAILURE;
-            };
-            if !valid_written_record(slot, record.as_bytes()) {
-                return ExitCode::FAILURE;
-            }
-            match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
-                Err(_) => ExitCode::FAILURE,
-            }
-        }
-        "delete" => match Entry::new(SERVICE, slot).and_then(|entry| entry.delete_credential()) {
-            Ok(()) | Err(Error::NoEntry) => ExitCode::SUCCESS,
-            Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
-            Err(_) => ExitCode::FAILURE,
-        },
-        _ => ExitCode::FAILURE,
     }
 }

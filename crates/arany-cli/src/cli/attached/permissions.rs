@@ -8,7 +8,7 @@ use arany::permissions::{
 };
 use arany::{
     ApprovalMode, CommandEnvironment, CommandEnvironmentError, ProviderKind, StateRoot,
-    WorkspacePermissions, native_protection_supported,
+    WorkspacePermissions,
 };
 use std::path::Path;
 mod capture;
@@ -21,14 +21,10 @@ pub(super) enum PermissionChoice {
     Exit,
 }
 
-pub(in crate::cli) const UNAVAILABLE_NOTICE: &str =
-    "Native Tool protection is unavailable on this OS; chat is read only.";
-
 pub(in crate::cli) fn supports_tools(profile: Option<&str>) -> bool {
-    native_protection_supported()
-        && profile
-            .and_then(ProviderKind::parse)
-            .is_some_and(ProviderKind::is_native)
+    profile
+        .and_then(ProviderKind::parse)
+        .is_some_and(ProviderKind::is_native)
 }
 
 pub(super) fn refresh_mode(
@@ -63,7 +59,7 @@ pub(super) async fn admit(
         TrustAdmission::Exit => return Ok(PermissionChoice::Exit),
     };
     if access.is_trusted() {
-        composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
+        composer.set_approval_mode(Some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
         choose(
@@ -1170,10 +1166,7 @@ pub(super) async fn choose(
                         format!("Could not remember folder trust: {error}"),
                     ));
                 }
-                composer.set_approval_mode(
-                    (native_protection_supported() && permissions.is_trusted())
-                        .then_some(permissions.mode()),
-                );
+                composer.set_approval_mode(permissions.is_trusted().then_some(permissions.mode()));
                 terminal.restore_draft_input(composer.input_capacity())?;
                 return Ok(PermissionChoice::Selected(permissions));
             }
@@ -1258,9 +1251,6 @@ fn toggle_profile(selected: &mut [bool], options: &[arany::RuntimeProfileOption]
 }
 
 pub(super) fn cycle(composer: &mut Composer) -> String {
-    if !native_protection_supported() {
-        return UNAVAILABLE_NOTICE.into();
-    }
     let Some(mode) = composer.approval_mode() else {
         return "Read only · use /permissions to trust this folder".into();
     };
@@ -1423,7 +1413,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, debug_assertions))]
+    #[cfg(debug_assertions)]
     #[test]
     fn rejected_save_keeps_the_trust_record_and_reports_the_error() {
         use super::{PermissionChoice, choose};

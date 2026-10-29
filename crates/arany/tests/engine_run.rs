@@ -66,7 +66,6 @@ mod hooks;
 #[path = "engine_run/permissions.rs"]
 mod permissions;
 
-#[cfg(unix)]
 pub use arany::test_support::process;
 
 use arany::test_support::engine as engine_support;
@@ -90,7 +89,7 @@ fn account_path_uses_the_private_binary_fixture() {
         return;
     }
     assert_eq!(StateRoot::account_path().unwrap(), root);
-    #[cfg(all(unix, debug_assertions))]
+    #[cfg(debug_assertions)]
     {
         use process::BoundedOutput;
 
@@ -122,7 +121,6 @@ fn account_path_uses_the_private_binary_fixture() {
     }
 }
 
-#[cfg(unix)]
 #[path = "engine_run/workspace_security.rs"]
 mod workspace_security;
 
@@ -664,7 +662,6 @@ fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation(
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn user_instructions_lead_the_project_files_and_are_pinned_by_digest() {
     use std::os::unix::fs::PermissionsExt;
@@ -721,7 +718,6 @@ fn user_instructions_lead_the_project_files_and_are_pinned_by_digest() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn prompt_overrides_are_pinned_rendered_and_unsafe_ones_refuse_admission() {
     use arany::{PromptFile, PromptOverrideError, PromptSource};
@@ -784,7 +780,6 @@ fn prompt_overrides_are_pinned_rendered_and_unsafe_ones_refuse_admission() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     use std::os::unix::fs::symlink;
@@ -927,7 +922,6 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1110,7 +1104,6 @@ async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn preview_checkpoint_survives_abrupt_process_death() {
     const CASE: &str = "ARANY_TEST_PREVIEW_CRASH_ROOT";

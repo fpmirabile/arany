@@ -343,7 +343,6 @@ mod tests {
 
         let empty = temp.path().join("empty-state");
         std::fs::create_dir(&empty).unwrap();
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -362,7 +361,6 @@ mod tests {
         .unwrap();
         assert_eq!(provider.context_window_tokens_for_run().await, None);
 
-        #[cfg(unix)]
         {
             let unsafe_state = temp.path().join("unsafe-state");
             std::os::unix::fs::symlink(temp.path(), &unsafe_state).unwrap();

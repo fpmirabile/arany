@@ -703,7 +703,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn runtime_discovery_is_bounded_metadata_only_and_pins_exact_versions() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager, discover};
@@ -1068,19 +1067,6 @@ channel = "stable"
         std::fs::write(workspace.join(".env"), "synthetic excluded fixture").unwrap();
         std::os::unix::fs::symlink(temp.path(), workspace.join("outside")).unwrap();
         std::fs::hard_link(workspace.join("README.md"), workspace.join("linked.md")).unwrap();
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            assert_eq!(
-                fs::workspace_entries(&workspace, "", "").unwrap(),
-                vec!["docs/"]
-            );
-            let nested = fs::workspace_entries(&workspace, "docs", "hello");
-            assert!(
-                matches!(&nested, Err(ToolError::ProtectionUnavailable)),
-                "{nested:?}"
-            );
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert_eq!(
                 fs::workspace_entries(&workspace, "", "").unwrap(),
@@ -1161,7 +1147,6 @@ channel = "stable"
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn stale_runtime_grant_stays_pinned_for_rejection_and_removal() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1201,7 +1186,6 @@ channel = "stable"
         assert!(choices[0].label.ends_with("(no longer detected)"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn runtime_grant_identity_drift_fails_verification_and_changes_token() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1235,7 +1219,6 @@ channel = "stable"
         assert_ne!(grant_at(&cache).token().unwrap(), original_token);
     }
 
-    #[cfg(unix)]
     #[test]
     fn discovery_failure_stays_local_to_the_chooser_and_keeps_saved_profiles() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1285,7 +1268,6 @@ channel = "stable"
         assert!(!choices[0].label.contains("no longer detected"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn confirming_unchanged_trust_keeps_a_stale_pin_without_reverifying() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1335,7 +1317,6 @@ channel = "stable"
         assert_eq!(restored.stale_runtime_notices(), [STALE_CARGO_NOTICE]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn remembering_a_grant_inside_the_workspace_is_rejected_and_keeps_the_record() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1459,7 +1440,6 @@ channel = "stable"
             root.record(RecordKind::WorkspacePermissions).replace(record).unwrap();
             assert_eq!(WorkspacePermissions::load(&path, &root).err(), Some(cause));
         }
-        #[cfg(unix)]
         {
             std::fs::remove_file(root.path().join("workspace-permissions.json")).unwrap();
             std::os::unix::fs::symlink(
@@ -1539,7 +1519,6 @@ channel = "stable"
         assert!(!error.to_string().contains("not json"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn oversize_trust_record_is_named_as_not_private_and_never_reset() {
         use std::os::unix::fs::PermissionsExt;

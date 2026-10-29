@@ -22,7 +22,6 @@ fn accepted(credentials: &VerifiedCredentials) -> ConsentReceipt {
         .unwrap()
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn disappearing_keyring_saves_block_new_and_existing_setup_sessions() {
     use std::os::unix::fs::PermissionsExt;
@@ -69,7 +68,6 @@ async fn disappearing_keyring_saves_block_new_and_existing_setup_sessions() {
     crate::test_process::assert_single_test_completed(&output.stdout, test);
 }
 
-#[cfg(unix)]
 async fn assert_disappearing_keyring_save(root: &Path, existing: bool) {
     let workspace = root.join(if existing {
         "existing-workspace"
@@ -1249,7 +1247,6 @@ fn older_account_indexes_are_refused_unchanged() {
     }
 }
 
-#[cfg(unix)]
 const FAKE_HELPER: &str = r#"#!/bin/sh
 d="${0%/*}/store"
 case "$2" in
@@ -1260,13 +1257,11 @@ delete) /bin/rm -f "$d/$3" ;;
 esac
 "#;
 
-#[cfg(unix)]
 struct FakeHelper {
     store: PathBuf,
     _gate: std::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(unix)]
 impl FakeHelper {
     fn install(dir: &Path) -> Self {
         use std::os::unix::fs::PermissionsExt;
@@ -1306,7 +1301,6 @@ impl FakeHelper {
     }
 }
 
-#[cfg(unix)]
 impl Drop for FakeHelper {
     fn drop(&mut self) {
         *crate::accounts::credentials::TEST_HELPER
@@ -1315,7 +1309,6 @@ impl Drop for FakeHelper {
     }
 }
 
-#[cfg(unix)]
 fn rotate(previous: &VerifiedCredentials) -> Result<VerifiedCredentials, AuthorizationError> {
     let mut next = previous.clone();
     next.access_token = "synthetic-rotated-access".into();
@@ -1324,7 +1317,6 @@ fn rotate(previous: &VerifiedCredentials) -> Result<VerifiedCredentials, Authori
     Ok(next)
 }
 
-#[cfg(unix)]
 #[test]
 fn legacy_slot_keyring_accounts_load_refresh_and_block_through_their_retained_slots() {
     let temp = tempfile::tempdir().unwrap();
@@ -1452,7 +1444,6 @@ fn legacy_slot_keyring_accounts_load_refresh_and_block_through_their_retained_sl
     assert!(helper.holds(&legacy_first));
 }
 
-#[cfg(unix)]
 #[test]
 fn same_client_keyring_accounts_refresh_and_sign_out_in_isolation() {
     let temp = tempfile::tempdir().unwrap();

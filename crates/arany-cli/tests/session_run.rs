@@ -5,7 +5,6 @@ use arany::{
     StoreError, continue_session, create_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_git_range_outputs(
     run: &arany::RunView,
     workspace: &std::path::Path,
@@ -60,7 +59,6 @@ fn assert_git_range_outputs(
     assert!(diff["patch"].as_str().unwrap().contains("+bravo"));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::ProviderRequest]) {
     for (request_index, tool_index) in [(6, 5), (7, 6), (8, 7), (9, 8)] {
         assert_eq!(
@@ -78,7 +76,6 @@ fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::Provid
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
     for index in [5, 6, 7, 8] {
         assert_eq!(
@@ -88,7 +85,6 @@ fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
     let timed_out = branches["timed_out"].as_bool().unwrap();
     let rows = branches["branches"].as_array().unwrap();
@@ -124,7 +120,6 @@ fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace:
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_closed_git_views(
     state: &std::path::Path,
     home: &std::path::Path,
@@ -177,11 +172,9 @@ fn assert_closed_git_views(
 use process::BoundedOutput;
 use std::process::Command;
 
-#[cfg(unix)]
 #[path = "session_run/worker.rs"]
 mod worker;
 
-#[cfg(unix)]
 fn reply_positioned_cursor_queries(
     input: &mut impl std::io::Write,
     bytes: &[u8],
@@ -618,7 +611,6 @@ pub use arany::test_support::process;
 
 pub use arany::test_support::engine as engine_support;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use arany::test_support::git;
 
 #[cfg(target_os = "linux")]
@@ -641,7 +633,6 @@ mod tools_git;
 #[path = "session_run/tools_macos_researcher.rs"]
 mod tools_researcher;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
 
@@ -652,11 +643,9 @@ mod tool_replay;
 #[path = "session_run/tools/git_journey.rs"]
 mod git_journey;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/supervisor.rs"]
 mod supervisor;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -789,7 +778,6 @@ fn seed_answer_session(
 #[path = "session_run/roster.rs"]
 mod roster;
 
-#[cfg(unix)]
 #[path = "session_run/custom.rs"]
 mod custom;
 
@@ -797,7 +785,6 @@ mod custom;
 #[path = "session_run/exec_interrupt.rs"]
 mod exec_interrupt;
 
-#[cfg(unix)]
 #[path = "session_run/live.rs"]
 mod live;
 
@@ -824,7 +811,6 @@ mod account_lock;
 #[path = "session_run/setup.rs"]
 mod setup;
 
-#[cfg(unix)]
 #[path = "session_run/loopback.rs"]
 mod loopback;
 
@@ -867,7 +853,6 @@ mod disk_fault;
 #[path = "session_run/performance.rs"]
 mod performance;
 
-#[cfg(unix)]
 #[test]
 fn terminal_readers_preserve_shared_output_and_setup_redraw() {
     use arany_cli::terminal::{AttachedTerminal, Composer, TerminalInput, TerminalMode};
@@ -1292,7 +1277,6 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn account_path_ignores_session_state_environment() {
     use nix::unistd::{User, geteuid};
@@ -1855,7 +1839,6 @@ fn model_catalog_command_reads_only_selected_configuration() {
     let root = StateRoot::admit(&state_dir).expect("private state root");
     let profile_file = root.path().join("provider-profiles.json");
     std::fs::write(&profile_file, r#"{"version":2,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#).expect("profile file");
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o600))
@@ -2661,7 +2644,6 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     assert_eq!(missing_key.stderr, b"error: OPENAI_API_KEY unavailable\n");
     assert!(!state.exists());
 
-    #[cfg(unix)]
     for workspace_id in ["", "default", "wrkspc_a\r\nx-header:value"] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
@@ -2887,7 +2869,6 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     assert!(!state.exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn private_state_admission_rejects_unsafe_path_objects() {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -3242,10 +3223,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
     });
 }
 
-#[cfg(unix)]
 struct SupervisedChild(Option<std::process::Child>);
 
-#[cfg(unix)]
 impl SupervisedChild {
     fn child(&mut self) -> &mut std::process::Child {
         self.0.as_mut().expect("live child")
@@ -3260,7 +3239,6 @@ impl SupervisedChild {
     }
 }
 
-#[cfg(unix)]
 impl Drop for SupervisedChild {
     fn drop(&mut self) {
         if let Some(child) = &mut self.0 {
@@ -3270,7 +3248,6 @@ impl Drop for SupervisedChild {
     }
 }
 
-#[cfg(unix)]
 fn process_output_before_deadline(mut command: Command) -> std::process::Output {
     use std::process::Stdio;
     use std::time::Duration;
@@ -3280,12 +3257,10 @@ fn process_output_before_deadline(mut command: Command) -> std::process::Output 
     process::capture(process.child(), Duration::from_secs(5), 32 * 1024 * 1024)
 }
 
-#[cfg(unix)]
 struct HeldProvider {
     ready_path: std::path::PathBuf,
 }
 
-#[cfg(unix)]
 #[async_trait::async_trait]
 impl arany::Provider for HeldProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
@@ -3335,7 +3310,6 @@ impl arany::Provider for HeldProvider {
     }
 }
 
-#[cfg(unix)]
 #[test]
 #[ignore = "supervised process helper"]
 fn process_lock_holder() {
@@ -3384,7 +3358,6 @@ fn process_lock_holder() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
     use std::process::Stdio;
@@ -3942,7 +3915,6 @@ fn check_output(
     prefix.as_bytes().to_vec()
 }
 
-#[cfg(unix)]
 fn assert_check_privacy(output: &std::process::Output, state: &std::path::Path, canaries: &[&str]) {
     let database = std::fs::read(state.join("events.sqlite3")).expect("whole check database");
     let diagnostics = match std::fs::read(state.join("development.log")) {
@@ -4081,6 +4053,6 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
         });
     }
 }
-#[cfg(all(unix, any(debug_assertions, target_os = "linux")))]
+#[cfg(any(debug_assertions, target_os = "linux"))]
 #[path = "session_run/storage.rs"]
 mod storage;

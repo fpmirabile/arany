@@ -15,7 +15,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[cfg(unix)]
 pub use arany::test_support::process;
 use arany::test_support::{engine as engine_support, scenario::*};
 

@@ -12,10 +12,7 @@ use super::{
 use crate::accounts::chatgpt;
 use crate::cli::provider::{roster::SelectedRoster, select::ProviderArg};
 use crate::terminal::{AttachedTerminal, Composer, Submission, TerminalMode};
-use arany::{
-    Engine, ProviderKind, SessionDefaults, SessionId, SessionView, StateRoot, Telemetry,
-    native_protection_supported,
-};
+use arany::{Engine, ProviderKind, SessionDefaults, SessionId, SessionView, StateRoot, Telemetry};
 use std::{io::Write, ops::ControlFlow, str::FromStr};
 
 struct Startup {
@@ -105,9 +102,6 @@ pub(super) async fn start(
             &mut startup.setup_notice,
             "Process PATH differs from the pinned command environment; use /permissions → Command environment to capture explicitly",
         );
-    }
-    if !native_protection_supported() {
-        append_notice(&mut startup.setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
     let explicit_provider = startup.admission.defaults.provider.is_some();
     startup.restore_chatgpt_account();

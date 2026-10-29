@@ -1249,7 +1249,6 @@ mod tests {
         view
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn linear_child_message_preserves_navigation_and_prints_commit_once() {
         async fn line(
@@ -1453,7 +1452,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn pointer_input_on_a_read_only_child_is_handled_silently() {
         let mut view = active_child_view();
@@ -1493,7 +1491,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn repeated_child_feedback_is_announced_again() {
         let view = active_child_view();
@@ -1529,7 +1526,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn blank_child_draft_is_not_submitted_and_stays_unchanged() {
         let view = active_child_view();
@@ -1570,7 +1566,6 @@ mod tests {
         assert_eq!(terminal.child_drafts[0].composer.text(), "  ");
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn full_draft_table_refuses_without_dropping_the_shown_chat_and_prunes_old_runs() {
         let view = active_child_view();
@@ -1619,7 +1614,6 @@ mod tests {
         assert_eq!(terminal.child_drafts.len(), 1);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn child_drafts_primary_capacity_and_shortcut_survive_a_released_terminal() {
         for shortcut in [NewlineShortcut::AltEnter, NewlineShortcut::CtrlEnter] {
@@ -1636,7 +1630,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn child_message_input_stays_with_its_armed_target() {
         let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);

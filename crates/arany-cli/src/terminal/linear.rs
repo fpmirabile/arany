@@ -521,7 +521,6 @@ impl LinearState {
         }
         if !self.announced {
             writeln!(writer, "Presentation: {}", self.mode_label)?;
-            #[cfg(unix)]
             writeln!(
                 writer,
                 "Input: Enter submits; backslash then Enter adds a newline; empty Ctrl+D exits",
@@ -1276,7 +1275,6 @@ mod tests {
         assert_eq!(graphemes, "Draft (not sent):\n  e\u{301}👩‍💻\nDraft: 2 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
     }
 
-    #[cfg(unix)]
     #[test]
     fn linear_presentation_is_labeled_append_only_and_control_free() {
         let mut view = SessionView {

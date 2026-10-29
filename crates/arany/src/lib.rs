@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
-#[cfg(all(test, unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("Arany supports Linux and macOS; on Windows use WSL2");
+
+#[cfg(test)]
 use test_support::process as test_process;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -130,8 +133,8 @@ pub use tools::{
     ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
     ToolResourceSettings, ToolStep, TrustRecordError, TrustReset, UnguardedGrant, UnguardedPrompt,
     UnguardedReceipt, WorkspacePermissions, command_tool_candidates, configured_skill_names,
-    mcp_login, mcp_logout, mention_paths, native_protection_supported, now_ms, project_skills,
-    recover_build_cache, runtime_skill_names, tool_guard_main, tool_host_main,
+    mcp_login, mcp_logout, mention_paths, now_ms, project_skills, recover_build_cache,
+    runtime_skill_names, tool_guard_main, tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;
@@ -146,7 +149,6 @@ pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(
     view.apply_committed(envelope)
 }
 
-#[cfg(unix)]
 pub use store::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,
