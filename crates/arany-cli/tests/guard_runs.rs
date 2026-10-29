@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use arany::test_support::process;
-use arany::test_support::{engine as engine_support, scenario::*};
+use arany::test_support::{
+    engine as engine_support, private_file, scenario::*, sha256_hex as hash,
+};
 
 use engine_support::{run_to_end, run_with};
 
@@ -1636,19 +1638,6 @@ fn write_plan() -> arany::GoalPlanContract {
             max_runs: 1,
         },
     }
-}
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 fn budget() -> arany::GoalBudget {

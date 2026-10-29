@@ -1,4 +1,11 @@
 use arany::WorkspaceIdentity;
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", any(debug_assertions, arany_ci))
+))]
+use arany::test_support::private_file;
+use arany::test_support::scenario::tool_outcome;
+use arany::test_support::sha256_hex as hash;
 use arany::{
     AgentRole, AgentRunId, AgentStatus, CollaborationPolicy, ContextUsage, EngineError, Event,
     RunConfig, RunId, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store,
@@ -547,13 +554,6 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     account_id
 }
 
-fn tool_outcome(call: arany::ToolCall) -> arany::ProviderOutcome {
-    arany::ProviderOutcome::Tools(vec![arany::ToolRequest {
-        id: arany::ToolUseId::new("call_1").expect("scripted Tool id"),
-        call,
-    }])
-}
-
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn planned(request: &arany::ProviderRequest) -> bool {
     request.input.goal_plan_contract.is_some()
@@ -645,24 +645,6 @@ mod git_journey;
 
 #[path = "session_run/supervisor.rs"]
 mod supervisor;
-
-fn hash(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
-fn private_file(path: &std::path::Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
@@ -815,6 +797,11 @@ mod setup;
 #[cfg_attr(not(all(target_os = "linux", debug_assertions)), allow(dead_code))]
 #[path = "support/product.rs"]
 mod product;
+
+#[test]
+fn launches_use_the_product_helper() {
+    product::assert_launches_use_the_product_helper(&["session_run.rs", "session_run"]);
+}
 
 #[path = "session_run/loopback.rs"]
 mod loopback;
@@ -3626,7 +3613,7 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     std::fs::create_dir(&workspace).unwrap();
     let state = root.path().join("state");
     StateRoot::admit(&state).unwrap();
-    private_file(
+    arany::test_support::private_file(
         &state.join("provider-roster.json"),
         &serde_json::to_vec(&serde_json::json!({
             "version":2,

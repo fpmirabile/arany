@@ -8,6 +8,9 @@ use std::{
 
 pub const EXE: &str = env!("CARGO_BIN_EXE_arany");
 
+const MAX_SCANNED_SOURCES: usize = 512;
+const MAX_SCANNED_SOURCE_BYTES: u64 = 1024 * 1024;
+
 // The account root a `Isolation::Fixture` launch under `root` uses.
 pub fn fixture_account(root: &Path) -> PathBuf {
     root.join("account-root")
@@ -169,4 +172,45 @@ impl<R: Read + AsFd> Read for Blocking<R> {
             }
         }
     }
+}
+
+// Only this file starts `script`, so a new PTY fixture cannot copy the wrapper and environment.
+pub fn assert_launches_use_the_product_helper(sources: &[&str]) {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let helper = tests.join("support/product.rs");
+    let mut pending: Vec<PathBuf> = sources.iter().map(|source| tests.join(source)).collect();
+    let mut scanned = 0;
+    let mut violations = Vec::new();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in std::fs::read_dir(&path).expect("test source directory") {
+                pending.push(entry.expect("test source entry").path());
+            }
+            continue;
+        }
+        if path == helper || path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        scanned += 1;
+        assert!(scanned <= MAX_SCANNED_SOURCES, "bounded test source scan");
+        let mut text = String::new();
+        std::fs::File::open(&path)
+            .expect("test source")
+            .take(MAX_SCANNED_SOURCE_BYTES + 1)
+            .read_to_string(&mut text)
+            .expect("UTF-8 test source");
+        assert!(
+            text.len() as u64 <= MAX_SCANNED_SOURCE_BYTES,
+            "bounded test source {}",
+            path.display()
+        );
+        if text.contains(concat!("\"/usr/bin/", "script\"")) {
+            violations.push(path.display().to_string());
+        }
+    }
+    assert!(scanned > 0, "the scan found test sources");
+    assert!(
+        violations.is_empty(),
+        "start `script` through PtyLaunch in tests/support/product.rs: {violations:?}"
+    );
 }
