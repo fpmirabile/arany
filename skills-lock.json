@@ -14,9 +14,9 @@
       "computedHash": "43a71462e5ad089e652133fe6f8c3c3835688a143e0ad973d6c5b803d1dbafe7"
     },
     "clean-architecture-review": {
-      "source": "./agents/skills/clean-architecture-review",
+      "source": "./agents/skills",
       "sourceType": "local",
-      "computedHash": "b320b9736fa9187d2e3963f8ecf3fc1ae08bb2f8cccc6f52e9c6583bd375a731"
+      "computedHash": "dc10768caab32a8ec7bc430e3e6880a198b971a4c8b5d40e7e2d159da46de0ef"
     },
     "code-review": {
       "source": "mattpocock/skills",
@@ -140,9 +140,9 @@
       "computedHash": "b8d55851a2909e26c2dbb2e8563719c87b3b700559f604e4df344f8c27e21047"
     },
     "rust-clean-code": {
-      "source": "./agents/skills/rust-clean-code",
+      "source": "./agents/skills",
       "sourceType": "local",
-      "computedHash": "06d151cf8a6a839d9100c5e2fdfa1b3ccb94aa6d18472ba845e3830a0bc29371"
+      "computedHash": "1246038f107a88810c14a3de4868f574e418c59f520d19a198429e39d33d537a"
     },
     "scaffold-exercises": {
       "source": "mattpocock/skills",
@@ -181,9 +181,9 @@
       "computedHash": "81c196426808c270a9d4688be291405c038bba11f020b9fe10098ad0f1d8c132"
     },
     "terminal-ui-design": {
-      "source": "./agents/skills/terminal-ui-design",
+      "source": "./agents/skills",
       "sourceType": "local",
-      "computedHash": "4f8bd2e90e6ae6bf7651d29174dc8554738b98db9ca023610a7e385e16131e6d"
+      "computedHash": "fee402068c97f2600ededc133d8d6c48dc6c1ce57fbe8b2a1b883ebd99984a7e"
     },
     "to-questionnaire": {
       "source": "mattpocock/skills",
