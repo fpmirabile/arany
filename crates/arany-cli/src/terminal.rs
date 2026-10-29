@@ -1131,6 +1131,7 @@ pub struct ModelPicker<'a> {
     pub filter: &'a str,
     pub invalid: bool,
     pub catalog_state: ModelCatalogState,
+    pub refresh_error: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

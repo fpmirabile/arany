@@ -740,7 +740,7 @@ async fn configure_chatgpt(
         .into_iter()
         .map(|row| ModelEntry {
             id: row.slug,
-            context_window_tokens: None,
+            context_window_tokens: row.context_window_tokens,
             runnable: false,
             efforts: Vec::new(),
         })

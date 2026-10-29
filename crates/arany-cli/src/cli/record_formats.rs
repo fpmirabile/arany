@@ -177,6 +177,7 @@ mod tests {
     #[test]
     fn startup_archives_records_from_another_version_and_keeps_current_ones() {
         use std::os::unix::fs::PermissionsExt;
+        arany::test_support::isolate_account_root();
         let temp = tempfile::tempdir().unwrap();
         let state_dir = temp.path().join("state");
         let state = StateRoot::admit(&state_dir).unwrap();

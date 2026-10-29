@@ -718,12 +718,18 @@ impl LinearState {
             picker.items.len()
         )?;
         if picker.catalog_state != super::ModelCatalogState::Current {
-            let status = if picker.catalog_state == super::ModelCatalogState::Updated {
-                "refreshed; reopen /model to see updates; these choice numbers are unchanged"
-            } else {
-                picker.catalog_state.label()
-            };
-            writeln!(writer, "Catalog: {status}")?;
+            match (picker.catalog_state, picker.refresh_error) {
+                (super::ModelCatalogState::Updated, _) => writeln!(
+                    writer,
+                    "Catalog: model list refreshed; reopen /model to see updates; these choice numbers are unchanged"
+                )?,
+                (super::ModelCatalogState::RefreshFailed, Some(error)) => writeln!(
+                    writer,
+                    "Catalog: refresh failed: {}; cached models kept; /model refresh retries",
+                    safe_truncate(error, MAX_ROW_WIDTH)
+                )?,
+                (state, _) => writeln!(writer, "Catalog: {}", state.label())?,
+            }
         }
         for (index, item) in picker.items.iter().skip(start).take(10).enumerate() {
             let status = super::model_catalog_status(item, picker.exact_custom);
@@ -1438,7 +1444,7 @@ mod tests {
                 "Command: /compact; Compact context; during Run: locked\n",
                 "Command: /agents <single|auto|team> [max-active-children]; Agent details; during Run: view-only\n",
                 "Command: /provider <provider>; Choose Provider; during Run: view-only\n",
-                "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
+                "Command: /model <model-id> [effort|default]; Choose model; refresh re-reads the list; during Run: view-only\n",
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /storage; Report owned storage metadata; during Run: locked\n",
@@ -1809,6 +1815,7 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("first page");
@@ -1837,6 +1844,7 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("unchanged page");
@@ -1853,6 +1861,7 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("second page");
@@ -1875,11 +1884,44 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("hostile profile label");
         assert!(String::from_utf8_lossy(&hostile).contains("Models: bad\\u{001b}[31m"));
         assert!(!hostile.contains(&0x1b));
+
+        let mut refreshed = Vec::new();
+        let mut linear = LinearState::new("screen-reader");
+        for (catalog_state, refresh_error) in [
+            (
+                crate::terminal::ModelCatalogState::RefreshFailed,
+                Some("Provider unavailable"),
+            ),
+            (crate::terminal::ModelCatalogState::Updated, None),
+        ] {
+            linear
+                .write_models(
+                    &mut refreshed,
+                    "openai",
+                    &super::super::ModelPicker {
+                        items: &items,
+                        efforts: &vec![Some(arany::Effort::Low); items.len()],
+                        selected: 0,
+                        exact_custom: false,
+                        filter: "",
+                        invalid: false,
+                        catalog_state,
+                        refresh_error,
+                    },
+                )
+                .expect("refresh outcome");
+        }
+        let text = String::from_utf8(refreshed).expect("UTF-8 refresh outcome");
+        assert!(text.contains(
+            "Catalog: refresh failed: Provider unavailable; cached models kept; /model refresh retries\n"
+        ));
+        assert!(text.contains("Catalog: model list refreshed; reopen /model"));
     }
 }
 

@@ -47,6 +47,13 @@ pub(crate) async fn run(
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
+    // Threads pick their own Provider; startup refreshes the saved selection's catalog.
+    if let Ok(workspace) = std::env::current_dir()
+        && let Ok(Some(saved)) = super::attached::models::last_saved_defaults(&workspace)
+        && let Some(profile) = saved.provider
+    {
+        super::attached::models::refresh_at_startup(workspace, profile, saved.account_id);
+    }
     let mut signals = super::run_outcome::StopSignals::install()
         .map_err(|_| "signal handling unavailable".to_owned())?;
     let engine = Engine::open(

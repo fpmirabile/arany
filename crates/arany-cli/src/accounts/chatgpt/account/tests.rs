@@ -273,8 +273,7 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
                 &reopened,
                 &workspace,
                 &selected,
-                ("model-one", Effort::Medium),
-                Ok(&[])
+                ("model-one", Effort::Medium)
             ),
             Err(AuthorizationError::NoSelectedAccount)
         ));
@@ -1216,79 +1215,6 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
     let restored = AccountIndex::read(&state).unwrap();
     assert_eq!(restored.selected, Some(id));
     assert!(!restored.accounts[0].renewal_pending);
-}
-
-fn model_account() -> (tempfile::TempDir, StateRoot, PathBuf, SelectedAccount) {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
-    let credentials = credentials("oaiapp_checked", "subject-one");
-    let id = save_private_file_at(
-        &state,
-        &workspace,
-        credentials.clone(),
-        accepted(&credentials),
-        None,
-    )
-    .unwrap();
-    let selected = refresh_selected_with(&state, &workspace, id, 1_799_000_000, |_| {
-        panic!("fresh token must not rotate")
-    })
-    .unwrap();
-    (temp, state, workspace, selected)
-}
-
-#[test]
-fn catalog_admission_uses_matching_metadata() {
-    for (slug, catalog_window, expected) in [
-        ("model-one", Some(272_000), Some(272_000)),
-        ("model-one", Some(32_768), Some(32_768)),
-        ("model-one", Some(2_000_000), Some(2_000_000)),
-        ("model-one", None, None),
-        ("model-two", Some(272_000), None),
-    ] {
-        let (_temp, state, workspace, selected) = model_account();
-        let catalog = [super::super::ChatGptModel {
-            slug: slug.into(),
-            display_name: "First model".into(),
-            context_window_tokens: catalog_window,
-        }];
-        let (_, window) = admitted_model_at(
-            &state,
-            &workspace,
-            &selected,
-            ("model-one", Effort::High),
-            Ok(&catalog),
-        )
-        .unwrap();
-        assert_eq!(window, expected);
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn slow_admission_catalog_leaves_the_window_absent_after_five_seconds() {
-    use std::time::Duration;
-    const DELAYED_REPLY: Duration = Duration::from_secs(6);
-
-    let (_temp, state, workspace, selected) = model_account();
-    let started = tokio::time::Instant::now();
-    let catalog = super::super::catalog::read_for_run(async {
-        tokio::time::sleep(DELAYED_REPLY).await;
-        Ok(Vec::new())
-    })
-    .await;
-    assert!(matches!(&catalog, Err(AuthorizationError::Unavailable)));
-    assert_eq!(started.elapsed(), Duration::from_secs(5));
-    let (_, window) = admitted_model_at(
-        &state,
-        &workspace,
-        &selected,
-        ("model-one", Effort::High),
-        catalog.as_deref(),
-    )
-    .unwrap();
-    assert_eq!(window, None);
 }
 
 #[test]

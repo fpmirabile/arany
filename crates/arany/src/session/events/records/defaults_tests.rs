@@ -316,8 +316,8 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         ("chatgpt", Some(2_000_000), 1024 * 1024, true),
         ("chatgpt", Some(2_000_001), 64 * 1024, false),
         ("chatgpt", Some(32_767), 64 * 1024, false),
-        ("openai", Some(272_000), 64 * 1024, false),
-        ("anthropic", Some(272_000), 64 * 1024, false),
+        ("openai", Some(272_000), 64 * 1024, true),
+        ("anthropic", Some(272_000), 64 * 1024, true),
     ] {
         let mut pinned = if provider == "chatgpt" {
             config.clone()
@@ -377,9 +377,9 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     anthropic.model = "claude-sonnet-5".into();
     for (fallback, window_valid) in [
         (fallback, true),
-        (ordinary.identity().unwrap(), false),
+        (ordinary.identity().unwrap(), true),
         (custom, false),
-        (anthropic, false),
+        (anthropic, true),
     ] {
         let mut pinned = config.clone();
         pinned.providers = Some(crate::provider::Providers::all(vec![

@@ -382,6 +382,7 @@ impl AttachedSession {
             | TerminalInput::QuickActions
             | TerminalInput::HistoryFind
             | TerminalInput::HistoryLive
+            | TerminalInput::Refresh
             | TerminalInput::Transcript
             | TerminalInput::AgentPrevious
             | TerminalInput::AgentNext
@@ -685,11 +686,15 @@ impl AttachedSession {
                 self.select(Selector::Resume).await?
             }
             InteractiveCommand::Compact => return self.compact().await,
-            InteractiveCommand::Model | InteractiveCommand::Agents if argument.is_none() => {
-                self.select(if command == InteractiveCommand::Agents {
-                    Selector::Agents
-                } else {
-                    Selector::Models
+            InteractiveCommand::Model | InteractiveCommand::Agents
+                if argument.is_none()
+                    || command == InteractiveCommand::Model
+                        && argument == Some(super::models::REFRESH_ARGUMENT) =>
+            {
+                self.select(match (command, argument) {
+                    (InteractiveCommand::Agents, _) => Selector::Agents,
+                    (_, None) => Selector::Models(super::models::ModelOpen::Cached),
+                    (_, Some(_)) => Selector::Models(super::models::ModelOpen::Refresh),
                 })
                 .await?;
             }

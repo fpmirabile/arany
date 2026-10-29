@@ -916,10 +916,6 @@ impl Composer {
         self.choices.set_catalog(profile, items, exact_custom);
     }
 
-    pub fn cached_model_catalog(&self) -> Option<(Vec<ModelEntry>, bool)> {
-        self.choices.cached_catalog()
-    }
-
     pub(super) fn command_preview(&self, run_active: bool) -> Option<CommandPreview> {
         if self.text_only || !self.pastes.is_empty() {
             return None;

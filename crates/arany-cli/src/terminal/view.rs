@@ -2391,15 +2391,19 @@ pub(super) fn draw_model_catalog_frame(
     if picker.catalog_state != super::ModelCatalogState::Current {
         let status = match picker.catalog_state {
             super::ModelCatalogState::Refreshing if full.width >= 50 => {
-                "Refreshing models · cached choices remain selectable"
+                "Refreshing models · cached choices remain selectable".into()
             }
-            super::ModelCatalogState::Refreshing => "Refreshing",
-            super::ModelCatalogState::Updated => "Refreshed",
-            _ if full.width >= 50 => "Refresh failed · cached choices kept · retry /model",
-            _ => "Refresh failed",
+            super::ModelCatalogState::Refreshing => "Refreshing".into(),
+            super::ModelCatalogState::Updated if full.width >= 50 => "Model list refreshed".into(),
+            super::ModelCatalogState::Updated => "Refreshed".into(),
+            _ if full.width >= 50 => match picker.refresh_error {
+                Some(error) => format!("Refresh failed: {error} · cached choices kept"),
+                None => "Refresh failed · cached choices kept · Ctrl+R retries".into(),
+            },
+            _ => "Refresh failed".to_owned(),
         };
         frame.render_widget(
-            Paragraph::new(safe_truncate(status, usize::from(full.width))).style(
+            Paragraph::new(safe_truncate(&status, usize::from(full.width))).style(
                 if picker.catalog_state == super::ModelCatalogState::RefreshFailed {
                     palette.error()
                 } else {
@@ -2459,10 +2463,12 @@ pub(super) fn draw_model_catalog_frame(
         "Type/BS · Esc"
     } else if area.width < 40 {
         "Enter pick Esc"
-    } else if area.width < 80 {
+    } else if area.width < 60 || picker.exact_custom {
         "Enter selects both · Esc · Type/BS filter"
+    } else if area.width < 84 {
+        "Enter selects both · Esc · Type/BS filter · Ctrl+R refresh"
     } else {
-        "Enter selects both · Esc keeps draft · Type/BS filter · PgUp/PgDn"
+        "Enter selects both · Esc keeps draft · Type/BS filter · PgUp/PgDn · Ctrl+R refresh"
     };
     for (offset, text) in [(2, navigation), (1, action)].into_iter().filter(|_| armed) {
         frame.render_widget(

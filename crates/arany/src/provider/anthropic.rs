@@ -19,6 +19,7 @@ pub struct AnthropicProvider {
     effort: Effort,
     key: String,
     workspace_id: Option<String>,
+    context_window_tokens: Option<u32>,
 }
 
 impl AnthropicProvider {
@@ -103,7 +104,16 @@ impl AnthropicProvider {
             effort,
             key: credentials.key,
             workspace_id: credentials.anthropic_workspace_id,
+            context_window_tokens: None,
         })
+    }
+
+    /// Pins the window the Provider catalog reported; out-of-range values stay absent.
+    #[must_use]
+    pub fn with_context_window(mut self, tokens: Option<u32>) -> Self {
+        self.context_window_tokens =
+            tokens.and_then(|tokens| super::admitted_context_window(u64::from(tokens)));
+        self
     }
 
     #[cfg(test)]
@@ -302,6 +312,10 @@ impl AnthropicProvider {
 impl Provider for AnthropicProvider {
     fn identity(&self) -> &ProviderIdentity {
         &self.identity
+    }
+
+    fn context_window_tokens(&self) -> Option<u32> {
+        self.context_window_tokens
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

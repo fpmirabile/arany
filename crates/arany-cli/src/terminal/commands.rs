@@ -236,7 +236,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Compact => "Compact context",
         InteractiveCommand::Agents => "Agent details",
         InteractiveCommand::Provider => "Choose Provider",
-        InteractiveCommand::Model => "Choose model",
+        InteractiveCommand::Model => "Choose model; refresh re-reads the list",
         InteractiveCommand::Permissions => "Folder trust and approval settings",
         InteractiveCommand::Cache => "Clear private build caches",
         InteractiveCommand::Storage => "Report owned storage metadata",
@@ -313,11 +313,6 @@ impl CommandChoices {
             .collect();
         self.catalog_loaded = true;
         self.exact_custom = exact_custom;
-    }
-
-    pub fn cached_catalog(&self) -> Option<(Vec<ModelEntry>, bool)> {
-        self.catalog_loaded
-            .then(|| (self.catalog.clone(), self.exact_custom))
     }
 
     fn effort_values(&self, model: &str) -> Vec<&'static str> {

@@ -1,8 +1,10 @@
 use crate::accounts::{chatgpt, credentials};
+use crate::cli::attached::models::cached_window;
 use crate::cli::native_run_key_from_env;
 use arany::{
-    AnthropicProvider, CustomProvider, Effort, NativeApiCredentials, OpenAiProvider, Provider,
-    ProviderKind, StateRoot, resolve_native_effort_for_run, validate_native_model_id,
+    AnthropicProvider, ChatGptProvider, CustomProvider, Effort, NativeApiCredentials,
+    OpenAiProvider, Provenance, Provider, ProviderKind, StateRoot, resolve_native_effort_for_run,
+    validate_native_model_id,
 };
 use std::{
     path::{Path, PathBuf},
@@ -180,7 +182,14 @@ async fn select_provider_inner(
                 selection.account_id,
             )
             .map_err(|_| SelectionError::AnthropicKeyUnavailable)?;
-            Ok(Arc::new(provider))
+            let window = cached_window(
+                selection.workspace,
+                selection.profile,
+                selection.account_id,
+                selection.model,
+            )
+            .await;
+            Ok(Arc::new(provider.with_context_window(window)))
         }
         Some(ProviderKind::ChatGpt) => {
             let account_id = selection
@@ -197,7 +206,9 @@ async fn select_provider_inner(
             )
             .await
             .map_err(SelectionError::ChatGpt)?;
-            Ok(Arc::new(provider))
+            Ok(Arc::new(
+                with_cached_chatgpt_window(selection.workspace, provider).await,
+            ))
         }
         Some(ProviderKind::Custom) | None => {
             if selection.account_id.is_some() {
@@ -213,6 +224,20 @@ async fn select_provider_inner(
             Ok(Arc::new(provider))
         }
     }
+}
+
+// Run admission reads no catalog; the admitted account's window comes from the catalog cache.
+async fn with_cached_chatgpt_window(
+    workspace: &Path,
+    provider: ChatGptProvider,
+) -> ChatGptProvider {
+    let identity = provider.identity();
+    let account_id = match &identity.provenance {
+        Provenance::ChatGpt(provenance) => Some(provenance.account_id),
+        Provenance::Native { .. } | Provenance::Custom(_) => None,
+    };
+    let window = cached_window(workspace, &identity.profile, account_id, &identity.model).await;
+    provider.with_context_window(window)
 }
 
 async fn native_key(
@@ -289,16 +314,17 @@ pub(crate) async fn select_env_provider(
                 .map_err(|_| SelectionError::AnthropicEnvKeyUnavailable)?,
             )
         }
-        ProviderArg::Chatgpt => Arc::new(
-            chatgpt::provider_for_run(
-                workspace,
+        ProviderArg::Chatgpt => {
+            let provider = chatgpt::provider_for_run(
+                workspace.clone(),
                 None,
                 model.to_owned(),
                 effort.expect("validated ChatGPT effort"),
             )
             .await
-            .map_err(SelectionError::ChatGpt)?,
-        ),
+            .map_err(SelectionError::ChatGpt)?;
+            Arc::new(with_cached_chatgpt_window(&workspace, provider).await)
+        }
         ProviderArg::Custom(name) => {
             let root = StateRoot::open_existing(state_dir)
                 .map_err(|_| SelectionError::StateUnavailable)?;

@@ -358,13 +358,11 @@ impl RunConfig {
                     && self.custom_profile_provenance.is_none()
                     && self
                         .identity()
-                        .is_some_and(|identity| identity.chatgpt_provenance().is_some())
-                    && self.providers.as_ref().is_none_or(|providers| {
-                        providers
-                            .primary
-                            .iter()
-                            .all(|identity| identity.chatgpt_provenance().is_some())
-                    })
+                        .is_some_and(|identity| has_catalog_window(&identity))
+                    && self
+                        .providers
+                        .as_ref()
+                        .is_none_or(|providers| providers.primary.iter().all(has_catalog_window))
             })
             && self
                 .context_usage
@@ -501,6 +499,16 @@ impl RunConfig {
         }
         self.policy.validate()
     }
+}
+
+// ChatGPT and native API catalogs report windows; custom protocols expose no catalog.
+fn has_catalog_window(identity: &crate::provider::ProviderIdentity) -> bool {
+    identity.chatgpt_provenance().is_some()
+        || ProviderKind::parse(&identity.profile).is_some_and(ProviderKind::is_native_api)
+            && matches!(
+                identity.provenance,
+                crate::provider::Provenance::Native { .. }
+            )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

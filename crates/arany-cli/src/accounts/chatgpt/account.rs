@@ -457,7 +457,6 @@ fn verify_selected_snapshot(
 pub(super) struct AdmittedModel {
     pub(super) selected: SelectedAccount,
     pub(super) fingerprint: [u8; 32],
-    pub(super) context_window_tokens: Option<u32>,
 }
 
 pub(super) async fn admitted_selected_for_run(
@@ -467,30 +466,17 @@ pub(super) async fn admitted_selected_for_run(
     effort: Effort,
 ) -> Result<AdmittedModel, AuthorizationError> {
     let selected = selected_for_use(workspace.clone(), expected_account_id).await?;
-    let models = super::catalog::read_for_run(super::catalog::list_models(
-        &selected.credentials,
-        &selected.consent,
-        selected.storage,
-    ))
-    .await;
     let admitted = selected.clone();
-    let (fingerprint, context_window_tokens) = tokio::task::spawn_blocking(move || {
+    let fingerprint = tokio::task::spawn_blocking(move || {
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        admitted_model_at(
-            &state,
-            &workspace,
-            &admitted,
-            (&model, effort),
-            models.as_deref(),
-        )
+        admitted_model_at(&state, &workspace, &admitted, (&model, effort))
     })
     .await
     .map_err(|_| AuthorizationError::Unavailable)??;
     Ok(AdmittedModel {
         selected,
         fingerprint,
-        context_window_tokens,
     })
 }
 
@@ -499,17 +485,13 @@ fn admitted_model_at(
     workspace: &Path,
     selected: &SelectedAccount,
     (slug, effort): (&str, Effort),
-    catalog: Result<&[super::ChatGptModel], &AuthorizationError>,
-) -> Result<([u8; 32], Option<u32>), AuthorizationError> {
+) -> Result<[u8; 32], AuthorizationError> {
     let fingerprint = account_fingerprint(selected, slug, effort)?;
     state
         .with_account_replacement_lock(workspace, || {
             let index = AccountIndex::read(state)?;
             verify_selected_snapshot(&index, selected)?;
-            let window = catalog
-                .ok()
-                .and_then(|models| super::catalog::model_window(models, slug).ok().flatten());
-            Ok((fingerprint, window))
+            Ok(fingerprint)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
 }

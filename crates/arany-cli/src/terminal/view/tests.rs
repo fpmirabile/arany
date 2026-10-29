@@ -1303,6 +1303,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                                     filter,
                                     invalid: false,
                                     catalog_state,
+                                    refresh_error: Some("Provider unavailable"),
                                 },
                                 true,
                                 &composer,
@@ -1332,9 +1333,20 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                     let status = match catalog_state {
                         crate::terminal::ModelCatalogState::Current => None,
                         crate::terminal::ModelCatalogState::Refreshing => Some("Refreshing"),
+                        crate::terminal::ModelCatalogState::Updated if width >= 50 => {
+                            Some("Model list refreshed")
+                        }
                         crate::terminal::ModelCatalogState::Updated => Some("Refreshed"),
+                        crate::terminal::ModelCatalogState::RefreshFailed if width >= 50 => {
+                            Some("Refresh failed: Provider unavailable")
+                        }
                         crate::terminal::ModelCatalogState::RefreshFailed => Some("Refresh failed"),
                     };
+                    assert_eq!(
+                        rows.iter().any(|row| row.contains("Ctrl+R refresh")),
+                        width >= 60,
+                        "{width}x{height}: {rows:?}"
+                    );
                     if let Some(status) = status {
                         assert!(
                             rows.last().unwrap().contains(status),

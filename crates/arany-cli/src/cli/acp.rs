@@ -147,6 +147,16 @@ pub(crate) async fn run(
             .write_all(roster.manifest()?.as_bytes())
             .map_err(|_| "roster manifest output failed")?;
     }
+    if let Ok(workspace) = std::env::current_dir() {
+        let (profile, account_id) = match &roster {
+            Some(roster) => (
+                roster.primary().provider.profile(),
+                roster.primary().account_id,
+            ),
+            None => (provider.profile_label(), None),
+        };
+        super::attached::models::refresh_at_startup(workspace, profile, account_id);
+    }
     let config = Config {
         state: state_dir.clone(),
         provider,

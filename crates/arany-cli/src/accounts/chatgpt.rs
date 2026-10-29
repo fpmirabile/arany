@@ -107,7 +107,6 @@ struct AdmittedAccount {
     id: Uuid,
     access_token: String,
     admission_fingerprint: [u8; 32],
-    context_window_tokens: Option<u32>,
 }
 
 async fn admitted_account_for_run(
@@ -123,7 +122,6 @@ async fn admitted_account_for_run(
         id: admitted.selected.id,
         access_token: admitted.selected.credentials.access_token,
         admission_fingerprint: admitted.fingerprint,
-        context_window_tokens: admitted.context_window_tokens,
     })
 }
 
@@ -145,7 +143,6 @@ pub(crate) async fn provider_for_run(
             admission: ChatGptAdmission::AccountConsent,
         },
     )
-    .map(|provider| provider.with_context_window(admitted.context_window_tokens))
     .map_err(|_| AuthorizationError::Unavailable)
 }
 
@@ -237,8 +234,6 @@ pub(crate) enum AuthorizationError {
     CatalogHttp { status: u16, advice: &'static str },
     #[error("ChatGPT model or effort is invalid")]
     InvalidSelection,
-    #[error("model is not visible to the selected ChatGPT account")]
-    ModelUnavailable,
 }
 
 pub(crate) struct AuthorizationUrl(Url);

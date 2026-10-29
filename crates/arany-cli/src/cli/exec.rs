@@ -1,3 +1,4 @@
+use super::attached::models::refresh_at_startup;
 use super::provider::select::{ProviderArg, validate_headless_selection};
 pub(in crate::cli) use super::run_outcome::SHUTDOWN_GRACE;
 use super::run_outcome::{StopSignals, StopStep, stop_after_answer, stop_step, stop_text};
@@ -213,6 +214,11 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
             _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
             result = selected.admit(&state_dir, &workspace) => result?,
         };
+        refresh_at_startup(
+            workspace.clone(),
+            primary.provider.profile(),
+            primary.account_id,
+        );
         let state = StateRoot::open_existing(&state_dir)
             .map_err(|_| "state directory unavailable or unsafe")?;
         super::admit_headless_history(&state)?;
@@ -239,6 +245,11 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
     )
     .await
     .map_err(|error| error.to_string())?;
+    refresh_at_startup(
+        admission.workspace.clone(),
+        provider.identity().profile.clone(),
+        None,
+    );
     run_with_provider(args, admission, provider, telemetry).await
 }
 

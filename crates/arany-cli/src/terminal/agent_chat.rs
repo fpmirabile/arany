@@ -396,6 +396,7 @@ impl AttachedTerminal {
             | TerminalInput::QuickActions
             | TerminalInput::HistoryFind
             | TerminalInput::HistoryLive
+            | TerminalInput::Refresh
             | TerminalInput::Transcript
             | TerminalInput::CopySelection
             | TerminalInput::PanelSelectionChanged

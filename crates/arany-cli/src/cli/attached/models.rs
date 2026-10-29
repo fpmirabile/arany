@@ -7,20 +7,28 @@ use crate::terminal::{
 };
 use arany::{
     CustomProfile, Effort, MAX_CATALOG_MODELS, ModelEntry, NativeApiCredentials, ProviderKind,
-    SessionId, SessionView, StateRoot, list_native_models_with_credentials, resolve_native_effort,
+    SessionId, SessionView, StateRoot, admitted_context_window,
+    list_native_models_with_credentials, resolve_native_effort,
 };
 use arany::{RecordFormat, RecordKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 const CATALOG_LOADING: &str = "Loading model catalog; Ctrl+C cancels";
+// `/model refresh` opens the picker with a catalog read, for line input without Ctrl+R.
+pub(super) const REFRESH_ARGUMENT: &str = "refresh";
 const MAX_PREFERENCE_BYTES: usize = RecordKind::ModelPreferences.limit();
 const MAX_PREFERENCE_SOURCES: usize = 8;
+const PREFERENCES_VERSION: u8 = 2;
+// Model lists and windows rarely change, so startup reads a catalog at most once a day.
+const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -43,11 +51,52 @@ struct SavedSelection {
 #[serde(deny_unknown_fields)]
 struct SavedModels {
     profile: String,
-    account_id: uuid::Uuid,
+    account_id: Uuid,
     model: Option<String>,
     effort: Option<Effort>,
+    // Unix seconds of the last catalog read; absent until one succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refreshed_at: Option<u64>,
     #[serde(deserialize_with = "bounded_models")]
-    catalog: Vec<String>,
+    catalog: Vec<CachedModel>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CachedModel {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<u32>,
+}
+
+impl SavedModels {
+    fn rows(&self) -> Vec<ModelEntry> {
+        self.catalog
+            .iter()
+            .map(|model| catalog_entry(&self.profile, model.id.clone(), model.window()))
+            .collect()
+    }
+
+    fn fresh(&self, now: u64) -> bool {
+        self.refreshed_at
+            .and_then(|refreshed_at| now.checked_sub(refreshed_at))
+            .is_some_and(|age| age < REFRESH_AFTER.as_secs())
+    }
+}
+
+impl CachedModel {
+    fn window(&self) -> Option<u32> {
+        self.window
+            .and_then(|tokens| admitted_context_window(u64::from(tokens)))
+    }
+}
+
+impl ModelPreferences {
+    fn source(&self, profile: &str, account_id: Uuid) -> Option<&SavedModels> {
+        self.sources
+            .iter()
+            .find(|source| source.profile == profile && source.account_id == account_id)
+    }
 }
 
 fn bounded_sources<'de, D: serde::Deserializer<'de>>(
@@ -61,8 +110,8 @@ fn bounded_sources<'de, D: serde::Deserializer<'de>>(
 
 fn bounded_models<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<String>, D::Error> {
-    bounded_list::<D, String, MAX_CATALOG_MODELS>(
+) -> Result<Vec<CachedModel>, D::Error> {
+    bounded_list::<D, CachedModel, MAX_CATALOG_MODELS>(
         deserializer,
         "saved model preference limit exceeded",
     )
@@ -71,7 +120,7 @@ fn bounded_models<'de, D: serde::Deserializer<'de>>(
 pub(crate) const MODEL_PREFERENCES: RecordFormat = RecordFormat {
     kind: RecordKind::ModelPreferences,
     field: "version",
-    current: 1,
+    current: PREFERENCES_VERSION as u64,
     accepts: |bytes| decode_preferences(bytes).is_ok(),
 };
 
@@ -82,7 +131,7 @@ fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
         .map_err(|_| "saved model preferences unavailable or unsafe")?
     else {
         return Ok(ModelPreferences {
-            version: 1,
+            version: PREFERENCES_VERSION,
             selected: None,
             sources: Vec::new(),
         });
@@ -115,7 +164,9 @@ pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
 
 fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreferences, String> {
     let mut sources = HashSet::new();
-    if preferences.version != 1 || preferences.sources.len() > MAX_PREFERENCE_SOURCES {
+    if preferences.version != PREFERENCES_VERSION
+        || preferences.sources.len() > MAX_PREFERENCE_SOURCES
+    {
         return Err("invalid saved model preferences".into());
     }
     for source in &preferences.sources {
@@ -138,7 +189,7 @@ fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreference
             || !valid_selection
             || source.catalog.len() > MAX_CATALOG_MODELS
             || source.catalog.iter().any(|model| {
-                arany::validate_native_model_id(model).is_err() || !models.insert(model)
+                arany::validate_native_model_id(&model.id).is_err() || !models.insert(&model.id)
             })
         {
             return Err("invalid saved model preferences".into());
@@ -167,21 +218,13 @@ fn matching_source<'a>(
 pub(crate) fn last_saved_defaults(
     workspace: &Path,
 ) -> Result<Option<arany::SessionDefaults>, String> {
-    let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
-    let Some(root) = arany::StateRoot::open_optional(&path)
-        .map_err(|_| "saved selection unavailable or unsafe")?
-    else {
+    let Some(preferences) = saved_preferences(workspace)? else {
         return Ok(None);
     };
-    let preferences = read_saved_selection(&root, workspace)?;
     Ok(preferences
         .selected
         .as_ref()
-        .and_then(|selected| {
-            preferences.sources.iter().find(|source| {
-                source.profile == selected.profile && source.account_id == selected.account_id
-            })
-        })
+        .and_then(|selected| preferences.source(&selected.profile, selected.account_id))
         .map(|source| arany::SessionDefaults {
             provider: Some(source.profile.clone()),
             model: source.model.clone(),
@@ -189,6 +232,16 @@ pub(crate) fn last_saved_defaults(
             account_id: Some(source.account_id),
             ..arany::SessionDefaults::default()
         }))
+}
+
+fn saved_preferences(workspace: &Path) -> Result<Option<ModelPreferences>, String> {
+    let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
+    let Some(root) = arany::StateRoot::open_optional(&path)
+        .map_err(|_| "saved selection unavailable or unsafe")?
+    else {
+        return Ok(None);
+    };
+    read_saved_selection(&root, workspace).map(Some)
 }
 
 // A read-only lookup never waits on the account lock another Arany process may hold.
@@ -203,13 +256,9 @@ pub(crate) fn saved_effort(
     profile: &str,
     model: &str,
 ) -> Result<Option<Effort>, String> {
-    let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
-    let Some(root) = arany::StateRoot::open_optional(&path)
-        .map_err(|_| "saved selection unavailable or unsafe")?
-    else {
+    let Some(preferences) = saved_preferences(workspace)? else {
         return Ok(None);
     };
-    let preferences = read_saved_selection(&root, workspace)?;
     let selected = preferences
         .selected
         .as_ref()
@@ -220,6 +269,102 @@ pub(crate) fn saved_effort(
         .filter(|source| source.profile == profile && source.model.as_deref() == Some(model))
         .max_by_key(|source| Some(source.account_id) == selected)
         .and_then(|source| source.effort))
+}
+
+// Returns the cached catalog of a Provider and account; `None` means its catalog was never read.
+async fn cached_catalog(
+    workspace: &Path,
+    profile: &str,
+    account_id: Option<Uuid>,
+) -> Option<SavedModels> {
+    let account_id = account_id?;
+    let (workspace, profile) = (workspace.to_owned(), profile.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let mut preferences = saved_preferences(&workspace).ok()??;
+        let index = preferences.sources.iter().position(|source| {
+            source.profile == profile
+                && source.account_id == account_id
+                && source.refreshed_at.is_some()
+        })?;
+        Some(preferences.sources.swap_remove(index))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Returns the cached window for a Run without reading any catalog; a miss uses default bounds.
+pub(crate) async fn cached_window(
+    workspace: &Path,
+    profile: &str,
+    account_id: Option<Uuid>,
+    model: &str,
+) -> Option<u32> {
+    cached_catalog(workspace, profile, account_id)
+        .await?
+        .catalog
+        .iter()
+        .find(|cached| cached.id == model)?
+        .window()
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Starts one non-blocking catalog read at process start unless the cached catalog is younger
+/// than a day or the account's secret lives in the OS credential store.
+pub(crate) fn refresh_at_startup(workspace: PathBuf, profile: String, account_id: Option<Uuid>) {
+    if !ProviderKind::parse(&profile).is_some_and(ProviderKind::is_native) {
+        return;
+    }
+    // Detached: runtime shutdown cancels it, and the record publishes by atomic rename.
+    tokio::spawn(async move {
+        let account_id = match account_id {
+            Some(id) => id,
+            None if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) => {
+                match tokio::task::spawn_blocking(chatgpt::selected_account_id).await {
+                    Ok(Ok(id)) => id,
+                    _ => return,
+                }
+            }
+            // An environment key has no account to cache a catalog for.
+            None => return,
+        };
+        if cached_catalog(&workspace, &profile, Some(account_id))
+            .await
+            .is_some_and(|source| source.fresh(now()))
+            || in_os_store(&profile, account_id).await
+        {
+            return;
+        }
+        if let Ok(items) = read_catalog(&workspace, &profile, Some(account_id)).await {
+            let defaults = arany::SessionDefaults {
+                provider: Some(profile),
+                account_id: Some(account_id),
+                ..arany::SessionDefaults::default()
+            };
+            let _ = remember_models(&workspace, &defaults, Some(&items), false).await;
+        }
+    });
+}
+
+// Startup authorization already opened the OS store once; a background read could prompt again.
+async fn in_os_store(profile: &str, account_id: Uuid) -> bool {
+    let slot = match ProviderKind::parse(profile) {
+        Some(ProviderKind::ChatGpt) => {
+            tokio::task::spawn_blocking(move || chatgpt::selected_keyring_slot(account_id).ok())
+                .await
+                .ok()
+                .flatten()
+        }
+        Some(_) | None => credentials::selected_keyring_slot(account_id, profile)
+            .await
+            .ok(),
+    };
+    !matches!(slot, Some(None))
 }
 
 pub(super) async fn restore_saved_models(
@@ -246,21 +391,7 @@ pub(super) async fn restore_saved_models(
             defaults.model = source.model.clone();
             defaults.effort = source.effort;
         }
-        Ok(source
-            .catalog
-            .iter()
-            .map(|id| ModelEntry {
-                id: id.clone(),
-                context_window_tokens: None,
-                runnable: resolve_native_effort(&source.profile, id, None).is_ok(),
-                efforts: Effort::ALL
-                    .into_iter()
-                    .filter(|effort| {
-                        resolve_native_effort(&source.profile, id, Some(*effort)).is_ok()
-                    })
-                    .collect(),
-            })
-            .collect())
+        Ok(source.rows())
     } else {
         if restore_selection && let Ok(state) = StateRoot::open_existing(state_dir) {
             match arany::continue_session(state, workspace.to_path_buf()).await {
@@ -302,10 +433,14 @@ pub(super) async fn remember_models(
         account_id,
         model: defaults.model.clone(),
         effort: defaults.effort,
+        refreshed_at: catalog.map(|_| now()),
         catalog: catalog
             .unwrap_or_default()
             .iter()
-            .map(|item| item.id.clone())
+            .map(|item| CachedModel {
+                id: item.id.clone(),
+                window: item.context_window_tokens,
+            })
             .collect(),
     };
     let replace_catalog = catalog.is_some();
@@ -340,6 +475,7 @@ fn write_preferences(
         let old = preferences.sources.remove(index);
         if !replace_catalog {
             source.catalog = old.catalog;
+            source.refreshed_at = old.refreshed_at;
         }
         if source.model.is_none() || (!remember_selection && old.model.is_some()) {
             source.model = old.model;
@@ -405,12 +541,51 @@ enum Choice {
     Shutdown(ShutdownSignal),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ModelOpen {
+    Cached,
+    Refresh,
+}
+
+// Opening shows the cached catalog; only an explicit refresh, or a Provider and account whose
+// catalog was never read, reads it. `None` waits for that read.
+fn open_catalog(
+    cached: Option<Vec<ModelEntry>>,
+    open: ModelOpen,
+    refresh: &mut CatalogRefresh<'_>,
+) -> Option<Vec<ModelEntry>> {
+    match (cached, open) {
+        (Some(items), ModelOpen::Cached) => Some(items),
+        (Some(items), ModelOpen::Refresh) if !items.is_empty() => {
+            refresh.request();
+            Some(items)
+        }
+        _ => {
+            refresh.request();
+            None
+        }
+    }
+}
+
+fn catalog_entry(profile: &str, id: String, context_window_tokens: Option<u32>) -> ModelEntry {
+    ModelEntry {
+        runnable: resolve_native_effort(profile, &id, None).is_ok(),
+        efforts: Effort::ALL
+            .into_iter()
+            .filter(|effort| resolve_native_effort(profile, &id, Some(*effort)).is_ok())
+            .collect(),
+        id,
+        context_window_tokens,
+    }
+}
+
 pub(super) async fn browse(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     session_id: SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
+    open: ModelOpen,
 ) -> Result<ModelBrowse, LoopError> {
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok(ModelBrowse::Notice(super::Feedback::History(
@@ -422,26 +597,28 @@ pub(super) async fn browse(
         view.defaults.model.as_deref(),
         view.defaults.account_id,
     );
-    let cached = composer
-        .cached_model_catalog()
-        .filter(|(items, exact)| !items.is_empty() && !exact);
-    let refreshing = cached.is_some();
-    let (mut items, exact_custom) = match cached {
-        Some(items) => items,
-        None => match load_while_owned(terminal, admission, view, composer, profile).await? {
-            Ok(items) => items,
-            Err(outcome) => return Ok(outcome),
-        },
-    };
-    composer.set_model_catalog(profile, &items, exact_custom);
-    if items.is_empty() {
-        return Ok(ModelBrowse::Notice(super::Feedback::History(
-            "No models available for the selected Provider".into(),
-        )));
-    }
+    let cached = cached_catalog(&admission.workspace, profile, view.defaults.account_id)
+        .await
+        .map(|source| source.rows());
     let selection = {
-        let refresh = load_catalog(admission, view, profile);
-        tokio::pin!(refresh);
+        let shown: &SessionView = view;
+        let mut refresh =
+            CatalogRefresh::new(move || Box::pin(load_catalog(admission, shown, profile)));
+        let (mut items, exact_custom) = match open_catalog(cached, open, &mut refresh) {
+            Some(items) => (items, false),
+            None => {
+                match load_while_owned(terminal, admission, shown, composer, &mut refresh).await? {
+                    Ok(items) => items,
+                    Err(outcome) => return Ok(outcome),
+                }
+            }
+        };
+        composer.set_model_catalog(profile, &items, exact_custom);
+        if items.is_empty() {
+            return Ok(ModelBrowse::Notice(super::Feedback::History(
+                "No models available for the selected Provider".into(),
+            )));
+        }
         if terminal.is_linear() {
             terminal
                 .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
@@ -449,22 +626,20 @@ pub(super) async fn browse(
             browse_linear(
                 terminal,
                 &items,
-                view,
+                shown,
                 composer,
                 exact_custom,
-                refresh.as_mut(),
-                refreshing,
+                &mut refresh,
             )
             .await
         } else {
             browse_inline(
                 terminal,
                 &mut items,
-                view,
+                shown,
                 composer,
                 exact_custom,
-                refresh.as_mut(),
-                refreshing,
+                &mut refresh,
             )
             .await
         }
@@ -483,6 +658,44 @@ pub(super) async fn browse(
                 controls::select_model(admission, session_id, view, &model, effort).await?;
             Ok(ModelBrowse::Notice(super::Feedback::History(notice)))
         }
+    }
+}
+
+type CatalogLoad<'a> = Pin<Box<dyn Future<Output = Result<(Vec<ModelEntry>, bool), String>> + 'a>>;
+
+// At most one catalog read is in flight; a finished read can be requested again.
+struct CatalogRefresh<'a> {
+    start: Box<dyn FnMut() -> CatalogLoad<'a> + 'a>,
+    pending: Option<CatalogLoad<'a>>,
+}
+
+impl<'a> CatalogRefresh<'a> {
+    fn new(start: impl FnMut() -> CatalogLoad<'a> + 'a) -> Self {
+        Self {
+            start: Box::new(start),
+            pending: None,
+        }
+    }
+
+    fn request(&mut self) -> ModelCatalogState {
+        if self.pending.is_none() {
+            self.pending = Some((self.start)());
+        }
+        ModelCatalogState::Refreshing
+    }
+
+    fn in_flight(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    // Cancel-safe: the read stays pending until it completes.
+    async fn finish(&mut self) -> Result<(Vec<ModelEntry>, bool), String> {
+        let Some(pending) = self.pending.as_mut() else {
+            return std::future::pending().await;
+        };
+        let result = pending.await;
+        self.pending = None;
+        result
     }
 }
 
@@ -548,43 +761,10 @@ async fn load_catalog_inner(
     profile: &str,
 ) -> Result<(Vec<ModelEntry>, bool), String> {
     let result = match ProviderKind::parse(profile) {
-        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
-            let key = match view.defaults.account_id {
-                Some(id) => credentials::load_selected(id, profile)
-                    .await
-                    .map_err(|error| error.to_string())?,
-                None => {
-                    NativeApiCredentials::from_env(profile).map_err(|error| error.to_string())?
-                }
-            };
-            list_native_models_with_credentials(profile, &key)
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::ChatGpt) => {
+            read_catalog(&admission.workspace, profile, view.defaults.account_id)
                 .await
                 .map(|items| (items, false))
-                .map_err(|error| error.to_string())
-        }
-        Some(ProviderKind::ChatGpt) => {
-            let expected = view
-                .defaults
-                .account_id
-                .ok_or_else(|| "select a ChatGPT account with /setup first".to_owned())?;
-            let (selected, rows) =
-                chatgpt::selected_models(admission.workspace.clone(), Some(expected))
-                    .await
-                    .map_err(|error| error.to_string())?;
-            if selected != expected {
-                return Err("selected ChatGPT account changed; use /setup".into());
-            }
-            Ok((
-                rows.into_iter()
-                    .map(|row| ModelEntry {
-                        id: row.slug,
-                        context_window_tokens: None,
-                        runnable: false,
-                        efforts: Vec::new(),
-                    })
-                    .collect(),
-                false,
-            ))
         }
         Some(ProviderKind::Custom) | None => {
             let name = ProviderKind::custom_name(profile)
@@ -604,12 +784,48 @@ async fn load_catalog_inner(
     result
 }
 
+// Reads a native or ChatGPT catalog now; callers record it with `remember_models`.
+async fn read_catalog(
+    workspace: &Path,
+    profile: &str,
+    account_id: Option<Uuid>,
+) -> Result<Vec<ModelEntry>, String> {
+    if ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt) {
+        let expected =
+            account_id.ok_or_else(|| "select a ChatGPT account with /setup first".to_owned())?;
+        let (selected, rows) = chatgpt::selected_models(workspace.to_owned(), Some(expected))
+            .await
+            .map_err(|error| error.to_string())?;
+        if selected != expected {
+            return Err("selected ChatGPT account changed; use /setup".into());
+        }
+        return Ok(rows
+            .into_iter()
+            .map(|row| ModelEntry {
+                id: row.slug,
+                context_window_tokens: row.context_window_tokens,
+                runnable: false,
+                efforts: Vec::new(),
+            })
+            .collect());
+    }
+    let key = match account_id {
+        Some(id) => credentials::load_selected(id, profile)
+            .await
+            .map_err(|error| error.to_string())?,
+        None => NativeApiCredentials::from_env(profile).map_err(|error| error.to_string())?,
+    };
+    list_native_models_with_credentials(profile, &key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 async fn load_while_owned(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     view: &SessionView,
     composer: &mut Composer,
-    profile: &str,
+    refresh: &mut CatalogRefresh<'_>,
 ) -> Result<Result<(Vec<ModelEntry>, bool), ModelBrowse>, String> {
     terminal
         .draw_busy_notice(
@@ -618,12 +834,10 @@ async fn load_while_owned(
             Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING)),
         )
         .map_err(|error| error.to_string())?;
-    let query = load_catalog(admission, view, profile);
-    tokio::pin!(query);
     let outcome = loop {
         let at_input_boundary = terminal.input_boundary_ready();
         tokio::select! {
-            result = &mut query, if at_input_boundary => break result.map_err(|error| {
+            result = refresh.finish(), if at_input_boundary => break result.map_err(|error| {
                 ModelBrowse::Notice(super::Feedback::History(format!("Error: Model catalog unavailable: {error}. Review the selected account or retry /model.")))
             }),
             input = terminal.next_chat_input() => {
@@ -718,8 +932,7 @@ async fn browse_inline(
     view: &SessionView,
     composer: &mut Composer,
     exact_custom: bool,
-    mut refresh: Pin<&mut impl Future<Output = Result<(Vec<ModelEntry>, bool), String>>>,
-    refreshing: bool,
+    refresh: &mut CatalogRefresh<'_>,
 ) -> Result<Choice, String> {
     let profile = view.defaults.provider.as_deref().unwrap_or("");
     let mut anchor = view
@@ -730,11 +943,12 @@ async fn browse_inline(
         .unwrap_or(&items[0].id)
         .to_owned();
     let mut efforts = initial_efforts(items, view, exact_custom);
-    let mut catalog_state = if refreshing {
+    let mut catalog_state = if refresh.in_flight() {
         ModelCatalogState::Refreshing
     } else {
         ModelCatalogState::Current
     };
+    let mut refresh_error = None::<String>;
     let mut filter = String::new();
     let (mut visible, mut selected) = matching_models(items, &filter, &anchor);
     terminal.begin_dialog();
@@ -759,6 +973,7 @@ async fn browse_inline(
                     filter: &filter,
                     invalid: false,
                     catalog_state,
+                    refresh_error: refresh_error.as_deref(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -771,7 +986,7 @@ async fn browse_inline(
         }
         let at_input_boundary = terminal.input_boundary_ready();
         let input = tokio::select! {
-            result = &mut refresh, if catalog_state == ModelCatalogState::Refreshing && at_input_boundary => {
+            result = refresh.finish(), if refresh.in_flight() && at_input_boundary => {
                 match result {
                     Ok((updated, false)) => {
                         let mut updated_efforts = initial_efforts(&updated, view, false);
@@ -788,7 +1003,10 @@ async fn browse_inline(
                         (visible, selected) = matching_models(items, &filter, &anchor);
                         catalog_state = ModelCatalogState::Updated;
                     }
-                    _ => catalog_state = ModelCatalogState::RefreshFailed,
+                    failed => {
+                        refresh_error = failed.err();
+                        catalog_state = ModelCatalogState::RefreshFailed;
+                    }
                 }
                 continue;
             }
@@ -818,6 +1036,10 @@ async fn browse_inline(
                 if filter.pop().is_some() {
                     (visible, selected) = matching_models(items, &filter, &anchor);
                 }
+            }
+            TerminalInput::Refresh if !exact_custom => {
+                catalog_state = refresh.request();
+                refresh_error = None;
             }
             TerminalInput::Up => selected = selected.saturating_sub(1),
             TerminalInput::Down => selected = (selected + 1).min(visible.len().saturating_sub(1)),
@@ -892,8 +1114,7 @@ async fn browse_linear(
     view: &SessionView,
     composer: &mut Composer,
     exact_custom: bool,
-    mut refresh: Pin<&mut impl Future<Output = Result<(Vec<ModelEntry>, bool), String>>>,
-    refreshing: bool,
+    refresh: &mut CatalogRefresh<'_>,
 ) -> Result<Choice, String> {
     let profile = view.defaults.provider.as_deref().unwrap_or("");
     let mut start = view
@@ -908,11 +1129,12 @@ async fn browse_linear(
     let mut input = String::new();
     let mut invalid = false;
     let mut too_long = false;
-    let mut catalog_state = if refreshing {
+    let mut catalog_state = if refresh.in_flight() {
         ModelCatalogState::Refreshing
     } else {
         ModelCatalogState::Current
     };
+    let mut refresh_error = None::<String>;
     terminal.begin_dialog();
     loop {
         terminal
@@ -927,6 +1149,7 @@ async fn browse_linear(
                     filter: "",
                     invalid,
                     catalog_state,
+                    refresh_error: refresh_error.as_deref(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -940,13 +1163,16 @@ async fn browse_linear(
         invalid = false;
         let at_input_boundary = terminal.input_boundary_ready();
         let next = tokio::select! {
-            result = &mut refresh, if catalog_state == ModelCatalogState::Refreshing && at_input_boundary => {
+            result = refresh.finish(), if refresh.in_flight() && at_input_boundary => {
                 match result {
                     Ok((updated, false)) => {
                         composer.set_model_catalog(profile, &updated, false);
                         catalog_state = ModelCatalogState::Updated;
                     }
-                    _ => catalog_state = ModelCatalogState::RefreshFailed,
+                    failed => {
+                        refresh_error = failed.err();
+                        catalog_state = ModelCatalogState::RefreshFailed;
+                    }
                 }
                 continue;
             }
@@ -1022,6 +1248,114 @@ async fn browse_linear(
 mod tests {
     use super::*;
 
+    // Returns the catalog reads made and whether cached rows showed at once.
+    fn open_with(
+        cached: Option<Vec<ModelEntry>>,
+        open: ModelOpen,
+        refresh_keys: usize,
+    ) -> (u32, bool) {
+        let reads = std::cell::Cell::new(0);
+        let shown = {
+            let mut refresh = CatalogRefresh::new(|| {
+                reads.set(reads.get() + 1);
+                Box::pin(std::future::pending::<
+                    Result<(Vec<ModelEntry>, bool), String>,
+                >())
+            });
+            let shown = open_catalog(cached, open, &mut refresh).is_some();
+            for _ in 0..refresh_keys {
+                refresh.request();
+            }
+            shown
+        };
+        (reads.get(), shown)
+    }
+
+    #[test]
+    fn model_open_reads_the_catalog_only_without_a_cached_entry_or_on_refresh() {
+        let listed = || Some(vec![ModelEntry::exact_custom("cached".into())]);
+        for (cached, open, refresh_keys, expected, case) in [
+            (listed(), ModelOpen::Cached, 0, (0, true), "cached entry"),
+            (
+                Some(Vec::new()),
+                ModelOpen::Cached,
+                0,
+                (0, true),
+                "empty read catalog",
+            ),
+            (None, ModelOpen::Cached, 0, (1, false), "never read"),
+            (listed(), ModelOpen::Cached, 1, (1, true), "Ctrl+R"),
+            (
+                listed(),
+                ModelOpen::Cached,
+                2,
+                (1, true),
+                "Ctrl+R joins the read",
+            ),
+            (listed(), ModelOpen::Refresh, 0, (1, true), "/model refresh"),
+            (
+                listed(),
+                ModelOpen::Refresh,
+                1,
+                (1, true),
+                "Ctrl+R during /model refresh",
+            ),
+            (
+                Some(Vec::new()),
+                ModelOpen::Refresh,
+                0,
+                (1, false),
+                "refresh of nothing",
+            ),
+            (
+                None,
+                ModelOpen::Refresh,
+                0,
+                (1, false),
+                "refresh never read",
+            ),
+        ] {
+            assert_eq!(open_with(cached, open, refresh_keys), expected, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_reads_once_per_request_and_failure_keeps_rows() {
+        let reads = std::cell::Cell::new(0);
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let mut refresh = CatalogRefresh::new(|| {
+            reads.set(reads.get() + 1);
+            let mut receiver = receiver.clone();
+            Box::pin(async move {
+                receiver.wait_for(|ready| *ready).await.unwrap();
+                Err("Provider unavailable".to_owned())
+            })
+        });
+        assert!(!refresh.in_flight());
+        assert_eq!(refresh.request(), ModelCatalogState::Refreshing);
+        assert_eq!(refresh.request(), ModelCatalogState::Refreshing);
+        assert_eq!(
+            reads.get(),
+            1,
+            "a second key press joins the read in flight"
+        );
+        tokio::select! {
+            biased;
+            _ = refresh.finish() => panic!("read finished before its reply"),
+            () = std::future::ready(()) => {}
+        }
+        assert!(refresh.in_flight(), "an interrupted wait keeps the read");
+        sender.send_replace(true);
+        let mut items = vec![ModelEntry::exact_custom("cached".into())];
+        if let Ok((updated, _)) = refresh.finish().await {
+            items = updated;
+        }
+        assert_eq!(items[0].id, "cached", "a failed refresh keeps the rows");
+        assert!(!refresh.in_flight());
+        refresh.request();
+        assert_eq!(reads.get(), 2, "a finished read can be requested again");
+    }
+
     #[test]
     fn inline_filter_preserves_identity_and_can_recover_from_no_matches() {
         let items = [
@@ -1055,9 +1389,10 @@ mod preference_tests {
         let id = uuid::Uuid::now_v7();
         let source = json!({
             "profile": "chatgpt", "account_id": id, "model": "gpt-6.1-sol",
-            "effort": "medium", "catalog": ["gpt-6.1-sol", "another-model"]
+            "effort": "medium", "refreshed_at": 1,
+            "catalog": [{"id": "gpt-6.1-sol", "window": 272_000}, {"id": "another-model"}]
         });
-        let document = json!({"version": 1, "sources": [source.clone()]});
+        let document = json!({"version": PREFERENCES_VERSION, "sources": [source.clone()]});
         let mut cases = vec![(document.clone(), true)];
         for (profile, account_id, accepted) in [
             ("chatgpt", id, true),
@@ -1078,8 +1413,12 @@ mod preference_tests {
             ("account_id", json!("2e664d00-3f9a-40c3-adeb-c6447313a871")),
             ("effort", json!(null)),
             ("model", json!("bad\nmodel")),
-            ("catalog", json!(["duplicate", "duplicate"])),
-            ("catalog", json!(["bad\u{1b}model"])),
+            ("catalog", json!([{"id": "duplicate"}, {"id": "duplicate"}])),
+            ("catalog", json!([{"id": "bad\u{1b}model"}])),
+            ("catalog", json!(["gpt-6.1-sol"])),
+            ("catalog", json!([{"id": "gpt-6.1-sol", "window": -1}])),
+            ("catalog", json!([{"id": "gpt-6.1-sol", "runnable": true}])),
+            ("refreshed_at", json!("today")),
             ("runnable", json!(true)),
         ] {
             let mut changed = document.clone();
@@ -1087,7 +1426,7 @@ mod preference_tests {
             cases.push((changed, false));
         }
         let mut changed = document.clone();
-        changed["version"] = json!(2);
+        changed["version"] = json!(PREFERENCES_VERSION - 1);
         cases.push((changed, false));
         let mut changed = document.clone();
         changed["sources"] = json!([source.clone(), source.clone()]);
@@ -1099,7 +1438,7 @@ mod preference_tests {
             let mut changed = document.clone();
             changed["sources"][0]["catalog"] = json!(
                 (0..count)
-                    .map(|index| format!("model-{index}"))
+                    .map(|index| json!({"id": format!("model-{index}")}))
                     .collect::<Vec<_>>()
             );
             cases.push((changed, count == MAX_CATALOG_MODELS));
@@ -1147,12 +1486,15 @@ mod preference_tests {
         choice.catalog.clear();
         write_preferences(&root, choice, false, true).unwrap();
         let mut stale_refresh = original.clone();
-        stale_refresh.catalog = vec!["fresh-model".into()];
+        stale_refresh.catalog = vec![CachedModel {
+            id: "fresh-model".into(),
+            window: None,
+        }];
         write_preferences(&root, stale_refresh, true, false).unwrap();
         let reopened = StateRoot::open_existing(root.path()).unwrap();
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources[0].effort, Some(Effort::High));
-        assert_eq!(current.sources[0].catalog, ["fresh-model"]);
+        assert_eq!(current.sources[0].catalog[0].id, "fresh-model");
         assert_eq!(current.selected.as_ref().unwrap().account_id, id);
         let mut other_refresh = original.clone();
         other_refresh.account_id = uuid::Uuid::now_v7();
@@ -1176,7 +1518,10 @@ mod preference_tests {
         assert!(current.sources.iter().all(|source| source.account_id != id));
         let mut large = original;
         large.catalog = (0..MAX_CATALOG_MODELS)
-            .map(|index| format!("{index:04}{}", "x".repeat(124)))
+            .map(|index| CachedModel {
+                id: format!("{index:04}{}", "x".repeat(124)),
+                window: Some(272_000),
+            })
             .collect();
         write_preferences(&root, large.clone(), true, true).unwrap();
         large.account_id = uuid::Uuid::now_v7();
@@ -1198,6 +1543,7 @@ mod preference_tests {
             account_id: uuid::Uuid::now_v7(),
             model: Some("gpt-6.1-sol".into()),
             effort: Some(Effort::High),
+            refreshed_at: None,
             catalog: Vec::new(),
         };
         write_preferences(&root, source, true, true).unwrap();
@@ -1207,5 +1553,107 @@ mod preference_tests {
             .unwrap();
         assert_eq!(preferences.sources[0].effort, Some(Effort::High));
         assert!(read_saved_selection(&reader, reader.path()).is_err());
+    }
+
+    #[test]
+    fn catalog_reads_cache_windows_and_read_time_beside_the_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let day = REFRESH_AFTER.as_secs();
+        let selection = SavedModels {
+            profile: "chatgpt".into(),
+            account_id: id,
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some(Effort::Medium),
+            refreshed_at: None,
+            catalog: Vec::new(),
+        };
+        write_preferences(&root, selection.clone(), false, true).unwrap();
+        let source = |root: &StateRoot| {
+            read_preferences(root)
+                .unwrap()
+                .source("chatgpt", id)
+                .cloned()
+        };
+        assert_eq!(
+            source(&root).unwrap().refreshed_at,
+            None,
+            "a remembered selection is not a catalog read"
+        );
+
+        let cached = |id: &str, window| CachedModel {
+            id: id.into(),
+            window,
+        };
+        let read = SavedModels {
+            model: None,
+            effort: None,
+            refreshed_at: Some(10 * day),
+            catalog: vec![
+                cached("gpt-6.1-sol", Some(272_000)),
+                cached("tiny", Some(1)),
+                cached("unlisted", None),
+            ],
+            ..selection.clone()
+        };
+        write_preferences(&root, read, true, false).unwrap();
+        let stored = source(&root).unwrap();
+        assert_eq!(
+            stored.model.as_deref(),
+            Some("gpt-6.1-sol"),
+            "the selection is kept"
+        );
+        assert_eq!(
+            stored
+                .rows()
+                .iter()
+                .map(|row| row.context_window_tokens)
+                .collect::<Vec<_>>(),
+            [Some(272_000), None, None],
+            "out-of-range windows stay absent"
+        );
+        for (now, fresh) in [
+            (10 * day - 1, false),
+            (10 * day, true),
+            (11 * day - 1, true),
+            (11 * day, false),
+        ] {
+            assert_eq!(stored.fresh(now), fresh, "{now}");
+        }
+
+        let mut choice = selection;
+        choice.effort = Some(Effort::High);
+        write_preferences(&root, choice, false, true).unwrap();
+        let stored = source(&root).unwrap();
+        assert_eq!(stored.effort, Some(Effort::High));
+        assert_eq!(
+            stored.refreshed_at,
+            Some(10 * day),
+            "a selection keeps the read time"
+        );
+        assert_eq!(
+            stored.catalog.len(),
+            3,
+            "a selection keeps the cached catalog"
+        );
+
+        root.record(RecordKind::ModelPreferences)
+            .replace(
+                json!({"version": PREFERENCES_VERSION, "sources": [{
+                    "profile": "chatgpt", "account_id": id, "model": null, "effort": null,
+                    "catalog": [{"id": "gpt-6.1-sol"}]
+                }]})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        let stored = source(&root).unwrap();
+        assert_eq!(
+            stored.refreshed_at, None,
+            "a missing read time defaults to never read"
+        );
+        assert_eq!(stored.catalog, [cached("gpt-6.1-sol", None)]);
+        assert!(!stored.fresh(10 * day));
     }
 }

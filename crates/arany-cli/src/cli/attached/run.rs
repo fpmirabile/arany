@@ -1560,9 +1560,10 @@ mod tests {
                 .record(RecordKind::ModelPreferences)
                 .replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "version": 1, "selected": { "profile": profile, "account_id": id },
+                        "version": crate::cli::attached::models::MODEL_PREFERENCES.current,
+                        "selected": { "profile": profile, "account_id": id },
                         "sources": [{ "profile": profile, "account_id": id, "model": "gpt-5.4",
-                            "effort": "low", "catalog": ["gpt-5.4"] }]
+                            "effort": "low", "catalog": [{ "id": "gpt-5.4" }] }]
                     }))
                     .unwrap(),
                 )

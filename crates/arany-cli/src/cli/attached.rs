@@ -152,7 +152,7 @@ fn open_state(admission: &Admission) -> Result<StateRoot, LoopError> {
 #[derive(Clone, Copy)]
 enum Selector {
     Usage,
-    Models,
+    Models(models::ModelOpen),
     Agents,
     Resume,
     Setup,
@@ -373,8 +373,8 @@ async fn run_selector(
         Selector::Setup => {
             configure_account(terminal, admission, session_id, view, composer).await?
         }
-        Selector::Models => {
-            match models::browse(terminal, admission, *session_id, view, composer).await? {
+        Selector::Models(open) => {
+            match models::browse(terminal, admission, *session_id, view, composer, open).await? {
                 ModelBrowse::Notice(notice) => notice,
                 ModelBrowse::Shutdown(signal) => {
                     return Err(format!("terminated by {}", signal.name()).into());
@@ -505,8 +505,10 @@ async fn configure_account(
     update_defaults(admission, *session_id, view, defaults.clone()).await?;
     admission.defaults = defaults;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
+    // A failed or empty setup read leaves the catalog unread, so `/model` reads it.
+    let read = (!catalog.is_empty()).then_some(catalog.as_slice());
     if let Err(error) =
-        models::remember_models(&admission.workspace, &view.defaults, Some(&catalog), true).await
+        models::remember_models(&admission.workspace, &view.defaults, read, true).await
     {
         return Ok(Feedback::History(format!(
             "{notice}; Error: {error}; selection kept for this conversation only"

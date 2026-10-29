@@ -328,6 +328,7 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
                             filter,
                             invalid: false,
                             catalog_state: crate::terminal::ModelCatalogState::Current,
+                            refresh_error: None,
                         },
                         true,
                         &composer,

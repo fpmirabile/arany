@@ -77,6 +77,7 @@ pub enum TerminalInput {
     QuickActions,
     HistoryFind,
     HistoryLive,
+    Refresh,
     Transcript,
     AgentPrevious,
     AgentNext,
@@ -994,6 +995,7 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
             KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
             KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
+            KeyCode::Char('r' | 'R') => Some(TerminalInput::Refresh),
             KeyCode::Char('o' | 'O') => Some(TerminalInput::Transcript),
             KeyCode::Char('j' | 'J') => Some(TerminalInput::Newline),
             KeyCode::Left => Some(TerminalInput::WordLeft),
@@ -1587,6 +1589,10 @@ mod tests {
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
                 Some(TerminalInput::HistoryLive),
+            ),
+            (
+                Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+                Some(TerminalInput::Refresh),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),

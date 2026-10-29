@@ -565,6 +565,15 @@ impl Startup {
             return Ok(ControlFlow::Break(()));
         }
         let engine = self.open_engine()?;
+        if matches!(self.access, SavedAccess::Authorized)
+            && let Some(profile) = view.defaults.provider.clone()
+        {
+            models::refresh_at_startup(
+                self.admission.workspace.clone(),
+                profile,
+                view.defaults.account_id,
+            );
+        }
         if let Some(capture) = &view.environment_capture
             && capture.outcome() == arany::EnvironmentCaptureStage::Uncertain
         {

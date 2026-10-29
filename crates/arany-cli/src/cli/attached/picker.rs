@@ -23,7 +23,7 @@ pub(super) async fn pick_quick_action(
     view: &SessionView,
 ) -> Result<QuickChoice, String> {
     let action = |index| match index {
-        0 => Selector::Models,
+        0 => Selector::Models(super::models::ModelOpen::Cached),
         1 => Selector::Agents,
         2 => Selector::Resume,
         3 => Selector::Setup,

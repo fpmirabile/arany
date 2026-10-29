@@ -48,9 +48,9 @@ Until the [backend route](../../planning/usage-limits/README.md) is admitted, re
 
 Run admission:
 
-- After normal renewal, Run admission makes one authenticated catalog read with a five-second deadline and no retry, then revalidates account identity and consent under the lock before Workspace input. `RunStarted.config.context_window_tokens` journals the selected window without a plan-consuming check or inference call.
-- A successful read supplies the selected slug's admitted window. An absent row or window, an out-of-range value or a failed read, including the admission deadline, means no window and the default [context ceiling](./session.md#context-and-compaction). An unavailable catalog alone never stops admission.
-- Like Codex's live-model fetch, catalog metadata only resizes bounded budgets and grants no model, effort or account authority. Inherited team children and automatic Goal continuations reuse the admitted provider; explicitly configured role routes admit their own. Setup and model-picker reads stay separate from Run admission. Replayed provenance grants a Session no authority.
+- After normal renewal, Run admission revalidates account identity and consent under the lock before Workspace input, then takes the admitted account's window for the selected slug from the [catalog window cache](./provider.md#per-role-selection-and-fallback) without a catalog read. `RunStarted.config.context_window_tokens` journals that window without a plan-consuming check or inference call.
+- Every successful startup, setup or `/model` catalog read records the account's admitted windows in that cache. An absent entry or window, an out-of-range value or a failed refresh means no window and the default [context ceiling](./session.md#context-and-compaction). An unavailable catalog never stops admission.
+- Like Codex's live-model fetch, catalog metadata only resizes bounded budgets and grants no model, effort or account authority. Inherited team children and automatic Goal continuations reuse the admitted provider; explicitly configured role routes admit their own. Setup, startup and model-picker reads stay separate from Run admission. Replayed provenance grants a Session no authority.
 
 Requests and streams:
 

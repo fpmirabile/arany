@@ -1339,7 +1339,9 @@ pub(super) fn validate_idle_command(
         {
             Err("Provider must be openai, anthropic, chatgpt, or custom:NAME")
         }
-        InteractiveCommand::Model if argument.is_some() => {
+        InteractiveCommand::Model
+            if argument.is_some_and(|argument| argument != super::models::REFRESH_ARGUMENT) =>
+        {
             typed_model_selection(view, argument.expect("model argument")).map(|_| ())
         }
         InteractiveCommand::Agents
@@ -2582,6 +2584,15 @@ mod tests {
         assert_eq!(
             validate_idle_command(&view, InteractiveCommand::Model, Some("gpt-5.4 medium")),
             Err("Select /provider first")
+        );
+        // `/model refresh` opens the picker instead of selecting a model named refresh.
+        assert!(
+            validate_idle_command(
+                &view,
+                InteractiveCommand::Model,
+                Some(super::super::models::REFRESH_ARGUMENT)
+            )
+            .is_ok()
         );
         view.defaults.provider = Some("openai".into());
         assert!(
