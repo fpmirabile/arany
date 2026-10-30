@@ -25,12 +25,14 @@ fn image_chip_rectangles_match_only_visible_full_chips() {
             .draw(|frame| {
                 chips = draw_frame_with_history_and_chips(
                     frame,
-                    &model,
-                    &composer,
-                    None,
-                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                    &[],
-                    None,
+                    FrameContent {
+                        model: &model,
+                        composer: &composer,
+                        notice: None,
+                        hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                        history_rows: &[],
+                        history_status: None,
+                    },
                 )
                 .image_chips;
             })
@@ -51,12 +53,14 @@ fn image_chip_rectangles_match_only_visible_full_chips() {
         .draw(|frame| {
             chips = draw_frame_with_history_and_chips(
                 frame,
-                &model,
-                &composer,
-                None,
-                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                &[],
-                None,
+                FrameContent {
+                    model: &model,
+                    composer: &composer,
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                    history_rows: &[],
+                    history_status: None,
+                },
             )
             .image_chips;
         })

@@ -392,12 +392,14 @@ impl AttachedTerminal {
         self.draw_frame(height, |frame, _| {
             let geometry = view::draw_frame_with_history_and_chips(
                 frame,
-                &model,
-                composer,
-                status_notice,
-                view::ComposerHints::new(palette, newline_hint),
-                &history_rows,
-                history_status.as_deref(),
+                view::FrameContent {
+                    model: &model,
+                    composer,
+                    notice: status_notice,
+                    hints: view::ComposerHints::new(palette, newline_hint),
+                    history_rows: &history_rows,
+                    history_status: history_status.as_deref(),
+                },
             );
             history_area = geometry.history_area;
             image_chip_areas = geometry.image_chips;
