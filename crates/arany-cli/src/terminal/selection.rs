@@ -203,7 +203,7 @@ impl AttachedTerminal {
             !self.is_linear() && self.mode == TerminalMode::Fullscreen && mouse_capture_enabled();
         match input {
             TerminalInput::PointerMove { .. } => {
-                !selects || !std::mem::take(&mut self.graphics_hover_changed)
+                !selects || !std::mem::take(&mut self.hover.changed)
             }
             TerminalInput::PointerClick { column, row, .. } => {
                 !selects
@@ -211,14 +211,14 @@ impl AttachedTerminal {
                         && !self.transcript.history.selecting())
             }
             TerminalInput::PointerDrag { .. } => {
-                let graphics_changed = std::mem::take(&mut self.graphics_hover_changed);
+                let graphics_changed = std::mem::take(&mut self.hover.changed);
                 !selects || (!self.transcript.history.selecting() && !graphics_changed)
             }
             TerminalInput::PointerRelease { .. } => {
                 if !self.transcript.history.has_selection() {
                     self.transcript.history.clear_selection();
                 }
-                let graphics_changed = std::mem::take(&mut self.graphics_hover_changed);
+                let graphics_changed = std::mem::take(&mut self.hover.changed);
                 !selects
                     || (!graphics_changed
                         && (!self.pointer.copy_on_select
@@ -229,7 +229,7 @@ impl AttachedTerminal {
     }
 
     pub fn take_graphics_hover_changed(&mut self) -> bool {
-        std::mem::take(&mut self.graphics_hover_changed)
+        std::mem::take(&mut self.hover.changed)
     }
 
     fn history_cell(&self, column: u16, row: u16) -> Option<(usize, usize)> {

@@ -276,13 +276,7 @@ impl AttachedTerminal {
             transcript: Transcript::default(),
             active_run: None,
             pointer,
-            image_chip_areas: Vec::new(),
-            hovered_image: None,
-            pointer_position: None,
-            graphics_hover_changed: false,
-            graphics_placement: None,
-            hovered_image_digest: None,
-            sixel_preview: graphics::SixelPreview::default(),
+            hover: graphics::GraphicsHover::default(),
             linear: mode_label.map(LinearState::new),
             secret_echo: None,
             agent_panel: None,
@@ -482,13 +476,7 @@ pub struct AttachedTerminal {
     transcript: Transcript,
     active_run: Option<arany::RunId>,
     pointer: PointerSettings,
-    image_chip_areas: Vec<(usize, Rect)>,
-    hovered_image: Option<usize>,
-    pointer_position: Option<ratatui::layout::Position>,
-    graphics_hover_changed: bool,
-    graphics_placement: Option<GraphicsPlacement>,
-    hovered_image_digest: Option<[u8; 32]>,
-    sixel_preview: graphics::SixelPreview,
+    hover: graphics::GraphicsHover,
     linear: Option<LinearState>,
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
@@ -678,7 +666,7 @@ impl AttachedTerminal {
                 self.clipboard_paste = Some(paste);
                 InputRead::Input(TerminalInput::Paste)
             },
-            () = self.sixel_preview.wait() => InputRead::GraphicsReady,
+            () = self.hover.sixel.wait() => InputRead::GraphicsReady,
             result = wait_panel_copy(&mut self.panels.panel_copy) => {
                 InputRead::PanelCopy(result)
             },
@@ -691,14 +679,14 @@ impl AttachedTerminal {
             && mouse_capture_enabled()
             && let Some((column, row)) = pointer_position(input)
         {
-            self.pointer_position = Some(ratatui::layout::Position::new(column, row));
-            let hovered = hovered_image_at(&self.image_chip_areas, column, row);
-            if transition_hover(&mut self.hovered_image, hovered) {
-                self.sixel_preview.clear();
-                self.hovered_image_digest = None;
-                self.graphics_hover_changed = true;
+            self.hover.pointer = Some(ratatui::layout::Position::new(column, row));
+            let hovered = hovered_image_at(&self.hover.chip_areas, column, row);
+            if transition_hover(&mut self.hover.image, hovered) {
+                self.hover.sixel.clear();
+                self.hover.digest = None;
+                self.hover.changed = true;
             } else {
-                self.graphics_hover_changed = false;
+                self.hover.changed = false;
             }
         }
     }
@@ -1049,8 +1037,8 @@ impl AttachedTerminal {
             std::mem::take(&mut self.transcript.classic_history);
         replacement.panels.panel_selection = std::mem::take(&mut self.panels.panel_selection);
         replacement.panels.panel_copy = self.panels.panel_copy.take();
-        self.sixel_preview.clear();
-        replacement.sixel_preview = std::mem::take(&mut self.sixel_preview);
+        self.hover.sixel.clear();
+        replacement.hover.sixel = std::mem::take(&mut self.hover.sixel);
         replacement.panels.dialog_armed = self.panels.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
         replacement.child_drafts = std::mem::take(&mut self.child_drafts);
@@ -1172,13 +1160,13 @@ mod graphics_lifecycle_tests {
                 let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
                 attached.owned.graphics_protocol = Some(GraphicsProtocol::Kitty);
                 attached.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
-                attached.graphics_placement = Some(GraphicsPlacement {
+                attached.hover.placement = Some(GraphicsPlacement {
                     image_index: 0,
                     digest: [1; 32],
                     inner: Rect::new(1, 2, 3, 4),
                 });
                 assert!(attached.release().is_err());
-                assert!(attached.graphics_placement.is_none());
+                assert!(attached.hover.placement.is_none());
                 attached
                     .delete_graphics_placement()
                     .expect("repeated cleanup is idempotent");
@@ -1192,8 +1180,8 @@ mod graphics_lifecycle_tests {
         let mut attached = super::clipboard::cleanup_tests::released_terminal(None);
         attached.owned.graphics_protocol = Some(GraphicsProtocol::Kitty);
         attached.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
-        attached.hovered_image = Some(0);
-        attached.graphics_placement = Some(GraphicsPlacement {
+        attached.hover.image = Some(0);
+        attached.hover.placement = Some(GraphicsPlacement {
             image_index: 0,
             digest: [1; 32],
             inner: Rect::new(1, 2, 3, 4),
@@ -1208,8 +1196,8 @@ mod graphics_lifecycle_tests {
             super::TerminalError::Io(error)
                 if error.to_string() == "injected graphics writer failure"
         ));
-        assert!(attached.hovered_image.is_none());
-        assert!(attached.graphics_placement.is_none());
+        assert!(attached.hover.image.is_none());
+        assert!(attached.hover.placement.is_none());
         attached
             .release()
             .expect("graphics cleanup is not repeated during release");
@@ -1349,7 +1337,7 @@ mod terminal_lifecycle_tests {
             let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
             terminal.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
             terminal.owned.graphics_protocol = Some(GraphicsProtocol::Kitty);
-            terminal.graphics_placement = Some(GraphicsPlacement {
+            terminal.hover.placement = Some(GraphicsPlacement {
                 image_index: 0,
                 digest: [1; 32],
                 inner: Rect::new(1, 2, 3, 4),

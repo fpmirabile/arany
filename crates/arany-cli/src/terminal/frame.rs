@@ -64,7 +64,7 @@ impl AttachedTerminal {
         terminal.draw(|frame| render(frame, frame.area()))?;
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
-        if self.hovered_image.is_none() {
+        if self.hover.image.is_none() {
             self.delete_graphics_placement()?;
         }
         Ok(())
@@ -84,16 +84,16 @@ impl AttachedTerminal {
     }
 
     pub(super) fn clear_graphics_hover(&mut self) {
-        self.sixel_preview.clear();
-        transition_hover(&mut self.hovered_image, None);
-        self.pointer_position = None;
-        self.hovered_image_digest = None;
-        self.image_chip_areas.clear();
-        self.graphics_hover_changed = false;
+        self.hover.sixel.clear();
+        transition_hover(&mut self.hover.image, None);
+        self.hover.pointer = None;
+        self.hover.digest = None;
+        self.hover.chip_areas.clear();
+        self.hover.changed = false;
     }
 
     pub(super) fn delete_graphics_placement(&mut self) -> io::Result<()> {
-        if self.graphics_placement.take().is_none() {
+        if self.hover.placement.take().is_none() {
             return Ok(());
         }
         if self.owned.graphics_protocol != Some(GraphicsProtocol::Kitty) {
@@ -229,8 +229,8 @@ impl AttachedTerminal {
             self.clear_graphics_hover();
         }
         self.panels.frame_area = Some(screen);
-        if let Some(index) = self.hovered_image
-            && self.hovered_image_digest.is_some_and(|digest| {
+        if let Some(index) = self.hover.image
+            && self.hover.digest.is_some_and(|digest| {
                 composer.images().get(index).map(ImageAttachment::digest) != Some(digest)
             })
         {
@@ -468,11 +468,11 @@ impl AttachedTerminal {
         let mut history_area = Rect::default();
         let mut image_chip_areas = Vec::new();
         let mut preview_inner = None;
-        let pointer_position = self.pointer_position;
-        let mut hovered_image = self.hovered_image;
+        let pointer_position = self.hover.pointer;
+        let mut hovered_image = self.hover.image;
         let graphics_protocol = self.owned.graphics_protocol;
-        let published_graphics = self.graphics_placement;
-        let ready_graphics = self.sixel_preview.ready_placement();
+        let published_graphics = self.hover.placement;
+        let ready_graphics = self.hover.sixel.ready_placement();
         let newline_hint = composer.newline_hint(self.keyboard_support());
         self.draw_frame(height, |frame, _| {
             let geometry = view::draw_frame_with_history_and_chips(
@@ -516,10 +516,11 @@ impl AttachedTerminal {
             }
         })?;
         self.panels.history_area = (self.mode == TerminalMode::Fullscreen).then_some(history_area);
-        self.image_chip_areas = image_chip_areas;
-        self.hovered_image = hovered_image;
-        self.hovered_image_digest = self
-            .hovered_image
+        self.hover.chip_areas = image_chip_areas;
+        self.hover.image = hovered_image;
+        self.hover.digest = self
+            .hover
+            .image
             .and_then(|index| composer.images().get(index).map(ImageAttachment::digest));
         self.emit_graphics_preview(composer, preview_inner)?;
         Ok(())
@@ -531,7 +532,8 @@ impl AttachedTerminal {
         inner: Option<Rect>,
     ) -> Result<(), TerminalError> {
         let image = self
-            .hovered_image
+            .hover
+            .image
             .and_then(|index| composer.images().get(index).map(|image| (index, image)));
         let preview = image.and_then(|(index, image)| inner.map(|inner| (index, image, inner)));
         let placement = preview.map(|(index, image, inner)| GraphicsPlacement {
@@ -540,14 +542,14 @@ impl AttachedTerminal {
             inner,
         });
         if placement.is_none() {
-            self.sixel_preview.clear();
+            self.hover.sixel.clear();
         }
-        let unchanged = placement.is_some() && self.graphics_placement == placement;
+        let unchanged = placement.is_some() && self.hover.placement == placement;
         if unchanged {
             return Ok(());
         }
         let mut bytes = Vec::new();
-        if self.graphics_placement.take().is_some()
+        if self.hover.placement.take().is_some()
             && self.owned.graphics_protocol == Some(GraphicsProtocol::Kitty)
         {
             bytes.extend_from_slice(graphics::kitty_delete());
@@ -558,15 +560,15 @@ impl AttachedTerminal {
                 GraphicsProtocol::ITerm2 => graphics::inline_image(image, inner),
                 GraphicsProtocol::Sixel(cell) => {
                     if let Some(placement) = placement {
-                        self.sixel_preview.request(placement, image, cell);
+                        self.hover.sixel.request(placement, image, cell);
                     }
-                    let Some(bytes) = self.sixel_preview.take_ready() else {
+                    let Some(bytes) = self.hover.sixel.take_ready() else {
                         return Ok(());
                     };
                     bytes
                 }
             });
-            self.graphics_placement = placement;
+            self.hover.placement = placement;
         }
         if !bytes.is_empty() {
             self.owned().backend_mut().write_graphics(&bytes)?;
