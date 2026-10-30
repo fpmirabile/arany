@@ -23,10 +23,16 @@ pub(super) fn configure_proxy(command: &mut std::process::Command, root: &Path, 
     ignore = "native macOS user programs, linked dylib and rustup proxy"
 )]
 fn guarded_user_programs_load_homebrew_libraries_and_select_rustup_toolchains() {
-    let proxy = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|directory| directory.join("rustup"))
-        .find(|candidate| candidate.is_file())
-        .expect("CI requires an installed rustup proxy on PATH");
+    // Homebrew's rustup on PATH is a wrapper script; the fixture copies the multicall binary itself.
+    let home = PathBuf::from(std::env::var_os("HOME").expect("Rust installation home"));
+    let proxy = [
+        home.join(".cargo/bin/rustup"),
+        PathBuf::from("/opt/homebrew/opt/rustup/libexec/bin/rustup"),
+        PathBuf::from("/usr/local/opt/rustup/libexec/bin/rustup"),
+    ]
+    .into_iter()
+    .find(|candidate| std::fs::read(candidate).is_ok_and(|bytes| !bytes.starts_with(b"#!")))
+    .expect("CI requires an installed rustup proxy binary");
     super::native_journey_with_rust_sysroot(
         "tools::user_programs::native_user_programs_helper",
         None,
