@@ -75,116 +75,137 @@ pub(super) fn resolve_goal_admission(
     entry: GoalEntry,
 ) -> Result<GoalAdmission, EngineError> {
     if let Some(id) = request.goal.id {
-        let goal = history
-            .and_then(|view| view.goal(id))
-            .ok_or(EngineError::GoalUnavailable)?;
-        // Only the most recent unfinished Goal is resumable; older paused Goals stay history.
-        if goal.status == GoalStatus::Interrupted
-            && history.and_then(crate::session::SessionView::interrupted_goal_id) != Some(id)
-        {
-            return Err(EngineError::GoalUnavailable);
-        }
-        if !request.objective.trim().is_empty()
-            && !goal.run_ids.iter().any(|run_id| {
-                history.is_some_and(|view| view.runs.iter().any(|run| run.id == *run_id))
-            })
-            && goal.objective != request.objective
-        {
-            return Err(EngineError::GoalUnavailable);
-        }
-        if goal.status == GoalStatus::Interrupted
-            && history.is_none_or(|view| !goal.can_resume(view))
-            || goal.active_run.is_some()
-        {
-            return Err(EngineError::GoalUnavailable);
-        }
-        let entry = match goal.status {
-            GoalStatus::Running => GoalEntry::Continue,
-            GoalStatus::Interrupted if entry == GoalEntry::Continue => GoalEntry::Continue,
-            GoalStatus::Interrupted => GoalEntry::Resume,
-            GoalStatus::Completed | GoalStatus::Failed => {
-                return Err(EngineError::GoalUnavailable);
-            }
-        };
-        let view = history.ok_or(EngineError::GoalUnavailable)?;
-        Ok(GoalAdmission {
-            id,
-            objective: goal.objective.clone(),
-            include_paths: goal.include_paths.clone(),
-            phase: goal.phase,
-            budget: goal.budget,
-            autonomous: goal.autonomous,
-            resource_settings: goal.resource_settings,
-            plan_contract: goal.plan_contract.clone(),
-            entry,
-            usage: goal.resume_usage(view),
-            continues: goal.continues,
-        })
+        resumed_goal_admission(request, history, entry, id)
     } else if let Some(source_id) = request.goal.continues {
-        let source = history
-            .and_then(crate::session::SessionView::continuable_goal)
-            .filter(|source| source.id == source_id && request.objective.trim().is_empty())
-            .ok_or(EngineError::GoalNotContinuable)?;
-        let paths = source
-            .include_paths
-            .as_ref()
-            .ok_or(EngineError::GoalIncludesUnavailable)?;
-        if !request.include_paths.is_empty()
-            && request.include_paths != paths.iter().map(PathBuf::from).collect::<Vec<_>>()
-        {
-            return Err(EngineError::InvalidRequest);
-        }
-        Ok(GoalAdmission {
-            id: GoalId::new(),
-            objective: source.objective.clone(),
-            include_paths: Some(paths.clone()),
-            phase: source.phase,
-            budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
-            autonomous: source.autonomous,
-            resource_settings: resources::admit(request.goal.resource_settings),
-            plan_contract: None,
-            entry: GoalEntry::New,
-            usage: GoalUsage {
-                runs: 0,
-                provider_calls: 0,
-                active_ms: 0,
-                known_tokens: 0,
-                token_usage_unknown: false,
-            },
-            continues: Some(source_id),
-        })
+        continued_goal_admission(request, history, source_id)
     } else {
-        // A paused Goal does not block a new one; the Session lock serializes live Runs.
-        Ok(GoalAdmission {
-            id: GoalId::new(),
-            objective: request.objective.clone(),
-            include_paths: Some(
-                request
-                    .include_paths
-                    .iter()
-                    .map(|path| {
-                        path.to_str()
-                            .map(str::to_owned)
-                            .ok_or(EngineError::InvalidWorkspacePath)
-                    })
-                    .collect::<Result<_, _>>()?,
-            ),
-            phase: request.goal.phase.ok_or(EngineError::InvalidRequest)?,
-            budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
-            autonomous: request.goal.autonomous,
-            resource_settings: resources::admit(request.goal.resource_settings),
-            plan_contract: None,
-            entry: GoalEntry::New,
-            usage: GoalUsage {
-                runs: 0,
-                provider_calls: 0,
-                active_ms: 0,
-                known_tokens: 0,
-                token_usage_unknown: false,
-            },
-            continues: None,
-        })
+        new_goal_admission(request)
     }
+}
+
+fn resumed_goal_admission(
+    request: &RunRequest,
+    history: Option<&crate::session::SessionView>,
+    entry: GoalEntry,
+    id: GoalId,
+) -> Result<GoalAdmission, EngineError> {
+    let goal = history
+        .and_then(|view| view.goal(id))
+        .ok_or(EngineError::GoalUnavailable)?;
+    // Only the most recent unfinished Goal is resumable; older paused Goals stay history.
+    if goal.status == GoalStatus::Interrupted
+        && history.and_then(crate::session::SessionView::interrupted_goal_id) != Some(id)
+    {
+        return Err(EngineError::GoalUnavailable);
+    }
+    if !request.objective.trim().is_empty()
+        && !goal
+            .run_ids
+            .iter()
+            .any(|run_id| history.is_some_and(|view| view.runs.iter().any(|run| run.id == *run_id)))
+        && goal.objective != request.objective
+    {
+        return Err(EngineError::GoalUnavailable);
+    }
+    if goal.status == GoalStatus::Interrupted && history.is_none_or(|view| !goal.can_resume(view))
+        || goal.active_run.is_some()
+    {
+        return Err(EngineError::GoalUnavailable);
+    }
+    let entry = match goal.status {
+        GoalStatus::Running => GoalEntry::Continue,
+        GoalStatus::Interrupted if entry == GoalEntry::Continue => GoalEntry::Continue,
+        GoalStatus::Interrupted => GoalEntry::Resume,
+        GoalStatus::Completed | GoalStatus::Failed => {
+            return Err(EngineError::GoalUnavailable);
+        }
+    };
+    let view = history.ok_or(EngineError::GoalUnavailable)?;
+    Ok(GoalAdmission {
+        id,
+        objective: goal.objective.clone(),
+        include_paths: goal.include_paths.clone(),
+        phase: goal.phase,
+        budget: goal.budget,
+        autonomous: goal.autonomous,
+        resource_settings: goal.resource_settings,
+        plan_contract: goal.plan_contract.clone(),
+        entry,
+        usage: goal.resume_usage(view),
+        continues: goal.continues,
+    })
+}
+
+fn continued_goal_admission(
+    request: &RunRequest,
+    history: Option<&crate::session::SessionView>,
+    source_id: GoalId,
+) -> Result<GoalAdmission, EngineError> {
+    let source = history
+        .and_then(crate::session::SessionView::continuable_goal)
+        .filter(|source| source.id == source_id && request.objective.trim().is_empty())
+        .ok_or(EngineError::GoalNotContinuable)?;
+    let paths = source
+        .include_paths
+        .as_ref()
+        .ok_or(EngineError::GoalIncludesUnavailable)?;
+    if !request.include_paths.is_empty()
+        && request.include_paths != paths.iter().map(PathBuf::from).collect::<Vec<_>>()
+    {
+        return Err(EngineError::InvalidRequest);
+    }
+    Ok(GoalAdmission {
+        id: GoalId::new(),
+        objective: source.objective.clone(),
+        include_paths: Some(paths.clone()),
+        phase: source.phase,
+        budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
+        autonomous: source.autonomous,
+        resource_settings: resources::admit(request.goal.resource_settings),
+        plan_contract: None,
+        entry: GoalEntry::New,
+        usage: GoalUsage {
+            runs: 0,
+            provider_calls: 0,
+            active_ms: 0,
+            known_tokens: 0,
+            token_usage_unknown: false,
+        },
+        continues: Some(source_id),
+    })
+}
+
+fn new_goal_admission(request: &RunRequest) -> Result<GoalAdmission, EngineError> {
+    // A paused Goal does not block a new one; the Session lock serializes live Runs.
+    Ok(GoalAdmission {
+        id: GoalId::new(),
+        objective: request.objective.clone(),
+        include_paths: Some(
+            request
+                .include_paths
+                .iter()
+                .map(|path| {
+                    path.to_str()
+                        .map(str::to_owned)
+                        .ok_or(EngineError::InvalidWorkspacePath)
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+        phase: request.goal.phase.ok_or(EngineError::InvalidRequest)?,
+        budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
+        autonomous: request.goal.autonomous,
+        resource_settings: resources::admit(request.goal.resource_settings),
+        plan_contract: None,
+        entry: GoalEntry::New,
+        usage: GoalUsage {
+            runs: 0,
+            provider_calls: 0,
+            active_ms: 0,
+            known_tokens: 0,
+            token_usage_unknown: false,
+        },
+        continues: None,
+    })
 }
 
 impl Engine {
@@ -395,27 +416,13 @@ impl Engine {
                 .ok_or(EngineError::InvalidHistory)?
                 .clone();
             let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
-            // Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
-            let terminal = match run.status {
-                crate::session::RunStatus::Finished if goal.autonomous => {
-                    if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
-                        Some((GoalStatus::Completed, false))
-                    } else if !goal_view.admits_next_run() {
-                        // Decide the exhaustion before this segment closes, so the next admission cannot find it open.
-                        Some((GoalStatus::Failed, true))
-                    } else {
-                        None
-                    }
-                }
-                crate::session::RunStatus::Finished => {
-                    finish_after_run.then_some((GoalStatus::Completed, false))
-                }
-                crate::session::RunStatus::Failed => Some((
-                    GoalStatus::Failed,
-                    budget_stopped && goal_view.budget_spent(),
-                )),
-                _ => None,
-            }
+            let terminal = goal_terminal(
+                run.status,
+                goal_view,
+                goal.autonomous,
+                finish_after_run,
+                budget_stopped,
+            )
             .map(|(status, exhausted)| {
                 let mut goal_view = goal_view.clone();
                 let mut refusal = if exhausted {
@@ -462,6 +469,36 @@ impl Engine {
             autonomous: goal.autonomous,
             goal_status,
         })
+    }
+}
+
+// Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
+fn goal_terminal(
+    run_status: crate::session::RunStatus,
+    goal_view: &crate::session::GoalView,
+    autonomous: bool,
+    finish_after_run: bool,
+    budget_stopped: bool,
+) -> Option<(GoalStatus, bool)> {
+    match run_status {
+        crate::session::RunStatus::Finished if autonomous => {
+            if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
+                Some((GoalStatus::Completed, false))
+            } else if !goal_view.admits_next_run() {
+                // Decide the exhaustion before this segment closes, so the next admission cannot find it open.
+                Some((GoalStatus::Failed, true))
+            } else {
+                None
+            }
+        }
+        crate::session::RunStatus::Finished => {
+            finish_after_run.then_some((GoalStatus::Completed, false))
+        }
+        crate::session::RunStatus::Failed => Some((
+            GoalStatus::Failed,
+            budget_stopped && goal_view.budget_spent(),
+        )),
+        _ => None,
     }
 }
 

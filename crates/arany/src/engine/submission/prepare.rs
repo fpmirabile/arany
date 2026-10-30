@@ -296,8 +296,6 @@ pub(super) fn root_request(
     policy: crate::session::CollaborationPolicy,
     identity: &crate::provider::ProviderIdentity,
     goal: &GoalAdmission,
-    objective: String,
-    budget: GoalBudget,
     input: RootInput<'_>,
 ) -> ProviderRequest {
     let CallScope {
@@ -323,9 +321,9 @@ pub(super) fn root_request(
             context_window_tokens: input.context_window_tokens,
             assignment_profiles: input.assignment_profiles,
             images: input.images,
-            goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
+            goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(input.budget),
             plan_offered: policy.offers_plan(goal.autonomous),
-            pinned_budget: budget,
+            pinned_budget: input.budget,
             goal_plan_contract: goal.plan_contract.clone(),
             workspace_guidance: input
                 .inputs
@@ -346,7 +344,7 @@ pub(super) fn root_request(
             context_summary: input.summary,
             tools,
             prompts: input.prompts,
-            ..RunInput::new(role, objective)
+            ..RunInput::new(role, input.objective)
         },
     }
 }

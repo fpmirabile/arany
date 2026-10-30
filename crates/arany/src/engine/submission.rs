@@ -96,11 +96,7 @@ impl Engine {
         cancellation: RunCancellation,
         hints: Option<RunHints>,
     ) -> Result<RunResult, EngineError> {
-        let workspace = request.workspace.clone();
-        let launch_directory = request.launch_directory.clone();
-        let include_paths = request.include_paths.clone();
-        let policy = request.policy;
-        let context_window = request.goal.context_window;
+        let base = continuation_request(&request, None, GoalRequest::default());
         let mut leases = SubmissionLeases::default();
         let entry = if request.goal.id.is_some() {
             GoalEntry::Resume
@@ -120,21 +116,11 @@ impl Engine {
         let mut continuation_error = None;
         while turn.continues() && !cancellation.is_cancelled() {
             crate::fault::autonomous_continuation(turn.outcome.session_id).await;
-            let next = RunRequest {
-                skill: None,
-                session_id: Some(turn.outcome.session_id),
-                title: None,
-                objective: String::new(),
-                images: Vec::new(),
-                workspace: workspace.clone(),
-                launch_directory: launch_directory.clone(),
-                include_paths: include_paths.clone(),
-                policy,
-                goal: GoalRequest {
-                    context_window,
-                    ..GoalRequest::resume(turn.outcome.goal_id, false)
-                },
-            };
+            let next = continuation_request(
+                &base,
+                Some(turn.outcome.session_id),
+                GoalRequest::resume(turn.outcome.goal_id, false),
+            );
             // Settlement left the Goal open under the same admits_next_run check, so this cannot be refused for budget.
             turn = match Box::pin(self.run_turn(
                 submission,
@@ -338,9 +324,9 @@ impl Engine {
                     request.policy,
                     identity,
                     &goal,
-                    objective,
-                    budget,
                     RootInput {
+                        objective,
+                        budget,
                         assignment_profiles: submission
                             .providers
                             .roster
@@ -519,5 +505,28 @@ async fn trace_follower(
                 .flatten()
         };
         trace.follow(tap, ended, goal).await;
+    }
+}
+
+// An autonomous continuation repeats the first request's Workspace inputs and context window.
+fn continuation_request(
+    base: &RunRequest,
+    session_id: Option<SessionId>,
+    goal: GoalRequest,
+) -> RunRequest {
+    RunRequest {
+        skill: None,
+        session_id,
+        title: None,
+        objective: String::new(),
+        images: Vec::new(),
+        workspace: base.workspace.clone(),
+        launch_directory: base.launch_directory.clone(),
+        include_paths: base.include_paths.clone(),
+        policy: base.policy,
+        goal: GoalRequest {
+            context_window: base.goal.context_window,
+            ..goal
+        },
     }
 }

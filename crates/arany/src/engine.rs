@@ -445,6 +445,8 @@ struct AdmittedTurn {
 }
 
 struct RootInput<'a> {
+    objective: String,
+    budget: GoalBudget,
     assignment_profiles: Vec<String>,
     context_window_tokens: Option<u32>,
     tool_context: Option<crate::tools::ToolContext>,

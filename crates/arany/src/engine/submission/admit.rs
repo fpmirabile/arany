@@ -17,25 +17,8 @@ impl Engine {
         }
         let workspace_identity = crate::tools::workspace_identity(&request.workspace)?;
         let session_id = request.session_id.unwrap_or_default();
-        if leases.session.is_none() {
-            leases.session = Some((session_id, self.lock_session(session_id)?));
-        }
-        let (locked_session, session_lock) =
-            leases.session.as_mut().expect("admitted Session lease");
-        if *locked_session != session_id {
-            return Err(EngineError::InvalidRequest);
-        }
-        let history = if request.session_id.is_some() {
-            Some(
-                self.journal
-                    .store()
-                    .load_view(session_id)
-                    .await?
-                    .ok_or(EngineError::MissingSession)?,
-            )
-        } else {
-            None
-        };
+        let session_lock = self.session_lease(leases, session_id)?;
+        let history = self.load_history(request, session_id).await?;
         if history.is_some() {
             session_lock.keep();
         }
@@ -58,38 +41,12 @@ impl Engine {
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
         if entry == GoalEntry::Resume {
-            let previous = history
-                .as_ref()
-                .and_then(|view| {
-                    let stored = view.goal(goal.id)?;
-                    view.runs
-                        .iter()
-                        .rev()
-                        .filter(|run| stored.run_ids.contains(&run.id))
-                        .find_map(|run| run.config.as_ref())
-                })
-                .and_then(|config| config.roster.as_ref());
-            let selected = submission
-                .providers
-                .roster
-                .as_ref()
-                .map(|roster| &roster.snapshot);
-            if previous.is_some_and(|roster| {
-                Some(roster.selection_digest) != selected.map(|selected| selected.selection_digest)
-            }) {
-                return Err(EngineError::RosterSelectionMismatch);
-            }
+            ensure_resumed_roster(history.as_ref(), goal.id, submission)?;
         }
         if request.goal.id.is_some() && goal.include_paths.is_none() {
             return Err(EngineError::GoalIncludesUnavailable);
         }
-        let objective = if request.objective.trim().is_empty()
-            && (request.goal.id.is_some() || request.goal.continues.is_some())
-        {
-            goal.objective.clone()
-        } else {
-            request.objective.clone()
-        };
+        let objective = turn_objective(request, &goal);
         let budget = goal.budget.effective(goal.plan_contract.as_ref());
         if !budget.admits_next_run(goal.usage) {
             if goal.entry == GoalEntry::Resume {
@@ -98,36 +55,17 @@ impl Engine {
             }
             return Err(EngineError::GoalBudgetExhausted);
         }
-        // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
-        let first_action = Action::ProviderCall {
-            previews,
-            steering: submission.steering.is_some(),
-        };
-        let event_slots = RUN_START_EVENTS
-            + first_action.max_events_for_admitted(&submission.providers)
-            + if submission.tools.is_some() {
-                first_action.verdict_slots()
-            } else {
-                0
-            }
-            + usize::from(request.session_id.is_none());
+        let event_slots = run_start_slots(submission, request, previews);
         self.journal
             .admit_as(session_id, event_slots, 0, AdmissionKind::RunStart)
             .await?;
-        let writes = match &submission.grant {
-            ToolGrant::None => false,
-            ToolGrant::Configured => submission
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.config.write),
-            ToolGrant::Trusted(_) => true,
+        let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
+            && grant_writes(submission)
+        {
+            self.acquire_goal_workspace(&leases.workspaces, goal.id, workspace_identity)?
+        } else {
+            None
         };
-        let provisional_workspace_lock =
-            if goal.phase == crate::session::GoalPhase::Implementation && writes {
-                self.acquire_goal_workspace(&leases.workspaces, goal.id, workspace_identity)?
-            } else {
-                None
-            };
         Ok(AdmittedTurn {
             session_id,
             workspace_identity,
@@ -137,6 +75,40 @@ impl Engine {
             objective,
             budget,
             provisional_workspace_lock,
+        })
+    }
+
+    fn session_lease<'a>(
+        &self,
+        leases: &'a mut SubmissionLeases,
+        session_id: SessionId,
+    ) -> Result<&'a mut SessionRunLock, EngineError> {
+        if leases.session.is_none() {
+            leases.session = Some((session_id, self.lock_session(session_id)?));
+        }
+        let (locked_session, session_lock) =
+            leases.session.as_mut().expect("admitted Session lease");
+        if *locked_session != session_id {
+            return Err(EngineError::InvalidRequest);
+        }
+        Ok(session_lock)
+    }
+
+    async fn load_history(
+        &self,
+        request: &RunRequest,
+        session_id: SessionId,
+    ) -> Result<Option<crate::session::SessionView>, EngineError> {
+        Ok(if request.session_id.is_some() {
+            Some(
+                self.journal
+                    .store()
+                    .load_view(session_id)
+                    .await?
+                    .ok_or(EngineError::MissingSession)?,
+            )
+        } else {
+            None
         })
     }
 
@@ -230,6 +202,73 @@ pub(super) fn validate_turn_providers(
         return Err(EngineError::IncompatibleProviderChain);
     }
     Ok(())
+}
+
+// A resumed Goal keeps the roster selection its last Run was pinned to.
+fn ensure_resumed_roster(
+    history: Option<&crate::session::SessionView>,
+    goal_id: GoalId,
+    submission: &AdmittedSubmission,
+) -> Result<(), EngineError> {
+    let previous = history
+        .and_then(|view| {
+            let stored = view.goal(goal_id)?;
+            view.runs
+                .iter()
+                .rev()
+                .filter(|run| stored.run_ids.contains(&run.id))
+                .find_map(|run| run.config.as_ref())
+        })
+        .and_then(|config| config.roster.as_ref());
+    let selected = submission
+        .providers
+        .roster
+        .as_ref()
+        .map(|roster| &roster.snapshot);
+    if previous.is_some_and(|roster| {
+        Some(roster.selection_digest) != selected.map(|selected| selected.selection_digest)
+    }) {
+        return Err(EngineError::RosterSelectionMismatch);
+    }
+    Ok(())
+}
+
+// Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
+fn run_start_slots(submission: &AdmittedSubmission, request: &RunRequest, previews: bool) -> usize {
+    let first_action = Action::ProviderCall {
+        previews,
+        steering: submission.steering.is_some(),
+    };
+    RUN_START_EVENTS
+        + first_action.max_events_for_admitted(&submission.providers)
+        + if submission.tools.is_some() {
+            first_action.verdict_slots()
+        } else {
+            0
+        }
+        + usize::from(request.session_id.is_none())
+}
+
+// A resumed or continued Goal without a new objective keeps its own.
+fn turn_objective(request: &RunRequest, goal: &GoalAdmission) -> String {
+    if request.objective.trim().is_empty()
+        && (request.goal.id.is_some() || request.goal.continues.is_some())
+    {
+        goal.objective.clone()
+    } else {
+        request.objective.clone()
+    }
+}
+
+fn grant_writes(submission: &AdmittedSubmission) -> bool {
+    match &submission.grant {
+        ToolGrant::None => false,
+        ToolGrant::Configured => submission
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.config.write),
+        ToolGrant::Trusted(_) => true,
+    }
 }
 
 #[cfg(test)]
