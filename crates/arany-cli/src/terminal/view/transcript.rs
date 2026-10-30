@@ -11,68 +11,8 @@ pub(in crate::terminal) fn draw_history_rows(
         .take(usize::from(area.height))
         .enumerate()
     {
-        let style = if line.matched {
-            palette.selection()
-        } else if line.speaker == MessageKind::Supervisor {
-            Style::default().add_modifier(Modifier::DIM)
-        } else if line.heading {
-            match line.speaker {
-                MessageKind::User | MessageKind::Assignment => {
-                    Style::default().add_modifier(Modifier::BOLD)
-                }
-                MessageKind::Assistant
-                | MessageKind::AgentResult
-                | MessageKind::Preview
-                | MessageKind::Incomplete => palette.selection(),
-                MessageKind::Tool | MessageKind::ToolDetails | MessageKind::Commentary => {
-                    palette.accent()
-                }
-                MessageKind::Supervisor => Style::default().add_modifier(Modifier::DIM),
-                MessageKind::Notice | MessageKind::SteeringNote => {
-                    palette.accent().add_modifier(Modifier::BOLD)
-                }
-                MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
-            }
-        } else {
-            Style::default()
-        };
-        let marker = match (line.speaker, line.heading) {
-            (MessageKind::User | MessageKind::Assignment, true) => Some("› "),
-            (MessageKind::Assistant | MessageKind::AgentResult, true) => Some("● "),
-            (MessageKind::User | MessageKind::Assignment, false) if !line.text.is_empty() => {
-                Some("│ ")
-            }
-            _ => None,
-        };
-        let spans = if let Some(marker) = marker {
-            let width = usize::from(area.width).min(MAX_ROW_CELLS);
-            let text = if line.heading {
-                line.text.as_str()
-            } else {
-                line.text.strip_prefix("  ").unwrap_or(&line.text)
-            };
-            let mut spans = vec![Span::styled(safe_truncate(marker, width), palette.accent())];
-            spans.extend(slash_spans(
-                safe_truncate(text, width.saturating_sub(2)),
-                line.slash_cells,
-                style,
-                palette,
-            ));
-            spans
-        } else {
-            if line.spans.is_empty() {
-                vec![Span::styled(line.text.as_str(), style)]
-            } else {
-                line.spans
-                    .iter()
-                    .cloned()
-                    .map(|span| {
-                        let merged = span.style.patch(style);
-                        span.style(merged)
-                    })
-                    .collect()
-            }
-        };
+        let style = history_row_style(line, palette);
+        let spans = history_row_spans(line, style, area.width, palette);
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
             Rect::new(area.x, area.y + row as u16, area.width, 1),
@@ -90,6 +30,78 @@ pub(in crate::terminal) fn draw_history_rows(
                 ),
                 Style::default().add_modifier(Modifier::REVERSED),
             );
+        }
+    }
+}
+
+fn history_row_style(line: &HistoryRow, palette: Palette) -> Style {
+    if line.matched {
+        palette.selection()
+    } else if line.speaker == MessageKind::Supervisor {
+        Style::default().add_modifier(Modifier::DIM)
+    } else if line.heading {
+        match line.speaker {
+            MessageKind::User | MessageKind::Assignment => {
+                Style::default().add_modifier(Modifier::BOLD)
+            }
+            MessageKind::Assistant
+            | MessageKind::AgentResult
+            | MessageKind::Preview
+            | MessageKind::Incomplete => palette.selection(),
+            MessageKind::Tool | MessageKind::ToolDetails | MessageKind::Commentary => {
+                palette.accent()
+            }
+            MessageKind::Supervisor => Style::default().add_modifier(Modifier::DIM),
+            MessageKind::Notice | MessageKind::SteeringNote => {
+                palette.accent().add_modifier(Modifier::BOLD)
+            }
+            MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
+        }
+    } else {
+        Style::default()
+    }
+}
+
+// User rows carry a quote marker and Assistant headings a bullet; other rows keep their spans.
+fn history_row_spans<'a>(
+    line: &'a HistoryRow,
+    style: Style,
+    width: u16,
+    palette: Palette,
+) -> Vec<Span<'a>> {
+    let marker = match (line.speaker, line.heading) {
+        (MessageKind::User | MessageKind::Assignment, true) => Some("› "),
+        (MessageKind::Assistant | MessageKind::AgentResult, true) => Some("● "),
+        (MessageKind::User | MessageKind::Assignment, false) if !line.text.is_empty() => Some("│ "),
+        _ => None,
+    };
+    if let Some(marker) = marker {
+        let width = usize::from(width).min(MAX_ROW_CELLS);
+        let text = if line.heading {
+            line.text.as_str()
+        } else {
+            line.text.strip_prefix("  ").unwrap_or(&line.text)
+        };
+        let mut spans = vec![Span::styled(safe_truncate(marker, width), palette.accent())];
+        spans.extend(slash_spans(
+            safe_truncate(text, width.saturating_sub(2)),
+            line.slash_cells,
+            style,
+            palette,
+        ));
+        spans
+    } else {
+        if line.spans.is_empty() {
+            vec![Span::styled(line.text.as_str(), style)]
+        } else {
+            line.spans
+                .iter()
+                .cloned()
+                .map(|span| {
+                    let merged = span.style.patch(style);
+                    span.style(merged)
+                })
+                .collect()
         }
     }
 }
