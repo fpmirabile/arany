@@ -3170,8 +3170,12 @@ mod child_tool_report_tests {
             enforcement_digest: [2; 32],
             workspace_device: 1,
             workspace_inode: 2,
-            call: ToolCall::List {
-                path: "notes".into(),
+            call: ToolCall::Command {
+                program: "ls".into(),
+                args: vec!["notes".into()],
+                cwd: "".into(),
+                resource_class: None,
+                timeout_ms: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,
@@ -3234,7 +3238,7 @@ mod child_tool_report_tests {
             assert_eq!(
                 report,
                 format!(
-                    "Recent child Tool outcomes:\n- Tool list: {}",
+                    "Recent child Tool outcomes:\n- Tool command: {}",
                     cause.diagnostic()
                 )
             );
@@ -3325,7 +3329,7 @@ mod delegation_bound_tests {
             std::fs::write(&path, settings).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
             let config = serde_json::from_value(serde_json::json!({
-                "version":1,"workspace_paths":["notes"],"write":false,
+                "workspace_paths":["notes"],"write":false,
                 "commands":[],"skills":[],"mcp":[]
             }))
             .unwrap();
