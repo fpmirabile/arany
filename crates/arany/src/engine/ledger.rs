@@ -2,9 +2,9 @@ use super::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::journal::{Journal, JournalWriter};
 use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
-    AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal, Event, EventEnvelope, GoalBudget,
-    GoalId, GoalLimit, GoalPlanContract, GoalUsage, GoalView, MAX_CHILD_TOOL_CALLS,
-    MAX_DISPLAY_CHUNKS, SessionId, SessionView,
+    AgentRunId, BudgetAction, BudgetRefusal, Event, EventEnvelope, GoalBudget, GoalId, GoalLimit,
+    GoalPlanContract, GoalUsage, GoalView, MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionId,
+    SessionView,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1033,9 +1033,7 @@ fn refusal_at(
     )?;
     refusal.run_id = goal.active_run;
     refusal.agent_run_id = actor.filter(|_| refusal.run_id.is_some());
-    if goal.uncertain_active_ms > 0 {
-        refusal.charge_basis = BudgetChargeBasis::Conservative;
-    }
+    goal.qualify_charge(&mut refusal);
     Some(refusal)
 }
 

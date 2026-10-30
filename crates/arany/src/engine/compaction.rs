@@ -650,9 +650,7 @@ fn goal_compaction_reservation(goal: &crate::session::GoalView) -> Result<u64, E
             refusal.requested = Some(action_ms);
             refusal.required_minimum = Some(duration_ms(STORE_ACTION_OVERHEAD) + 1);
         }
-        if goal.uncertain_active_ms > 0 {
-            refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
-        }
+        goal.qualify_charge(&mut refusal);
         return Err(EngineError::GoalBudgetUncommitted {
             refusal: Box::new(refusal),
             source: Box::new(EngineError::GoalBudgetExhausted),

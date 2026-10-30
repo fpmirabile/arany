@@ -151,6 +151,13 @@ impl GoalView {
             })
     }
 
+    // Uncertain active time leaves any refusal charged on a conservative basis.
+    pub(crate) fn qualify_charge(&self, refusal: &mut super::BudgetRefusal) {
+        if self.uncertain_active_ms > 0 {
+            refusal.charge_basis = super::BudgetChargeBasis::Conservative;
+        }
+    }
+
     pub(crate) fn resume_usage(&self, view: &SessionView) -> GoalUsage {
         let unaccepted_link = self
             .run_ids

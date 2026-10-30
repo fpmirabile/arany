@@ -1465,7 +1465,7 @@ pub(super) fn validate_idle_command(
         }
         InteractiveCommand::Rename if argument.is_none() => Err("Usage: /rename TITLE"),
         InteractiveCommand::Rename
-            if argument.is_some_and(|title| title.is_empty() || title.len() > 128) =>
+            if argument.is_some_and(|title| !arany::valid_session_title(title)) =>
         {
             Err("Title is empty or too long; use a shorter title")
         }
@@ -1668,7 +1668,7 @@ async fn rename_command(
     let Some(title) = argument else {
         return Ok("Usage: /rename TITLE".into());
     };
-    if title.is_empty() || title.len() > 128 {
+    if !arany::valid_session_title(title) {
         return Ok("Error: invalid Run request".into());
     }
     if view.created_sequence == 0 {

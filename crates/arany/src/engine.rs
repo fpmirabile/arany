@@ -1186,7 +1186,8 @@ impl Engine {
             .effective_budget()
             .refusal(goal.usage, crate::session::BudgetAction::Resume)
             .ok_or(EngineError::InvalidHistory)?;
-        if goal_view.uncertain_active_ms > 0 || unknown_recovery {
+        goal_view.qualify_charge(&mut refusal);
+        if unknown_recovery {
             refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
         }
         goal_view.budget_refusal = Some(refusal);
@@ -2327,7 +2328,7 @@ impl Engine {
             }
             .map(|(status, exhausted)| {
                 let mut goal_view = goal_view.clone();
-                goal_view.budget_refusal = if exhausted {
+                let mut refusal = if exhausted {
                     captured_refusal.or_else(|| {
                         goal_view.effective_budget().refusal(
                             goal_view.resume_usage(view),
@@ -2337,11 +2338,10 @@ impl Engine {
                 } else {
                     None
                 };
-                if goal_view.uncertain_active_ms > 0
-                    && let Some(refusal) = &mut goal_view.budget_refusal
-                {
-                    refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
+                if let Some(refusal) = &mut refusal {
+                    goal_view.qualify_charge(refusal);
                 }
+                goal_view.budget_refusal = refusal;
                 (
                     status,
                     goal_report(view, &run, &goal_view),
@@ -2406,7 +2406,7 @@ impl Engine {
             || request
                 .title
                 .as_ref()
-                .is_some_and(|title| title.is_empty() || title.len() > 128)
+                .is_some_and(|title| !crate::session::valid_session_title(title))
             || request.policy.validate().is_err()
             || !request.goal.resource_settings.valid()
             || !request.goal.context_window.valid()

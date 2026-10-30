@@ -64,14 +64,14 @@ impl Event {
                 }
             }
             Self::SessionStarted { title, .. } | Self::SessionRenamed { title } => {
-                bounded(title, 128)
+                bounded(title, crate::session::MAX_SESSION_TITLE_BYTES)
             }
             Self::SessionDefaultChanged { defaults } => defaults.validate(),
             Self::SessionForked {
                 title,
                 source_sequence,
                 ..
-            } if *source_sequence > 0 => bounded(title, 128),
+            } if *source_sequence > 0 => bounded(title, crate::session::MAX_SESSION_TITLE_BYTES),
             Self::SessionForked { .. } => Err(ReplayError::InvalidPayload),
             Self::ContextCompacted { record, .. } => record.validate(),
             Self::ToolResultsCleared {

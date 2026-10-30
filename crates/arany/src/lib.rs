@@ -94,7 +94,7 @@ pub use session::{
     RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
     SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
     ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView, UsageGroup,
-    UsageView, WorkspaceIdentity, escape_status_text,
+    UsageView, WorkspaceIdentity, escape_status_text, valid_session_title,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{

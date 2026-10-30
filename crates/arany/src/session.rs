@@ -159,17 +159,23 @@ pub(crate) fn answer_summary(text: &str) -> String {
     line[..end].to_owned()
 }
 
+pub(crate) const MAX_SESSION_TITLE_BYTES: usize = 128;
+
+pub fn valid_session_title(title: &str) -> bool {
+    !title.is_empty() && title.len() <= MAX_SESSION_TITLE_BYTES
+}
+
 pub(crate) fn title_preview(text: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     let mut title = String::new();
     'words: for word in text.split_whitespace() {
         for grapheme in word.graphemes(true) {
-            if title.len() + grapheme.len() > 128 {
+            if title.len() + grapheme.len() > MAX_SESSION_TITLE_BYTES {
                 break 'words;
             }
             title.push_str(grapheme);
         }
-        if title.len() == 128 {
+        if title.len() == MAX_SESSION_TITLE_BYTES {
             break;
         }
         title.push(' ');
