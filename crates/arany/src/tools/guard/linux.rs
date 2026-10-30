@@ -2541,7 +2541,7 @@ mod tests {
             kind: RuntimeKind::ManagerShims,
             manager: RuntimeManager::Rustup,
             version: None,
-            path: PathBuf::from("/usr/local/Cellar/rustup/1.0/bin"),
+            path: PathBuf::from("/usr/local/Cellar/rustup/1.0/libexec/bin"),
             device: 1,
             inode: 1,
             root: Some(GrantRoot {

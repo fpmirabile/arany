@@ -829,7 +829,7 @@ pub fn user_programs_fixture(home: &Path) {
 pub fn homebrew_programs_fixture(root: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let prefix = root.join("homebrew");
-    for directory in ["bin", "lib", "opt", "Cellar/rustup/1.0/bin"] {
+    for directory in ["bin", "lib", "opt", "Cellar/rustup/1.0/libexec/bin"] {
         std::fs::create_dir_all(prefix.join(directory)).unwrap();
     }
     std::fs::create_dir_all(root.join("home/.rustup")).unwrap();
@@ -839,7 +839,7 @@ pub fn homebrew_programs_fixture(root: &Path) {
         ("bin/arany-brew-tool", "cat /opt/homebrew/lib/tool-data"),
         ("bin/arany-collide", "printf collide-brew"),
         (
-            "Cellar/rustup/1.0/bin/arany-rustup-tool",
+            "Cellar/rustup/1.0/libexec/bin/arany-rustup-tool",
             "cat \"$RUSTUP_HOME/tool-data\"",
         ),
     ] {
@@ -868,13 +868,13 @@ test "$(arany-collide)" = collide-local
 test "$PYENV_ROOT" = "{home}/.pyenv"
 test "$VOLTA_HOME" = "{home}/.volta"
 test "$RUSTUP_HOME" = "{home}/.rustup"
-test "$PATH" = "{local}:{pyenv}:/opt/homebrew/bin:/opt/homebrew/Cellar/rustup/1.0/bin:{volta}:/usr/bin:/bin"
+test "$PATH" = "{local}:{pyenv}:/opt/homebrew/bin:/opt/homebrew/Cellar/rustup/1.0/libexec/bin:{volta}:/usr/bin:/bin"
 case "$HOME" in /scratch*) ;; *) exit 91 ;; esac
 test "$HOME" = "$TMPDIR"
 if (printf changed > "{local}/arany-local-tool") 2>/dev/null; then exit 92; fi
 if (printf new > "{volta}/arany-new-file") 2>/dev/null; then exit 93; fi
 if (printf changed > /opt/homebrew/lib/tool-data) 2>/dev/null; then exit 94; fi
-if (printf changed > /opt/homebrew/Cellar/rustup/1.0/bin/arany-rustup-tool) 2>/dev/null; then exit 95; fi
+if (printf changed > /opt/homebrew/Cellar/rustup/1.0/libexec/bin/arany-rustup-tool) 2>/dev/null; then exit 95; fi
 if (printf changed > "{home}/.rustup/new-file") 2>/dev/null; then exit 96; fi
 printf user-programs-ok
 "#,
@@ -1024,7 +1024,7 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
     for directory in [
         home.join(".local/bin"),
         root.join("homebrew/bin"),
-        root.join("homebrew/Cellar/rustup/1.0/bin"),
+        root.join("homebrew/Cellar/rustup/1.0/libexec/bin"),
         home.join(".rustup"),
     ] {
         let moved = directory.with_extension("old");

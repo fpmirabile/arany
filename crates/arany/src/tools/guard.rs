@@ -1895,6 +1895,12 @@ pub(super) fn payload<'a>(
     for (name, root) in runtime_grants.iter().filter_map(RuntimeGrant::manager_home) {
         command.env(name, root);
     }
+    for (name, settings) in runtime_grants
+        .iter()
+        .filter_map(RuntimeGrant::homebrew_rustup_settings)
+    {
+        command.env(name, settings);
+    }
     if runtime_grants
         .iter()
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)

@@ -97,6 +97,11 @@ const MAX_DISCOVERY_PATH_BYTES: usize = super::command_environment::PATH_LIMIT_B
 pub(crate) const MAX_DISCOVERY_PATH_ENTRIES: usize = 32;
 
 const HOMEBREW_PREFIXES: [&str; 3] = ["/home/linuxbrew/.linuxbrew", "/opt/homebrew", "/usr/local"];
+// Homebrew's opt/rustup/bin holds bash wrappers; SIP strips the page-size interposer from bash, so
+// the grant pins the multicall directory they exec and sets the fallback settings they export.
+const HOMEBREW_RUSTUP_MULTICALL: &str = "libexec/bin";
+const HOMEBREW_RUSTUP_SETTINGS: &str = "etc/rustup/settings.toml";
+const HOMEBREW_RUSTUP_SETTINGS_VARIABLE: &str = "RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS";
 
 impl RuntimeKind {
     pub(crate) fn label(self) -> &'static str {
@@ -379,11 +384,22 @@ impl RuntimeGrant {
         Some((self.shim_entry()?.variable, root.path.as_path()))
     }
 
+    // Set only when the file is visible, as Homebrew's wrappers do.
+    pub(crate) fn homebrew_rustup_settings(&self) -> Option<(&'static str, PathBuf)> {
+        if self.kind != RuntimeKind::ManagerShims || self.manager != RuntimeManager::Rustup {
+            return None;
+        }
+        let settings = homebrew_rustup_prefix(&self.path)?.join(HOMEBREW_RUSTUP_SETTINGS);
+        settings
+            .is_file()
+            .then_some((HOMEBREW_RUSTUP_SETTINGS_VARIABLE, settings))
+    }
+
     fn shim_entry(&self) -> Option<&'static ShimEntry> {
         MANAGER_SHIMS.iter().find(|entry| {
             entry.manager == self.manager
                 && if entry.homebrew {
-                    homebrew_rustup_layout(&self.path)
+                    homebrew_rustup_prefix(&self.path).is_some()
                 } else {
                     self.path.ends_with(entry.directory)
                 }
@@ -736,12 +752,14 @@ fn shim_grant(
     let mut path = logical.clone();
     if entry.homebrew {
         // Homebrew links opt/<formula> to the Cellar, so the physical directory is pinned.
-        let (Ok(physical), Ok(prefix)) =
-            (std::fs::canonicalize(&path), std::fs::canonicalize(base))
-        else {
+        let multicall = logical.with_file_name(HOMEBREW_RUSTUP_MULTICALL);
+        let (Ok(physical), Ok(prefix)) = (
+            std::fs::canonicalize(multicall),
+            std::fs::canonicalize(base),
+        ) else {
             return Ok(None);
         };
-        if !physical.starts_with(&prefix) || !homebrew_rustup_layout(&physical) {
+        if homebrew_rustup_prefix(&physical) != Some(prefix.as_path()) {
             return Ok(None);
         }
         path = physical;
@@ -765,7 +783,9 @@ fn shim_grant(
     .map(|grant| grant.map(|grant| (logical, grant)))
 }
 
-fn homebrew_rustup_layout(path: &Path) -> bool {
+// The prefix of a Homebrew rustup multicall directory: Cellar/rustup/<version>/libexec/bin or its
+// opt/rustup alias.
+fn homebrew_rustup_prefix(path: &Path) -> Option<&Path> {
     let names = path
         .components()
         .filter_map(|part| match part {
@@ -773,9 +793,23 @@ fn homebrew_rustup_layout(path: &Path) -> bool {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let linked = matches!(names.as_slice(), [.., opt, formula, bin] if *opt == "opt" && *formula == "rustup" && *bin == "bin");
-    let cellar = matches!(names.as_slice(), [.., cellar, formula, _, bin] if *cellar == "Cellar" && *formula == "rustup" && *bin == "bin");
-    linked || cellar
+    let depth = match names.as_slice() {
+        [.., opt, formula, libexec, bin]
+            if *opt == "opt" && *formula == "rustup" && *libexec == "libexec" && *bin == "bin" =>
+        {
+            4
+        }
+        [.., cellar, formula, _, libexec, bin]
+            if *cellar == "Cellar"
+                && *formula == "rustup"
+                && *libexec == "libexec"
+                && *bin == "bin" =>
+        {
+            5
+        }
+        _ => return None,
+    };
+    path.ancestors().nth(depth)
 }
 
 pub(super) fn default_profile_selection(
@@ -1403,6 +1437,7 @@ mod user_environment_tests {
         let outside = directory(&temp.path().join("outside/bin"));
         let prefix = std::fs::canonicalize(directory(&temp.path().join("brew"))).unwrap();
         directory(&prefix.join("opt"));
+        directory(&prefix.join("Cellar/rustup/1.0/libexec/bin"));
         for formula in ["rustup", "tool"] {
             directory(&prefix.join(format!("Cellar/{formula}/1.0/bin")));
             std::os::unix::fs::symlink(
@@ -1428,16 +1463,28 @@ mod user_environment_tests {
             home.join("missing"),
         ]);
         let found = discover_user_programs(&home, Some(&brew_first), &prefixes).unwrap();
+        // Rustup's PATH entry selects the multicall directory behind Homebrew's bash wrappers.
         assert_eq!(
             paths(&found),
             [
-                prefix.join("Cellar/rustup/1.0/bin"),
+                prefix.join("Cellar/rustup/1.0/libexec/bin"),
                 prefix.join("Cellar/tool/1.0/bin"),
                 local,
                 volta.clone()
             ]
         );
         assert_eq!(found[1].grant.root.as_ref().unwrap().path, prefix);
+        let rustup = &found[0].grant;
+        assert_eq!(rustup.manager_home().unwrap().1, home.join(".rustup"));
+        assert_eq!(rustup.homebrew_rustup_settings(), None);
+        let settings = prefix.join(HOMEBREW_RUSTUP_SETTINGS);
+        directory(settings.parent().unwrap());
+        std::fs::write(&settings, "version = \"12\"\n").unwrap();
+        assert_eq!(
+            rustup.homebrew_rustup_settings(),
+            Some((HOMEBREW_RUSTUP_SETTINGS_VARIABLE, settings))
+        );
+        assert_eq!(found[1].grant.homebrew_rustup_settings(), None);
         let cargo_first = search(&[cargo.clone(), prefix.join("opt/rustup/bin")]);
         let found = discover_user_programs(&home, Some(&cargo_first), &prefixes).unwrap();
         assert_eq!(paths(&found), [cargo, volta]);
@@ -1579,7 +1626,7 @@ mod user_environment_tests {
         let first = grant(
             RuntimeKind::ManagerShims,
             RuntimeManager::Rustup,
-            &directory(&home.join("brew/opt/rustup/bin")),
+            &directory(&home.join("brew/opt/rustup/libexec/bin")),
             Some(&home.join(".rustup")),
         );
         validate_selection(std::slice::from_ref(&first)).unwrap();
