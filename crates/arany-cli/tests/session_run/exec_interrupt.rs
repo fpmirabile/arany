@@ -286,7 +286,7 @@ fn death_during_approval_leaves_no_started_effect_and_resume_reproposes() {
 fn write_approval_death_settings(state: &std::path::Path, ask: bool) {
     use std::os::unix::fs::PermissionsExt;
     for (name, bytes) in [
-        ("tools.json", br#"{"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
+        ("tools.json", br#"{"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
         ("permissions.json", if ask { br#"{"permissions":{"ask":["Read"]}}"#.as_slice() } else { b"{}".as_slice() }),
     ] {
         std::fs::write(state.join(name), bytes).unwrap();

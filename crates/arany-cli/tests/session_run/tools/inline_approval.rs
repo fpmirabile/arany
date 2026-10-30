@@ -47,7 +47,7 @@ fn run_case(case: &'static str) {
     StateRoot::admit(&state).unwrap();
     crate::private_file(&state.join("permissions.json"), br#"{"permissions":{}}"#);
     crate::private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
-        "version":1,"workspace_paths":["."],"write":true,
+        "workspace_paths":["."],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":crate::hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
         "skills":[],"mcp":[]
     })).unwrap());

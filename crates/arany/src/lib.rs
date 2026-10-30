@@ -122,11 +122,10 @@ pub use tools::{
     RewriteStage, RuntimeProfileOption, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME,
     SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition,
     ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError, TrustReset,
-    UnguardedGrant, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions, WrapStage,
-    command_tool_candidates, configured_skill_names, import_command_tools, mcp_login, mcp_logout,
-    mention_paths, now_ms, project_skills, recover_build_cache, runtime_skill_names,
-    tool_guard_main, tool_host_main,
+    ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError, UnguardedGrant,
+    UnguardedPrompt, UnguardedReceipt, WorkspacePermissions, WrapStage, command_tool_candidates,
+    configured_skill_names, import_command_tools, mcp_login, mcp_logout, mention_paths, now_ms,
+    project_skills, recover_build_cache, runtime_skill_names, tool_guard_main, tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

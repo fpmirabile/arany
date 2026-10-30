@@ -169,7 +169,10 @@ fn clear_conflict(
     presentation: Presentation,
     saved: &[u8],
 ) {
-    super::super::private_file(&state.join("provider-routing.json"), br#"{"version":2,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#);
+    super::super::private_file(
+        &state.join("provider-routing.json"),
+        br#"{"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#,
+    );
     for name in ["coding", "research"] {
         let output = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
@@ -355,14 +358,14 @@ fn routing_inspection_failures_retain_roster_edits_until_a_reviewed_save() {
 fn prepare_saved_roster(state: &Path) -> &'static [u8] {
     StateRoot::admit(state).unwrap();
     let route = json!({"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"none","account_id":null});
-    let record = json!({"version":2,"profiles":[
+    let record = json!({"profiles":[
         {"name":"main","routes":[route]}, {"name":"inspect","routes":[route]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","inspect"]}]});
     super::super::private_file(
         &state.join("provider-roster.json"),
         &serde_json::to_vec(&record).unwrap(),
     );
-    let routing = br#"{"version":2,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
+    let routing = br#"{"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
     super::super::private_file(&state.join("provider-routing.json"), routing);
     routing
 }

@@ -5,12 +5,12 @@ use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, ShutdownSignal,
     TerminalInput,
 };
+use arany::RecordKind;
 use arany::{
     CustomProfile, Effort, MAX_CATALOG_MODELS, ModelEntry, NativeApiCredentials, ProviderKind,
     SessionId, SessionView, StateRoot, admitted_context_window,
     list_native_models_with_credentials, resolve_native_effort,
 };
-use arany::{RecordFormat, RecordKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -26,29 +26,25 @@ const CATALOG_LOADING: &str = "Loading model catalog; Ctrl+C cancels";
 pub(super) const REFRESH_ARGUMENT: &str = "refresh";
 const MAX_PREFERENCE_BYTES: usize = RecordKind::ModelPreferences.limit();
 const MAX_PREFERENCE_SOURCES: usize = 8;
-const PREFERENCES_VERSION: u8 = 2;
 // Model lists and windows rarely change, so startup reads a catalog at most once a day.
 const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+// A tolerant preference and catalog cache: unknown fields are ignored and missing ones default.
+#[derive(Default, Deserialize, Serialize)]
 struct ModelPreferences {
-    version: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected: Option<SavedSelection>,
-    #[serde(deserialize_with = "bounded_sources")]
+    #[serde(default, deserialize_with = "bounded_sources")]
     sources: Vec<SavedModels>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct SavedSelection {
     profile: String,
     account_id: uuid::Uuid,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct SavedModels {
     profile: String,
     account_id: Uuid,
@@ -57,12 +53,11 @@ struct SavedModels {
     // Unix seconds of the last catalog read; absent until one succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refreshed_at: Option<u64>,
-    #[serde(deserialize_with = "bounded_models")]
+    #[serde(default, deserialize_with = "bounded_models")]
     catalog: Vec<CachedModel>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 struct CachedModel {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -117,89 +112,67 @@ fn bounded_models<'de, D: serde::Deserializer<'de>>(
     )
 }
 
-pub(crate) const MODEL_PREFERENCES: RecordFormat = RecordFormat {
-    kind: RecordKind::ModelPreferences,
-    field: "version",
-    current: PREFERENCES_VERSION as u64,
-    accepts: |bytes| decode_preferences(bytes).is_ok(),
-};
-
 fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
-    let Some(record) = root
-        .record(MODEL_PREFERENCES.kind)
+    let record = root
+        .record(RecordKind::ModelPreferences)
         .read()
-        .map_err(|_| "saved model preferences unavailable or unsafe")?
-    else {
-        return Ok(ModelPreferences {
-            version: PREFERENCES_VERSION,
-            selected: None,
-            sources: Vec::new(),
-        });
-    };
-    decode_preferences(&record)
+        .map_err(|_| "saved model preferences unavailable or unsafe")?;
+    Ok(record.map_or_else(ModelPreferences::default, |record| {
+        decode_preferences(&record)
+    }))
 }
 
-fn decode_preferences(record: &[u8]) -> Result<ModelPreferences, String> {
-    let preferences: ModelPreferences =
-        serde_json::from_slice(record).map_err(|_| "invalid saved model preferences")?;
-    validate_preferences(preferences)
+// Tolerant: an unreadable record reads as empty, and an invalid source or dangling selection is dropped.
+fn decode_preferences(record: &[u8]) -> ModelPreferences {
+    let mut preferences: ModelPreferences = serde_json::from_slice(record).unwrap_or_default();
+    let mut sources = HashSet::new();
+    preferences.sources.retain(|source| {
+        valid_source(source) && sources.insert((source.profile.clone(), source.account_id))
+    });
+    if dangling_selection(&preferences) {
+        preferences.selected = None;
+    }
+    preferences
 }
 
-pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
-    let path = StateRoot::account_path().map_err(|_| "saved model preferences unavailable")?;
-    let Some(root) = arany::StateRoot::open_optional(&path)
-        .map_err(|_| "saved model preferences unavailable or unsafe")?
-    else {
-        return Ok(false);
+fn valid_source(source: &SavedModels) -> bool {
+    let mut models = HashSet::new();
+    let valid_selection = match source.model.as_deref() {
+        Some(model) if arany::validate_native_model_id(model).is_ok() => {
+            if ProviderKind::parse(&source.profile) == Some(ProviderKind::ChatGpt) {
+                source.effort.is_some()
+            } else {
+                arany::resolve_native_effort_for_run(&source.profile, model, source.effort).is_ok()
+            }
+        }
+        None => source.effort.is_none(),
+        _ => false,
     };
-    root.with_account_replacement_lock(workspace, || {
-        let record = root
-            .record(MODEL_PREFERENCES.kind)
-            .read()
-            .map_err(|_| "saved model preferences unavailable or unsafe")?;
-        Ok(record.is_some_and(|bytes| decode_preferences(&bytes).is_err()))
+    ProviderKind::parse(source.profile.as_str()).is_some_and(ProviderKind::is_native)
+        && source.account_id.get_version() == Some(uuid::Version::SortRand)
+        && valid_selection
+        && source.catalog.len() <= MAX_CATALOG_MODELS
+        && source.catalog.iter().all(|model| {
+            arany::validate_native_model_id(&model.id).is_ok() && models.insert(&model.id)
+        })
+}
+
+fn dangling_selection(preferences: &ModelPreferences) -> bool {
+    preferences.selected.as_ref().is_some_and(|selected| {
+        !preferences.sources.iter().any(|source| {
+            source.profile == selected.profile && source.account_id == selected.account_id
+        })
     })
-    .map_err(|_| "saved model preferences unavailable".to_owned())?
 }
 
 fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreferences, String> {
     let mut sources = HashSet::new();
-    if preferences.version != PREFERENCES_VERSION
-        || preferences.sources.len() > MAX_PREFERENCE_SOURCES
-    {
-        return Err("invalid saved model preferences".into());
-    }
-    for source in &preferences.sources {
-        let mut models = HashSet::new();
-        let valid_selection = match source.model.as_deref() {
-            Some(model) if arany::validate_native_model_id(model).is_ok() => {
-                if ProviderKind::parse(&source.profile) == Some(ProviderKind::ChatGpt) {
-                    source.effort.is_some()
-                } else {
-                    arany::resolve_native_effort_for_run(&source.profile, model, source.effort)
-                        .is_ok()
-                }
-            }
-            None => source.effort.is_none(),
-            _ => false,
-        };
-        if !ProviderKind::parse(source.profile.as_str()).is_some_and(ProviderKind::is_native)
-            || source.account_id.get_version() != Some(uuid::Version::SortRand)
-            || !sources.insert((&source.profile, source.account_id))
-            || !valid_selection
-            || source.catalog.len() > MAX_CATALOG_MODELS
-            || source.catalog.iter().any(|model| {
-                arany::validate_native_model_id(&model.id).is_err() || !models.insert(&model.id)
-            })
-        {
-            return Err("invalid saved model preferences".into());
-        }
-    }
-    if preferences.selected.as_ref().is_some_and(|selected| {
-        !preferences.sources.iter().any(|source| {
-            source.profile == selected.profile && source.account_id == selected.account_id
+    if preferences.sources.len() > MAX_PREFERENCE_SOURCES
+        || preferences.sources.iter().any(|source| {
+            !valid_source(source) || !sources.insert((&source.profile, source.account_id))
         })
-    }) {
+        || dangling_selection(&preferences)
+    {
         return Err("invalid saved model preferences".into());
     }
     Ok(preferences)
@@ -1392,48 +1365,61 @@ mod preference_tests {
             "effort": "medium", "refreshed_at": 1,
             "catalog": [{"id": "gpt-6.1-sol", "window": 272_000}, {"id": "another-model"}]
         });
-        let document = json!({"version": PREFERENCES_VERSION, "sources": [source.clone()]});
-        let mut cases = vec![(document.clone(), true)];
-        for (profile, account_id, accepted) in [
+        let document = json!({"sources": [source.clone()]});
+        // Each case keeps this many sources and, when one is named, whether the selection survives.
+        let mut cases = vec![(document.clone(), 1, None)];
+        for (profile, account_id, kept) in [
             ("chatgpt", id, true),
             ("openai", id, false),
             ("chatgpt", uuid::Uuid::now_v7(), false),
         ] {
             let mut changed = document.clone();
             changed["selected"] = json!({"profile": profile, "account_id": account_id});
-            cases.push((changed, accepted));
+            cases.push((changed, 1, Some(kept)));
         }
         let mut absent_model = document.clone();
         absent_model["selected"] = json!({"profile": "chatgpt", "account_id": id});
         absent_model["sources"][0]["model"] = json!(null);
         absent_model["sources"][0]["effort"] = json!(null);
-        cases.push((absent_model, true));
-        for (field, value) in [
-            ("profile", json!("custom:host")),
-            ("account_id", json!("2e664d00-3f9a-40c3-adeb-c6447313a871")),
-            ("effort", json!(null)),
-            ("model", json!("bad\nmodel")),
-            ("catalog", json!([{"id": "duplicate"}, {"id": "duplicate"}])),
-            ("catalog", json!([{"id": "bad\u{1b}model"}])),
-            ("catalog", json!(["gpt-6.1-sol"])),
-            ("catalog", json!([{"id": "gpt-6.1-sol", "window": -1}])),
-            ("catalog", json!([{"id": "gpt-6.1-sol", "runnable": true}])),
-            ("refreshed_at", json!("today")),
-            ("runnable", json!(true)),
+        cases.push((absent_model, 1, Some(true)));
+        for (field, value, kept) in [
+            ("profile", json!("custom:host"), 0),
+            (
+                "account_id",
+                json!("2e664d00-3f9a-40c3-adeb-c6447313a871"),
+                0,
+            ),
+            ("effort", json!(null), 0),
+            ("model", json!("bad\nmodel"), 0),
+            (
+                "catalog",
+                json!([{"id": "duplicate"}, {"id": "duplicate"}]),
+                0,
+            ),
+            ("catalog", json!([{"id": "bad\u{1b}model"}]), 0),
+            ("catalog", json!(["gpt-6.1-sol"]), 0),
+            ("catalog", json!([{"id": "gpt-6.1-sol", "window": -1}]), 0),
+            (
+                "catalog",
+                json!([{"id": "gpt-6.1-sol", "runnable": true}]),
+                1,
+            ),
+            ("refreshed_at", json!("today"), 0),
+            ("runnable", json!(true), 1),
         ] {
             let mut changed = document.clone();
             changed["sources"][0][field] = value;
-            cases.push((changed, false));
+            cases.push((changed, kept, None));
         }
         let mut changed = document.clone();
-        changed["version"] = json!(PREFERENCES_VERSION - 1);
-        cases.push((changed, false));
+        changed["version"] = json!(2);
+        cases.push((changed, 1, None));
         let mut changed = document.clone();
         changed["sources"] = json!([source.clone(), source.clone()]);
-        cases.push((changed, false));
+        cases.push((changed, 1, None));
         let mut changed = document.clone();
         changed["sources"] = json!(vec![source.clone(); MAX_PREFERENCE_SOURCES + 1]);
-        cases.push((changed, false));
+        cases.push((changed, 0, None));
         for count in [MAX_CATALOG_MODELS, MAX_CATALOG_MODELS + 1] {
             let mut changed = document.clone();
             changed["sources"][0]["catalog"] = json!(
@@ -1441,14 +1427,19 @@ mod preference_tests {
                     .map(|index| json!({"id": format!("model-{index}")}))
                     .collect::<Vec<_>>()
             );
-            cases.push((changed, count == MAX_CATALOG_MODELS));
+            cases.push((changed, usize::from(count == MAX_CATALOG_MODELS), None));
         }
-        for (document, accepted) in cases {
+        cases.push((json!("not an object"), 0, None));
+        for (document, sources, selected) in cases {
             root.record(RecordKind::ModelPreferences)
                 .replace(&serde_json::to_vec(&document).unwrap())
                 .unwrap();
             let reopened = StateRoot::open_existing(root.path()).unwrap();
-            assert_eq!(read_preferences(&reopened).is_ok(), accepted);
+            let preferences = read_preferences(&reopened).unwrap();
+            assert_eq!(preferences.sources.len(), sources, "{document}");
+            if let Some(kept) = selected {
+                assert_eq!(preferences.selected.is_some(), kept, "{document}");
+            }
         }
         root.record(RecordKind::ModelPreferences)
             .replace(&serde_json::to_vec(&document).unwrap())
@@ -1640,7 +1631,7 @@ mod preference_tests {
 
         root.record(RecordKind::ModelPreferences)
             .replace(
-                json!({"version": PREFERENCES_VERSION, "sources": [{
+                json!({"sources": [{
                     "profile": "chatgpt", "account_id": id, "model": null, "effort": null,
                     "catalog": [{"id": "gpt-6.1-sol"}]
                 }]})

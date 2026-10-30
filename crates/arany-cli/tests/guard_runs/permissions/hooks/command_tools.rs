@@ -29,7 +29,7 @@ impl CommandFixture {
         state
             .record(arany::RecordKind::WorkspacePermissions)
             .replace(
-                &serde_json::to_vec(&json!({"version":2,"workspaces":[{
+                &serde_json::to_vec(&json!({"workspaces":[{
                     "path":workspace,"device":folder.dev(),"inode":folder.ino(),"mode":"request",
                     "runtime_grants":[{"kind":"user_programs","manager":"user_directory","version":null,
                         "path":directory,"device":programs.dev(),"inode":programs.ino()}]

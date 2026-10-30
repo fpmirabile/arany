@@ -581,8 +581,8 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 account
                     .record(arany::RecordKind::SavedAccount).replace(
                         &serde_json::to_vec(&serde_json::json!({
-                            "schema":2,"storage":"private_file","account":{
-                                "schema":3,"id":uuid::Uuid::now_v7(),"provider":{"kind":"openai","custom_name":null},
+                            "storage":"private_file","account":{
+                                "id":uuid::Uuid::now_v7(),"provider":{"kind":"openai","custom_name":null},
                                 "model":"gpt-5.4","effort":null,"api_key":"synthetic-never-sent-key","anthropic_workspace_id":null
                             }
                         }))
@@ -941,15 +941,18 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
 #[test]
 #[cfg(target_os = "linux")]
 #[cfg_attr(not(arany_ci), ignore = "native Linux PTY folder trust recovery")]
-fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_current_damage() {
+fn trust_record_recovery_archives_refused_records_and_stops_on_unsafe_ones() {
     #[derive(Clone, Copy)]
     enum Case {
-        OtherVersion,
-        Malformed,
+        Refused(&'static [u8]),
         Linked,
     }
 
-    for case in [Case::OtherVersion, Case::Malformed, Case::Linked] {
+    for case in [
+        Case::Refused(br#"{"version":1,"workspaces":[]}"#),
+        Case::Refused(b"{"),
+        Case::Linked,
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         std::fs::create_dir(&workspace).unwrap();
@@ -962,14 +965,9 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
                 std::fs::write(&outside, br#"{"version":1,"workspaces":[]}"#).unwrap();
                 std::os::unix::fs::symlink(&outside, &record).unwrap();
             }
-            Case::OtherVersion => {
+            Case::Refused(bytes) => {
                 root.record(arany::RecordKind::WorkspacePermissions)
-                    .replace(br#"{"version":1,"workspaces":[]}"#)
-                    .unwrap();
-            }
-            Case::Malformed => {
-                root.record(arany::RecordKind::WorkspacePermissions)
-                    .replace(b"{")
+                    .replace(bytes)
                     .unwrap();
             }
         }
@@ -1003,36 +1001,18 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
         match case {
             Case::Linked => {
                 wait(&mut pty, "owner-only regular");
-                assert!(
-                    !super::session_picker::screen_contains(
-                        &pty.transcript,
-                        80,
-                        24,
-                        "Reset folder trust"
-                    ),
-                    "a non-private record must not offer a reset"
-                );
                 pty.send(b"\x1b[B\r");
-            }
-            Case::Malformed => {
-                wait(&mut pty, "workspace-permissions.json is malformed");
-                pty.send(b"\x1b[B\r");
-                wait(&mut pty, "Reset folder trust?");
-                pty.send(b"\t\r");
-                wait(&mut pty, "Do you trust this folder?");
-                assert!(!record.exists(), "consented reset must delete the record");
-                pty.send(b"\x03");
             }
             // The record is archived before any setup step and named in the startup notice
             // (terminal.md, attached startup), which the chat shows after the trust choice.
-            Case::OtherVersion => {
+            Case::Refused(_) => {
                 wait(&mut pty, "Do you trust this folder?");
                 assert!(
                     !record.exists(),
-                    "an other-version record must leave the state root"
+                    "a refused record must leave the state root"
                 );
                 pty.send(b"\r");
-                wait(&mut pty, "Saved records from an incompatible version");
+                wait(&mut pty, "Saved records this version cannot read");
                 pty.send(b"\x03");
                 wait(&mut pty, "Ctrl+C again exits");
                 pty.send(b"\x03");
@@ -1053,7 +1033,7 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
         };
         pty.pump();
         assert!(status.success());
-        if matches!(case, Case::OtherVersion) {
+        if let Case::Refused(bytes) = case {
             let folders: Vec<_> = std::fs::read_dir(account.join("archive"))
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
@@ -1063,7 +1043,7 @@ fn trust_record_recovery_archives_other_versions_and_offers_reset_only_for_curre
             };
             assert_eq!(
                 std::fs::read(folder.join("workspace-permissions.json")).unwrap(),
-                br#"{"version":1,"workspaces":[]}"#
+                bytes
             );
         }
         if matches!(case, Case::Linked) {
@@ -1298,13 +1278,13 @@ fn consent_probe(
 #[cfg(target_os = "linux")]
 fn seed_command_environment(state: &std::path::Path, path: Vec<String>) {
     let canonical =
-        serde_json::to_vec(&serde_json::json!([3, "process", null, path, [], []])).unwrap();
+        serde_json::to_vec(&serde_json::json!(["process", null, path, [], []])).unwrap();
     StateRoot::admit(state)
         .unwrap()
         .record(arany::RecordKind::CommandEnvironment)
         .replace(
             &serde_json::to_vec(&serde_json::json!({
-                "version": 3, "source": "process", "shell": null, "captured_at": 0, "path": path,
+                "source": "process", "shell": null, "captured_at": 0, "path": path,
                 "names": [], "excluded": [], "sha256": hash(&canonical)
             }))
             .unwrap(),
@@ -1378,7 +1358,7 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
     }
     expected.push(volta.to_str().unwrap());
     assert_eq!(selected, expected);
-    assert_eq!(trusted["version"], 2);
+    assert!(trusted.get("version").is_none());
     let remembered = std::fs::read(&record_path).unwrap();
     consent_probe(root, &search, false, None);
     assert_eq!(std::fs::read(&record_path).unwrap(), remembered);
@@ -1533,7 +1513,7 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
         trusted["workspaces"][0]["path"],
         workspace.to_str().unwrap()
     );
-    assert_eq!(trusted["version"], 2);
+    assert!(trusted.get("version").is_none());
     assert_eq!(
         trusted["workspaces"][0]["runtime_grants"][0]["path"],
         node.to_str().unwrap()
@@ -1628,7 +1608,7 @@ fn run_permissions_journey(journey: PermissionsJourney) {
     let state = temp.path().join("state");
     if matches!(journey, PermissionsJourney::LoginShellCapture) {
         let root = StateRoot::admit(&state).unwrap();
-        root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"version":3,"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"1ae964a6a4911a76405b9484671bd5f5c24650a712f4c6c829698c8ad9128c2b"}"#).unwrap();
+        root.record(arany::RecordKind::CommandEnvironment).replace(br#"{"source":"process","shell":null,"captured_at":0,"path":["/pinned-programs"],"names":[{"name":"LANG","value":"C"}],"excluded":[],"sha256":"4b1f9ed292c2e50601038b69b1c914cd752c047f22bc0944ea3589c8c26e058c"}"#).unwrap();
     }
     let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
     let mut pty = Pty::with_responses(

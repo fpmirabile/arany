@@ -295,7 +295,7 @@ fn facts_engine_with_telemetry(
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
@@ -1092,9 +1092,11 @@ async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let workspace = facts_workspace(temp.path(), "original");
     let state_path = temp.path().join("state");
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    std::fs::write(state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
-    ).expect("write grant");
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
     let script = (0..4)
         .map(|_| crate::tool_outcome(facts_read()))
         .chain([crate::tool_outcome(arany::ToolCall::Write {
@@ -1163,9 +1165,11 @@ async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file(
     }
     let state_path = temp.path().join("state");
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    std::fs::write(state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
-    ).expect("write grant");
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
     let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(
         arany::ToolCall::Write {
             path: "notes/facts.txt".into(),
@@ -1235,9 +1239,11 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
         finish_with("Unexpected continuation after context refusal"),
     ]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    std::fs::write(state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
-    ).expect("write grant");
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
     let mut input = request(&workspace, &"x".repeat(60 * 1024));
     input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
     input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
@@ -2202,7 +2208,7 @@ async fn near_full_context_refuses_command_before_dispatch() {
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     std::fs::write(
         state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("write grant");
     let command = arany::ToolCall::Command {
@@ -2347,7 +2353,11 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).expect("state");
         let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .expect("config");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private config");
         let engine = engine_support::open(
@@ -2684,8 +2694,11 @@ async fn concurrent_reads_commit_in_completion_order_and_settle_before_effects()
         let workspace = facts_workspace(temp.path(), "first\nsecond\nthird\nfourth\n");
         let state = temp.path().join("state");
         let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
-        std::fs::write(state.join("tools.json"),
-            br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            state.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         let count = if case == "four reads" { 4 } else { 2 };
         let reads: Vec<_> = (1..=count)
             .map(|offset| arany::ToolCall::Read {

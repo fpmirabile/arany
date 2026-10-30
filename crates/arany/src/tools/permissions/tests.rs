@@ -2467,7 +2467,7 @@ fn remembered_host_prefix_revalidates_executable_bytes_before_saving() {
     let tools = state.path().join("tools.json");
     std::fs::write(
         &tools,
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .unwrap();
     std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2583,7 +2583,7 @@ fn host_prefix_records_enforce_literal_scope_closed_policy_and_settings_bounds()
         }
     }
     let mut record = serde_json::to_value(&rule).unwrap();
-    record["version"] = json!(crate::tools::unguarded::HOST_POLICY_VERSION + 1);
+    record["version"] = json!(1);
     assert!(
         PermissionConfig::parse(
             &serde_json::to_vec(&json!({"permissions":{"hostPrefixes":[record]}})).unwrap()
@@ -2624,7 +2624,10 @@ fn host_prefix_scope_normalizes_lexical_paths_without_admitting_directory_aliase
 fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
     let intent = host_intent();
     let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
-    let mut config: crate::tools::config::Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let mut config: crate::tools::config::Config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     assert!(rule.admitted_by(&config));
     for name in ["python3.14", "git", "gh"] {
         let program: crate::tools::config::Program = serde_json::from_value(json!({"name":name,"executable":format!("/opt/bin/{name}"),"sha256":"a".repeat(64),"interpreter":name == "python3.14","inputs":[]})).unwrap();

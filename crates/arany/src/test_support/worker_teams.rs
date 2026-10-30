@@ -404,7 +404,10 @@ async fn run_case_inner(
     }
     let state = directory.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    crate::test_support::private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
+    crate::test_support::private_file(
+        &state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    );
     std::fs::create_dir(state.join("agents")).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -430,7 +433,7 @@ async fn run_case_inner(
     if case == "hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         crate::test_support::private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
-            "version":1,"workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
+            "workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
             "commands":[{"name":"sh","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}]
         })).unwrap());
         let hook = serde_json::json!({"type":"command","command":"exit 0","timeout":5});

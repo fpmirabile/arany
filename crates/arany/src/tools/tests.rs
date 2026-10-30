@@ -4,7 +4,7 @@ use super::types::*;
 use serde_json::{Value, json};
 
 pub(super) fn config_value() -> Value {
-    json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
+    json!({"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
     let temp = tempfile::tempdir().unwrap();
     let mut runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     runtime.context_limit_bytes = std::sync::Arc::new((1 << 20).into());
     let limit = runtime.context_limit_bytes();
@@ -670,7 +670,7 @@ fn compaction_readmission_accepts_a_recorded_locale() {
     let tools = state.path().join("tools.json");
     std::fs::write(
         &tools,
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .unwrap();
     std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
@@ -710,7 +710,7 @@ fn a_changed_environment_record_changes_the_process_policy_digest() {
         let tools = state.path().join("tools.json");
         std::fs::write(
             &tools,
-            br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
         )
         .unwrap();
         std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600))

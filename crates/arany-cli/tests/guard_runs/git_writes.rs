@@ -75,7 +75,6 @@ impl Repo {
         StateRoot::admit(&state).unwrap();
         let executable = std::fs::canonicalize(GIT).unwrap();
         let config = json!({
-            "version": 1,
             "workspace_paths": ["."],
             "write": true,
             "commands": [],

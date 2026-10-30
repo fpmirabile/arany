@@ -86,8 +86,6 @@ pub struct RuntimeProfileOption {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TrustRecordError {
-    #[error("workspace-permissions.json uses unsupported version {0}; this Arany reads version 2")]
-    UnsupportedVersion(u64),
     #[error("workspace-permissions.json is malformed")]
     Malformed,
     #[error(
@@ -106,12 +104,6 @@ pub enum TrustRecordError {
     Changed,
 }
 
-impl TrustRecordError {
-    pub fn is_resettable(&self) -> bool {
-        matches!(self, Self::UnsupportedVersion(_) | Self::Malformed)
-    }
-}
-
 impl From<TrustRecordError> for ToolError {
     fn from(_: TrustRecordError) -> Self {
         ToolError::Configuration
@@ -121,7 +113,6 @@ impl From<TrustRecordError> for ToolError {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Permissions {
-    version: u8,
     workspaces: Vec<Entry>,
 }
 
@@ -152,8 +143,6 @@ fn state_error(error: StoreError) -> TrustRecordError {
 
 pub(crate) const WORKSPACE_PERMISSIONS: RecordFormat = RecordFormat {
     kind: RecordKind::WorkspacePermissions,
-    field: "version",
-    current: 2,
     accepts: |bytes| parse(bytes).is_ok(),
 };
 
@@ -167,7 +156,6 @@ fn read(root: &StateRoot) -> Result<Permissions, TrustRecordError> {
     match read_bytes(root)? {
         Some(bytes) => parse(&bytes),
         None => Ok(Permissions {
-            version: 2,
             workspaces: Vec::new(),
         }),
     }
@@ -176,13 +164,6 @@ fn read(root: &StateRoot) -> Result<Permissions, TrustRecordError> {
 fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
     let value =
         super::skills::parse_json(bytes, 64 * 1024).map_err(|_| TrustRecordError::Malformed)?;
-    let version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or(TrustRecordError::Malformed)?;
-    if version != 2 {
-        return Err(TrustRecordError::UnsupportedVersion(version));
-    }
     let record: Permissions =
         serde_json::from_value(value).map_err(|_| TrustRecordError::Malformed)?;
     if record.workspaces.len() > 128
@@ -496,7 +477,6 @@ impl WorkspacePermissions {
             }]
         };
         let config = Config {
-            version: 1,
             workspace_paths: vec![".".into()],
             write: true,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -514,51 +494,6 @@ impl WorkspacePermissions {
         };
         config.validate()?;
         Ok(config)
-    }
-}
-
-/// Pins the current unsupported or malformed record so a consented reset deletes exactly it.
-pub struct TrustReset {
-    root: StateRoot,
-    workspace: PathBuf,
-    bytes: Vec<u8>,
-}
-
-impl WorkspacePermissions {
-    pub fn prepare_reset(workspace: &Path) -> Result<TrustReset, TrustRecordError> {
-        let account = StateRoot::account_path().map_err(state_error)?;
-        let root = StateRoot::open_existing(&account).map_err(state_error)?;
-        prepare_reset_with(workspace, root)
-    }
-}
-
-fn prepare_reset_with(workspace: &Path, root: StateRoot) -> Result<TrustReset, TrustRecordError> {
-    let bytes = read_bytes(&root)?.ok_or(TrustRecordError::Changed)?;
-    match parse(&bytes) {
-        Err(error) if error.is_resettable() => Ok(TrustReset {
-            root,
-            workspace: workspace.to_owned(),
-            bytes,
-        }),
-        Err(error) => Err(error),
-        Ok(_) => Err(TrustRecordError::Changed),
-    }
-}
-
-impl TrustReset {
-    pub fn apply(self) -> Result<(), TrustRecordError> {
-        self.root
-            .with_account_replacement_lock(&self.workspace, || {
-                let current = read_bytes(&self.root)?;
-                if current.as_deref() != Some(self.bytes.as_slice()) {
-                    return Err(TrustRecordError::Changed);
-                }
-                self.root
-                    .record(RecordKind::WorkspacePermissions)
-                    .remove()
-                    .map_err(record_error)
-            })
-            .map_err(state_error)?
     }
 }
 
@@ -1427,18 +1362,16 @@ channel = "stable"
                 .unwrap()
                 .is_trusted()
         );
-        for (record, cause) in [
-            (
-                br#"{"version":1,"workspaces":[]}"#.as_slice(),
-                TrustRecordError::UnsupportedVersion(1),
-            ),
-            (
-                br#"{"version":2,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#.as_slice(),
-                TrustRecordError::Malformed,
-            ),
+        for record in [
+            br#"{"version":2,"workspaces":[]}"#.as_slice(),
+            br#"{"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#,
         ] {
             root.record(RecordKind::WorkspacePermissions).replace(record).unwrap();
-            assert_eq!(WorkspacePermissions::load(&path, &root).err(), Some(cause));
+            assert_eq!(
+                WorkspacePermissions::load(&path, &root).err(),
+                Some(TrustRecordError::Malformed)
+            );
+            assert!(!(WORKSPACE_PERMISSIONS.accepts)(record));
         }
         {
             std::fs::remove_file(root.path().join("workspace-permissions.json")).unwrap();
@@ -1452,56 +1385,6 @@ channel = "stable"
                 Some(TrustRecordError::RecordNotPrivate)
             );
         }
-    }
-
-    #[test]
-    fn unsupported_trust_record_resets_only_with_the_pinned_bytes() {
-        let temp = tempfile::tempdir().unwrap();
-        let state = temp.path().join("state");
-        let root = StateRoot::admit(&state).unwrap();
-        let path = temp.path().join("project");
-        std::fs::create_dir(&path).unwrap();
-        let file = state.join("workspace-permissions.json");
-        let version_one = br#"{"version":1,"workspaces":[]}"#;
-        root.record(RecordKind::WorkspacePermissions)
-            .replace(version_one)
-            .unwrap();
-
-        let reset = prepare_reset_with(&path, root.try_clone().unwrap()).unwrap();
-        root.record(RecordKind::WorkspacePermissions)
-            .replace(br#"{"version":1,"workspaces":[] }"#)
-            .unwrap();
-        assert_eq!(reset.apply(), Err(TrustRecordError::Changed));
-        assert!(file.exists());
-
-        let reset = prepare_reset_with(&path, root.try_clone().unwrap()).unwrap();
-        reset.apply().unwrap();
-        assert!(!file.exists());
-        assert!(
-            !WorkspacePermissions::load(&path, &root)
-                .unwrap()
-                .is_trusted()
-        );
-
-        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
-        access
-            .save(&root, true, ApprovalMode::AutoEdits, Vec::new())
-            .unwrap();
-        let before = std::fs::read(&file).unwrap();
-        assert_eq!(
-            prepare_reset_with(&path, root.try_clone().unwrap()).err(),
-            Some(TrustRecordError::Changed)
-        );
-        assert_eq!(std::fs::read(&file).unwrap(), before);
-
-        assert!(TrustRecordError::UnsupportedVersion(1).is_resettable());
-        assert!(TrustRecordError::Malformed.is_resettable());
-        assert!(!TrustRecordError::RecordNotPrivate.is_resettable());
-        assert!(!TrustRecordError::StateNotPrivate.is_resettable());
-        assert!(!TrustRecordError::StateInsideWorkspace.is_resettable());
-        assert!(!TrustRecordError::StateUnavailable.is_resettable());
-        assert!(!TrustRecordError::Workspace.is_resettable());
-        assert!(!TrustRecordError::Changed.is_resettable());
     }
 
     #[test]
@@ -1520,7 +1403,7 @@ channel = "stable"
     }
 
     #[test]
-    fn oversize_trust_record_is_named_as_not_private_and_never_reset() {
+    fn oversize_trust_record_is_named_as_not_private() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
@@ -1533,8 +1416,6 @@ channel = "stable"
         let error = WorkspacePermissions::load(&path, &root).err().unwrap();
         assert_eq!(error, TrustRecordError::RecordNotPrivate);
         assert!(error.to_string().contains("within 64 KiB"));
-        assert!(!error.is_resettable());
-        assert!(prepare_reset_with(&path, root.try_clone().unwrap()).is_err());
         assert!(record.exists());
     }
 }

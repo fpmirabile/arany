@@ -125,7 +125,7 @@ done
         let shell_digest = hash(&std::fs::read("/bin/sh").unwrap());
         let git = std::fs::canonicalize("/Library/Developer/CommandLineTools/usr/bin/git").unwrap();
         let config = json!({
-            "version": 1, "workspace_paths": ["."], "write": true,
+            "workspace_paths": ["."], "write": true,
             "commands": [{"name":"shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,"inputs":[]}],
             "skills": [],
             "mcp": [{"name":"synthetic","program":{"name":"mcp-shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,

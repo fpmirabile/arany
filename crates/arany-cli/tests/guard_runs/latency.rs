@@ -95,7 +95,7 @@ fn fixture_for(
     } else {
         Vec::new()
     };
-    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":commands,"skills":[],"mcp":[]})).unwrap());
+    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":commands,"skills":[],"mcp":[]})).unwrap());
     let provider = Arc::new(
         ScriptedProvider::new(vec![
             ProviderOutcome::Tools(

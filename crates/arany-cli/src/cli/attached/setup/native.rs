@@ -209,10 +209,6 @@ pub(super) async fn reset_saved_setup(
             "Reset ChatGPT setup?",
             "Outdated or damaged setup. Reset ChatGPT accounts, sign-in and models; keep history and API accounts. Password-store entries may remain; no remote sign-out.",
         ),
-        credentials::SetupData::Models => (
-            "Reset saved model choices?",
-            "Clear outdated or damaged model choices; keep accounts, history and folder trust.",
-        ),
     };
     if choose(
         terminal,
@@ -233,10 +229,6 @@ pub(super) async fn reset_saved_setup(
         credentials::SetupData::ChatGpt => (
             ProviderSetupTargetKind::ChatGptAccount,
             "chatgpt-setup".to_owned(),
-        ),
-        credentials::SetupData::Models => (
-            ProviderSetupTargetKind::ModelPreferences,
-            "models".to_owned(),
         ),
     };
     let operation = journal.start(kind, identity, None).await?;

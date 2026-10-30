@@ -132,9 +132,7 @@ pub(crate) use git::recover_locks as report_git_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
 pub(crate) use workspace::WORKSPACE_PERMISSIONS;
-pub use workspace::{
-    RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
-};
+pub use workspace::{RuntimeProfileOption, TrustRecordError, WorkspacePermissions, mention_paths};
 
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?

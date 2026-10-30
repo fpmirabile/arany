@@ -851,7 +851,6 @@ pub(super) mod reuse_tests {
             limit: Some(1),
         };
         let mut definition = crate::tools::definitions::AgentDefinition {
-            version: 1,
             name: "reader".into(),
             description: "Read".into(),
             tools: None,

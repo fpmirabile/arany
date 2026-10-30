@@ -99,10 +99,10 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
         let disconnected = matches!(access, Access::Disconnected);
         let token = (storage == "private_file" && !disconnected).then(|| {
             serde_json::json!({
-                "schema": 2, "slot": null,
+                "slot": null,
                 "credentials": {
                     "client_id": client, "host_id": host, "subject": "synthetic-subject",
-                    "id_token": ACCESS, "access_token": ACCESS,
+                    "chatgpt_account_id": "synthetic-account", "id_token": ACCESS, "access_token": ACCESS,
                     "refresh_token": ACCESS, "access_expires_at_unix": 4_000_000_000_u64
                 },
                 "consent": {
@@ -115,20 +115,20 @@ fn seed_accounts(root: &StateRoot, storage: &str, access: Access) -> Uuid {
         let keyring_slot = (storage == "keyring").then(|| crate::setup::chatgpt_slot(client, id));
         serde_json::json!({
             "id": id, "host_id": host, "client_id": client, "subject": "synthetic-subject",
-            "chatgpt_account_id": null, "keyring_slot": keyring_slot,
+            "chatgpt_account_id": "synthetic-account", "keyring_slot": keyring_slot,
             "storage": storage, "renewal_pending": matches!(access, Access::RenewalPending),
             "signout_pending": matches!(access, Access::SignOutPending), "disconnected": disconnected,
             "token": token
         })
     };
     root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema": 5, "selected": selected,
+        "selected": selected,
         "accounts": [entry(selected, "oaiapp_selected_inspection"), entry(inspected, "oaiapp_other_inspection")]
     })).unwrap()).unwrap();
     root.record(RecordKind::ChatgptRegistration)
         .replace(
             &serde_json::to_vec(&serde_json::json!({
-                "schema": 2, "host_id": host
+                "host_id": host
             }))
             .unwrap(),
         )

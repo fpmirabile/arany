@@ -87,7 +87,7 @@ impl Fixture {
         server_program["inputs"] =
             json!([{"path":script,"destination":"server.sh","sha256":hash(source.as_bytes())}]);
         private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
-            "version":1,"workspace_paths":["notes"],"write":write,"commands":[program],"skills":[],
+            "workspace_paths":["notes"],"write":write,"commands":[program],"skills":[],
             "mcp":[{"name":"server","program":server_program,"args":["/inputs/server/server.sh"],"tools":["echo"]}]
         })).unwrap());
         if let Some(settings) = settings {

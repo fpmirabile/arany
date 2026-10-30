@@ -1080,8 +1080,10 @@ pub(crate) fn workspace_entries(
     validate_mention_path(folder, true)?;
     validate_mention_path(prefix, true)?;
     let root = open_directory(workspace)?;
-    let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}))
-        .map_err(|_| ToolError::Configuration)?;
+    let config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .map_err(|_| ToolError::Configuration)?;
     let call = ToolCall::List {
         path: if folder.is_empty() {
             ".".into()
@@ -2456,7 +2458,7 @@ mod path_tests {
         let runtime = super::super::tests::in_process_runtime(
             &workspace,
             json!({
-                "version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]
+                "workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]
             }),
         );
         for (path, expected) in [

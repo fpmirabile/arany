@@ -125,7 +125,7 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     let entry = |id, client| {
         serde_json::json!({
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
-            "chatgpt_account_id":null,"keyring_slot":chatgpt_slot(client, id),
+            "chatgpt_account_id":"synthetic-account","keyring_slot":chatgpt_slot(client, id),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
             "disconnected":false,"token":null
         })
@@ -133,7 +133,7 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     root.record(RecordKind::ChatgptAccounts)
         .replace(
             &serde_json::to_vec(&serde_json::json!({
-                "schema":5,"selected":selected,
+                "selected":selected,
                 "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)]
             }))
             .unwrap(),

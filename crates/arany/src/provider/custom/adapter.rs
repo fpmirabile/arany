@@ -170,22 +170,7 @@ mod tests {
     }
 
     async fn local_custom_provider(port: u16, messages: bool) -> CustomProvider {
-        let mut profile = CustomProfile {
-            name: "local".into(),
-            protocol: super::super::Protocol::OpenaiResponses,
-            endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
-            model: "model-1".into(),
-            credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            efforts: Vec::new(),
-        };
-        if messages {
-            let base_url = format!("http://127.0.0.1:{port}/anthropic");
-            profile.endpoint = format!("{base_url}/v1/messages");
-            profile.protocol = super::super::Protocol::AnthropicMessages {
-                base_url,
-                auth: super::super::MessagesAuth::ApiKey,
-            };
-        }
+        let profile = super::super::local_profile(port, messages);
         let destination = profile.resolve_destination().await.unwrap();
         CustomProvider {
             identity: ProviderIdentity::new(

@@ -44,7 +44,7 @@ pub(super) async fn edit_custom_route(
     let summary = format!(
         "Name: {}\nDestination: {}\nModel: {}\nSaving does not call the Provider or verify credentials.",
         escape_terminal(&draft.name),
-        escape_terminal(&draft.endpoint),
+        escape_terminal(&draft.url),
         escape_terminal(&draft.model),
     );
     if review_warning(
@@ -126,7 +126,7 @@ pub(super) async fn add_custom_route(
     let summary = format!(
         "Name: {}\nDestination: {}\nModel: {}\nCredential reference: {}\nSaving does not call the Provider or verify credentials.",
         escape_terminal(&draft.name),
-        escape_terminal(&draft.endpoint),
+        escape_terminal(&draft.url),
         escape_terminal(&draft.model),
         escape_terminal(&draft.credential_env),
     );
@@ -236,7 +236,7 @@ async fn custom_profile_form(
     let Some(protocol) = choose_custom_protocol(terminal, initial).await? else {
         return Ok(None);
     };
-    let Some((name, endpoint, model, credential_env)) =
+    let Some((name, url, model, credential_env)) =
         read_custom_profile_fields(terminal, protocol, initial).await?
     else {
         return Ok(None);
@@ -244,14 +244,14 @@ async fn custom_profile_form(
     let Some(efforts) = read_custom_efforts(terminal, initial).await? else {
         return Ok(None);
     };
-    let messages_auth = if protocol == CustomProtocol::AnthropicMessages {
+    let auth = if protocol == CustomProtocol::AnthropicMessages {
         let Some(choice) = choose_focused(
             terminal,
             1,
             "Messages authentication",
             "Choose the one declared credential header",
             &[(b'1', "Bearer"), (b'2', "x-api-key")],
-            initial.map(|draft| match draft.messages_auth {
+            initial.and_then(|draft| draft.auth).map(|auth| match auth {
                 MessagesAuth::Bearer => b'1',
                 MessagesAuth::ApiKey => b'2',
             }),
@@ -260,23 +260,21 @@ async fn custom_profile_form(
         else {
             return Ok(None);
         };
-        if choice == b'1' {
+        Some(if choice == b'1' {
             MessagesAuth::Bearer
         } else {
             MessagesAuth::ApiKey
-        }
-    } else if protocol == CustomProtocol::OpenaiChatCompletions {
-        MessagesAuth::Bearer
+        })
     } else {
-        MessagesAuth::ApiKey
+        None
     };
     Ok(Some(CustomProfileDraft {
         name,
         protocol,
-        endpoint,
+        url,
+        auth,
         model,
         credential_env,
-        messages_auth,
         efforts,
     }))
 }
@@ -346,7 +344,7 @@ async fn read_custom_profile_fields(
         endpoint_prompt,
         initial
             .filter(|draft| draft.protocol == protocol)
-            .map_or("", |draft| &draft.endpoint),
+            .map_or("", |draft| &draft.url),
         MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
     )
     .await?

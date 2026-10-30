@@ -1075,7 +1075,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     for (name, bytes) in [
         (
             "tools.json",
-            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+            &br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
         ),
         (
             "permissions.json",

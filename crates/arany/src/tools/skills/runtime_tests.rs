@@ -16,7 +16,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     use std::path::PathBuf;
 
     let config = Config {
-        version: 1,
         workspace_paths: vec![".agents/skills".into()],
         write: false,
         child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -258,7 +257,7 @@ async fn an_unavailable_skill_root_does_not_disable_other_tools_or_renew_its_pin
     std::fs::write(workspace.join("note.txt"), "workspace fact").unwrap();
     std::fs::write(good.join("SKILL.md"), "good instructions").unwrap();
     let config = serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],
+        "workspace_paths":["."],"write":false,"commands":[],"mcp":[],
         "skills":[
             {"name":"good","description":"available","directory":good,"files":{"SKILL.md":hex_digest(b"good instructions")}},
             {"name":"missing","description":"unavailable","directory":unavailable,"files":{"SKILL.md":hex_digest(b"late instructions")}}
@@ -331,7 +330,7 @@ async fn skill_text_reads_are_bounded_inert_and_pinned_without_guard_execution()
     let runtime = in_process_runtime(
         &workspace,
         json!({
-            "version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],
+            "workspace_paths":["."],"write":false,"commands":[],"mcp":[],
             "skills":[{"name":"review","description":"Reviewed guidance","directory":directory,
                 "files":{"SKILL.md":hex_digest(body.as_bytes()),"references/note.txt":hex_digest(b"reference")}}]
         }),

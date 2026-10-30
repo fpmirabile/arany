@@ -40,7 +40,7 @@ pub async fn seed_host_prefix(
         .mode(0o600)
         .open(root.path().join("tools.json"))
         .expect("private host Tool configuration")
-        .write_all(br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#)
+        .write_all(br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#)
         .expect("host Tool configuration");
     let engine = super::engine::open(
         root,

@@ -7,7 +7,7 @@ fn editor_build_jobs_bind_selected_rust_before_guard_dispatch() {
     let mut runtime = crate::tools::tests::in_process_runtime(
         directory.path(),
         serde_json::json!({
-            "version":1,"workspace_paths":["."],"write":true,"skills":[],"mcp":[],
+            "workspace_paths":["."],"write":true,"skills":[],"mcp":[],
             "commands":[{"name":"sh","executable":"/unavailable","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],
             "runtime_grants":[{"kind":"rust","manager":"rustup","version":version,"path":directory.path().join(".rustup/toolchains").join(version),"device":1,"inode":1}]
         }),
@@ -54,7 +54,7 @@ async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_
     let mut runtime = crate::tools::tests::in_process_runtime(
         &workspace,
         serde_json::json!({
-            "version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]
+            "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]
         }),
     );
     runtime.cache_state = Some(Arc::new(state.try_clone().unwrap()));

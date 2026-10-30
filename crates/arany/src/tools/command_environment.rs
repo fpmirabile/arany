@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const VERSION: u8 = 3;
 const MAX_NAMES: usize = 32;
 const MAX_PATH_ENTRIES: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -36,7 +35,6 @@ struct Variable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvironment {
-    version: u8,
     source: Source,
     shell: Option<LoginShellIdentity>,
     captured_at: u64,
@@ -74,8 +72,6 @@ pub enum CommandEnvironmentError {
 
 pub(crate) const COMMAND_ENVIRONMENT: RecordFormat = RecordFormat {
     kind: RecordKind::CommandEnvironment,
-    field: "version",
-    current: VERSION as u64,
     accepts: |bytes| CommandEnvironment::parse(bytes).is_ok(),
 };
 
@@ -143,8 +139,8 @@ impl CommandEnvironment {
             Err(_) => return Err(ToolError::Configuration),
         };
         // Discovery writes nothing, so an unadmitted State or a record awaiting archive previews as a fresh one.
-        match found.filter(|bytes| !COMMAND_ENVIRONMENT.mismatched(bytes)) {
-            Some(bytes) => Self::parse(&bytes),
+        match found.and_then(|bytes| Self::parse(&bytes).ok()) {
+            Some(environment) => Ok(environment),
             None => Self::from_process().map_err(|error| match error {
                 CommandEnvironmentError::TooLarge(_) => ToolError::Limit,
                 _ => ToolError::Configuration,
@@ -332,7 +328,6 @@ impl CommandEnvironment {
     // Capture time is informational; keeping it out of the identity keeps the pinned digest stable across state roots.
     fn canonical(&self) -> Vec<u8> {
         serde_json::to_vec(&(
-            self.version,
             self.source,
             &self.shell,
             &self.path,
@@ -370,7 +365,6 @@ impl CommandEnvironment {
         }
         names.sort_by(|left, right| left.name.cmp(&right.name));
         let mut record = Self {
-            version: VERSION,
             source: Source::Process,
             shell: None,
             captured_at: super::now_ms(),
@@ -386,7 +380,6 @@ impl CommandEnvironment {
     #[cfg(any(target_os = "macos", test))]
     pub(crate) fn empty() -> Self {
         let mut record = Self {
-            version: VERSION,
             source: Source::Process,
             shell: None,
             captured_at: 0,
@@ -408,13 +401,11 @@ impl CommandEnvironment {
             let names: Vec<_> = names.collect();
             names.windows(2).all(|pair| pair[0] < pair[1])
         };
-        if record.version != VERSION
-            || !match (&record.source, &record.shell) {
-                (Source::Process, None) => true,
-                (Source::LoginShell, Some(shell)) => shell.valid(),
-                _ => false,
-            }
-            || record.path.len() > MAX_PATH_ENTRIES
+        if !match (&record.source, &record.shell) {
+            (Source::Process, None) => true,
+            (Source::LoginShell, Some(shell)) => shell.valid(),
+            _ => false,
+        } || record.path.len() > MAX_PATH_ENTRIES
             || !record.path.iter().all(|entry| valid_entry(entry))
             || record.path_string().len() > PATH_LIMIT_BYTES
             || record.names.len() > MAX_NAMES
@@ -638,24 +629,16 @@ mod tests {
         assert_eq!(record.read().unwrap(), saved);
 
         let mut previous = serde_json::to_value(&selected).unwrap();
-        previous["version"] = (VERSION - 1).into();
+        previous["version"] = 3.into();
         let previous_bytes = serde_json::to_vec(&previous).unwrap();
-        record.replace(&previous_bytes).unwrap();
-        assert_eq!(
-            CommandEnvironment::for_discovery(&path).unwrap().source(),
-            "process"
-        );
-        assert_eq!(record.read().unwrap().unwrap(), previous_bytes);
-
-        record.replace(b"invalid saved environment").unwrap();
-        assert!(matches!(
-            CommandEnvironment::for_discovery(&path),
-            Err(ToolError::Configuration)
-        ));
-        assert_eq!(
-            record.read().unwrap().unwrap(),
-            b"invalid saved environment"
-        );
+        for refused in [previous_bytes.as_slice(), b"invalid saved environment"] {
+            record.replace(refused).unwrap();
+            assert_eq!(
+                CommandEnvironment::for_discovery(&path).unwrap().source(),
+                "process"
+            );
+            assert_eq!(record.read().unwrap().unwrap(), refused);
+        }
 
         selected.save(&state).unwrap();
         std::fs::remove_file(path.join("events.sqlite3")).unwrap();
@@ -752,8 +735,7 @@ mod tests {
         let record = CommandEnvironment::for_path("/usr/bin:/bin");
         let good = serde_json::to_value(&record).unwrap();
         assert!(CommandEnvironment::parse(good.to_string().as_bytes()).is_ok());
-        let mutations: [(&str, serde_json::Value); 5] = [
-            ("version", 4.into()),
+        let mutations: [(&str, serde_json::Value); 4] = [
             ("path", serde_json::json!(["relative"])),
             ("path", serde_json::json!(["/a:b"])),
             (

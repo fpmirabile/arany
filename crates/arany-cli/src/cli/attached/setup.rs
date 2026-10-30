@@ -397,12 +397,6 @@ pub(super) async fn resolve(
     journal: &mut SetupJournal,
     current: &SessionDefaults,
 ) -> Result<Option<SetupSelection>, SetupError> {
-    if super::models::preferences_need_reset(workspace)?
-        && !native::reset_saved_setup(terminal, workspace, credentials::SetupData::Models, journal)
-            .await?
-    {
-        return Ok(None);
-    }
     let Some(access) = choose(
         terminal,
         1,

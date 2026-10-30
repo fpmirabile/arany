@@ -273,7 +273,7 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
     let source_root = StateRoot::admit(&source).unwrap();
     private_json(
         &source.join("tools.json"),
-        json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let engine = Engine::open(
         source_root,

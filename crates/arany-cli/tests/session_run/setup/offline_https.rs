@@ -638,7 +638,6 @@ fn isolated_stage() {
     );
 
     let routing = serde_json::to_vec(&serde_json::json!({
-        "version": 2,
         "providers": {
             "primary": [
                 {"provider": {"kind": "openai", "custom_name": null}, "model": "gpt-offline-new", "effort": "high", "account_id": account_id},

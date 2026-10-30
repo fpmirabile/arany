@@ -728,7 +728,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"---\nname: ask-matt\ndescription: Synthetic guidance\n---\nGuide the selected task.\n",
     )
     .unwrap();
-    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
+    let config = serde_json::json!({"workspace_paths":["."],"write":false,
         "commands":[],"mcp":[],"skills":[]});
     std::fs::write(
         state.join("tools.json"),
@@ -1264,19 +1264,19 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         );
     }
     let profile_path = state.join("provider-profiles.json");
-    let mut profile = serde_json::json!({
-        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
-        "profiles": [{
-            "name": "synthetic", "protocol": "openai-responses",
-            "endpoint": "http://127.0.0.1:9/responses", "model": "different-model",
-            "credential_env": "ARANY_PROVIDER_SYNTHETIC", "outcome_encoding": "json_schema",
-            "privacy": "user_authorized", "max_output_tokens": 4096,
-            "efforts": ["low", "high"]
-        }]
-    });
-    let mismatched = serde_json::to_vec(&profile).expect("mismatched profile JSON");
-    profile["profiles"][0]["model"] = "synthetic-custom-model".into();
-    let matched = serde_json::to_vec(&profile).expect("matching profile JSON");
+    let document = |model: &str| {
+        let draft = arany::CustomProfileDraft {
+            name: "synthetic".into(),
+            url: "http://127.0.0.1:9/responses".into(),
+            model: model.into(),
+            credential_env: "ARANY_PROVIDER_SYNTHETIC".into(),
+            efforts: vec![arany::Effort::Low, arany::Effort::High],
+            ..arany::test_support::local_custom_profile(9)
+        };
+        serde_json::to_vec(&serde_json::json!({ "profiles": [draft] })).expect("profile JSON")
+    };
+    let mismatched = document("different-model");
+    let matched = document("synthetic-custom-model");
     let forms = [
         "/model synthetic-custom-model max",
         "/model synthetic-custom-model low",

@@ -77,7 +77,7 @@ async fn glob_returns_admitted_regular_files_in_path_order_with_honest_truncatio
         .unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for (call, expected, truncated) in [
         (
@@ -197,7 +197,7 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     std::os::unix::fs::symlink(temp.path().join("elsewhere"), workspace.join("linked")).unwrap();
     let whole = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for pattern in ["**", "**/*.rs", ".*", "**/.env*", "src/*"] {
         let observation = glob_result(&whole, glob(pattern, ".", 100), 64 * 1024).await;
@@ -216,7 +216,7 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     }
     let selected = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["Cargo.toml","src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["Cargo.toml","src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for (call, expected) in [
         (glob("**", ".", 100), &["Cargo.toml", "src/main.rs"][..]),
@@ -311,7 +311,7 @@ async fn glob_never_discloses_unix_socket_entries() {
         std::os::unix::net::UnixListener::bind(temp.path().join("socket-canary.rs")).unwrap();
     let runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for pattern in ["**", "**/*.rs", "*"] {
         let observation = glob_result(&runtime, glob(pattern, ".", 100), 1024).await;

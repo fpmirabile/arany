@@ -66,7 +66,6 @@ const WORKER_OUTPUT: &str = "worker.output";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recovery {
-    version: u32,
     root: (u64, u64),
     boot: uuid::Uuid,
     supervisor: Option<Identity>,
@@ -74,8 +73,7 @@ struct Recovery {
 
 fn recovery(directory: &PrivateDirectory) -> Result<Recovery, ToolError> {
     let record: Recovery = read_record(&directory.dir, RECOVERY_RECORD)?;
-    if record.version != 1
-        || record.boot.is_nil()
+    if record.boot.is_nil()
         || record.root != crate::tools::fs::identity(&directory.dir)?
         || record.supervisor.is_some_and(|identity| {
             identity.pid <= 1
@@ -668,7 +666,6 @@ impl Unit {
             &unit._directory.dir,
             RECOVERY_RECORD,
             &Recovery {
-                version: 1,
                 root: crate::tools::fs::identity(&unit._directory.dir)?,
                 boot: ffi::boot_session()?,
                 supervisor: None,
@@ -2143,7 +2140,7 @@ mod tests {
         enum Case {
             Missing,
             Malformed,
-            Version,
+            Unknown,
             Identity,
             Boot,
             Oversized,
@@ -2157,7 +2154,7 @@ mod tests {
         for case in [
             Case::Missing,
             Case::Malformed,
-            Case::Version,
+            Case::Unknown,
             Case::Identity,
             Case::Boot,
             Case::Oversized,
@@ -2175,17 +2172,16 @@ mod tests {
             let directory = open_directory(&root, false).unwrap();
             let lock = hold_liveness_lock(&directory).unwrap();
             let mut record = Recovery {
-                version: 1,
                 root: crate::tools::fs::identity(&directory.dir).unwrap(),
                 boot: uuid::Uuid::now_v7(),
                 supervisor: None,
             };
             match case {
-                Case::Version => record.version += 1,
                 Case::Identity => record.root.1 += 1,
                 Case::Boot => record.boot = uuid::Uuid::nil(),
                 Case::Missing
                 | Case::Malformed
+                | Case::Unknown
                 | Case::Oversized
                 | Case::Link
                 | Case::Hardlink
@@ -2195,7 +2191,14 @@ mod tests {
             match case {
                 Case::Missing => std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap(),
                 Case::Malformed => {
-                    std::fs::write(root.join(RECOVERY_RECORD), b"{\"version\":").unwrap()
+                    std::fs::write(root.join(RECOVERY_RECORD), b"{\"root\":").unwrap()
+                }
+                Case::Unknown => {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(root.join(RECOVERY_RECORD)).unwrap())
+                            .unwrap();
+                    value["version"] = 1.into();
+                    std::fs::write(root.join(RECOVERY_RECORD), value.to_string()).unwrap()
                 }
                 Case::Oversized => std::fs::write(
                     root.join(RECOVERY_RECORD),
@@ -2213,7 +2216,7 @@ mod tests {
                 Case::Hardlink => {
                     std::fs::hard_link(root.join(RECOVERY_RECORD), root.join("alias")).unwrap()
                 }
-                Case::Version | Case::Identity | Case::Boot | Case::Live => {}
+                Case::Identity | Case::Boot | Case::Live => {}
             }
             let held = if matches!(case, Case::Live) {
                 Some(lock)
@@ -2259,7 +2262,6 @@ mod tests {
             &directory.dir,
             RECOVERY_RECORD,
             &Recovery {
-                version: 1,
                 root: crate::tools::fs::identity(&directory.dir).unwrap(),
                 boot: uuid::Uuid::now_v7(),
                 supervisor: None,
@@ -2587,7 +2589,6 @@ done
             )),
             spill_access: None,
             config: crate::tools::config::Config {
-                version: 1,
                 workspace_paths,
                 write: true,
                 child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -3082,7 +3083,6 @@ int main(int argc, char **argv) {
                 &directory.dir,
                 RECOVERY_RECORD,
                 &Recovery {
-                    version: 1,
                     root: crate::tools::fs::identity(&directory.dir).unwrap(),
                     boot: uuid::Uuid::now_v7(),
                     supervisor: Some(own),

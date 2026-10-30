@@ -197,7 +197,7 @@ async fn compact_with_guidance(
         let config = state_path.join("tools.json");
         std::fs::write(
             &config,
-            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
         )
         .expect("Tool configuration");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))

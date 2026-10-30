@@ -411,7 +411,7 @@ async fn admit_submission<'a>(
     };
     let editable = preparation_text(&objective, draft);
     let include_paths = submission_includes(admission, ui.view, goal, &editable)?;
-    let execution_settings = super::controls::settings_or_defaults(admission).await?;
+    let execution_settings = super::controls::restore_settings(admission).await?;
     let goal = goal_request(ui.view, goal, execution_settings)?;
     let (progress, inbox) = RunProgress::new(admission, ui, starting_sequence, autonomous, goal.id);
     let request = RunRequest {

@@ -158,6 +158,11 @@ struct Permissions {
     host_prefixes: Vec<HostPrefixRule>,
 }
 
+pub(crate) const PERMISSION_SETTINGS: crate::store::RecordFormat = crate::store::RecordFormat {
+    kind: crate::store::RecordKind::Permissions,
+    accepts: |bytes| PermissionConfig::parse(bytes).is_ok(),
+};
+
 impl PermissionConfig {
     pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError> {
         let value = super::parse_json(bytes, MAX_CONFIG_BYTES).map_err(|_| ConfigError::Json)?;

@@ -122,13 +122,13 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
             == before
     );
     let mut index = AccountIndex::read(&state).unwrap();
-    let unbound_id = Uuid::now_v7();
+    let other_account = Uuid::now_v7();
     index.accounts.push(AccountEntry {
-        id: unbound_id,
+        id: other_account,
         host_id: super::super::fixture_host_id(),
         client_id: super::super::CLIENT_ID.into(),
         subject: "same-subject".into(),
-        chatgpt_account_id: None,
+        chatgpt_account_id: "remote-other".into(),
         keyring_slot: None,
         storage: AccountStorage::PrivateFile,
         renewal_pending: false,
@@ -136,7 +136,7 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
         disconnected: true,
         token: None,
     });
-    index.selected = Some(unbound_id);
+    index.selected = Some(other_account);
     index.write(&state).unwrap();
     let before = state
         .record(RecordKind::ChatgptAccounts)
@@ -146,7 +146,13 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
     let replacement = fixture("remote-one");
     let consent = receipt(&replacement, AccountStorage::PrivateFile);
     assert!(matches!(
-        save_private_file_at(&state, &workspace, replacement, consent, Some(unbound_id)),
+        save_private_file_at(
+            &state,
+            &workspace,
+            replacement,
+            consent,
+            Some(other_account)
+        ),
         Err(AuthorizationError::RegistrationConflict)
     ));
     assert!(
@@ -172,10 +178,4 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
     )
     .unwrap();
     assert!(removed.local_cleared);
-    let replacement = fixture("remote-one");
-    let consent = receipt(&replacement, AccountStorage::PrivateFile);
-    assert_eq!(
-        save_private_file_at(&state, &workspace, replacement, consent, Some(unbound_id)).unwrap(),
-        unbound_id
-    );
 }

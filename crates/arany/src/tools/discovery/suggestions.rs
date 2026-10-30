@@ -41,7 +41,6 @@ impl FileSuggestionSource {
             ToolGrant::None => vec![".".into()],
         };
         Ok(Config {
-            version: 1,
             workspace_paths: paths,
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,

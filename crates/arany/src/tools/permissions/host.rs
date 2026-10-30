@@ -10,7 +10,6 @@ mod tests;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostPrefixRule {
-    version: u32,
     pub prefix: Vec<String>,
     pub decision: Decision,
     pin: HostCommandPin,
@@ -54,7 +53,6 @@ impl HostPrefixRule {
             .ok_or(ToolError::Configuration)?;
         pin.permissions_digest = None;
         let rule = Self {
-            version: crate::tools::unguarded::HOST_POLICY_VERSION,
             prefix: std::iter::once(program.clone())
                 .chain(args.iter().cloned())
                 .take(count)
@@ -72,8 +70,7 @@ impl HostPrefixRule {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.version == crate::tools::unguarded::HOST_POLICY_VERSION
-            && self.pin.valid()
+        self.pin.valid()
             && super::prefix::valid_path(&self.pin.workspace)
             && super::prefix::valid_path(&self.pin.executable)
             && self

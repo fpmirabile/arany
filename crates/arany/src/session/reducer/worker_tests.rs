@@ -402,7 +402,6 @@ fn fixture_with_grant(
         AgentRunId::new(),
     );
     let definition = crate::tools::definitions::AgentDefinition {
-        version: 1,
         name: "editor".into(),
         description: "Edit".into(),
         tools: Some(definition_tools),

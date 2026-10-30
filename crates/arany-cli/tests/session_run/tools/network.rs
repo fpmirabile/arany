@@ -125,7 +125,7 @@ async fn egress_proxy_is_the_only_route_and_records_refusals() {
     ] {
         let state_path = temp.path().join(format!("state-{listed}"));
         let state = StateRoot::admit(&state_path).unwrap();
-        let config = json!({"version":1,"workspace_paths":["src"],"write":true,
+        let config = json!({"workspace_paths":["src"],"write":true,
             "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
             "skills":[],"mcp":[],"network":{"allow":["127.0.0.1"]}});
         private_file(
@@ -232,7 +232,7 @@ async fn connections_past_the_total_bound_are_recorded_through_the_endpoint() {
     private_file(&workspace.join("src/limit.sh"), LIMIT_SCRIPT.as_bytes());
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let config = json!({"version":1,"workspace_paths":["src"],"write":true,
+    let config = json!({"workspace_paths":["src"],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
         "skills":[],"mcp":[],"network":{"allow":["127.0.0.1"]}});
     private_file(
@@ -314,7 +314,7 @@ async fn held_tunnels_record_one_overflow_through_the_endpoint() {
     );
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let config = json!({"version":1,"workspace_paths":["src"],"write":true,
+    let config = json!({"workspace_paths":["src"],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
         "skills":[],"mcp":[],"network":{"allow":["127.0.0.1"]}});
     private_file(
@@ -518,7 +518,7 @@ async fn fetch_page(content_type: &'static str, body: Vec<u8>) -> (Value, bool) 
     private_file(&workspace.join("src/current.txt"), b"current");
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let config = json!({"version":1,"workspace_paths":["src"],"write":false,
+    let config = json!({"workspace_paths":["src"],"write":false,
         "commands":[],"skills":[],"mcp":[],"network":{"allow":["127.0.0.1"]}});
     private_file(
         &state_path.join("tools.json"),

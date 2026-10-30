@@ -15,7 +15,6 @@ pub(super) const MAX_MCP_SERVERS: usize = 4;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
-    pub version: u32,
     pub workspace_paths: Vec<String>,
     pub write: bool,
     #[serde(default, skip_serializing_if = "UnguardedGrant::is_denied")]
@@ -192,8 +191,6 @@ impl Server {
 
 pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
     kind: RecordKind::ToolsConfig,
-    field: "version",
-    current: 1,
     accepts: |bytes| Config::parse(bytes).is_ok(),
 };
 
@@ -241,7 +238,6 @@ impl Config {
 
     pub(crate) fn validate(&self) -> Result<(), ToolError> {
         if self.child_unguarded != UnguardedGrant::Denied
-            || self.version != 1
             || self.workspace_paths.is_empty()
             || self.workspace_paths.len() > MAX_WORKSPACE_PATHS
             || self.workspace_paths.iter().any(|path| {

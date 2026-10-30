@@ -72,6 +72,35 @@ const CHAT_COMPLETIONS: RouteCase = RouteCase {
 };
 
 impl RouteCase {
+    fn profile(self, port: u16) -> arany::CustomProfileDraft {
+        let base = format!("http://127.0.0.1:{port}{}", self.base_path);
+        let (protocol, url, auth) = match (self.chat, self.auth) {
+            (true, _) => (arany::CustomProtocol::OpenaiChatCompletions, base, None),
+            (false, Some(auth)) => (
+                arany::CustomProtocol::AnthropicMessages,
+                base,
+                Some(if auth == "x-api-key" {
+                    arany::MessagesAuth::ApiKey
+                } else {
+                    arany::MessagesAuth::Bearer
+                }),
+            ),
+            (false, None) => (
+                arany::CustomProtocol::OpenaiResponses,
+                format!("{base}/v1/responses"),
+                None,
+            ),
+        };
+        arany::CustomProfileDraft {
+            protocol,
+            url,
+            auth,
+            model: self.model.into(),
+            credential_env: self.credential_env.into(),
+            ..arany::test_support::local_custom_profile(port)
+        }
+    }
+
     fn keys(self, command: &mut Command, selected: Option<&str>) {
         command
             .env("ANTHROPIC_API_KEY", "omitted-native-key")
@@ -243,44 +272,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
     }
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
-    let mut profile = serde_json::json!({
-        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
-        "profiles": [{
-            "name": "local",
-            "protocol": "openai-responses",
-            "endpoint": format!("http://127.0.0.1:{port}/v1/responses"),
-            "model": case.model,
-            "credential_env": case.credential_env,
-            "outcome_encoding": "json_schema",
-            "privacy": "user_authorized",
-            "max_output_tokens": 4096,
-            "efforts": []
-        }]
-    });
-    if chat {
-        let entry = profile["profiles"][0].as_object_mut().unwrap();
-        entry.remove("endpoint");
-        entry.insert("protocol".into(), "openai-chat-completions".into());
-        entry.insert(
-            "base_url".into(),
-            format!("http://127.0.0.1:{port}{}", case.base_path).into(),
-        );
-        entry.insert("auth".into(), "bearer".into());
-    } else if let Some(auth) = messages {
-        let entry = profile["profiles"][0].as_object_mut().unwrap();
-        entry.remove("endpoint");
-        entry.insert("protocol".into(), "anthropic-messages".into());
-        entry.insert(
-            "base_url".into(),
-            format!("http://127.0.0.1:{port}{}", case.base_path).into(),
-        );
-        entry.insert("auth".into(), auth.into());
-        entry.insert("outcome_encoding".into(), "native_tools".into());
-    }
-    let profile_path = state_path.join("provider-profiles.json");
-    std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("profile file");
-    std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
-        .expect("private profile file");
+    arany::test_support::save_custom_profiles(&state_path, &[case.profile(port)]);
 
     let mutation_path = state_path.join("provider-roster.json");
     let database_for_server = state_path.join("events.sqlite3");
@@ -683,7 +675,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
             .expect("first Session ID"),
     )
     .expect("first Session ID format");
-    let roster = serde_json::json!({"version":2,"profiles":[
+    let roster = serde_json::json!({"profiles":[
         {"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":case.model,"effort":null,"account_id":null}]},
         {"name":"inspect","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":case.model,"effort":null,"account_id":null}]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":"inspect","review":null,"compaction":null},"child_profiles":["inspect","main"]}]});
@@ -708,7 +700,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
         "single",
         Some(continued_session_id),
     );
-    std::fs::write(&roster_path, serde_json::to_vec(&roster).unwrap()).unwrap();
+    crate::private_file(&roster_path, &serde_json::to_vec(&roster).unwrap());
     let mut jsonl_command = Command::new(env!("CARGO_BIN_EXE_arany"));
     jsonl_command
         .env_clear()
@@ -728,7 +720,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
         .arg(&state_path)
         .arg("answer");
     let roster_jsonl = run_product(&mut jsonl_command);
-    assert!(roster_jsonl.status.success());
+    assert!(
+        roster_jsonl.status.success(),
+        "{}",
+        String::from_utf8_lossy(&roster_jsonl.stderr)
+    );
     let jsonl_lines: Vec<serde_json::Value> = roster_jsonl
         .stdout
         .split(|byte| *byte == b'\n')
@@ -774,8 +770,15 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
     assert_eq!(team_receipt[3], "Provider: custom");
     assert!(!reflected.status.success());
     assert_eq!(reflected.stdout, b"");
-    let reflected_receipt = std::str::from_utf8(&reflected.stderr).expect("failure receipt UTF-8");
-    let reflected_receipt: Vec<_> = reflected_receipt.lines().collect();
+    let reflected_stderr = std::str::from_utf8(&reflected.stderr).expect("failure receipt UTF-8");
+    // The roster replaced during the team Run is refused, so this start archives it first.
+    let (archive_warning, reflected_text) = reflected_stderr.split_once('\n').unwrap();
+    assert!(
+        archive_warning
+            .starts_with("warning: Saved records this version cannot read (provider-roster.json)"),
+        "{archive_warning}"
+    );
+    let reflected_receipt: Vec<_> = reflected_text.lines().collect();
     assert_eq!(reflected_receipt.len(), 4);
     let reflected_session_id =
         SessionId::from_str(reflected_receipt[0].strip_prefix("Session: ").unwrap())
@@ -784,11 +787,10 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
         .expect("failed Run ID");
     assert_eq!(reflected_session_id, session_id);
     assert_eq!(
-        reflected.stderr,
+        reflected_text,
         format!(
             "Session: {reflected_session_id}\nRun: {reflected_run_id}\nStatus: failed\nProvider: custom\n"
         )
-        .as_bytes()
     );
     let diagnostic_path = state_path.join("development.log");
     if cfg!(debug_assertions) {
@@ -965,7 +967,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RunFailure) {
         .block_on(store.close())
         .expect("close read-only Store");
     std::fs::write(
-        &profile_path,
+        state_path.join("provider-profiles.json"),
         b"invalid profile during historical inspection",
     )
     .unwrap();
@@ -1305,7 +1307,7 @@ fn custom_effort_profile_pins_the_selected_effort() {
         assert_eq!(config.effort, Some(arany::Effort::High));
         assert_eq!(
             config.custom_profile_provenance.as_ref().unwrap().endpoint,
-            profile["profiles"][0]["endpoint"]
+            profile["profiles"][0]["url"]
         );
         store.close().await.unwrap();
     });
@@ -1355,7 +1357,6 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        os::unix::fs::PermissionsExt,
         process::Stdio,
         thread,
         time::{Duration, Instant},
@@ -1369,13 +1370,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
-    let path = state.join("provider-profiles.json");
-    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":arany::test_support::record_version(arany::RecordKind::ProviderProfiles),"profiles":[{
-        "name":"local","protocol":"anthropic-messages","base_url":format!("http://127.0.0.1:{port}{}", case.base_path),
-        "auth":case.auth.unwrap(),"model":case.model,"credential_env":case.credential_env,
-        "outcome_encoding":"native_tools","privacy":"user_authorized","max_output_tokens":4096,"efforts":[]
-    }]})).unwrap()).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    arany::test_support::save_custom_profiles(&state, &[case.profile(port)]);
     let peer = thread::spawn(move || {
         // The first Run, then a team Run, its child and synthesis, a compaction and the continued Run.
         for index in 3..if cancel { 4 } else { 9 } {
@@ -1609,7 +1604,11 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                 .windows(case.key.len())
                 .any(|part| part == case.key.as_bytes())
         );
-        std::fs::write(path, b"invalid historical config").unwrap();
+        std::fs::write(
+            state.join("provider-profiles.json"),
+            b"invalid historical config",
+        )
+        .unwrap();
         let mut show = Command::new(env!("CARGO_BIN_EXE_arany"));
         show.env_clear()
             .current_dir(&workspace)

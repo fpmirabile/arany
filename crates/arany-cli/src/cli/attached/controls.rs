@@ -10,7 +10,7 @@ use crate::terminal::{
     InteractiveCommand, NewlineShortcut, PointerSettings, Submission, TerminalInput, TerminalMode,
     transcript_agents,
 };
-use arany::{BuildCacheSize, RecordFormat, RecordKind};
+use arany::{BuildCacheSize, RecordKind};
 use arany::{
     CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionId, SessionView, StateRoot,
     fork_session, rename_session, resume_session, validate_native_model_id,
@@ -25,7 +25,6 @@ const BUILD_CACHE_LABEL: &str = "Build cache";
 mod build_cpu;
 mod build_jobs;
 
-const UI_PREFERENCES_VERSION: u8 = 9;
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
     ("KB", 1024),
@@ -34,25 +33,11 @@ const SIZE_UNITS: &[(&str, u64)] = &[
     ("TB", 1024_u64.pow(4)),
 ];
 
-pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
-    kind: RecordKind::UiPreferences,
-    field: "version",
-    current: UI_PREFERENCES_VERSION as u64,
-    accepts: |bytes| decode_settings(bytes).is_ok(),
-};
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
+// A tolerant record: only keys that differ from the binary's defaults; every other key follows them at read time.
+#[derive(Default, serde::Deserialize, serde::Serialize)]
 struct UiPreferences {
-    version: u8,
-    // Only keys that differ from the binary's defaults; every other key follows them at read time.
+    #[serde(default)]
     preferences: serde_json::Map<String, Value>,
-}
-
-// Read first so an older record is refused by version rather than by its missing fields.
-#[derive(serde::Deserialize)]
-struct RecordVersion {
-    version: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -674,7 +659,14 @@ pub(super) async fn restore_settings(admission: &Admission) -> Result<Preference
 pub(super) async fn restore_settings_at(
     state_dir: &std::path::Path,
 ) -> Result<Preferences, String> {
-    Ok(saved_settings(state_dir).await??)
+    let path = state_dir.to_owned();
+    tokio::task::spawn_blocking(move || match StateRoot::open_optional(&path) {
+        Ok(Some(root)) => read_settings(&root),
+        Ok(None) => Ok(Preferences::default()),
+        Err(_) => Err("display settings unavailable or unsafe".into()),
+    })
+    .await
+    .map_err(|_| "display settings unavailable".to_owned())?
 }
 
 pub(in crate::cli) async fn execution_limits(
@@ -695,66 +687,68 @@ pub(in crate::cli) async fn execution_limits(
     ))
 }
 
-// An unsupported or invalid record leaves defaults in force until /settings replaces it.
-pub(super) async fn settings_or_defaults(admission: &Admission) -> Result<Preferences, String> {
-    Ok(saved_settings(&admission.state_dir)
-        .await?
-        .unwrap_or_default())
-}
-
-async fn saved_settings(
-    state_dir: &std::path::Path,
-) -> Result<Result<Preferences, &'static str>, String> {
-    let path = state_dir.to_owned();
-    tokio::task::spawn_blocking(move || match StateRoot::open_optional(&path) {
-        Ok(Some(root)) => read_settings(&root),
-        Ok(None) => Ok(Ok(Preferences::default())),
-        Err(_) => Err("display settings unavailable or unsafe".into()),
-    })
-    .await
-    .map_err(|_| "display settings unavailable".to_owned())?
-}
-
-fn read_settings(root: &StateRoot) -> Result<Result<Preferences, &'static str>, String> {
-    let Some(record) = root
-        .record(UI_PREFERENCES.kind)
+fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
+    let record = root
+        .record(RecordKind::UiPreferences)
         .read()
-        .map_err(|_| "display settings unavailable or unsafe")?
-    else {
-        return Ok(Ok(Preferences::default()));
+        .map_err(|_| "display settings unavailable or unsafe")?;
+    Ok(record.map_or_else(Preferences::default, |record| decode_settings(&record)))
+}
+
+// Tolerant: unknown keys, malformed JSON and values that fail validation keep their defaults.
+fn decode_settings(record: &[u8]) -> Preferences {
+    let saved = Value::Object(
+        serde_json::from_slice::<UiPreferences>(record)
+            .unwrap_or_default()
+            .preferences,
+    );
+    let defaults =
+        serde_json::to_value(Preferences::default()).expect("typed preferences serialize");
+    // All known keys at once keep related limits together; only an invalid whole falls back to each key alone.
+    [false, true]
+        .into_iter()
+        .find_map(|checked| {
+            let mut resolved = defaults.clone();
+            overlay(&mut resolved, &mut Vec::new(), saved.clone(), checked);
+            decoded(&resolved)
+        })
+        .unwrap_or_default()
+}
+
+fn decoded(resolved: &Value) -> Option<Preferences> {
+    serde_json::from_value::<Preferences>(resolved.clone())
+        .ok()
+        .filter(|preferences| {
+            preferences.goal_budget.validate().is_ok() && preferences.resources.valid()
+        })
+}
+
+fn slot<'a>(resolved: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
+    path.iter()
+        .try_fold(resolved, |value, key| value.get_mut(key))
+}
+
+// Applies each saved leaf the defaults know; a checked leaf stays only if the whole record still decodes.
+fn overlay(resolved: &mut Value, path: &mut Vec<String>, saved: Value, checked: bool) {
+    let Some(current) = slot(resolved, path) else {
+        return;
     };
-    Ok(decode_settings(&record))
-}
-
-fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
-    let invalid = "invalid display settings; use /settings to replace them";
-    let unsupported = "unsupported settings; use /settings to replace them";
-    let version: RecordVersion = serde_json::from_slice(record).map_err(|_| invalid)?;
-    if version.version != UI_PREFERENCES_VERSION {
-        return Err(unsupported);
-    }
-    let record: UiPreferences = serde_json::from_slice(record).map_err(|_| invalid)?;
-    let mut resolved = serde_json::to_value(Preferences::default()).map_err(|_| invalid)?;
-    overlay(&mut resolved, Value::Object(record.preferences)).ok_or(invalid)?;
-    let preferences: Preferences = serde_json::from_value(resolved).map_err(|_| invalid)?;
-    if preferences.goal_budget.validate().is_err() || !preferences.resources.valid() {
-        return Err(unsupported);
-    }
-    Ok(preferences)
-}
-
-// Saved keys replace defaults; a key the defaults lack is refused.
-fn overlay(resolved: &mut Value, saved: Value) -> Option<()> {
-    match (resolved, saved) {
-        (Value::Object(resolved), Value::Object(saved)) => {
-            for (key, value) in saved {
-                overlay(resolved.get_mut(&key)?, value)?;
+    match saved {
+        Value::Object(fields) if current.is_object() => {
+            for (key, value) in fields {
+                path.push(key);
+                overlay(resolved, path, value, checked);
+                path.pop();
             }
-            Some(())
         }
-        (resolved, saved) => {
-            *resolved = saved;
-            Some(())
+        saved => {
+            let previous = std::mem::replace(current, saved);
+            if checked
+                && decoded(resolved).is_none()
+                && let Some(current) = slot(resolved, path)
+            {
+                *current = previous;
+            }
         }
     }
 }
@@ -780,11 +774,7 @@ fn encode_settings(preferences: Preferences) -> Option<Vec<u8>> {
         Some(Value::Object(fields)) => fields,
         _ => serde_json::Map::new(),
     };
-    serde_json::to_vec(&UiPreferences {
-        version: UI_PREFERENCES_VERSION,
-        preferences,
-    })
-    .ok()
+    serde_json::to_vec(&UiPreferences { preferences }).ok()
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1046,7 +1036,7 @@ pub(super) async fn settings(
     view: &SessionView,
 ) -> Result<String, String> {
     let linear = terminal.is_linear();
-    let mut current = settings_or_defaults(admission).await?;
+    let mut current = restore_settings(admission).await?;
     current.completion = composer.completion_layout();
     current.newline = composer.newline_shortcut();
     current.view = *saved_view;
@@ -2280,7 +2270,7 @@ mod tests {
             serde_json::json!({"context_window": "500k"}),
             "only the changed key is saved"
         );
-        assert_eq!(decode_settings(&saved), Ok(preferences));
+        assert_eq!(decode_settings(&saved), preferences);
         assert!(apply_setting(&mut preferences, "16 default"));
         assert_eq!(preferences, Preferences::default());
         let mut cycled = Vec::new();
@@ -2417,7 +2407,7 @@ mod tests {
     fn saved_settings_keep_only_changed_keys_and_follow_current_defaults() {
         assert_eq!(
             encode_settings(Preferences::default()).unwrap(),
-            br#"{"version":9,"preferences":{}}"#
+            br#"{"preferences":{}}"#
         );
         let mut changed = Preferences::default();
         changed.goal_budget.max_provider_calls = Some(64);
@@ -2426,25 +2416,34 @@ mod tests {
         let record = encode_settings(changed).unwrap();
         assert_eq!(
             record,
-            br#"{"version":9,"preferences":{"goal_budget":{"max_provider_calls":64},"resources":{"build_jobs":2},"view":"classic"}}"#
+            br#"{"preferences":{"goal_budget":{"max_provider_calls":64},"resources":{"build_jobs":2},"view":"classic"}}"#
         );
-        assert_eq!(decode_settings(&record), Ok(changed));
-        assert!((UI_PREFERENCES.accepts)(&record));
-        for invalid in [
-            br#"{"version":9,"preferences":{"unknown":1}}"#.as_slice(),
-            br#"{"version":9,"preferences":{"goal_budget":{"unknown":1}}}"#,
-            br#"{"version":9,"preferences":{"goal_budget":3}}"#,
-            br#"{"version":9,"preferences":{"view":"unknown"}}"#,
-            br#"{"version":9}"#,
+        assert_eq!(decode_settings(&record), changed);
+    }
+
+    #[test]
+    fn saved_settings_ignore_unknown_and_invalid_keys_and_default_missing_ones() {
+        let expected = Preferences {
+            view: TerminalMode::Classic,
+            ..Preferences::default()
+        };
+        for tolerated in [
+            br#"{"version":9,"preferences":{"view":"classic","unknown":1}}"#.as_slice(),
+            br#"{"preferences":{"view":"classic","goal_budget":{"unknown":1}},"other":true}"#,
+            br#"{"preferences":{"view":"classic","goal_budget":3}}"#,
+            br#"{"preferences":{"view":"classic","completion":"unknown"}}"#,
+            br#"{"preferences":{"view":"classic","goal_budget":{"max_provider_calls":0}}}"#,
         ] {
-            assert!(decode_settings(invalid).is_err());
+            assert_eq!(decode_settings(tolerated), expected);
         }
-        assert_eq!(
-            decode_settings(
-                br#"{"version":9,"preferences":{"goal_budget":{"max_provider_calls":0}}}"#
-            ),
-            Err("unsupported settings; use /settings to replace them")
-        );
+        for defaulted in [
+            br#"{}"#.as_slice(),
+            br#"{"preferences":3}"#,
+            br#"{"preferences":{"view":"classic""#,
+            b"not json",
+        ] {
+            assert_eq!(decode_settings(defaulted), Preferences::default());
+        }
     }
 
     #[test]
@@ -2704,25 +2703,14 @@ mod tests {
         let root = StateRoot::open_existing(&admission.state_dir).unwrap();
         for document in [
             br#"{"version":1,"completion":"tabs"}"#.as_slice(),
-            br#"{"version":2,"completion":"tabs","view":"classic"}"#.as_slice(),
-            br#"{"version":3,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
-            br#"{"version":5,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"unknown","view":"classic"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"unknown"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic","tools":true}}"#
-                .as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic"},"tools":true}"#
-                .as_slice(),
-            br#"{"version":2}"#.as_slice(),
+            br#"{"preferences":{"newline":"enter"}}"#.as_slice(),
             b"malformed",
         ] {
             root.record(RecordKind::UiPreferences)
                 .replace(document)
                 .unwrap();
-            assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
-                settings_or_defaults(&admission).await.unwrap(),
+                restore_settings(&admission).await.unwrap(),
                 Preferences::default()
             );
             assert_eq!(
@@ -2730,7 +2718,8 @@ mod tests {
                     .read()
                     .unwrap()
                     .unwrap(),
-                document
+                document,
+                "reading never rewrites a record"
             );
         }
         save_settings(&admission, combined_classic).await.unwrap();
@@ -2741,39 +2730,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":9,"preferences":{"completion":"combined","view":"classic"}}"#
-        );
-        // Records of any other version stay untouched for the startup archive; reading refuses them.
-        for version in [3, 8, 10] {
-            let mut other: Value = serde_json::from_slice(&original).unwrap();
-            other["version"] = version.into();
-            let other = serde_json::to_vec(&other).unwrap();
-            root.record(RecordKind::UiPreferences)
-                .replace(&other)
-                .unwrap();
-            assert!(UI_PREFERENCES.mismatched(&other));
-            assert!(restore_settings(&admission).await.is_err());
-            assert_eq!(
-                root.record(RecordKind::UiPreferences)
-                    .read()
-                    .unwrap()
-                    .unwrap(),
-                other
-            );
-        }
-        let mut invalid_shortcut: Value = serde_json::from_slice(&original).unwrap();
-        invalid_shortcut["preferences"]["newline"] = "enter".into();
-        let invalid_shortcut = serde_json::to_vec(&invalid_shortcut).unwrap();
-        root.record(RecordKind::UiPreferences)
-            .replace(&invalid_shortcut)
-            .unwrap();
-        assert!(restore_settings(&admission).await.is_err());
-        assert_eq!(
-            root.record(RecordKind::UiPreferences)
-                .read()
-                .unwrap()
-                .unwrap(),
-            invalid_shortcut
+            br#"{"preferences":{"completion":"combined","view":"classic"}}"#
         );
         root.record(RecordKind::UiPreferences)
             .replace(&original)
@@ -2820,9 +2777,8 @@ mod tests {
             std::fs::remove_file(pending).unwrap();
             let file = admission.state_dir.join("ui-preferences.json");
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
-                settings_or_defaults(&admission).await.unwrap_err(),
+                restore_settings(&admission).await.unwrap_err(),
                 "display settings unavailable or unsafe"
             );
             assert!(
@@ -3066,24 +3022,13 @@ mod tests {
         assert_eq!(view.defaults.effort, None);
 
         {
-            use std::os::unix::fs::PermissionsExt;
-            let file = admission.state_dir.join("provider-profiles.json");
-            let profile = serde_json::json!({
-                "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
-                "profiles": [{
-                    "name": "local",
-                    "protocol": "openai-responses",
-                    "endpoint": "http://127.0.0.1:9321/v1/responses",
-                    "model": "model-1",
-                    "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
-                    "outcome_encoding": "json_schema",
-                    "privacy": "user_authorized",
-                    "max_output_tokens": 4096,
-                    "efforts": ["low", "high"]
-                }]
-            });
-            std::fs::write(&file, serde_json::to_vec(&profile).unwrap()).unwrap();
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            arany::test_support::save_custom_profiles(
+                &admission.state_dir,
+                &[arany::CustomProfileDraft {
+                    efforts: vec![Effort::Low, Effort::High],
+                    ..arany::test_support::local_custom_profile(9321)
+                }],
+            );
             for (command, argument) in [
                 (InteractiveCommand::Provider, "custom:local"),
                 (InteractiveCommand::Model, "model-1"),

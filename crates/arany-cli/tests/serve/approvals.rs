@@ -295,7 +295,7 @@ async fn approval_scenario_channel(
     let state_root = StateRoot::admit(&state).unwrap();
     private_json(
         &state.join("tools.json"),
-        json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     private_json(
         &state.join("permissions.json"),

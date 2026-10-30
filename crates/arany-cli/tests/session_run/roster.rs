@@ -48,7 +48,7 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 fn record() -> serde_json::Value {
-    json!({"version":2,"profiles":[
+    json!({"profiles":[
         {"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}]},
         {"name":"unused","routes":[{"provider":{"kind":"anthropic","custom_name":null},"model":"claude-sonnet-5","effort":"high","account_id":null}]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","unused"]}]})
@@ -167,7 +167,10 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stdout, b"");
     assert_eq!(output.stderr, format!("{manifest}error: roster profile unused route 0 refused: Provider role route anthropic/claude-sonnet-5 refused: selected native API credentials or workspace configuration unavailable\n").as_bytes());
-    private_file(&state.join("provider-routing.json"), b"{}");
+    private_file(
+        &state.join("provider-routing.json"),
+        br#"{"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#,
+    );
     let conflict = command(&workspace, &state, &[]);
     assert_eq!(conflict.status.code(), Some(1));
     assert_eq!(conflict.stdout, b"");
@@ -724,7 +727,7 @@ mod journey {
 
     fn preset(child_profiles: &[&str]) -> Vec<u8> {
         let route = json!({"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null});
-        serde_json::to_vec(&json!({"version":2,"profiles":[
+        serde_json::to_vec(&json!({"profiles":[
             {"name":"main","routes":[route]},
             {"name":"inspect","routes":[route]}
         ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":child_profiles},{"name":"research","providers":{"primary":"inspect","child":null,"review":null,"compaction":null},"child_profiles":["inspect"]}]})).unwrap()

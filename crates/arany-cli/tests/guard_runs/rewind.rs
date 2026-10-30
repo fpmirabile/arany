@@ -9,7 +9,7 @@ fn grant(state: &Path, write: bool) {
     std::fs::write(
         &config,
         serde_json::to_vec(&serde_json::json!({
-            "version":1,"workspace_paths":["notes"],"write":write,"commands":[],"skills":[],"mcp":[]
+            "workspace_paths":["notes"],"write":write,"commands":[],"skills":[],"mcp":[]
         }))
         .unwrap(),
     )

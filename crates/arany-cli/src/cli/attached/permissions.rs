@@ -981,68 +981,28 @@ pub(super) enum TrustAdmission {
     Exit,
 }
 
-const RESET_WARNING: &str = "Reset deletes the remembered trust and runtime profile selections for every folder on this computer. Conversations, saved accounts and model choices are kept. Each folder asks for trust again. This cannot be undone.";
-
-fn recovery_choices(resettable: bool, exit: &'static str) -> Vec<(u8, &'static str)> {
-    let mut choices = vec![(b'1', "Retry")];
-    if resettable {
-        choices.push((b'2', "Reset folder trust"));
-    }
-    choices.push((b'0', exit));
-    choices
-}
-
-// The reset pins the bytes shown in the dialog; confirmation deletes only those bytes.
+// A refused trust record was archived at startup; what remains here is an unsafe or unavailable state.
 pub(super) async fn open_or_recover(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     exit: &'static str,
 ) -> Result<TrustAdmission, SetupError> {
-    let mut notice = None;
     loop {
         let error = match WorkspacePermissions::open(workspace) {
             Ok(access) => return Ok(TrustAdmission::Loaded(access)),
             Err(error) => error,
         };
-        let reset = if error.is_resettable() {
-            WorkspacePermissions::prepare_reset(workspace).ok()
-        } else {
-            None
-        };
-        let reason = notice.take().unwrap_or_else(|| format!("{error}."));
-        let instruction = if reset.is_some() {
-            format!(
-                "{reason} Reset deletes only the remembered folder trust list; conversations, accounts and models are kept."
-            )
-        } else {
-            reason
-        };
-        let choices = recovery_choices(reset.is_some(), exit);
         match super::setup::choose_focused(
             terminal,
             1,
             "Folder trust recovery",
-            &instruction,
-            &choices,
+            &format!("{error}."),
+            &[(b'1', "Retry"), (b'0', exit)],
             None,
         )
         .await?
         {
             Some(b'1') => {}
-            Some(b'2') => {
-                if let Some(reset) = reset {
-                    let confirmed = super::setup::review_warning(
-                        terminal,
-                        "Reset folder trust?",
-                        RESET_WARNING,
-                        "Delete remembered folder trust?",
-                    )
-                    .await?;
-                    if confirmed && let Err(error) = reset.apply() {
-                        notice = Some(format!("Reset did not complete: {error}; retry."));
-                    }
-                }
-            }
             _ => return Ok(TrustAdmission::Exit),
         }
     }
@@ -1524,28 +1484,6 @@ mod tests {
                 "a rejected save must not write the trust record"
             );
         });
-    }
-
-    #[test]
-    fn trust_recovery_offers_reset_only_for_resettable_causes() {
-        use arany::TrustRecordError;
-
-        let labels = |choices: Vec<(u8, &str)>| {
-            choices
-                .into_iter()
-                .map(|(_, label)| label.to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            labels(super::recovery_choices(true, "Exit")),
-            ["Retry", "Reset folder trust", "Exit"]
-        );
-        assert_eq!(
-            labels(super::recovery_choices(false, "Cancel")),
-            ["Retry", "Cancel"]
-        );
-        assert!(!TrustRecordError::RecordNotPrivate.is_resettable());
-        assert!(TrustRecordError::UnsupportedVersion(1).is_resettable());
     }
 
     fn option(token: &str, group: &'static str) -> arany::RuntimeProfileOption {

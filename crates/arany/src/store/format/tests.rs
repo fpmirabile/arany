@@ -360,37 +360,32 @@ fn damaged_busy_or_unsafe_checkpoints_are_never_archived() {
     }
 }
 
+// Accepts exactly the closed record `{"ok":true}`, like a strict owner decoder.
 const fn format(kind: RecordKind) -> RecordFormat {
     RecordFormat {
         kind,
-        field: "version",
-        current: 2,
-        accepts: |_| true,
+        accepts: |bytes| bytes == br#"{"ok":true}"#,
     }
 }
 
 #[test]
-fn records_at_another_version_are_archived_intact_and_others_stay_in_place() {
+fn refused_strict_records_are_archived_intact_and_accepted_ones_stay_in_place() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
     let root = StateRoot::admit(&path).unwrap();
-    let older = format(RecordKind::UiPreferences);
-    let newer = format(RecordKind::ModelPreferences);
-    let current = format(RecordKind::ProviderRoster);
+    let unknown = format(RecordKind::ToolsConfig);
     let malformed = format(RecordKind::ProviderRouting);
-    let unversioned = format(RecordKind::CommandTools);
-    let missing = format(RecordKind::ToolsConfig);
-    let records: [(&RecordFormat, &[u8]); 5] = [
-        (&older, br#"{"version":1,"canary":"older"}"#),
-        (&newer, br#"{"version":3}"#),
-        (&current, br#"{"version":2}"#),
-        (&malformed, br#"{"version":1"#),
-        (&unversioned, br#"{"schema":1}"#),
+    let accepted = format(RecordKind::ProviderRoster);
+    let missing = format(RecordKind::CommandTools);
+    let records: [(&RecordFormat, Vec<u8>); 3] = [
+        (&unknown, br#"{"ok":true,"canary":"newer"}"#.to_vec()),
+        (&malformed, br#"{"ok":tr"#.to_vec()),
+        (&accepted, br#"{"ok":true}"#.to_vec()),
     ];
-    for (format, bytes) in records {
+    for (format, bytes) in &records {
         private_file(&path.join(format.kind.file()), bytes);
     }
-    let formats = [&older, &newer, &current, &malformed, &unversioned, &missing];
+    let formats = [&unknown, &malformed, &accepted, &missing];
 
     let archived = root
         .archive_incompatible_records(&formats)
@@ -409,7 +404,7 @@ fn records_at_another_version_are_archived_intact_and_others_stay_in_place() {
     );
     assert_eq!(
         archived.files(),
-        [older.kind.file(), newer.kind.file()].as_slice()
+        [unknown.kind.file(), malformed.kind.file()].as_slice()
     );
     assert_eq!(
         std::fs::metadata(archived.path())
@@ -419,7 +414,7 @@ fn records_at_another_version_are_archived_intact_and_others_stay_in_place() {
             & 0o777,
         0o700
     );
-    for (format, bytes) in records {
+    for (format, bytes) in &records {
         let file = format.kind.file();
         let moved = archived.files().contains(&file);
         let kept = if moved {
@@ -427,7 +422,7 @@ fn records_at_another_version_are_archived_intact_and_others_stay_in_place() {
         } else {
             path.join(file)
         };
-        assert_eq!(std::fs::read(kept).unwrap(), bytes, "{file}");
+        assert_eq!(&std::fs::read(kept).unwrap(), bytes, "{file}");
         assert_eq!(path.join(file).exists(), !moved, "{file}");
     }
     assert!(
@@ -439,8 +434,8 @@ fn records_at_another_version_are_archived_intact_and_others_stay_in_place() {
 
 #[test]
 fn an_interrupted_record_archive_keeps_the_record_intact_in_one_place() {
-    let older = format(RecordKind::UiPreferences);
-    let bytes = br#"{"version":1}"#;
+    let older = format(RecordKind::ProviderRouting);
+    let bytes = br#"{"ok":false}"#;
     for fail in 0..5 {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
@@ -468,7 +463,7 @@ fn an_interrupted_record_archive_keeps_the_record_intact_in_one_place() {
 
 #[test]
 fn inactive_host_archive_preserves_the_source_fixture_and_refuses_interrupted_moves() {
-    let source = br#"{"version":1,"commands":[{"workspace":{"path":"/workspace","device":1,"inode":2},"program":"printf","args":["inspected"],"cwd":"","created_unix_ms":1}]}"#;
+    let source = br#"{"commands":[{"workspace":{"path":"/workspace","device":1,"inode":2},"program":"printf","args":["inspected"],"cwd":"","created_unix_ms":1}]}"#;
     assert!((crate::tools::unguarded_rules::UNGUARDED_COMMANDS.accepts)(
         source
     ));

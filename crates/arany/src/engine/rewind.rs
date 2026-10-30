@@ -918,7 +918,7 @@ mod tests {
 
     fn write_grant(state: &std::path::Path, write: bool) {
         let path = state.join("tools.json");
-        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":write,"commands":[],"skills":[],"mcp":[]})).unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"workspace_paths":["src"],"write":write,"commands":[],"skills":[],"mcp":[]})).unwrap()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 

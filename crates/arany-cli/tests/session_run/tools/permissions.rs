@@ -105,7 +105,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         } else {
             json!(["."])
         };
-        let config = json!({"version":1,"workspace_paths":roots,"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+        let config = json!({"workspace_paths":roots,"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
         private_file(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),

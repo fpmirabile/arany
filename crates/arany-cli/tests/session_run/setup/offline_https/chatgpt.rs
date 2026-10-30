@@ -554,7 +554,7 @@ fn isolated_stage(near_expiry: bool) {
     let text = std::str::from_utf8(&pty.transcript).unwrap();
     assert_tty_restored(text);
     assert_eq!(
-        text.contains("Saved records from an incompatible version"),
+        text.contains("Saved records this version cannot read"),
         stage == "archived_records"
     );
     let view = session("/root/state-chatgpt");

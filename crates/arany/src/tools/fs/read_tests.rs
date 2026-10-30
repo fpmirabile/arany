@@ -13,7 +13,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     std::fs::write(temp.path().join("outside.txt"), "outside-canary").unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let read = |path: &str| ToolCall::Read {
         path: path.into(),
@@ -168,7 +168,7 @@ async fn in_process_results_fit_their_budget_before_serialization() {
     std::fs::write(workspace.join("src/big.txt"), &text).unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for result_bytes in [256, 4096, MAX_TOOL_RESULT_BYTES as u32] {
         let mut intent = runtime.intent(
@@ -240,7 +240,7 @@ async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
     std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n".repeat(4096)).unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let mut elapsed = [Duration::ZERO; 40];
     for sample in &mut elapsed {
@@ -277,7 +277,7 @@ async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() 
     std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let slots = std::sync::Arc::clone(&runtime.reads.as_ref().unwrap().slots);
     let held = slots

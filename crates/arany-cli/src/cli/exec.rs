@@ -1113,7 +1113,7 @@ mod tests {
         let config = state_dir.join("tools.json");
         std::fs::write(
             &config,
-            r#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[]}"#,
+            r#"{"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[]}"#,
         )
         .expect("config");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).expect("mode");
@@ -1456,11 +1456,15 @@ mod tests {
             let state_dir = temp.path().join("state");
             let root = StateRoot::admit(&state_dir).expect("state");
             let config = state_dir.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+            std::fs::write(
+                &config,
+                br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            )
+            .expect("config");
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
                 .expect("private config");
             if finite {
-                let preferences = serde_json::json!({"version":9,"preferences":{
+                let preferences = serde_json::json!({"preferences":{
                     "goal_budget":GoalBudget { max_provider_calls:Some(1), ..Default::default() },
                 }});
                 root.record(arany::RecordKind::UiPreferences)
@@ -1533,57 +1537,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_rejects_malformed_and_unsafe_settings_before_dispatch() {
+    async fn exec_rejects_unsafe_settings_before_dispatch() {
         use std::os::unix::fs::PermissionsExt;
-        for unsafe_record in [false, true] {
-            let temp = tempfile::tempdir().expect("private root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir(&workspace).expect("Workspace");
-            let state = temp.path().join("state");
-            let root = StateRoot::admit(&state).expect("State");
-            root.record(arany::RecordKind::UiPreferences)
-                .replace(b"malformed")
-                .expect("record");
-            if unsafe_record {
-                std::fs::set_permissions(
-                    state.join("ui-preferences.json"),
-                    std::fs::Permissions::from_mode(0o644),
-                )
-                .expect("unsafe fixture");
-            }
-            drop(root);
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let exec = args(state.clone(), workspace.clone(), "Never dispatched");
-            let admission = exec.admit().expect("arguments");
-            let error = run_with_provider(
-                exec,
-                admission,
-                Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
-                Telemetry::disabled(),
-            )
-            .await
-            .err()
-            .expect("settings refusal");
-            assert_eq!(
-                error,
-                if unsafe_record {
-                    "display settings unavailable or unsafe"
-                } else {
-                    "invalid display settings; use /settings to replace them"
-                }
-            );
-            assert!(observed.lock().expect("observations").is_empty());
-            assert!(
-                arany::list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
-                    .await
-                    .expect("history")
-                    .is_empty()
-            );
-            assert_eq!(
-                std::fs::read(state.join("ui-preferences.json")).expect("unchanged record"),
-                b"malformed"
-            );
-        }
+        let temp = tempfile::tempdir().expect("private root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("Workspace");
+        let state = temp.path().join("state");
+        let root = StateRoot::admit(&state).expect("State");
+        root.record(arany::RecordKind::UiPreferences)
+            .replace(b"malformed")
+            .expect("record");
+        std::fs::set_permissions(
+            state.join("ui-preferences.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("unsafe fixture");
+        drop(root);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let exec = args(state.clone(), workspace.clone(), "Never dispatched");
+        let admission = exec.admit().expect("arguments");
+        let error = run_with_provider(
+            exec,
+            admission,
+            Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
+            Telemetry::disabled(),
+        )
+        .await
+        .err()
+        .expect("settings refusal");
+        assert_eq!(error, "display settings unavailable or unsafe");
+        assert!(observed.lock().expect("observations").is_empty());
+        assert!(
+            arany::list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
+                .await
+                .expect("history")
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::read(state.join("ui-preferences.json")).expect("unchanged record"),
+            b"malformed"
+        );
     }
 
     #[tokio::test]
@@ -1795,12 +1788,12 @@ mod tests {
         let tools = state_dir.join("tools.json");
         std::fs::write(
             &tools,
-            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
         )
         .expect("Tool configuration");
         std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
             .expect("private Tool configuration");
-        let preferences = serde_json::json!({"version":9,"preferences":{"goal_budget":budget}});
+        let preferences = serde_json::json!({"preferences":{"goal_budget":budget}});
         root.record(arany::RecordKind::UiPreferences)
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
             .expect("record settings");

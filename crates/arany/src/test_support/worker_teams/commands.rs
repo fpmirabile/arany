@@ -76,7 +76,7 @@ pub(super) fn configure(state: &Path, case: &str) {
     }
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
     crate::test_support::private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
-        "version":1,"workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
+        "workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
         "commands":[{"name":"build","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}]
     })).unwrap());
 }

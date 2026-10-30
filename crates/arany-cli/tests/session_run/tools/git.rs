@@ -156,7 +156,6 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     );
     let git = std::fs::canonicalize("/usr/bin/git").unwrap();
     let config = json!({
-        "version": 1,
         "workspace_paths": ["."],
         "write": false,
         "commands": [],

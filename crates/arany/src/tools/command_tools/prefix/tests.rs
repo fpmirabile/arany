@@ -106,7 +106,6 @@ fn prefix_payload_and_replay_facts_refuse_a_different_final_command() {
     other.executable = "/programs/other".into();
     other.selected_path = other.executable.clone();
     let record = CommandTools {
-        version: VERSION,
         tools: vec![tool.clone(), other],
     };
     assert!(CommandTools::parse(&serde_json::to_vec(&record).unwrap()).is_err());

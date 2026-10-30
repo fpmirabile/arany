@@ -7,7 +7,7 @@ fn credentials(client_id: &str, subject: &str) -> VerifiedCredentials {
         client_id: client_id.into(),
         host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
         subject: subject.into(),
-        chatgpt_account_id: None,
+        chatgpt_account_id: Some(format!("account-{subject}")),
         id_token: "synthetic-id".into(),
         access_token: "synthetic-access".into(),
         refresh_token: "synthetic-refresh".into(),
@@ -486,14 +486,13 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
     let credentials = credentials("oaiapp_terminal_keyring", "subject-one");
     let id = Uuid::now_v7();
     AccountIndex {
-        schema: CHATGPT_ACCOUNTS.current as u8,
         selected: Some(id),
         accounts: vec![AccountEntry {
             id,
             host_id: credentials.host_id,
             client_id: credentials.client_id,
             subject: credentials.subject,
-            chatgpt_account_id: None,
+            chatgpt_account_id: credentials.chatgpt_account_id.unwrap(),
             keyring_slot: Some(account_keyring_slot("oaiapp_terminal_keyring", id)),
             storage: AccountStorage::Keyring,
             renewal_pending: true,
@@ -583,7 +582,6 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
     let slot = account_keyring_slot(&client_id, id);
     let _cleanup = Cleanup(slot.clone());
     let record = serde_json::to_vec(&TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: Some(slot.clone()),
         credentials: first.clone(),
         consent,
@@ -608,7 +606,6 @@ fn native_keyring_round_trips_and_replaces_a_synthetic_chatgpt_account() {
         .bind(&replacement)
         .expect("replacement consent");
     let replacement_record = serde_json::to_vec(&TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: Some(slot.clone()),
         credentials: replacement.clone(),
         consent: consent.clone(),
@@ -674,13 +671,8 @@ fn keyring_consent(credentials: &VerifiedCredentials) -> ConsentReceipt {
         .unwrap()
 }
 
-fn token_record_json(
-    schema: u8,
-    slot: Option<&str>,
-    credentials: &VerifiedCredentials,
-) -> serde_json::Value {
+fn token_record_json(slot: Option<&str>, credentials: &VerifiedCredentials) -> serde_json::Value {
     let mut value = serde_json::json!({
-        "schema": schema,
         "credentials": credentials,
         "consent": keyring_consent(credentials),
     });
@@ -696,7 +688,7 @@ fn keyring_entry(id: Uuid, credentials: &VerifiedCredentials, slot: String) -> A
         host_id: credentials.host_id,
         client_id: credentials.client_id.clone(),
         subject: credentials.subject.clone(),
-        chatgpt_account_id: None,
+        chatgpt_account_id: credentials.chatgpt_account_id.clone().unwrap(),
         keyring_slot: Some(slot),
         storage: AccountStorage::Keyring,
         renewal_pending: false,
@@ -711,7 +703,7 @@ fn keyring_slot_and_consent_bind_token_to_its_record() {
     let id = Uuid::now_v7();
     let creds = credentials("oaiapp_first", "subject-one");
     let slot = account_keyring_slot("oaiapp_first", id);
-    let value = token_record_json(TOKEN_RECORD_SCHEMA, Some(&slot), &creds);
+    let value = token_record_json(Some(&slot), &creds);
     let record = serde_json::to_vec(&value).unwrap();
     assert!(valid_keyring_record(&slot, &record));
     let foreign = account_keyring_slot("oaiapp_first", Uuid::now_v7());
@@ -740,27 +732,17 @@ fn keyring_read_admits_only_the_record_written_at_the_entry_slot() {
     let creds = credentials("oaiapp_admit", "subject-one");
     let slot = account_keyring_slot("oaiapp_admit", id);
     let entry = keyring_entry(id, &creds, slot.clone());
-    let bytes = |schema: u8, slot: Option<&str>, credentials: &VerifiedCredentials| {
-        serde_json::to_vec(&token_record_json(schema, slot, credentials)).unwrap()
+    let bytes = |slot: Option<&str>, credentials: &VerifiedCredentials| {
+        serde_json::to_vec(&token_record_json(slot, credentials)).unwrap()
     };
-    let admitted =
-        admit_keyring_record(&entry, &bytes(TOKEN_RECORD_SCHEMA, Some(&slot), &creds)).unwrap();
+    let admitted = admit_keyring_record(&entry, &bytes(Some(&slot), &creds)).unwrap();
     assert_eq!(admitted.slot.as_deref(), Some(slot.as_str()));
     let foreign = account_keyring_slot("oaiapp_admit", Uuid::now_v7());
     for record in [
-        bytes(TOKEN_RECORD_SCHEMA, Some(&foreign), &creds),
-        bytes(TOKEN_RECORD_SCHEMA, None, &creds),
-        bytes(1, Some(&slot), &creds),
-        bytes(
-            TOKEN_RECORD_SCHEMA,
-            Some(&slot),
-            &credentials("oaiapp_other", "subject-one"),
-        ),
-        bytes(
-            TOKEN_RECORD_SCHEMA,
-            Some(&slot),
-            &credentials("oaiapp_admit", "subject-two"),
-        ),
+        bytes(Some(&foreign), &creds),
+        bytes(None, &creds),
+        bytes(Some(&slot), &credentials("oaiapp_other", "subject-one")),
+        bytes(Some(&slot), &credentials("oaiapp_admit", "subject-two")),
     ] {
         assert!(matches!(
             admit_keyring_record(&entry, &record),
@@ -815,6 +797,7 @@ fn accounts_of_one_client_keep_distinct_slots_and_identities() {
 
     let mut duplicate = serde_json::to_value(&index).unwrap();
     duplicate["accounts"][1]["subject"] = "subject-one".into();
+    duplicate["accounts"][1]["chatgpt_account_id"] = "account-subject-one".into();
     assert!(
         serde_json::from_value::<AccountIndex>(duplicate)
             .unwrap()
@@ -878,7 +861,7 @@ fn private_file_entries_carry_no_slot() {
     save_private_file_at(&state, &workspace, creds.clone(), accepted(&creds), None).unwrap();
     let index = AccountIndex::read(&state).unwrap();
     assert!(index.accounts[0].keyring_slot.is_none());
-    assert!(index.accounts[0].chatgpt_account_id.is_none());
+    assert_eq!(index.accounts[0].chatgpt_account_id, "account-subject-one");
     assert!(index.accounts[0].token.as_ref().unwrap().slot.is_none());
     let mut slotted = serde_json::to_value(&index).unwrap();
     slotted["accounts"][0]["keyring_slot"] =
@@ -913,12 +896,10 @@ fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path()
             Err(AuthorizationError::InvalidIdentity)
         ));
     };
-    for schema in [0, 1, 3, 255] {
-        let value = token_record_json(schema, Some(&slot), &creds);
-        refused(&slot, &serde_json::to_vec(&value).unwrap());
-    }
+    let mut versioned = token_record_json(Some(&slot), &creds);
+    versioned["schema"] = 2.into();
+    refused(&slot, &serde_json::to_vec(&versioned).unwrap());
     let current = serde_json::to_string(&TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: Some(slot.clone()),
         credentials: creds.clone(),
         consent: keyring_consent(&creds),
@@ -926,7 +907,7 @@ fn unsupported_or_duplicated_token_record_bytes_are_refused_on_every_read_path()
     .unwrap();
     assert!(valid_keyring_record(&slot, current.as_bytes()));
     for (from, to) in [
-        ("{\"schema\":2,", "{\"schema\":2,\"schema\":2,"),
+        ("{\"slot\":", "{\"slot\":null,\"slot\":"),
         (
             "\"client_id\":\"oaiapp_dup\"",
             "\"client_id\":\"oaiapp_dup\",\"client_id\":\"oaiapp_dup\"",
@@ -1093,14 +1074,13 @@ fn pending_keyring_renewal_blocks_load_before_os_store_access() {
     let state = StateRoot::admit(&temp.path().join("state")).unwrap();
     let id = Uuid::now_v7();
     AccountIndex {
-        schema: CHATGPT_ACCOUNTS.current as u8,
         selected: Some(id),
         accounts: vec![AccountEntry {
             id,
             host_id: credentials("oaiapp_pending", "subject-one").host_id,
             client_id: "oaiapp_pending".into(),
             subject: "subject-one".into(),
-            chatgpt_account_id: None,
+            chatgpt_account_id: "account-subject-one".into(),
             keyring_slot: Some(account_keyring_slot("oaiapp_pending", id)),
             storage: AccountStorage::Keyring,
             renewal_pending: true,

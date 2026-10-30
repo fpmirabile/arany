@@ -88,13 +88,25 @@ pub async fn record_setup_edit_state(
     operation_id
 }
 
-// The current version of a library-owned record, so fixtures never copy the number.
-pub fn record_version(kind: crate::RecordKind) -> u64 {
-    crate::RECORD_FORMATS
-        .iter()
-        .find(|format| format.kind == kind)
-        .expect("library-owned record")
-        .current
+// The Responses route `local` on a loopback port; struct update syntax derives the other protocols.
+pub fn local_custom_profile(port: u16) -> crate::CustomProfileDraft {
+    crate::CustomProfileDraft {
+        name: "local".into(),
+        protocol: crate::CustomProtocol::OpenaiResponses,
+        url: format!("http://127.0.0.1:{port}/v1/responses"),
+        auth: None,
+        model: "model-1".into(),
+        credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
+        efforts: Vec::new(),
+    }
+}
+
+// Saves custom routes through their owner, so fixtures always follow its current format.
+pub fn save_custom_profiles(state_dir: &std::path::Path, profiles: &[crate::CustomProfileDraft]) {
+    let state = crate::StateRoot::admit(state_dir).expect("private state root");
+    let expected = crate::CustomProfile::snapshot(&state).expect("profile snapshot");
+    crate::CustomProfile::write_profiles(&state, expected.as_deref(), profiles)
+        .expect("valid custom profiles");
 }
 
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
@@ -183,7 +195,7 @@ pub fn isolate_account_root() -> &'static std::path::Path {
                     .expect("private test Guard directory");
                 private_file(
                     &path.join("guard/limits.json"),
-                    br#"{"version":1,"units":64,"queued":1024}"#,
+                    br#"{"units":64,"queued":1024}"#,
                 );
                 path
             }

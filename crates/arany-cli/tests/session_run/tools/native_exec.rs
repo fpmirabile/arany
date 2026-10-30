@@ -1481,7 +1481,7 @@ impl SpillFixture {
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
         let shell = std::fs::canonicalize("/usr/bin/bash").unwrap();
-        private_file(&state_path.join("tools.json"), &serde_json::to_vec(&json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[{"name":"bash","executable":shell,"sha256":hash(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap());
+        private_file(&state_path.join("tools.json"), &serde_json::to_vec(&json!({"workspace_paths":["src"],"write":false,"commands":[{"name":"bash","executable":shell,"sha256":hash(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap());
         let engine = arany::test_support::engine::open(
             state,
             EngineConfig {

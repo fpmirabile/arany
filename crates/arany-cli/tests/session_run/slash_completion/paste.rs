@@ -78,7 +78,7 @@ esac
         StateRoot::admit(&dir.join(".local/state/arany"))
             .expect("isolated account root")
             .record(RecordKind::SavedAccount)
-            .replace(br#"{"schema":2,"storage":"keyring","account":null}"#)
+            .replace(br#"{"storage":"keyring","account":null}"#)
             .expect("credential-free backend marker");
         std::fs::create_dir(dir.join("runtime")).expect("private Wayland runtime");
         std::fs::set_permissions(dir.join("runtime"), std::fs::Permissions::from_mode(0o700))

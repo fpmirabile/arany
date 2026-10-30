@@ -18,8 +18,6 @@ use std::{
 };
 use uuid::{Uuid, Variant, Version};
 
-pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 2;
-
 const MAX_ACCOUNTS: usize = 8;
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
@@ -37,9 +35,7 @@ fn decode_keyring_record(bytes: &[u8]) -> Option<TokenRecord> {
     if bytes.len() > MAX_TOKEN_RECORD_BYTES {
         return None;
     }
-    serde_json::from_slice::<TokenRecord>(bytes)
-        .ok()
-        .filter(|record| record.schema == TOKEN_RECORD_SCHEMA)
+    serde_json::from_slice::<TokenRecord>(bytes).ok()
 }
 
 pub(crate) fn valid_keyring_record(slot: &str, bytes: &[u8]) -> bool {
@@ -51,7 +47,6 @@ pub(crate) fn valid_keyring_record(slot: &str, bytes: &[u8]) -> bool {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TokenRecord {
-    schema: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     slot: Option<String>,
     credentials: VerifiedCredentials,
@@ -71,7 +66,7 @@ struct SignedIn<'a> {
     client_id: &'a str,
     subject: &'a str,
     host_id: Uuid,
-    account_id: Option<&'a str>,
+    account_id: &'a str,
 }
 
 impl SignedIn<'_> {
@@ -79,10 +74,7 @@ impl SignedIn<'_> {
         entry.subject == self.subject
             && entry.host_id == self.host_id
             && entry.storage == storage
-            && entry
-                .chatgpt_account_id
-                .as_deref()
-                .is_none_or(|id| Some(id) == self.account_id)
+            && entry.chatgpt_account_id == self.account_id
     }
 }
 
@@ -92,7 +84,7 @@ pub(crate) struct ReauthorizationTarget {
     pub(crate) client_id: String,
     pub(crate) subject: String,
     pub(crate) storage: AccountStorage,
-    pub(crate) chatgpt_account_id: Option<String>,
+    pub(crate) chatgpt_account_id: String,
 }
 
 pub(crate) struct AccountInspection {
@@ -138,9 +130,7 @@ impl SelectedAccount {
 
 impl TokenRecord {
     fn content_valid(&self, storage: AccountStorage) -> bool {
-        self.schema == TOKEN_RECORD_SCHEMA
-            && self.credentials.valid_saved()
-            && self.consent.matches(&self.credentials, storage)
+        self.credentials.valid_saved() && self.consent.matches(&self.credentials, storage)
     }
 
     fn valid_for(&self, storage: AccountStorage) -> bool {
@@ -155,8 +145,7 @@ struct AccountEntry {
     host_id: Uuid,
     client_id: String,
     subject: String,
-    #[serde(deserialize_with = "Option::deserialize")]
-    chatgpt_account_id: Option<String>,
+    chatgpt_account_id: String,
     #[serde(deserialize_with = "Option::deserialize")]
     keyring_slot: Option<String>,
     storage: AccountStorage,
@@ -205,21 +194,18 @@ impl AccountEntry {
             && !self.subject.is_empty()
             && self.subject.len() <= 512
             && self.subject.bytes().all(|byte| byte.is_ascii_graphic())
-            && self
-                .chatgpt_account_id
-                .as_deref()
-                .is_none_or(|id| super::bounded_graphic(id, super::MAX_ACCOUNT_ID_BYTES))
+            && super::bounded_graphic(&self.chatgpt_account_id, super::MAX_ACCOUNT_ID_BYTES)
             && self.slot_valid()
             && !(self.signout_pending && self.renewal_pending)
             && match (&self.storage, &self.token) {
                 (AccountStorage::PrivateFile, Some(token)) => {
-                    token.schema == TOKEN_RECORD_SCHEMA
-                        && token.slot.is_none()
+                    token.slot.is_none()
                         && token.credentials.valid_saved()
                         && token.credentials.client_id == self.client_id
                         && token.credentials.host_id == self.host_id
                         && token.credentials.subject == self.subject
-                        && token.credentials.chatgpt_account_id == self.chatgpt_account_id
+                        && token.credentials.chatgpt_account_id.as_ref()
+                            == Some(&self.chatgpt_account_id)
                 }
                 (AccountStorage::PrivateFile, None) => self.disconnected,
                 (AccountStorage::Keyring, None) => true,
@@ -231,7 +217,6 @@ impl AccountEntry {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AccountIndex {
-    schema: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     selected: Option<Uuid>,
     accounts: Vec<AccountEntry>,
@@ -239,8 +224,6 @@ struct AccountIndex {
 
 pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptAccounts,
-    field: "schema",
-    current: 5,
     accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
 };
 
@@ -272,7 +255,7 @@ impl AccountIndex {
             None => self.accounts.iter().position(|entry| {
                 entry.client_id == who.client_id
                     && entry.subject == who.subject
-                    && entry.chatgpt_account_id.as_deref() == who.account_id
+                    && entry.chatgpt_account_id == who.account_id
             }),
         };
         let Some(position) = position else {
@@ -284,7 +267,7 @@ impl AccountIndex {
                 other.id != entry.id
                     && other.client_id == who.client_id
                     && other.subject == who.subject
-                    && other.chatgpt_account_id.as_deref() == who.account_id
+                    && other.chatgpt_account_id == who.account_id
             })
         {
             return Err(AuthorizationError::RegistrationConflict);
@@ -311,15 +294,13 @@ impl AccountIndex {
 
     fn empty() -> Self {
         Self {
-            schema: CHATGPT_ACCOUNTS.current as u8,
             selected: None,
             accounts: Vec::new(),
         }
     }
 
     fn validate(&self) -> Result<(), AuthorizationError> {
-        if u64::from(self.schema) != CHATGPT_ACCOUNTS.current
-            || self.accounts.len() > MAX_ACCOUNTS
+        if self.accounts.len() > MAX_ACCOUNTS
             || self
                 .selected
                 .is_some_and(|id| !self.accounts.iter().any(|entry| entry.id == id))
@@ -424,7 +405,7 @@ fn load_selected_snapshot(
     if entry.storage != selected.storage
         || entry.host_id != selected.credentials.host_id
         || entry.client_id != selected.credentials.client_id
-        || entry.chatgpt_account_id != selected.credentials.chatgpt_account_id
+        || selected.credentials.chatgpt_account_id.as_ref() != Some(&entry.chatgpt_account_id)
         || entry.subject != selected.credentials.subject
     {
         return Err(AuthorizationError::InvalidIdentity);
@@ -542,7 +523,6 @@ pub(super) fn save_private_file_at(
     expected_selected: Option<Uuid>,
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: None,
         credentials,
         consent,
@@ -551,6 +531,11 @@ pub(super) fn save_private_file_at(
         return Err(AuthorizationError::ConsentRequired);
     }
     let host_id = token.credentials.host_id;
+    let account_id = token
+        .credentials
+        .chatgpt_account_id
+        .clone()
+        .ok_or(AuthorizationError::InvalidIdentity)?;
     state
         .with_account_replacement_lock(workspace, || {
             let mut index = AccountIndex::read(state)?;
@@ -569,14 +554,13 @@ pub(super) fn save_private_file_at(
                     client_id,
                     subject,
                     host_id,
-                    account_id: token.credentials.chatgpt_account_id.as_deref(),
+                    account_id: &account_id,
                 },
                 AccountStorage::PrivateFile,
                 expected_selected,
             )?;
             let id = if let Some(position) = position {
                 let entry = &mut index.accounts[position];
-                entry.chatgpt_account_id = token.credentials.chatgpt_account_id.clone();
                 entry.token = Some(token);
                 entry.renewal_pending = false;
                 entry.signout_pending = false;
@@ -589,7 +573,7 @@ pub(super) fn save_private_file_at(
                     host_id,
                     client_id: client_id.clone(),
                     subject: subject.clone(),
-                    chatgpt_account_id: token.credentials.chatgpt_account_id.clone(),
+                    chatgpt_account_id: account_id.clone(),
                     keyring_slot: None,
                     storage: AccountStorage::PrivateFile,
                     renewal_pending: false,
@@ -633,7 +617,6 @@ fn save_keyring_at_with(
     write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
 ) -> Result<Uuid, AuthorizationError> {
     let mut token = TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: None,
         credentials,
         consent,
@@ -642,6 +625,11 @@ fn save_keyring_at_with(
         return Err(AuthorizationError::ConsentRequired);
     }
     let host_id = token.credentials.host_id;
+    let account_id = token
+        .credentials
+        .chatgpt_account_id
+        .clone()
+        .ok_or(AuthorizationError::InvalidIdentity)?;
     state
         .with_account_replacement_lock(workspace, || {
             let mut index = AccountIndex::read(state)?;
@@ -660,7 +648,7 @@ fn save_keyring_at_with(
                     client_id: &client_id,
                     subject: &subject,
                     host_id,
-                    account_id: token.credentials.chatgpt_account_id.as_deref(),
+                    account_id: &account_id,
                 },
                 AccountStorage::Keyring,
                 expected_selected,
@@ -676,7 +664,7 @@ fn save_keyring_at_with(
                     host_id,
                     client_id,
                     subject,
-                    chatgpt_account_id: token.credentials.chatgpt_account_id.clone(),
+                    chatgpt_account_id: account_id.clone(),
                     keyring_slot: Some(slot.clone()),
                     storage: AccountStorage::Keyring,
                     renewal_pending: false,
@@ -702,7 +690,6 @@ fn save_keyring_at_with(
             entry.renewal_pending = false;
             entry.signout_pending = false;
             entry.disconnected = false;
-            entry.chatgpt_account_id = token.credentials.chatgpt_account_id.clone();
             index.select_account(id);
             index.write(state).map_err(uncertain_account_publication)?;
             Ok(id)
@@ -808,7 +795,7 @@ fn admit_keyring_record(
         || token.slot != entry.keyring_slot
         || !token.credentials.valid_saved()
         || token.credentials.client_id != entry.client_id
-        || token.credentials.chatgpt_account_id != entry.chatgpt_account_id
+        || token.credentials.chatgpt_account_id.as_ref() != Some(&entry.chatgpt_account_id)
         || token.credentials.subject != entry.subject
         || token.credentials.host_id != entry.host_id
     {
@@ -1365,7 +1352,6 @@ fn refresh_selected_with(
                 return Err(AuthorizationError::InvalidIdentity);
             }
             let updated = TokenRecord {
-                schema: TOKEN_RECORD_SCHEMA,
                 slot: token.slot.clone(),
                 credentials: replacement,
                 consent: token.consent,

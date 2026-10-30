@@ -2761,7 +2761,7 @@ mod tests {
             interpreter: false,
             inputs: Vec::new(),
         };
-        serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[gh],"skills":[],"mcp":[],"git":git})).unwrap()
+        serde_json::from_value(json!({"workspace_paths":["."],"write":true,"commands":[gh],"skills":[],"mcp":[],"git":git})).unwrap()
     }
 
     fn authentication(root: &Path) -> Authentication {
@@ -2803,7 +2803,7 @@ mod tests {
         let mut runtime = crate::tools::tests::in_process_runtime(
             &home,
             json!({
-                "version": 1, "workspace_paths": ["."], "write": true,
+                "workspace_paths": ["."], "write": true,
                 "commands": [], "skills": [], "mcp": [],
                 "git": {"name":"git", "executable":"/usr/bin/git", "sha256":"0".repeat(64), "interpreter":false, "inputs":[]}
             }),

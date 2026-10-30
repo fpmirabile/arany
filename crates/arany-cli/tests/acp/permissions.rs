@@ -537,7 +537,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     for (name, value) in [
         (
             "tools.json",
-            json!({"version":1,"workspace_paths":if write {json!(["."])} else {json!(["facts.txt"])},"write":write || hook_ask,"commands":commands,"skills":[],"mcp":[]}),
+            json!({"workspace_paths":if write {json!(["."])} else {json!(["facts.txt"])},"write":write || hook_ask,"commands":commands,"skills":[],"mcp":[]}),
         ),
         ("permissions.json", permissions),
     ] {

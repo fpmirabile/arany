@@ -42,7 +42,7 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
     for (mode, call, expected) in rows {
         let state_path = temp.path().join(format!("state-{mode}"));
         let state = StateRoot::admit(&state_path).unwrap();
-        let config = json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[{"name":"synthetic","program":{"name":"python","executable":python,"sha256":python_hash,"interpreter":true,"inputs":[{"path":peer,"destination":"mcp.py","sha256":hash(peer_body)}]},"args":["/inputs/python/mcp.py",mode],"tools":["echo"]}]});
+        let config = json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[{"name":"synthetic","program":{"name":"python","executable":python,"sha256":python_hash,"interpreter":true,"inputs":[{"path":peer,"destination":"mcp.py","sha256":hash(peer_body)}]},"args":["/inputs/python/mcp.py",mode],"tools":["echo"]}]});
         private_file(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),

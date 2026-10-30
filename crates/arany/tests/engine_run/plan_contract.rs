@@ -90,7 +90,7 @@ fn command_resource_engine(state_path: &Path) -> Engine {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+    let config = serde_json::json!({"workspace_paths":["notes"],"write":false,
         "commands":[{"name":"sh","executable":executable,"sha256":digest,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
     let config_path = state_path.join("tools.json");
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -766,7 +766,7 @@ async fn resumed_goal_refuses_plan_excluded_invoked_skill_before_tool_started() 
     let config = state.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("admit project Skill discovery");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))

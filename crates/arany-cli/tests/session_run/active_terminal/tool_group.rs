@@ -75,7 +75,7 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     StateRoot::admit(&state).unwrap();
     crate::private_file(
         &state.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["src",".agents/skills"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["src",".agents/skills"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
     let port = {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

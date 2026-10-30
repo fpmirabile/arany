@@ -1921,8 +1921,7 @@ mod tests {
         let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,
-            "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
             command_deadline: None,
@@ -2370,8 +2369,7 @@ mod tests {
         let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,
-            "workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[],
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[],
             "git": git}))
         .unwrap();
         let call = ToolCall::GitStatus { path: ".".into() };

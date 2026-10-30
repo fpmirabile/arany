@@ -212,10 +212,14 @@ async fn serve_defaults_complete_past_64_calls_and_30_active_minutes() {
         let state = root.path().join("state");
         let admitted = StateRoot::admit(&state).unwrap();
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         if finite {
-            let preferences = json!({"version":9,"preferences":{
+            let preferences = json!({"preferences":{
                 "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
             }});
             admitted
@@ -314,73 +318,68 @@ async fn serve_defaults_complete_past_64_calls_and_30_active_minutes() {
 }
 
 #[tokio::test]
-async fn malformed_and_unsafe_settings_refuse_thread_admission_before_dispatch() {
+async fn unsafe_settings_refuse_thread_admission_before_dispatch() {
     use std::os::unix::fs::PermissionsExt;
     let _deadline = deadline();
-    for unsafe_record in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir(&workspace).unwrap();
-        let state = root.path().join("state");
-        let admitted = StateRoot::admit(&state).unwrap();
-        admitted
-            .record(arany::RecordKind::UiPreferences)
-            .replace(b"malformed")
-            .unwrap();
-        if unsafe_record {
-            std::fs::set_permissions(
-                state.join("ui-preferences.json"),
-                std::fs::Permissions::from_mode(0o644),
-            )
-            .unwrap();
-        }
-        drop(admitted);
-        let provider =
-            Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
-        let observed = provider.requests.clone();
-        let threads = threads::Threads::with_provider(provider);
-        let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
-        let (outbound, output) = mpsc::channel(OUTBOUND_CAPACITY);
-        let client = async {
-            let mut wire = Wire {
-                input,
-                output,
-                seen: Vec::new(),
-                timeout: Duration::from_secs(10),
-            };
-            wire.call(
-                1,
-                "initialize",
-                json!({"clientInfo":{"name":"test","version":"1"}}),
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let admitted = StateRoot::admit(&state).unwrap();
+    admitted
+        .record(arany::RecordKind::UiPreferences)
+        .replace(b"malformed")
+        .unwrap();
+    std::fs::set_permissions(
+        state.join("ui-preferences.json"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    drop(admitted);
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
+    let observed = provider.requests.clone();
+    let threads = threads::Threads::with_provider(provider);
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let client = async {
+        let mut wire = Wire {
+            input,
+            output,
+            seen: Vec::new(),
+            timeout: Duration::from_secs(10),
+        };
+        wire.call(
+            1,
+            "initialize",
+            json!({"clientInfo":{"name":"test","version":"1"}}),
+        )
+        .await;
+        let refused = wire
+            .call(
+                2,
+                "thread/start",
+                json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4"}),
             )
             .await;
-            let refused = wire
-                .call(
-                    2,
-                    "thread/start",
-                    json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4"}),
-                )
-                .await;
-            assert_eq!(reason(&refused), (&json!(-32000), &json!("invalidRequest")));
-            wire.shutdown().await;
-        };
-        let (result, ()) = tokio::join!(
-            server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
-            client
-        );
-        result.unwrap();
-        assert!(observed.lock().unwrap().is_empty());
-        assert!(
-            arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            std::fs::read(state.join("ui-preferences.json")).unwrap(),
-            b"malformed"
-        );
-    }
+        assert_eq!(reason(&refused), (&json!(-32000), &json!("invalidRequest")));
+        wire.shutdown().await;
+    };
+    let (result, ()) = tokio::join!(
+        server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
+        client
+    );
+    result.unwrap();
+    assert!(observed.lock().unwrap().is_empty());
+    assert!(
+        arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(state.join("ui-preferences.json")).unwrap(),
+        b"malformed"
+    );
 }
 
 #[tokio::test]
@@ -578,7 +577,7 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
     let state = root.path().join("state");
-    let preferences = json!({"version":9,"preferences":{
+    let preferences = json!({"preferences":{
         "view":"classic",
         "goal_budget":arany::GoalBudget{max_provider_calls:Some(1),..Default::default()},
     }});

@@ -49,7 +49,6 @@ pub enum McpAuthError {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Tokens {
-    schema: u8,
     servers: BTreeMap<String, Grant>,
 }
 
@@ -83,8 +82,6 @@ enum Renewal {
 
 pub(crate) const MCP_OAUTH: RecordFormat = RecordFormat {
     kind: RecordKind::McpOauth,
-    field: "schema",
-    current: 1,
     accepts: |bytes| Tokens::decode(bytes).is_ok(),
 };
 
@@ -123,8 +120,7 @@ impl Grant {
 impl Tokens {
     fn decode(bytes: &[u8]) -> Result<Self, McpAuthError> {
         let tokens: Self = serde_json::from_slice(bytes).map_err(|_| McpAuthError::Storage)?;
-        (tokens.schema == 1
-            && tokens.servers.len() <= MAX_MCP_SERVERS
+        (tokens.servers.len() <= MAX_MCP_SERVERS
             && tokens
                 .servers
                 .iter()
@@ -166,7 +162,6 @@ fn load(root: &StateRoot) -> Result<Tokens, McpAuthError> {
     {
         Some(bytes) => Tokens::decode(&bytes),
         None => Ok(Tokens {
-            schema: 1,
             servers: BTreeMap::new(),
         }),
     }

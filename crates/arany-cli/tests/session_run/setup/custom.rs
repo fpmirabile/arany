@@ -35,7 +35,7 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
         document["profiles"][0]["protocol"],
         "openai-chat-completions"
     );
-    assert_eq!(document["profiles"][0]["auth"], "bearer");
+    assert!(document["profiles"][0].get("auth").is_none());
     assert_eq!(profile.as_bytes(), before_edit);
     assert!(!profile.contains(FIRST_ROUTE_KEY_CANARY));
     assert!(!String::from_utf8_lossy(&transcript).contains(FIRST_ROUTE_KEY_CANARY));
@@ -168,36 +168,29 @@ fn assert_changed_protocol_requires_destination(pty: &mut Pty) {
 
 #[cfg(debug_assertions)]
 fn seed_long_custom_profiles(state: &Path) -> String {
-    StateRoot::admit(state).expect("custom route state");
     let long_name = "z".repeat(arany::MAX_CUSTOM_PROFILE_NAME_BYTES);
-    let profile = |name: &str, model: &str, credential_env: &str| {
-        serde_json::json!({
-            "name": name,
-            "protocol": "openai-responses",
-            "endpoint": "https://api.example.com/v1/responses",
-            "model": model,
-            "credential_env": credential_env,
-            "outcome_encoding": "json_schema",
-            "privacy": "user_authorized",
-            "max_output_tokens": 4096,
-            "efforts": []
-        })
+    let profile = |name: &str, model: &str, credential_env: &str| arany::CustomProfileDraft {
+        name: name.into(),
+        url: "https://api.example.com/v1/responses".into(),
+        model: model.into(),
+        credential_env: credential_env.into(),
+        ..arany::test_support::local_custom_profile(0)
     };
-    let document = serde_json::json!({
-        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
-        "profiles": [
-            profile("first-route", "first-model", "ARANY_PROVIDER_FIRST_ROUTE_KEY"),
-            profile(&long_name, "second-model", "ARANY_PROVIDER_SECOND_ROUTE_KEY")
-        ]
-    });
-    let path = state.join("provider-profiles.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&document).expect("profile document"),
-    )
-    .expect("write profile document");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .expect("private profiles");
+    arany::test_support::save_custom_profiles(
+        state,
+        &[
+            profile(
+                "first-route",
+                "first-model",
+                "ARANY_PROVIDER_FIRST_ROUTE_KEY",
+            ),
+            profile(
+                &long_name,
+                "second-model",
+                "ARANY_PROVIDER_SECOND_ROUTE_KEY",
+            ),
+        ],
+    );
     long_name
 }
 

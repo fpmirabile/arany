@@ -519,7 +519,7 @@ impl StateRoot {
             }
             match edit {
                 ProviderRecordEdit::Replace(bytes) => {
-                    if !format.accepts_current(bytes) || bytes.is_empty() || bytes.len() > limit {
+                    if !(format.accepts)(bytes) || bytes.is_empty() || bytes.len() > limit {
                         return Err(StoreError::InvalidHistory);
                     }
                     self.replace_private_record(name, pending, bytes, limit)
@@ -1180,8 +1180,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("test root");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private state");
         let format = &crate::provider::PROVIDER_PROFILES;
-        let empty = format!(r#"{{"version":{},"profiles":[]}}"#, format.current);
-        let empty = empty.as_bytes();
+        let empty = br#"{"profiles":[]}"#.as_slice();
         state
             .edit_provider_record(
                 ProviderRecordTarget::Profiles,

@@ -433,7 +433,6 @@ pub enum ProviderSetupTargetKind {
     NativeAccount,
     ChatGptAccount,
     CustomProfile,
-    ModelPreferences,
     RoleRouting,
     Roster,
 }

@@ -306,7 +306,7 @@ impl ArchivedRecords {
 }
 
 impl StateRoot {
-    // Moves each record whose readable version differs from its format into one archive folder.
+    // Moves each strict record its owner's decoder refuses into one archive folder.
     pub fn archive_incompatible_records(
         &self,
         formats: &[&super::RecordFormat],
@@ -317,7 +317,7 @@ impl StateRoot {
                 .read()
                 .ok()
                 .flatten()
-                .is_some_and(|bytes| format.mismatched(&bytes))
+                .is_some_and(|bytes| !(format.accepts)(&bytes))
         });
         if !pending {
             return Ok(None);
@@ -334,7 +334,7 @@ impl StateRoot {
                 let identity = (metadata.dev(), metadata.ino(), metadata.len());
                 let mut bytes = Vec::new();
                 file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-                if !format.mismatched(&bytes) {
+                if bytes.len() > limit || (format.accepts)(&bytes) {
                     continue;
                 }
                 if target.is_none() {

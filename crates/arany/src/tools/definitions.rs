@@ -261,7 +261,6 @@ fn scan(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentDefinition {
-    pub(crate) version: u8,
     pub(crate) name: String,
     pub(crate) description: String,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -338,8 +337,7 @@ impl AgentDefinition {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.version == 1
-            && valid_name(&self.name)
+        valid_name(&self.name)
             && self.name.len() <= 64
             && !self.description.trim().is_empty()
             && self.description.len() <= 2048
@@ -550,7 +548,6 @@ pub(super) fn strict(raw: &[u8]) -> Result<(AgentDefinition, Vec<String>), Rejec
             reason: "invalid",
         })?;
     let definition = AgentDefinition {
-        version: 1,
         name: front.name,
         description: front.description,
         tools: front

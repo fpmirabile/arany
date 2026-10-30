@@ -2173,7 +2173,7 @@ mod tests {
             index: 0,
             raw_digest: digest(&raw),
         };
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
             command_deadline: None,
             config,
@@ -2241,7 +2241,7 @@ mod tests {
                 serde_json::json!({"name": format!("program{index}"), "executable": format!("/usr/bin/{}", "x".repeat(4900)), "sha256": "0".repeat(64), "interpreter": false, "inputs": []})
             })
             .collect();
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
             command_deadline: None,
             config,
@@ -2273,7 +2273,7 @@ mod tests {
 
     #[test]
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
             command_deadline: None,
             config,
@@ -2901,7 +2901,6 @@ mod tests {
 
     fn config(runtime_grants: Vec<RuntimeGrant>) -> Config {
         Config {
-            version: 1,
             workspace_paths: vec![".".into()],
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -3264,7 +3263,6 @@ mod tests {
         let shell = dir.path().join("sh");
         std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &shell).unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({
-            "version": 1,
             "workspace_paths": ["src"],
             "write": true,
             "commands": [{

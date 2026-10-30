@@ -42,7 +42,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             if tools {
                 use std::os::unix::fs::PermissionsExt;
                 let config = path.join("tools.json");
-                std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+                std::fs::write(&config, br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
                 std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
             }
             let max_provider_calls = match &policy {
@@ -329,7 +329,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         {
             use std::os::unix::fs::PermissionsExt;
             let config = state_path.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+            std::fs::write(&config, br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         assert!(matches!(run_with(&engine, &provider, next(), RunControls { tools: ToolGrant::Configured, ..Default::default() }).await, Err(EngineError::Store(arany::StoreError::StorageFull))));

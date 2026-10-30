@@ -164,13 +164,13 @@ owns workspace validation and admission.
 
 ## OpenAI-compatible and Anthropic custom routes
 
-A custom route is a profile in a private version-2 `STATE/provider-profiles.json`.
+A custom route is a profile in a private `STATE/provider-profiles.json`.
 Keep the State directory outside the Workspace and the file private (`0600` on
 Unix). Each profile names one `ARANY_PROVIDER_*` environment key; supply it
 privately in Arany's launching environment. Native accounts, workspace headers,
 other vendors' keys and other clients' OAuth identities never supply its
 credentials, and Arany always identifies itself as `arany/<version>`. A profile
-file from another version is archived at startup; recreate the profiles.
+file this version cannot read is archived at startup; recreate the profiles.
 
 Arany runs no conformance pre-check: like Claude Code, Codex CLI and OpenCode, it
 sends no request you did not ask for, and every Run validates each real response
@@ -185,17 +185,12 @@ accept the Bearer credential and use its exact model ID:
 
 ```json
 {
-  "version": 3,
   "profiles": [{
     "name": "local",
     "protocol": "openai-chat-completions",
-    "base_url": "http://127.0.0.1:8080/v1",
-    "auth": "bearer",
+    "url": "http://127.0.0.1:8080/v1",
     "model": "MODEL_ID",
     "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
-    "outcome_encoding": "json_schema",
-    "privacy": "user_authorized",
-    "max_output_tokens": 4096,
     "efforts": []
   }]
 }
@@ -207,19 +202,20 @@ Use it with the matching model ID:
 arany exec --state-dir STATE --provider custom:local --model MODEL_ID "Your task"
 ```
 
-Chat Completions routes append `/chat/completions` to `base_url`; Anthropic
-Messages routes append `/v1/messages`. `efforts: []` omits the effort override
+Chat Completions routes append `/chat/completions` to `url`; Anthropic
+Messages routes append `/v1/messages` and add the required `auth` header choice.
+`efforts: []` omits the effort override
 (`reasoning_effort` for Chat Completions). Arany never inherits Claude defaults or translates unsupported
 values. Vendor profiles keep the remaining fields of the example above and change
 these:
 
-| `name` | `protocol` | `base_url` | `auth` | `model` | `credential_env` | `outcome_encoding` |
-|---|---|---|---|---|---|---|
-| `deepseek` | `anthropic-messages` | `https://api.deepseek.com/anthropic` | `x-api-key` | `deepseek-flash` | `ARANY_PROVIDER_DEEPSEEK_KEY` | `native_tools` |
-| `kimi-api` | `anthropic-messages` | `https://api.moonshot.ai/anthropic` | `bearer` | `kimi-k3` | `ARANY_PROVIDER_KIMI_API_KEY` | `native_tools` |
-| `kimi-code` | `anthropic-messages` | `https://api.kimi.com/coding/` | `x-api-key` | `k3-256k` | `ARANY_PROVIDER_KIMI_CODE_KEY` | `native_tools` |
-| `glm-api` | `anthropic-messages` | `https://api.z.ai/api/anthropic` | `bearer` | `glm-5.3` | `ARANY_PROVIDER_GLM_STANDARD_KEY` | `native_tools` |
-| `glm-flash` | `anthropic-messages` | `https://api.z.ai/api/anthropic` | `bearer` | `glm-5.3-flash` | `ARANY_PROVIDER_GLM_STANDARD_KEY` | `native_tools` |
+| `name` | `protocol` | `url` | `auth` | `model` | `credential_env` |
+|---|---|---|---|---|---|
+| `deepseek` | `anthropic-messages` | `https://api.deepseek.com/anthropic` | `x-api-key` | `deepseek-flash` | `ARANY_PROVIDER_DEEPSEEK_KEY` |
+| `kimi-api` | `anthropic-messages` | `https://api.moonshot.ai/anthropic` | `bearer` | `kimi-k3` | `ARANY_PROVIDER_KIMI_API_KEY` |
+| `kimi-code` | `anthropic-messages` | `https://api.kimi.com/coding/` | `x-api-key` | `k3-256k` | `ARANY_PROVIDER_KIMI_CODE_KEY` |
+| `glm-api` | `anthropic-messages` | `https://api.z.ai/api/anthropic` | `bearer` | `glm-5.3` | `ARANY_PROVIDER_GLM_STANDARD_KEY` |
+| `glm-flash` | `anthropic-messages` | `https://api.z.ai/api/anthropic` | `bearer` | `glm-5.3-flash` | `ARANY_PROVIDER_GLM_STANDARD_KEY` |
 
 Vendor notes:
 
@@ -262,7 +258,7 @@ native evidence.
 Create a private `provider-roster.json` in the State directory outside the Workspace, using owner-only file permissions:
 
 ```json
-{"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-6.1-sol","effort":"medium","account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}
+{"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-6.1-sol","effort":"medium","account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}
 ```
 
 With the selected route's existing credentials available, use `arany --profile coding` or `arany exec --profile coding "Inspect this project"`. Review the complete billing/route manifest; all candidates must admit before project input. Remove any competing `provider-routing.json` source explicitly. The [Provider contract](./specs/provider.md#named-roster-presets) owns the format, bounds and current fixed-role delivery boundary; this example makes no live-model support claim.

@@ -7,21 +7,17 @@ use uuid::{Uuid, Variant, Version};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
-    schema: u8,
     host_id: Uuid,
 }
 
 pub(crate) const CHATGPT_REGISTRATION: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptRegistration,
-    field: "schema",
-    current: 2,
     accepts: |bytes| Record::decode(bytes).is_ok(),
 };
 
 impl Record {
     fn validate(&self) -> Result<(), AuthorizationError> {
-        if u64::from(self.schema) != CHATGPT_REGISTRATION.current
-            || self.host_id.get_version() != Some(Version::Random)
+        if self.host_id.get_version() != Some(Version::Random)
             || self.host_id.get_variant() != Variant::RFC4122
         {
             return Err(AuthorizationError::InvalidIdentity);
@@ -113,7 +109,6 @@ impl Registration {
                 random[6] = random[6] & 0x0f | 0x40;
                 random[8] = random[8] & 0x3f | 0x80;
                 let record = Record {
-                    schema: CHATGPT_REGISTRATION.current as u8,
                     host_id: Uuid::from_bytes(random),
                 };
                 state
@@ -210,7 +205,7 @@ mod tests {
         let (_temp, workspace, state) = workspace_and_state();
         state
             .record(RecordKind::ChatgptRegistration)
-            .replace(b"{\"schema\":2}")
+            .replace(b"{\"host_id\":null}")
             .expect("synthetic malformed record");
         assert!(matches!(
             Registration::at(&state, &workspace),
@@ -218,7 +213,6 @@ mod tests {
         ));
 
         let record = Record {
-            schema: 2,
             host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
         };
         let mut missing = serde_json::to_value(&record).unwrap();

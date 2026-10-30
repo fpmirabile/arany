@@ -109,7 +109,7 @@ fn grants_reject_file_directory_and_ancestor_replacement_without_widening_mounts
         let runtime = crate::tools::tests::in_process_runtime(
             root.path(),
             serde_json::json!({
-            "version":1,"workspace_paths":["nested/src","Cargo.toml"],"write":true,
+            "workspace_paths":["nested/src","Cargo.toml"],"write":true,
             "commands":[],"skills":[],"mcp":[]}),
         );
         let intent = runtime.intent(
@@ -237,7 +237,7 @@ fn exact_file_grants_refuse_protected_hard_links_before_and_after_admission() {
     let runtime = crate::tools::tests::in_process_runtime(
         root.path(),
         serde_json::json!({
-        "version":1,"workspace_paths":["Cargo.toml"],"write":false,
+        "workspace_paths":["Cargo.toml"],"write":false,
         "commands":[],"skills":[],"mcp":[]}),
     );
     let intent = runtime.intent(
@@ -301,7 +301,7 @@ fn mask_reservations_and_helper_frames_fit_maximum_grants_and_refuse_short_buffe
             .map(|root| root.relative.clone())
             .collect::<Vec<_>>();
         let config: crate::tools::config::Config = serde_json::from_value(serde_json::json!({
-            "version":1,"workspace_paths":paths,"write":false,"commands":[],"skills":[],"mcp":[]}))
+            "workspace_paths":paths,"write":false,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         config.validate().unwrap();
         let masks = roots

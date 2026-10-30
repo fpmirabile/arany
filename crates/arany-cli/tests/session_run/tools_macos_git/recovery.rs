@@ -246,7 +246,7 @@ async fn capacity_released(engine: &Engine, workspace: &Path, name: &str, leftov
 fn two_slots() {
     private_file(
         &StateRoot::account_path().unwrap().join("guard/limits.json"),
-        br#"{"version":1,"units":2,"queued":32}"#,
+        br#"{"units":2,"queued":32}"#,
     );
 }
 

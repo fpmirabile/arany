@@ -355,7 +355,11 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
         )
         .unwrap();
         let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let plan = GoalPlanContract {
             mission: if plan_calls.is_some() {
@@ -519,7 +523,11 @@ async fn preflight_refusal_feedback_and_exports_use_the_reopened_receipt() {
         },
     )
     .unwrap();
-    std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(
+        state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
     std::fs::set_permissions(
         state.join("tools.json"),
         std::fs::Permissions::from_mode(0o600),

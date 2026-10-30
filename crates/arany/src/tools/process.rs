@@ -451,7 +451,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut runtime = super::super::tests::in_process_runtime(
             directory.path(),
-            json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+            json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
         );
         runtime.config.commands = serde_json::from_value(json!([{"name":"sh","executable":"/unavailable","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}])).unwrap();
         let version = "1.98.1-x86_64-unknown-linux-gnu";

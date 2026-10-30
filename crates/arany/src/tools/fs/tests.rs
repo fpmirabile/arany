@@ -10,7 +10,10 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("file");
-    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let config: Config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     let edit = |old: &str, new: &str, replace_all| LiteralEdit {
         old_string: old.into(),
         new_string: new.into(),
@@ -218,7 +221,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
             .is_dir()
     );
     let config: Config = serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":true,
+        "workspace_paths":["."],"write":true,
         "commands":[],"skills":[],"mcp":[]
     }))
     .unwrap();
@@ -347,7 +350,6 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         inputs: Vec::new(),
     };
     let snapshot_config = Config {
-        version: 1,
         workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
         write: true,
         child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -638,7 +640,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         .unwrap();
         let sibling_inode = std::fs::metadata(workspace.join("a-good")).unwrap().ino();
         let mut config: Config = serde_json::from_value(json!({
-            "version":1,"workspace_paths":["."],"write":true,
+            "workspace_paths":["."],"write":true,
             "commands":[],"skills":[],"mcp":[]
         }))
         .unwrap();
@@ -840,7 +842,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         "the fixture must retain read-only parent permissions"
     );
     let config: Config = serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":true,
+        "workspace_paths":["."],"write":true,
         "commands":[],"skills":[],"mcp":[]
     }))
     .unwrap();
@@ -1066,7 +1068,10 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
 fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
-    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let config: Config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     let content = b"binary\0\xff\r\n";
     let source = temp.path().join("source");
     let destination = temp.path().join("nested/destination");
@@ -1131,7 +1136,10 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
 fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
-    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["owned"],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let config: Config = serde_json::from_value(
+        json!({"workspace_paths":["owned"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     std::fs::create_dir(temp.path().join("owned")).unwrap();
     std::fs::write(temp.path().join("owned/source"), b"source").unwrap();
     symlink("source", temp.path().join("owned/link")).unwrap();
@@ -1221,7 +1229,7 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
     );
     let call = ToolCall::Mkdir {
         path: "directory".into(),
@@ -1273,7 +1281,7 @@ async fn workspace_file_versions_publish_in_process_with_intent_bound_receipts()
     std::fs::create_dir(temp.path().join("src")).unwrap();
     let runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
     );
     let path = "src/file";
     let source_digest = [1; 32];

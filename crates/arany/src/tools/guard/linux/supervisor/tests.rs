@@ -57,7 +57,7 @@ fn supervisor_launch_never_executes_a_path_replacement() {
     let seed = crate::tools::fs::open_directory(root.path()).unwrap();
     let mut runtime = crate::tools::tests::in_process_runtime(
         root.path(),
-        serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
+        serde_json::json!({"workspace_paths":["."],"write":false,
             "commands":[],"skills":[],"mcp":[]}),
     );
     runtime.guard_executable = root.path().join("guard");

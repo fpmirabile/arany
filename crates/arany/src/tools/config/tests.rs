@@ -67,14 +67,9 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
             "root grant: {path}"
         );
     }
-    root_value["version"] = json!(2);
-    assert!(
-        serde_json::from_value::<Config>(root_value)
-            .unwrap()
-            .validate()
-            .is_err()
-    );
-    let duplicate = br#"{"version":1,"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#;
+    root_value["version"] = json!(1);
+    assert!(serde_json::from_value::<Config>(root_value).is_err());
+    let duplicate = br#"{"write":false,"write":false,"workspace_paths":["src"],"commands":[],"skills":[],"mcp":[]}"#;
     assert!(parse_json(duplicate, 64 * 1024).is_err());
     let mut unknown = value.clone();
     unknown["network"] = json!(true);

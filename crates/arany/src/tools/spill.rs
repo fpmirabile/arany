@@ -243,7 +243,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = super::super::tests::in_process_runtime(
             temp.path(),
-            serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
         let intent = runtime.intent(
             crate::RunId::new(),
@@ -363,7 +363,7 @@ mod tests {
         std::fs::write(state.path().join("spill"), b"blocked").unwrap();
         let mut runtime = super::super::tests::in_process_runtime(
             temp.path(),
-            serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
         let mut observation = command_observation(&vec![b'!'; 8192]);
         let inline = observation.output.clone();
@@ -382,7 +382,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = super::super::tests::in_process_runtime(
             temp.path(),
-            serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            serde_json::json!({"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
         for path in [
             "spill:",

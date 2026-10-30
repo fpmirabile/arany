@@ -296,7 +296,7 @@ async fn publish_setup_profile(
 
 #[tokio::test]
 async fn provider_setup_admission_refuses_publication_when_only_one_event_fits() {
-    use crate::{CustomProfile, CustomProfileDraft, CustomProtocol, MessagesAuth, RecordKind};
+    use crate::{CustomProfile, CustomProfileDraft, CustomProtocol, RecordKind};
 
     for remaining in 1..=super::super::PROVIDER_SETUP_EDIT_EVENT_SLOTS {
         let temp = tempfile::tempdir().unwrap();
@@ -305,10 +305,10 @@ async fn provider_setup_admission_refuses_publication_when_only_one_event_fits()
         let draft = CustomProfileDraft {
             name: "example-route".into(),
             protocol: CustomProtocol::OpenaiResponses,
-            endpoint: "https://api.example.com/v1/responses".into(),
+            url: "https://api.example.com/v1/responses".into(),
+            auth: None,
             model: "model-synthetic".into(),
             credential_env: "ARANY_PROVIDER_EXAMPLE_KEY".into(),
-            messages_auth: MessagesAuth::Bearer,
             efforts: Vec::new(),
         };
         CustomProfile::validate_drafts(std::slice::from_ref(&draft)).unwrap();

@@ -2347,10 +2347,11 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
     };
     private(&omitted, b"OMITTED_CONFIG_CANARY");
     symlink(&omitted, workspace.join("AGENTS.md")).unwrap();
-    for (name, bytes, expected) in [
-        ("missing", None, "tools require a private tools.json; see docs/tools.md"),
-        ("unknown", Some(b"{\"version\":1,\"workspace_paths\":[\"src\"],\"write\":false,\"commands\":[],\"skills\":[],\"mcp\":[],\"network\":true}".as_slice()), "Tool configuration is invalid or unsafe"),
-        ("duplicates", Some(b"{\"version\":1,\"version\":1}".as_slice()), "Tool configuration is invalid or unsafe"),
+    // A refused tools.json is archived at startup, so every case fails closed as missing.
+    for (name, bytes) in [
+        ("missing", None),
+        ("unknown", Some(b"{\"workspace_paths\":[\"src\"],\"write\":false,\"commands\":[],\"skills\":[],\"mcp\":[],\"network\":true}".as_slice())),
+        ("duplicates", Some(b"{\"write\":false,\"write\":false}".as_slice())),
     ] {
         let state_path = temp.path().join(format!("state-{name}"));
         StateRoot::admit(&state_path).unwrap();
@@ -2363,7 +2364,13 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
         let output = super::process_output_before_deadline(command);
         assert_eq!(output.status.code(), Some(1), "configuration case {name}");
         assert!(output.stdout.is_empty());
-        assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("error: {expected}\n"));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.ends_with("error: tools require a private tools.json; see docs/tools.md\n"), "{stderr}");
+        assert_eq!(
+            stderr.starts_with("warning: Saved records this version cannot read (tools.json) archived intact"),
+            bytes.is_some(),
+            "{stderr}"
+        );
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
         assert_eq!(std::fs::read(&omitted).unwrap(), b"OMITTED_CONFIG_CANARY");
@@ -2425,7 +2432,10 @@ async fn four_call_step_show_bytes_survive_engine_close_and_store_reopen() {
         let workspace = goals::facts_workspace(temp.path(), "four durable reads");
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
-        crate::private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        crate::private_file(
+            &state_path.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         let engine = engine::open(
             state,
             arany::EngineConfig {

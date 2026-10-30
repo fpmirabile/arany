@@ -14,7 +14,6 @@ pub(super) const CAPACITY_WAIT_MS: u64 = 30_000;
 
 const MAX_WAITERS: usize = 1024;
 const ADMISSION_SCAN_LIMIT: usize = MAX_WAITERS + 64 * 4 + 16;
-const RESERVATION_VERSION: u32 = if cfg!(target_os = "linux") { 2 } else { 1 };
 #[cfg(target_os = "linux")]
 const SEED_ENTRY_LIMIT: usize =
     (crate::tools::types::COMMAND_SNAPSHOT_FILES + crate::tools::types::MAX_SKILLS * 32 + 12 * 17)
@@ -25,7 +24,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Limits {
-    version: u32,
     units: usize,
     queued: usize,
 }
@@ -33,7 +31,6 @@ struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            version: 1,
             units: 8,
             queued: 32,
         }
@@ -42,10 +39,7 @@ impl Default for Limits {
 
 impl Limits {
     fn validate(&self) -> Result<(), ToolError> {
-        if self.version != 1
-            || !(1..=64).contains(&self.units)
-            || !(1..=MAX_WAITERS).contains(&self.queued)
-        {
+        if !(1..=64).contains(&self.units) || !(1..=MAX_WAITERS).contains(&self.queued) {
             return Err(ToolError::Configuration);
         }
         Ok(())
@@ -55,14 +49,12 @@ impl Limits {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Counter {
-    version: u32,
     next: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Waiting {
-    version: u32,
     expires_at_ms: u64,
 }
 
@@ -228,7 +220,6 @@ fn limits(dir: &cap_std::fs::Dir) -> Result<Limits, ToolError> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reservation {
-    version: u32,
     id: uuid::Uuid,
     boot: uuid::Uuid,
 }
@@ -273,10 +264,7 @@ fn reserved(dir: &cap_std::fs::Dir, _root_parent: &Path) -> Result<usize, ToolEr
             continue;
         };
         let reservation: Reservation = decode(file.try_clone().map_err(|_| ToolError::Operation)?)?;
-        if reservation.version != RESERVATION_VERSION
-            || reservation.id != id
-            || reservation.boot.is_nil()
-        {
+        if reservation.id != id || reservation.boot.is_nil() {
             return Err(ToolError::ProtectionUnavailable);
         }
         #[cfg(target_os = "macos")]
@@ -349,7 +337,6 @@ impl Drop for Permit {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeedRecord {
-    version: u32,
     id: uuid::Uuid,
     boot: uuid::Uuid,
     path: std::path::PathBuf,
@@ -407,11 +394,7 @@ impl Permit {
             return Ok(None);
         };
         let seed: SeedRecord = decode(file)?;
-        if seed.version != 1
-            || seed.id != self.id
-            || seed.boot != self.boot
-            || seed.path != self.seed_path()
-        {
+        if seed.id != self.id || seed.boot != self.boot || seed.path != self.seed_path() {
             return Err(ToolError::ProtectionUnavailable);
         }
         Ok(Some(seed))
@@ -441,7 +424,6 @@ impl Permit {
             return Err(ToolError::Path);
         }
         let mut seed = SeedRecord {
-            version: 1,
             id: self.id,
             boot: self.boot,
             path: self.seed_path(),
@@ -683,12 +665,8 @@ fn reserve(
         boot: boot()?,
         release_on_drop: true,
     };
-    let bytes = serde_json::to_vec(&Reservation {
-        version: RESERVATION_VERSION,
-        id,
-        boot: boot()?,
-    })
-    .map_err(|_| ToolError::Operation)?;
+    let bytes =
+        serde_json::to_vec(&Reservation { id, boot: boot()? }).map_err(|_| ToolError::Operation)?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
         .map_err(|_| ToolError::Operation)?;
@@ -728,9 +706,6 @@ fn waiting(dir: &cap_std::fs::Dir, now_ms: u64) -> Result<Vec<u64>, ToolError> {
             remove(dir, name)?;
             continue;
         }
-        if waiter.version != 1 {
-            return Err(ToolError::ProtectionUnavailable);
-        }
         if waiter.expires_at_ms <= now_ms {
             remove(dir, name)?;
             continue;
@@ -761,13 +736,10 @@ fn register(directory: &PrivateDirectory, expires_at_ms: u64) -> Result<Ticket, 
     use std::io::Write;
     let mut counter: Counter = match directory.dir.symlink_metadata("counter.json") {
         Ok(_) => record(&directory.dir, "counter.json")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Counter {
-            version: 1,
-            next: 1,
-        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Counter { next: 1 },
         Err(_) => return Err(ToolError::Path),
     };
-    if counter.version != 1 || counter.next == 0 {
+    if counter.next == 0 {
         return Err(ToolError::ProtectionUnavailable);
     }
     let sequence = counter.next;
@@ -797,11 +769,7 @@ fn register(directory: &PrivateDirectory, expires_at_ms: u64) -> Result<Ticket, 
             .ok_or(ToolError::ProtectionUnavailable)?,
         sequence,
     };
-    let bytes = serde_json::to_vec(&Waiting {
-        version: 1,
-        expires_at_ms,
-    })
-    .map_err(|_| ToolError::Operation)?;
+    let bytes = serde_json::to_vec(&Waiting { expires_at_ms }).map_err(|_| ToolError::Operation)?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
         .map_err(|_| ToolError::Operation)?;
@@ -919,10 +887,7 @@ async fn recover_reservations(
             continue;
         };
         let reservation: Reservation = decode(file.try_clone().map_err(|_| ToolError::Operation)?)?;
-        if reservation.version != RESERVATION_VERSION
-            || reservation.id != id
-            || reservation.boot.is_nil()
-        {
+        if reservation.id != id || reservation.boot.is_nil() {
             return Err(ToolError::ProtectionUnavailable);
         }
         let Some(lease) = try_lock(file)? else {
@@ -1174,7 +1139,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn seed_config() -> crate::tools::config::Config {
         crate::tools::config::Config {
-            version: 1,
             workspace_paths: vec!["sample".into()],
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -1611,7 +1575,6 @@ mod tests {
             &directory.dir,
             "limits.json",
             &Limits {
-                version: 1,
                 units: 64,
                 queued: 1024,
             },
@@ -1646,14 +1609,11 @@ mod tests {
         let settings = limits(&directory.dir).unwrap();
         let id = uuid::Uuid::now_v7();
         let lease_name = format!("{id}.unit");
+        // An earlier binary's reservation shape, which this one refuses.
         replace_record(
             &directory.dir,
             &lease_name,
-            &Reservation {
-                version: 1,
-                id,
-                boot: boot().unwrap(),
-            },
+            &serde_json::json!({"version": 1, "id": id, "boot": boot().unwrap()}),
         )
         .unwrap();
         let lease = checked_file(&directory.dir, &lease_name, false).unwrap();
@@ -1915,7 +1875,7 @@ mod tests {
                 &root.dir,
                 "recovery.json",
                 &serde_json::json!({
-                    "version":1, "root":crate::tools::fs::identity(&root.dir).unwrap(),
+                    "root":crate::tools::fs::identity(&root.dir).unwrap(),
                     "boot":uuid::Uuid::now_v7(), "supervisor":null,
                 }),
             )
@@ -1973,7 +1933,6 @@ mod tests {
             &directory.dir,
             "limits.json",
             &Limits {
-                version: 1,
                 units: 1,
                 queued: 1,
             },
@@ -2031,7 +1990,6 @@ mod tests {
             &directory.dir,
             "limits.json",
             &Limits {
-                version: 1,
                 units: 2,
                 queued: 4,
             },
@@ -2066,7 +2024,6 @@ mod tests {
             &directory.dir,
             "limits.json",
             &Limits {
-                version: 1,
                 units: 1,
                 queued: 4,
             },
@@ -2090,16 +2047,7 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
         for (units, queued) in [(0, 32), (65, 32), (8, 0), (8, 1025)] {
-            replace_record(
-                &directory.dir,
-                "limits.json",
-                &Limits {
-                    version: 1,
-                    units,
-                    queued,
-                },
-            )
-            .unwrap();
+            replace_record(&directory.dir, "limits.json", &Limits { units, queued }).unwrap();
             assert!(limits(&directory.dir).is_err());
         }
         let name = format!("{}.unit.new", uuid::Uuid::now_v7());
@@ -2121,7 +2069,6 @@ mod tests {
             &directory.dir,
             &name,
             &Reservation {
-                version: 1,
                 id,
                 boot: uuid::Uuid::nil(),
             },

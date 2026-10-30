@@ -1235,7 +1235,7 @@ fn definition_preparation(
             raw_digest: [3; 32],
         },
     );
-    let output = serde_json::json!({"Definition":{"definition":{"version":1,"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"},"notes":[]}}).to_string();
+    let output = serde_json::json!({"Definition":{"definition":{"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"},"notes":[]}}).to_string();
     let observation = ToolObservation {
         spill: None,
         intent: intent.clone(),

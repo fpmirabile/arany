@@ -538,17 +538,15 @@ mod tests {
         let addressed = slot(credentials.client_id.as_bytes());
         let foreign = slot(b"another-client");
         let current = serde_json::to_string(&serde_json::json!({
-            "schema": 2, "slot": addressed, "credentials": credentials, "consent": consent
+            "slot": addressed, "credentials": credentials, "consent": consent
         }))
         .unwrap();
         assert!(valid_authorized_record(&addressed, &current, None));
         assert!(!valid_authorized_record(&foreign, &current, None));
         assert!(!valid_authorized_record(&addressed, "{", None));
-        for schema in [0, 1, 3, 255] {
-            let unsupported = current.replacen("\"schema\":2", &format!("\"schema\":{schema}"), 1);
-            assert!(!valid_authorized_record(&addressed, &unsupported, None));
-        }
-        let duplicated = current.replacen("\"schema\":2", "\"schema\":2,\"schema\":2", 1);
+        let versioned = current.replacen("{", "{\"schema\":2,", 1);
+        assert!(!valid_authorized_record(&addressed, &versioned, None));
+        let duplicated = current.replacen("\"slot\":", "\"slot\":null,\"slot\":", 1);
         assert!(!valid_authorized_record(&addressed, &duplicated, None));
     }
 
@@ -577,9 +575,8 @@ mod tests {
         )
         .unwrap();
         let mut legacy = serde_json::to_value(&account).unwrap();
-        legacy["schema"] = 2.into();
         legacy["provider"] = "openai".into();
-        // Records from another schema are refused, never upgraded.
+        // Records in another shape are refused, never upgraded.
         for (record, current) in [
             (serde_json::to_string(&account).unwrap(), true),
             (serde_json::to_string(&legacy).unwrap(), false),

@@ -65,7 +65,6 @@ impl Preset {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    version: u8,
     profiles: Vec<Profile>,
     presets: Vec<Preset>,
 }
@@ -116,8 +115,6 @@ fn bounded(bytes: &[u8]) -> bool {
 
 pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRoster,
-    field: "version",
-    current: 2,
     accepts: |bytes| presets(bytes).is_ok(),
 };
 
@@ -139,7 +136,6 @@ impl RosterDraft {
                 serde_json::from_slice::<Config>(bytes).map_err(|_| INVALID)?
             }
             None => Config {
-                version: u8::try_from(PROVIDER_ROSTER.current).map_err(|_| INVALID)?,
                 profiles: vec![],
                 presets: vec![],
             },
@@ -199,7 +195,6 @@ impl RosterDraft {
             }
         }
         let bytes = serde_json::to_vec(&Config {
-            version: u8::try_from(PROVIDER_ROSTER.current).map_err(|_| INVALID)?,
             profiles,
             presets: self.presets.clone(),
         })
@@ -313,8 +308,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         return Err(INVALID.into());
     }
     let mut config: Config = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
-    if u64::from(config.version) != PROVIDER_ROSTER.current
-        || config.profiles.is_empty()
+    if config.profiles.is_empty()
         || config.profiles.len() > MAX_PROFILES
         || config.presets.is_empty()
         || config.presets.len() > MAX_PRESETS
@@ -673,7 +667,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn record() -> Value {
-        json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
+        json!({"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
     }
 
     #[test]
@@ -716,7 +710,7 @@ mod tests {
         assert!(parse(&bytes, "coding").is_ok());
         assert!(parse(&bytes, "missing").is_err());
         for (pointer, value) in [
-            ("/version", json!(3)),
+            ("/version", json!(2)),
             ("/extra", json!(true)),
             ("/profiles/0/extra", json!(true)),
             ("/profiles/0/name", json!("../main")),
@@ -739,8 +733,8 @@ mod tests {
             let mut invalid = valid.clone();
             if let Some(slot) = invalid.pointer_mut(pointer) {
                 *slot = value;
-            } else if pointer == "/extra" {
-                invalid["extra"] = value;
+            } else if let Some(key @ ("extra" | "version")) = pointer.strip_prefix('/') {
+                invalid[key] = value;
             } else if pointer == "/profiles/0/extra" {
                 invalid["profiles"][0]["extra"] = value;
             } else {
@@ -768,7 +762,7 @@ mod tests {
         }
         let source = String::from_utf8(bytes.clone()).unwrap();
         for (from, to) in [
-            ("\"version\":2", "\"version\":2,\"version\":2"),
+            ("\"profiles\":[", "\"profiles\":[],\"profiles\":["),
             ("\"name\":\"main\"", "\"name\":\"main\",\"name\":\"main\""),
             ("\"child\":null", "\"child\":null,\"child\":null"),
             ("\"effort\":null", "\"effort\":null,\"effort\":null"),
@@ -858,7 +852,6 @@ mod tests {
             preset.providers.primary = Some(primary.into());
             preset.providers.child = child.map(str::to_owned);
             let bytes = serde_json::to_vec(&Config {
-                version: u8::try_from(PROVIDER_ROSTER.current).unwrap(),
                 profiles: config.profiles.clone(),
                 presets: vec![preset.clone()],
             })
@@ -901,7 +894,6 @@ mod tests {
                 .collect();
             *preset.providers.get_mut(role) = Some(profiles[MAX_ELIGIBLE_PROFILES].name.clone());
             let bytes = serde_json::to_vec(&Config {
-                version: u8::try_from(PROVIDER_ROSTER.current).unwrap(),
                 profiles: profiles.clone(),
                 presets: vec![preset.clone()],
             })

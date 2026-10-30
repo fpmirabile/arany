@@ -347,7 +347,11 @@ async fn run_research_batch_case(
     let state = temp.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
     let config = state.join("tools.json");
-    std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(
+        &config,
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let engine = engine::open(
         root,

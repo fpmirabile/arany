@@ -405,7 +405,6 @@ async fn native_git_journey_helper() {
     );
     let git = std::fs::canonicalize(CLT_GIT).unwrap();
     let config = json!({
-        "version": 1,
         "workspace_paths": ["."],
         "write": false,
         "commands": [],
@@ -765,7 +764,6 @@ fn write_fixture(root: &Path, case: &str) -> WriteFixture {
     private_file(
         &state_path.join("tools.json"),
         &serde_json::to_vec(&json!({
-            "version": 1,
             "workspace_paths": ["."],
             "write": true,
             "commands": [],

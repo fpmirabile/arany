@@ -659,7 +659,7 @@ async fn native_file_journey_helper() {
     private_file(&peer, MCP_SCRIPT.as_bytes());
     let shell_digest = hash(&std::fs::read("/bin/sh").unwrap());
     let config = json!({
-        "version":1,"workspace_paths":["src",".agents/skills"],"write":true,
+        "workspace_paths":["src",".agents/skills"],"write":true,
         "commands":[{"name":"shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,"inputs":[]}],
         "skills":[],
         "mcp":[{"name":"synthetic","program":{"name":"mcp-shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,
@@ -1088,7 +1088,7 @@ int main(int argc, char **argv) {
     assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = json!({
-        "version":1,"workspace_paths":["src"],"write":true,
+        "workspace_paths":["src"],"write":true,
         "commands":[
             {"name":"shell","executable":"/bin/sh","sha256":hash(&std::fs::read("/bin/sh").unwrap()),"interpreter":true,"inputs":[]},
             {"name":"native-links","executable":executable,"sha256":hash(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}
@@ -2830,7 +2830,8 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     use std::process::{Command, Stdio};
 
     const DEFINITION: &[u8] = b"---\nname: refusal\ndescription: Guard refusal base\n---\n";
-    let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
+    let config_bytes =
+        br#"{"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
         ("missing_command_deadline", "admission"),
@@ -3026,7 +3027,10 @@ async fn native_approval_rows_helper() {
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let state_path = root.join(format!("approval-state-{name}"));
         let state = StateRoot::admit(&state_path).unwrap();
-        private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state_path.join("tools.json"),
+            br#"{"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         if let Some(settings) = settings {
             private_file(
                 &state_path.join("permissions.json"),

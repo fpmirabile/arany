@@ -19,8 +19,11 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
         )
         .expect("engine");
         let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#)
-            .expect("tool configuration");
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .expect("tool configuration");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private configuration");
         let refused_write = || {
@@ -208,7 +211,11 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         )
         .expect("engine");
         let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).expect("grant");
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .expect("grant");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private grant");
         let plan = GoalPlanContract {
@@ -402,8 +409,15 @@ async fn invoked_skill_denial_is_journaled_before_any_provider_call() {
     )
     .unwrap();
     for (file, bytes) in [
-        ("tools.json", br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
-        ("permissions.json", br#"{"permissions":{"deny":["Skill"]}}"#.as_slice()),
+        (
+            "tools.json",
+            br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#
+                .as_slice(),
+        ),
+        (
+            "permissions.json",
+            br#"{"permissions":{"deny":["Skill"]}}"#.as_slice(),
+        ),
     ] {
         std::fs::write(state.join(file), bytes).unwrap();
         std::fs::set_permissions(state.join(file), std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -468,7 +482,11 @@ async fn line_paged_read_returns_all_eighty_lines_after_twenty_steps() {
     )
     .unwrap();
     let config = state.join("tools.json");
-    std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(
+        &config,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let read = |path: &str| {
         tool_outcome(arany::ToolCall::Read {
@@ -582,7 +600,7 @@ async fn guard_failure_before_dispatch_case(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+    let config = serde_json::json!({"workspace_paths":["notes"],"write":false,
         "commands":[{"name":PROGRAM,"executable":executable,"sha256":digest,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
     let config_path = state_path.join("tools.json");
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -651,7 +669,7 @@ fn edit_engine(state_path: &Path) -> Engine {
     for (name, bytes) in [
         (
             "tools.json",
-            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+            &br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
         ),
         (
             "permissions.json",

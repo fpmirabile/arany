@@ -14,7 +14,7 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
     std::fs::write(workspace.join("src").join(&long_name), "quoted").unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for (call, result_bytes) in [
         (
@@ -116,7 +116,7 @@ fn ignored_discovery_fixture(roots: Value) -> (tempfile::TempDir, super::ToolRun
     }
     let runtime = in_process_runtime(
         workspace,
-        json!({"version":1,"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     (temp, runtime)
 }
@@ -235,7 +235,7 @@ fn invalid_discovery_control(case: &str) -> (tempfile::TempDir, super::ToolRunti
     };
     let mut runtime = in_process_runtime(
         workspace,
-        json!({"version":1,"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     if case == "permission" {
         let bytes = br#"{"permissions":{"deny":["Read(./.gitignore)"]}}"#;

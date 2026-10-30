@@ -513,10 +513,8 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = uuid::Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 2,
         "storage": "private_file",
         "account": {
-            "schema": 3,
             "id": account_id,
             "provider": {"kind": "openai", "custom_name": null},
             "model": "gpt-5.4",
@@ -640,7 +638,7 @@ fn ui_preferences(fields: &[(&str, &str, &str)]) -> Vec<u8> {
         .map(|(key, value, _)| ((*key).to_owned(), (*value).into()))
         .collect();
     format!(
-        r#"{{"version":9,"preferences":{}}}"#,
+        r#"{{"preferences":{}}}"#,
         serde_json::Value::Object(changed)
     )
     .into_bytes()
@@ -1777,14 +1775,10 @@ fn model_catalog_command_reads_only_selected_configuration() {
     }
 
     let root = StateRoot::admit(&state_dir).expect("private state root");
-    let profile_file = root.path().join("provider-profiles.json");
-    let version = arany::test_support::record_version(arany::RecordKind::ProviderProfiles);
-    std::fs::write(&profile_file, format!(r#"{{"version":{version},"profiles":[{{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"efforts":[]}}]}}"#)).expect("profile file");
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o600))
-            .expect("private profile file");
-    }
+    arany::test_support::save_custom_profiles(
+        root.path(),
+        &[arany::test_support::local_custom_profile(9321)],
+    );
     let custom = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
         .current_dir(&workspace)
@@ -3598,7 +3592,6 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     arany::test_support::private_file(
         &state.join("provider-roster.json"),
         &serde_json::to_vec(&serde_json::json!({
-            "version":2,
             "profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}]}],
             "presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]
         })).unwrap(),

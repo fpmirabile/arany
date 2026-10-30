@@ -1,5 +1,4 @@
 use super::transport::{CustomTransport, TransportError};
-use super::{CustomProfile, MessagesAuth, Protocol};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PromptRole, ProviderRequest,
     RunInput,
@@ -303,26 +302,6 @@ async fn serve(listener: TcpListener, reply: Reply, messages: bool) -> Option<(u
     None
 }
 
-fn profile(port: u16, messages: bool) -> CustomProfile {
-    let mut profile = CustomProfile {
-        name: "local".into(),
-        protocol: Protocol::OpenaiResponses,
-        endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
-        model: "model-1".into(),
-        credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-        efforts: Vec::new(),
-    };
-    if messages {
-        let base_url = format!("http://127.0.0.1:{port}/anthropic");
-        profile.endpoint = format!("{base_url}/v1/messages");
-        profile.protocol = Protocol::AnthropicMessages {
-            base_url,
-            auth: MessagesAuth::ApiKey,
-        };
-    }
-    profile
-}
-
 fn request() -> ProviderRequest {
     ProviderRequest {
         session_id: SessionId::new(),
@@ -357,7 +336,7 @@ async fn run_case_observed(
         .await
         .expect("loopback listener");
     let port = listener.local_addr().expect("listener address").port();
-    let profile = profile(port, messages);
+    let profile = super::local_profile(port, messages);
     let destination = profile
         .resolve_destination()
         .await
@@ -424,7 +403,7 @@ async fn custom_messages_transport_rejections_are_logged_with_observed_shape() {
         .await
         .expect("route listener");
     let port = listener.local_addr().expect("route address").port();
-    let profile = profile(port, true);
+    let profile = super::local_profile(port, true);
     let pinned = profile.resolve_destination().await.expect("pinned route");
     let transport = CustomTransport::new(&profile, &pinned, "test-key".into()).expect("transport");
     assert!(matches!(

@@ -218,7 +218,7 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             .unwrap()
             .record(arany::RecordKind::UiPreferences)
             .replace(
-                &serde_json::to_vec(&json!({"version":9,"preferences":{
+                &serde_json::to_vec(&json!({"preferences":{
                     "view":"classic","goal_budget":budget,
                 }}))
                 .unwrap(),
@@ -227,8 +227,7 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
         let tools = state.join("tools.json");
         std::fs::write(
             &tools,
-            serde_json::to_vec(&json!({"version":1,
-                "workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]
+            serde_json::to_vec(&json!({"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]
             }))
             .unwrap(),
         )

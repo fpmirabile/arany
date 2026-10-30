@@ -105,14 +105,13 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 5,
         "selected": account_id,
         "accounts": [{
             "id": account_id,
             "host_id": "123e4567-e89b-42d3-a456-426614174000",
             "client_id": "oaiapp_synthetic_saved",
             "subject": "synthetic-subject",
-            "chatgpt_account_id": null,
+            "chatgpt_account_id": "synthetic-account",
             "keyring_slot": chatgpt_slot("oaiapp_synthetic_saved", account_id),
             "storage": "keyring",
             "renewal_pending": false, "signout_pending": false,
@@ -124,7 +123,6 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
         .replace(&serde_json::to_vec(&record).expect("account index"))
         .expect("test ChatGPT account index");
     let registration = serde_json::json!({
-        "schema": 2,
         "host_id": "123e4567-e89b-42d3-a456-426614174000"
     });
     state
@@ -279,32 +277,17 @@ fn finish_setup_pty_with_transcript(mut pty: Pty) -> (Output, Vec<u8>) {
 #[cfg(debug_assertions)]
 #[test]
 fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
-    for (choice, corrupt_native, corrupt_chatgpt, provider, opens_chat) in [
-        (Some("API key"), false, true, Some("openai"), true),
-        (Some("ChatGPT plan"), true, false, Some("chatgpt"), true),
-        (Some(""), true, true, None, false),
-        (Some("Cancel"), true, true, None, false),
-        (None, false, false, None, false),
-        (Some("API key"), true, false, None, true),
-        (Some("ChatGPT plan"), false, true, None, true),
+    // A damaged account record is archived at startup, so only intact pairs reach this choice.
+    for (choice, opens_chat) in [
+        (Some("API key"), true),
+        (Some("ChatGPT plan"), true),
+        (Some(""), false),
+        (Some("Cancel"), false),
+        (None, false),
     ] {
         let (temp, workspace, state) = workspace_root();
         prepare_test_file_account(temp.path());
         prepare_selected_chatgpt_account(temp.path());
-        if corrupt_native {
-            StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
-                .expect("account root")
-                .record(RecordKind::SavedAccount)
-                .replace(b"invalid unselected account JSON")
-                .expect("corrupt unselected native record");
-        }
-        if corrupt_chatgpt {
-            StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
-                .expect("account root")
-                .record(RecordKind::ChatgptAccounts)
-                .replace(b"invalid unselected ChatGPT JSON")
-                .expect("corrupt unselected ChatGPT index");
-        }
         let account_root = StateRoot::open_existing(&crate::product::fixture_account(temp.path()))
             .expect("protected account root");
         let native_before = account_root
@@ -358,16 +341,12 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
         );
         let text = String::from_utf8(pty.transcript).expect("screen-reader UTF-8");
         assert!(text.contains("Both saved; choose billing route"));
-        // Invalid selected-route data reopens unconfigured chat for explicit recovery.
-        assert_eq!(
-            text.contains("Saved access could not be restored"),
-            opens_chat && provider.is_none(),
+        assert!(
+            !text.contains("Saved access could not be restored"),
             "{choice:?}: {text}"
         );
         assert!(!text.contains("use arany --setup"), "{choice:?}: {text}");
         assert!(!text.contains("synthetic-existing-key"));
-        assert!(!text.contains("invalid unselected account JSON"));
-        assert!(!text.contains("invalid unselected ChatGPT JSON"));
         assert!(!text.contains('\x1b'), "screen-reader output has escapes");
         assert_tty_restored(&text);
         assert!(
@@ -529,7 +508,7 @@ fn release_bare_session(
         StateRoot::open_existing(&private_home.join(".local/state/arany"))
             .expect("fixture account root")
             .record(RecordKind::ModelPreferences)
-            .replace(br#"{"version":2,"sources":[]}"#)
+            .replace(br#"{"sources":[]}"#)
             .expect("mixed-access fixture without a remembered route");
     }
     let workspace = private_home.join("workspace");
@@ -1088,7 +1067,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let account_root = StateRoot::admit(&account_path).expect("isolated account marker");
     account_root
         .record(RecordKind::SavedAccount)
-        .replace(br#"{"schema":2,"storage":"keyring","account":null}"#)
+        .replace(br#"{"storage":"keyring","account":null}"#)
         .expect("keyring marker without credential");
     drop(account_root);
     let state = temp.path().join("resumed-state");

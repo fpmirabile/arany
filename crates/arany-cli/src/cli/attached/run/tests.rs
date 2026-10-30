@@ -24,11 +24,11 @@ mod budget_tests {
             )
             .expect("Engine");
             let config = state.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+            std::fs::write(&config, br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
                 .expect("private config");
             if finite {
-                let preferences = serde_json::json!({"version":9,"preferences":{
+                let preferences = serde_json::json!({"preferences":{
                     "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
                 }});
                 StateRoot::open_existing(&state)

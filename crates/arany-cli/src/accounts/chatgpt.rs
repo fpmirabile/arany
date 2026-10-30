@@ -255,10 +255,7 @@ pub(crate) struct AuthorizationAttempt {
 
 enum AuthorizationMode {
     NewRegistration,
-    Returning {
-        subject: String,
-        account_id: Option<String>,
-    },
+    Returning { subject: String, account_id: String },
 }
 
 pub(crate) struct CodeExchange {
@@ -335,10 +332,7 @@ impl AuthorizationAttempt {
         callback_port: u16,
     ) -> Result<Self, AuthorizationError> {
         if !valid_client_id(&account.client_id)
-            || account
-                .chatgpt_account_id
-                .as_deref()
-                .is_some_and(|id| !valid_account_id(id))
+            || !valid_account_id(&account.chatgpt_account_id)
             || !bounded_graphic(&account.subject, 512)
             || account.id.get_version() != Some(Version::SortRand)
         {
@@ -465,7 +459,7 @@ impl AuthorizationAttempt {
             expected_subject: accepted.expected_subject,
             expected_account_id: match self.mode {
                 AuthorizationMode::NewRegistration => None,
-                AuthorizationMode::Returning { account_id, .. } => account_id,
+                AuthorizationMode::Returning { account_id, .. } => Some(account_id),
             },
         }
     }
@@ -557,7 +551,7 @@ mod tests {
             client_id: account.client_id,
             subject: account.subject,
             storage: AccountStorage::Keyring,
-            chatgpt_account_id: account.chatgpt_account_id,
+            chatgpt_account_id: "account-saved".into(),
         }
     }
 
@@ -664,7 +658,10 @@ mod tests {
                 Some("verified-subject")
             );
             assert_eq!(exchange.host_id, account.host_id);
-            assert_eq!(exchange.expected_account_id, account.chatgpt_account_id);
+            assert_eq!(
+                exchange.expected_account_id.as_deref(),
+                Some(account.chatgpt_account_id.as_str())
+            );
         }
     }
 

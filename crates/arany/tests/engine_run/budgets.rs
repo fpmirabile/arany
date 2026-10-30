@@ -2221,7 +2221,7 @@ async fn reviewed_write_run(
     for (name, bytes) in [
         (
             "tools.json",
-            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+            &br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
         ),
         (
             "permissions.json",

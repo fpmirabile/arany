@@ -2190,7 +2190,7 @@ mod tests {
         let seed = crate::tools::fs::open_directory(fixture.path()).unwrap();
         let mut runtime = crate::tools::tests::in_process_runtime(
             fixture.path(),
-            serde_json::json!({"version":1,"workspace_paths":[root],"write":true,
+            serde_json::json!({"workspace_paths":[root],"write":true,
                 "commands":[],"skills":[],"mcp":[]}),
         );
         runtime.guard_executable = fixture.path().join("arany-guard");

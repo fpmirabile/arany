@@ -958,10 +958,6 @@ mod tests {
             Unconfigured,
             InvalidChatgpt,
             InvalidChatgptReset,
-            InvalidNative,
-            InvalidNativeReset,
-            InvalidPreferences,
-            InvalidPreferencesReset,
             InvalidRegistration,
             InitialSetupFailure,
             InvalidHistory,
@@ -977,7 +973,7 @@ mod tests {
             Cancel,
         }
         impl Case {
-            const ALL: [Self; 28] = [
+            const ALL: [Self; 24] = [
                 Self::ChatGpt,
                 Self::Locked,
                 Self::Missing,
@@ -989,10 +985,6 @@ mod tests {
                 Self::Unconfigured,
                 Self::InvalidChatgpt,
                 Self::InvalidChatgptReset,
-                Self::InvalidNative,
-                Self::InvalidNativeReset,
-                Self::InvalidPreferences,
-                Self::InvalidPreferencesReset,
                 Self::InvalidRegistration,
                 Self::InitialSetupFailure,
                 Self::InvalidHistory,
@@ -1021,10 +1013,6 @@ mod tests {
                     Self::Unconfigured => "unconfigured",
                     Self::InvalidChatgpt => "invalid_chatgpt",
                     Self::InvalidChatgptReset => "invalid_chatgpt_reset",
-                    Self::InvalidNative => "invalid_native",
-                    Self::InvalidNativeReset => "invalid_native_reset",
-                    Self::InvalidPreferences => "invalid_preferences",
-                    Self::InvalidPreferencesReset => "invalid_preferences_reset",
                     Self::InvalidRegistration => "invalid_registration",
                     Self::InitialSetupFailure => "initial_setup_failure",
                     Self::InvalidHistory => "invalid_history",
@@ -1085,28 +1073,6 @@ mod tests {
                         Reply("Manage ChatGPT account\n"),
                         Reply("Reset local setup\n"),
                         Reply("\n"),
-                        Reply("/exit\n"),
-                    ],
-                    Case::InvalidNative => &[
-                        Reply("/setup\n"),
-                        Reply("API accounts\n"),
-                        Reply("Add or replace native API account\n"),
-                        Reply("\n"),
-                        Reply("/exit\n"),
-                    ],
-                    Case::InvalidNativeReset => &[
-                        Reply("/setup\n"),
-                        Reply("API accounts\n"),
-                        Reply("Add or replace native API account\n"),
-                        Reply("Reset local setup\n"),
-                        Reply("\n"),
-                        Reply("/exit\n"),
-                    ],
-                    Case::InvalidPreferences => &[Reply("/setup\n"), Reply("\n"), Reply("/exit\n")],
-                    Case::InvalidPreferencesReset => &[
-                        Reply("/setup\n"),
-                        Reply("Reset local setup\n"),
-                        Interrupt,
                         Reply("/exit\n"),
                     ],
                     Case::InitialSetupFailure | Case::InvalidHistorySetup => &[
@@ -1335,8 +1301,14 @@ mod tests {
                     );
                 } else if case.name().starts_with("invalid_") || case == Case::InitialSetupFailure {
                     assert!(transcript.contains("Setup: "));
+                    if case != Case::InitialSetupFailure {
+                        assert!(
+                            transcript.contains("(chatgpt-registration.json) archived intact"),
+                            "refused records are archived with a notice"
+                        );
+                    }
                     if !matches!(case, Case::InvalidRegistration | Case::InitialSetupFailure) {
-                        assert!(transcript.contains("Saved access could not be restored"));
+                        assert!(transcript.contains("use /setup to review saved access"));
                     }
                     if case == Case::InitialSetupFailure {
                         assert!(transcript.contains("Setup could not be completed"));
@@ -1350,7 +1322,7 @@ mod tests {
                             transcript.contains("Reset local setup"),
                             "reset choice must not be clipped"
                         );
-                        if !case.name().starts_with("invalid_preferences") {
+                        {
                             let reviewed = transcript
                                 .lines()
                                 .filter_map(|line| {
@@ -1365,17 +1337,17 @@ mod tests {
                             );
                         }
                     }
-                    let expected = usize::from(matches!(
-                        case,
-                        Case::InvalidRegistration
-                            | Case::InvalidChatgptReset
-                            | Case::InvalidNativeReset
-                    ));
+                    // The intact accounts pass startup authorization once; a reset authorizes again.
+                    let expected = match case {
+                        Case::InitialSetupFailure => 0,
+                        Case::InvalidChatgptReset => 2,
+                        _ => 1,
+                    };
                     let calls = std::fs::read_to_string(marker).unwrap_or_default();
                     assert_eq!(
                         calls.lines().count(),
                         expected,
-                        "only explicit setup probes or valid startup authorization may use the helper"
+                        "only explicit setup probes or valid startup authorization may use the helper: {case}"
                     );
                 } else if matches!(case, Case::PrivateFile | Case::Unconfigured) {
                     assert!(
@@ -1430,7 +1402,7 @@ mod tests {
         let state = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let trust = serde_json::to_vec(&serde_json::json!({
-            "version": 2, "workspaces": [{ "path": workspace,
+            "workspaces": [{ "path": workspace,
                 "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
                 "runtime_grants": [] }]
         }))
@@ -1440,12 +1412,7 @@ mod tests {
         std::fs::set_permissions(&trust_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let native = matches!(
             case,
-            Case::Native
-                | Case::NativeCached
-                | Case::Replaced
-                | Case::PrivateFile
-                | Case::InvalidNative
-                | Case::InvalidNativeReset
+            Case::Native | Case::NativeCached | Case::Replaced | Case::PrivateFile
         );
         let account = crate::accounts::credentials::SavedAccount::new(
             "openai".into(),
@@ -1472,7 +1439,7 @@ mod tests {
             } else {
                 state
                     .record(RecordKind::SavedAccount)
-                    .replace(br#"{"schema":2,"storage":"keyring","account":null}"#)
+                    .replace(br#"{"storage":"keyring","account":null}"#)
                     .unwrap();
                 let record = serde_json::to_string(&account)
                     .unwrap()
@@ -1512,11 +1479,10 @@ mod tests {
             state
                 .record(RecordKind::ChatgptAccounts).replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "schema": crate::accounts::chatgpt::account::CHATGPT_ACCOUNTS.current,
                         "selected": id, "accounts": [{
                             "id": id, "host_id": "11111111-1111-4111-8111-111111111111",
                             "client_id": "synthetic-client", "subject": "synthetic-subject",
-                            "chatgpt_account_id": null, "keyring_slot": client_slot,
+                            "chatgpt_account_id": "synthetic-account", "keyring_slot": client_slot,
                             "storage": "keyring", "renewal_pending": false, "signout_pending": false,
                             "disconnected": false, "token": null
                         }]
@@ -1544,23 +1510,17 @@ mod tests {
                 | Case::InvalidHistorySetup
                 | Case::InvalidHistorySetupQuit
                 | Case::InvalidChatgpt
-                | Case::InvalidChatgptReset
-                | Case::InvalidPreferences
-                | Case::InvalidPreferencesReset => "exit 1",
+                | Case::InvalidChatgptReset => "exit 1",
                 _ => panic!("invalid synthetic startup case"),
             }
             .into();
             ("authorize", slot, response)
         };
-        if !matches!(
-            case,
-            Case::Native | Case::Unconfigured | Case::InvalidNative | Case::InvalidNativeReset
-        ) {
+        if !matches!(case, Case::Native | Case::Unconfigured) {
             state
                 .record(RecordKind::ModelPreferences)
                 .replace(
                     &serde_json::to_vec(&serde_json::json!({
-                        "version": crate::cli::attached::models::MODEL_PREFERENCES.current,
                         "selected": { "profile": profile, "account_id": id },
                         "sources": [{ "profile": profile, "account_id": id, "model": "gpt-5.4",
                             "effort": "low", "catalog": [{ "id": "gpt-5.4" }] }]
@@ -1569,37 +1529,8 @@ mod tests {
                 )
                 .unwrap();
         }
-        if case.name().starts_with("invalid_chatgpt") {
-            let mut record: serde_json::Value = serde_json::from_slice(
-                &state
-                    .record(RecordKind::ChatgptAccounts)
-                    .read()
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap();
-            record["accounts"][0]
-                .as_object_mut()
-                .unwrap()
-                .remove("signout_pending");
-            state
-                .record(RecordKind::ChatgptAccounts)
-                .replace(&serde_json::to_vec(&record).unwrap())
-                .unwrap();
-        }
-        if case.name().starts_with("invalid_native") {
-            state
-                .record(RecordKind::SavedAccount)
-                .replace(b"unsupported-api-setup")
-                .unwrap();
-        }
-        if case.name().starts_with("invalid_preferences") {
-            state
-                .record(RecordKind::ModelPreferences)
-                .replace(b"unsupported-model-preferences")
-                .unwrap();
-        }
-        if case == Case::InvalidRegistration {
+        // Startup archives the refused registration; the accounts it bound then need a setup reset.
+        if case.name().starts_with("invalid_chatgpt") || case == Case::InvalidRegistration {
             state
                 .record(RecordKind::ChatgptRegistration)
                 .replace(b"unsupported-registration")
@@ -1619,7 +1550,6 @@ mod tests {
             Some((
                 state.record(RecordKind::SavedAccount).read().unwrap(),
                 state.record(RecordKind::ChatgptAccounts).read().unwrap(),
-                state.record(RecordKind::ModelPreferences).read().unwrap(),
             ))
         } else {
             None
@@ -1854,7 +1784,7 @@ mod tests {
                     .is_empty()
             );
             store.close().await.unwrap();
-            let (native_before, chatgpt_before, models_before) = before_accounts.unwrap();
+            let (native_before, chatgpt_before) = before_accounts.unwrap();
             let reset = case.name().ends_with("_reset");
             assert!(
                 state.record(RecordKind::SavedAccount).read().unwrap()
@@ -1868,18 +1798,30 @@ mod tests {
                         chatgpt_before
                     }
             );
-            if case == Case::InvalidRegistration {
+            // Startup re-remembers the selection, so only presence is stable here.
+            assert_eq!(
+                state
+                    .record(RecordKind::ModelPreferences)
+                    .present()
+                    .unwrap(),
+                !reset
+            );
+            if case != Case::InitialSetupFailure {
                 assert!(
                     state
                         .record(RecordKind::ChatgptRegistration)
                         .read()
                         .unwrap()
-                        == Some(b"unsupported-registration".to_vec())
+                        .is_none()
                 );
-            } else {
-                assert!(
-                    state.record(RecordKind::ModelPreferences).read().unwrap()
-                        == if reset { None } else { models_before }
+                let archived = std::fs::read_dir(state.path().join("archive"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path().join("chatgpt-registration.json"))
+                    .find(|path| path.exists())
+                    .expect("archived registration");
+                assert_eq!(
+                    std::fs::read(archived).unwrap(),
+                    b"unsupported-registration"
                 );
             }
             return;
@@ -2035,7 +1977,7 @@ mod tests {
         let account = StateRoot::admit(&root.join("account")).unwrap();
         let metadata = std::fs::metadata(&workspace).unwrap();
         let remembered = serde_json::to_vec(&serde_json::json!({
-            "version": 2, "workspaces": [{ "path": workspace,
+            "workspaces": [{ "path": workspace,
                 "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
                 "runtime_grants": [] }]
         }))
@@ -2160,7 +2102,7 @@ mod tests {
                 && run.tools.is_empty()));
             store.close().await.unwrap();
             let private = state.join("tools.json");
-            std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
+            std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"workspace_paths":["."],"write":true,
                 "commands":[{"name":"sh","executable":"/bin/sh","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap()).unwrap();
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
             let error = embedded::run_with_providers(

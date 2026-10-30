@@ -14,7 +14,6 @@ use std::path::Path;
 
 pub const MAX_COMMAND_TOOL_CANDIDATES: usize = 256;
 pub const MAX_COMMAND_TOOLS: usize = 8;
-const VERSION: u8 = 1;
 pub const PROBE_COMMAND: &str = "cargo test";
 pub(crate) const TOOL_NAME: &str = "command-tool";
 pub(crate) const TIMEOUT_MS: u32 = (super::permissions::MAX_TIMEOUT_SECONDS * 1000) as u32;
@@ -71,17 +70,14 @@ pub struct CommandToolProbe {
     pub outcome: Option<super::permissions::HookOutcome>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandTools {
-    version: u8,
     tools: Vec<CommandTool>,
 }
 
 pub(crate) const COMMAND_TOOLS: RecordFormat = RecordFormat {
     kind: RecordKind::CommandTools,
-    field: "version",
-    current: 1,
     accepts: |bytes| CommandTools::parse(bytes).is_ok(),
 };
 
@@ -106,15 +102,6 @@ impl RewriteStage {
             Self::NotCompleted => "not completed",
             Self::Limit => "limit reached",
             Self::Uncertain => "unknown outcome",
-        }
-    }
-}
-
-impl Default for CommandTools {
-    fn default() -> Self {
-        Self {
-            version: VERSION,
-            tools: Vec::new(),
         }
     }
 }
@@ -201,8 +188,7 @@ impl CommandTools {
     fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
         let value = super::parse_json(bytes, RecordKind::CommandTools.limit())?;
         let record: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
-        if record.version != VERSION
-            || record.tools.len() > MAX_COMMAND_TOOLS
+        if record.tools.len() > MAX_COMMAND_TOOLS
             || record
                 .tools
                 .iter()

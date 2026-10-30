@@ -64,7 +64,7 @@ impl Host {
         private_file(
             &state.join("tools.json"),
             &serde_json::to_vec(&json!({
-                "version":1,"workspace_paths":["notes"],"write":false,"commands":[program],"skills":[],"mcp":[]
+                "workspace_paths":["notes"],"write":false,"commands":[program],"skills":[],"mcp":[]
             }))
             .unwrap(),
         );
@@ -487,7 +487,6 @@ fn write_rule(host: &Host, script: &str) {
     private_file(
         &host.state.join("unguarded-commands.json"),
         &serde_json::to_vec(&json!({
-            "version": 1,
             "commands": [{
                 "workspace": {
                     "path": host.workspace.to_str().unwrap(),
@@ -2003,12 +2002,11 @@ async fn environment_record_changes_alter_the_journaled_policy_and_replay_never_
         let host = Host::new(None);
         let file = host.state.join("command-environment.json");
         let names = json!([{"name": "EDITOR_NOTE", "value": value}]);
-        let canonical =
-            serde_json::to_string(&json!([3, "process", null, path, names, []])).unwrap();
+        let canonical = serde_json::to_string(&json!(["process", null, path, names, []])).unwrap();
         private_file(
             &file,
             &serde_json::to_vec(&json!({
-                "version": 3, "source": "process", "shell": null, "captured_at": 0, "path": path,
+                "source": "process", "shell": null, "captured_at": 0, "path": path,
                 "names": names, "excluded": [], "sha256": hash(canonical.as_bytes())
             }))
             .unwrap(),

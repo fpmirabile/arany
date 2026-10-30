@@ -330,7 +330,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     StateRoot::admit(&state).expect("state root");
     private_file(
         &state.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     );
     private_file(
         &state.join("permissions.json"),
@@ -339,28 +339,15 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let session_id = commit_initial_write(&workspace, &state);
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
-    let profile = serde_json::json!({
-        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
-        "profiles": [{
-            "name": "local",
-            "protocol": "openai-responses",
-            "endpoint": format!("http://127.0.0.1:{port}/v1/responses"),
-            "model": "model-1",
-            "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
-            "outcome_encoding": "json_schema",
-            "privacy": "user_authorized",
-            "max_output_tokens": 4096,
-            "efforts": []
-        }]
-    });
+    arany::test_support::save_custom_profiles(
+        &state,
+        &[arany::test_support::local_custom_profile(port)],
+    );
     let profile_path = state.join("provider-profiles.json");
-    std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("profile");
-    std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
-        .expect("private profile");
     let (request_sender, request_ready) = mpsc::channel();
     let (release_compaction, compaction_release) = mpsc::sync_channel(1);
     let roster_path = state.join("provider-roster.json");
-    let roster_bytes = serde_json::to_vec(&serde_json::json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
+    let roster_bytes = serde_json::to_vec(&serde_json::json!({"profiles":[{"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
     if matches!(case, CompactionCase::Success) {
         private_file(&roster_path, &roster_bytes);
     }

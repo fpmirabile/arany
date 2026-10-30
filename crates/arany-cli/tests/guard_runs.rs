@@ -1524,7 +1524,7 @@ async fn tool_step_events(
     std::fs::write(
         &config,
         format!(
-            r#"{{"version":1,"workspace_paths":["notes"],"write":{},"commands":[],"skills":[],"mcp":[]}}"#,
+            r#"{{"workspace_paths":["notes"],"write":{},"commands":[],"skills":[],"mcp":[]}}"#,
             setup.write
         ),
     )
@@ -1708,7 +1708,7 @@ fn write_notes_tools(state: &Path) {
     let config = state.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
@@ -2847,7 +2847,11 @@ mod routing {
         );
         let engine = guarded_engine(&state);
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
         pin_roster(&mut bindings, Some(vec![first.clone(), fallback.clone()]));
@@ -2925,7 +2929,11 @@ mod routing {
         );
         let engine = guarded_engine(&state);
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
         bindings.roles.compaction = vec![first.clone(), second.clone()];
@@ -3000,7 +3008,11 @@ mod routing {
         );
         let engine = guarded_engine(&state);
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
         bindings.roles.compaction = vec![first.clone(), second.clone()];
@@ -3042,7 +3054,7 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
     let config = state.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("grant");
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600))
@@ -3128,7 +3140,11 @@ async fn missing_skill_path_recovery() {
     let state = temp.path().join("state");
     let engine = guarded_engine(&state);
     let config = state.join("tools.json");
-    std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(
+        &config,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let read = |path: &str| {
         tool_outcome(arany::ToolCall::Read {
@@ -3243,7 +3259,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>()
                 };
-                let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+                let config = serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
                     "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"files":{"SKILL.md":hash},"disable_model_invocation":true
                 }]});
                 let config_path = state_path.join("tools.json");
@@ -3381,7 +3397,7 @@ fn invoked_skill_crash_window_resumes_without_rereading_or_rerunning() {
     let body = b"---\nname: ask-matt\ndescription: Guide the task\n---\nPinned guidance.\n";
     std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     let state_path = temp.path().join("state");
-    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+    let config = serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
         "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,
         "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
     }]});
@@ -3491,7 +3507,7 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
     std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     let state_path = temp.path().join("state");
     let engine = guarded_engine(&state_path);
-    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+    let config = serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
         "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"disable_model_invocation":true,
         "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
     }]});

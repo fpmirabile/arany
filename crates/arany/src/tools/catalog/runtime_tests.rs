@@ -532,7 +532,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
 
     let program = json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]});
     let value = json!({
-        "version":1,"workspace_paths":["src","Cargo.toml"],"write":true,
+        "workspace_paths":["src","Cargo.toml"],"write":true,
         "commands":[{"name":"bash","executable":"/bin/bash","sha256":"1".repeat(64),"interpreter":true,"inputs":[]}],
         "skills":[{"name":"review","description":"Review guidance","directory":"/tmp/skills/review","files":{"SKILL.md":"2".repeat(64)}}],
         "mcp":[{"name":"local","program":program,"args":[],"tools":["probe"]}],

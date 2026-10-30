@@ -1,10 +1,7 @@
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-use arany::StateRoot;
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    os::unix::fs::PermissionsExt,
     path::Path,
 };
 use std::{
@@ -207,26 +204,10 @@ pub(super) fn responses_stream(mut response: serde_json::Value) -> String {
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn write_profile(state: &Path, port: u16) {
-    StateRoot::admit(state).expect("state root");
-    let profile = serde_json::json!({
-        "version": arany::test_support::record_version(arany::RecordKind::ProviderProfiles),
-        "profiles": [{
-            "name": "local",
-            "protocol": "openai-responses",
-            "endpoint": format!("http://127.0.0.1:{port}/v1/responses"),
-            "model": "model-1",
-            "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
-            "outcome_encoding": "json_schema",
-            "privacy": "user_authorized",
-            "max_output_tokens": 4096,
-            "efforts": []
-        }]
-    });
-    let path = state.join("provider-profiles.json");
-    std::fs::write(&path, serde_json::to_vec(&profile).expect("profile JSON"))
-        .expect("profile file");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .expect("private profile file");
+    arany::test_support::save_custom_profiles(
+        state,
+        &[arany::test_support::local_custom_profile(port)],
+    );
 }
 
 // Streams the Run's call up to its text delta and holds the rest until released.

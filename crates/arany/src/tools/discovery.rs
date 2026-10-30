@@ -743,7 +743,10 @@ mod tests {
     fn vanished_descendants_are_omitted_after_enumeration() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fs::open_directory(fixture.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config = serde_json::from_value(
+            json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        )
+        .unwrap();
         let calls = [
             (json!({"operation":"list","path":"."}), Output::Tool),
             (json!({"operation":"glob","pattern":"**"}), Output::Tool),
@@ -781,7 +784,7 @@ mod tests {
     fn missing_requested_bases_fail_but_absent_scope_roots_are_omitted() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fs::open_directory(fixture.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["missing/nested"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config = serde_json::from_value(json!({"workspace_paths":["missing/nested"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         for path in [".", "missing/nested"] {
             let call = ToolCall::List { path: path.into() };
             let result = inspect(Request {
@@ -817,7 +820,10 @@ mod tests {
             ("notes", "notes", "notes/deep/e00000"),
             (".", "notes/deep", "notes/deep/e00000"),
         ] {
-            let config = serde_json::from_value(json!({"version":1,"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+            let config = serde_json::from_value(
+                json!({"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            )
+            .unwrap();
             let call = ToolCall::List { path: path.into() };
             let page: serde_json::Value = serde_json::from_str(
                 &inspect(tool_request(&root, &call, &config, Output::Tool)).unwrap(),
@@ -850,7 +856,7 @@ mod tests {
                 created += 1;
             }
             for scope in [".", "notes"] {
-                let config = serde_json::from_value(json!({"version":1,"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+                let config = serde_json::from_value(json!({"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
                 let output = inspect(Request {
                     root: &root,
                     call: &call,
@@ -961,7 +967,10 @@ mod tests {
             std::fs::write(temp.path().join(path), b"fixture payload").unwrap();
         }
         let root = fs::open_directory(temp.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config = serde_json::from_value(
+            json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        )
+        .unwrap();
         let call = ToolCall::List {
             path: "notes".into(),
         };
@@ -1005,7 +1014,10 @@ mod tests {
     }
 
     fn whole_workspace() -> Config {
-        serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap()
+        serde_json::from_value(
+            json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        )
+        .unwrap()
     }
 
     fn search_call(path: &str, query: &str, include: Option<&str>) -> ToolCall {

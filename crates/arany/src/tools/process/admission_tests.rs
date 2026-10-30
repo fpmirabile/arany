@@ -85,7 +85,7 @@ fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let intent = runtime.intent(
         crate::session::RunId::new(),

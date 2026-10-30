@@ -50,7 +50,7 @@ fn role_manager_saves_ordered_chains_reopens_inheritance_and_clears_in_every_pre
         let record: serde_json::Value = serde_json::from_slice(&saved).unwrap();
         assert_eq!(
             record,
-            json!({"version":2,"providers":{
+            json!({"providers":{
                 "primary":null,"child":[
                     {"provider":{"kind":"anthropic","custom_name":null},"model":"claude-sonnet-5","effort":"high","account_id":null},
                     {"provider":{"kind":"anthropic","custom_name":null},"model":"claude-opus-5-5","effort":"medium","account_id":null},
@@ -217,7 +217,7 @@ fn concurrent_role_edit_refuses_before_overwriting_the_other_editor() {
     let mut pty = start_setup_pty(&temp, &workspace, &state);
     open_roles(&mut pty, Presentation::ScreenReader);
     let from = Presentation::ScreenReader.choose(&mut pty, 6);
-    let bytes = br#"{"version":2,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
+    let bytes = br#"{"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
     super::super::private_file(&state.join("provider-routing.json"), bytes);
     confirm(
         &mut pty,
@@ -397,10 +397,10 @@ fn write_role_profiles(state: &Path, primary: &TcpListener, child: &TcpListener)
         |(name, model, port, credential_env)| arany::CustomProfileDraft {
             name: name.into(),
             protocol: arany::CustomProtocol::OpenaiResponses,
-            endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
+            url: format!("http://127.0.0.1:{port}/v1/responses"),
+            auth: None,
             model: model.into(),
             credential_env: credential_env.into(),
-            messages_auth: arany::MessagesAuth::ApiKey,
             efforts: Vec::new(),
         },
     )

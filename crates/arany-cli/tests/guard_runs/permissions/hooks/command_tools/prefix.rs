@@ -32,13 +32,13 @@ fn prefix_fixture(root: &Path, ending: Ending, compose: bool) -> CommandFixture 
         "/usr/bin",
         "/bin",
     ];
-    let canonical = serde_json::to_vec(&json!([3, "process", null, path, [], []])).unwrap();
+    let canonical = serde_json::to_vec(&json!(["process", null, path, [], []])).unwrap();
     fixture
         .state
         .record(arany::RecordKind::CommandEnvironment)
         .replace(
             &serde_json::to_vec(&json!({
-                "version":3,"source":"process","shell":null,"captured_at":0,"path":path,
+                "source":"process","shell":null,"captured_at":0,"path":path,
                 "names":[],"excluded":[],"sha256":hash(&canonical)
             }))
             .unwrap(),

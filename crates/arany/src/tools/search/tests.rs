@@ -11,7 +11,7 @@ async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
     std::os::unix::fs::symlink(fixture.path().join("outside.txt"), workspace.join("link")).unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for (path, disposition) in [
         ("link", ToolDisposition::Denied),
@@ -130,7 +130,7 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
     }
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let row = |path: &str, line: u64| (path.to_owned(), line);
     let regex = |call| with_search(call, |regex, _, _, _, _| *regex = true);
@@ -316,7 +316,7 @@ async fn search_pages_rows_with_a_hard_cap_and_resumes_after_fitted_rows() {
     .unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let paged = |offset: u32, limit: u32| {
         with_search(search("src", "hit"), move |_, _, _, o, l| {

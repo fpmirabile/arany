@@ -38,7 +38,7 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
     .unwrap();
     let executable = std::fs::canonicalize("/bin/echo").unwrap();
     let config = state.join("tools.json");
-    std::fs::write(&config, serde_json::json!({"version":1,"workspace_paths":[canaries[1]],"write":true,"commands":[{"name":"synthetic","executable":executable,"sha256":hash(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}],"skills":[],"mcp":[]}).to_string()).unwrap();
+    std::fs::write(&config, serde_json::json!({"workspace_paths":[canaries[1]],"write":true,"commands":[{"name":"synthetic","executable":executable,"sha256":hash(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}],"skills":[],"mcp":[]}).to_string()).unwrap();
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let permissions = state.join("permissions.json");
     std::fs::write(

@@ -26,7 +26,7 @@ pub(super) fn fixture(root: &Path) -> (StateRoot, std::path::PathBuf, String, Ru
     state
         .record(RecordKind::WorkspacePermissions)
         .replace(
-            &serde_json::to_vec(&serde_json::json!({"version":2,"workspaces":[{
+            &serde_json::to_vec(&serde_json::json!({"workspaces":[{
                 "path":workspace,"device":metadata.dev(),"inode":metadata.ino(),
                 "mode":"request","runtime_grants":[grant]
             }]}))
