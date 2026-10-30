@@ -29,7 +29,7 @@ pub(super) fn draw_rewind_frame(
     palette: view::Palette,
 ) -> bool {
     frame.render_widget(Clear, area);
-    if area.width < 16 || area.height < 8 {
+    if !view::dialog_fits(area) {
         frame.render_widget(Paragraph::new("Resize; Esc closes"), area);
         return true;
     }

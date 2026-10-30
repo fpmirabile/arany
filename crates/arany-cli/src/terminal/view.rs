@@ -105,19 +105,23 @@ pub(super) fn draw_permission_frame(
     } = state;
     let gutter = if boxed {
         0
-    } else if full.width >= 40 {
+    } else if full.width >= FULL_LAYOUT_WIDTH {
         2
     } else {
         0
     };
     let width = if boxed {
         full.width
-            .saturating_sub(if full.width >= 40 { 4 } else { 0 })
+            .saturating_sub(if full.width >= FULL_LAYOUT_WIDTH {
+                4
+            } else {
+                0
+            })
             .min(76)
     } else {
         full.width.saturating_sub(gutter * 2)
     };
-    if width == 0 || full.height < 8 {
+    if width == 0 || full.height < MIN_DIALOG_HEIGHT {
         return PermissionFrameProgress { more: true, page };
     }
     let mut rows = Vec::new();
@@ -201,7 +205,7 @@ pub(super) fn draw_permission_frame(
     } else {
         for (index, choice) in choices.iter().enumerate() {
             let focused = focus == index;
-            let label = format!("{} {}", if focused { "›" } else { " " }, choice);
+            let label = format!("{} {choice}", focus_marker(focused));
             frame.render_widget(
                 Paragraph::new(safe_truncate(&label, usize::from(width))).style(if focused {
                     palette.selection()
@@ -401,7 +405,11 @@ pub(super) fn tool_approval_height(
     choices: &[crate::presentation::ToolApprovalChoice],
     width: u16,
 ) -> u16 {
-    let width = usize::from(width.saturating_sub(if width >= 40 { 4 } else { 0 }).max(1));
+    let width = usize::from(
+        width
+            .saturating_sub(if width >= FULL_LAYOUT_WIDTH { 4 } else { 0 })
+            .max(1),
+    );
     let rows = lines
         .iter()
         .map(|line| wrap_cells(line, width, 0).len())
@@ -410,7 +418,7 @@ pub(super) fn tool_approval_height(
         tool_approval_controls(choices, width, None).len() + 1 + tool_approval_hint_height(width);
     u16::try_from(rows.saturating_add(chrome))
         .unwrap_or(u16::MAX)
-        .max(8)
+        .max(MIN_DIALOG_HEIGHT)
 }
 
 fn tool_approval_hint_height(width: usize) -> usize {
@@ -444,8 +452,12 @@ fn tool_approval_controls(
     rows
 }
 
+pub(super) fn focus_marker(focused: bool) -> &'static str {
+    if focused { "›" } else { " " }
+}
+
 fn numbered_label(index: usize, label: &str, focused: bool) -> String {
-    format!("{} {}. {label}", if focused { "›" } else { " " }, index + 1)
+    format!("{} {}. {label}", focus_marker(focused), index + 1)
 }
 
 fn choice_style(focus: Option<usize>, index: usize) -> Style {
@@ -488,7 +500,7 @@ pub(super) fn draw_tool_approval_frame(
         palette,
     } = state;
     frame.render_widget(Clear, area);
-    let gutter = u16::from(area.width >= 40) * 2;
+    let gutter = u16::from(area.width >= FULL_LAYOUT_WIDTH) * 2;
     let area = Rect::new(
         area.x + gutter,
         area.y,
@@ -578,10 +590,10 @@ pub(super) fn permission_height(
 ) -> u16 {
     let width = if boxed {
         width
-            .saturating_sub(if width >= 40 { 4 } else { 0 })
+            .saturating_sub(if width >= FULL_LAYOUT_WIDTH { 4 } else { 0 })
             .min(76)
     } else {
-        width.saturating_sub(if width >= 40 { 4 } else { 0 })
+        width.saturating_sub(if width >= FULL_LAYOUT_WIDTH { 4 } else { 0 })
     };
     let rows = lines
         .iter()
@@ -596,7 +608,7 @@ pub(super) fn permission_height(
         });
     let height = u16::try_from(rows.saturating_add(5))
         .unwrap_or(u16::MAX)
-        .max(8);
+        .max(MIN_DIALOG_HEIGHT);
     if boxed { height.min(20) } else { height }
 }
 
@@ -866,7 +878,7 @@ pub(super) fn draw_setup_text_frame(
         );
     }
     frame.render_widget(
-        Paragraph::new(if area.width < 40 {
+        Paragraph::new(if area.width < FULL_LAYOUT_WIDTH {
             "Enter · Esc"
         } else {
             "Enter confirms · Esc cancels"
@@ -879,14 +891,13 @@ pub(super) fn draw_setup_text_frame(
     });
 }
 
-const SETUP_CHOICES_MIN_HEIGHT: u16 = 8;
 const SETUP_CHOICES_CHROME_ROWS: u16 = 4;
 
 pub(super) fn setup_choices_height(choices: usize) -> u16 {
     u16::try_from(choices)
         .unwrap_or(u16::MAX)
         .saturating_add(SETUP_CHOICES_CHROME_ROWS)
-        .max(SETUP_CHOICES_MIN_HEIGHT)
+        .max(MIN_DIALOG_HEIGHT)
 }
 
 #[expect(
@@ -997,7 +1008,7 @@ pub(super) fn setup_warning_height(warning: &str, width: u16) -> u16 {
             .saturating_add(5),
     )
     .unwrap_or(u16::MAX)
-    .clamp(8, 16)
+    .clamp(MIN_DIALOG_HEIGHT, 16)
 }
 
 #[expect(
@@ -1016,7 +1027,7 @@ pub(super) fn draw_setup_warning_frame(
 ) -> bool {
     let width = full.width.min(72);
     let height = full.height.min(16);
-    if width == 0 || height < 8 {
+    if width == 0 || height < MIN_DIALOG_HEIGHT {
         return false;
     }
     let area = Rect::new(
@@ -1061,13 +1072,11 @@ pub(super) fn draw_setup_warning_frame(
         for (index, label) in ["Back", "Accept"].iter().enumerate() {
             let focused = accept_selected == (index == 1);
             frame.render_widget(
-                Paragraph::new(format!("{} {label}", if focused { "›" } else { " " })).style(
-                    if focused {
-                        palette.selection()
-                    } else {
-                        Style::default()
-                    },
-                ),
+                Paragraph::new(format!("{} {label}", focus_marker(focused))).style(if focused {
+                    palette.selection()
+                } else {
+                    Style::default()
+                }),
                 Rect::new(area.x, area.bottom() - 4 + index as u16, width, 1),
             );
         }
@@ -1364,7 +1373,7 @@ pub(super) fn draw_frame_with_history_and_chips(
             .saturating_sub(rows / 2)
             .min(names.len().saturating_sub(rows));
         if let Some(header) = header {
-            let header = if area.width < 40 {
+            let header = if area.width < FULL_LAYOUT_WIDTH {
                 match header {
                     "[Commands]  Skills · Left/Right" => "[Cmd] Skills ↔",
                     "Commands  [Skills] · Left/Right" => "Cmd [Skills] ↔",
@@ -1384,7 +1393,11 @@ pub(super) fn draw_frame_with_history_and_chips(
                 String::new()
             };
             let header_line = if composer.completion_tabs() {
-                let commands = if area.width < 40 { "Cmd" } else { "Commands" };
+                let commands = if area.width < FULL_LAYOUT_WIDTH {
+                    "Cmd"
+                } else {
+                    "Commands"
+                };
                 let selected = palette.selection().add_modifier(Modifier::REVERSED);
                 let skills_selected = composer.completion_skills_selected();
                 let tabs = [(commands, !skills_selected), ("Skills", skills_selected)];
@@ -1403,7 +1416,7 @@ pub(super) fn draw_frame_with_history_and_chips(
                     ));
                 }
                 spans.push(Span::styled(
-                    if area.width < 40 {
+                    if area.width < FULL_LAYOUT_WIDTH {
                         " ↔"
                     } else {
                         " · Left/Right"
@@ -1436,7 +1449,7 @@ pub(super) fn draw_frame_with_history_and_chips(
         for (row, name) in names.iter().enumerate().skip(start).take(rows) {
             let focused = row == selected;
             let marker = if focused { "> " } else { "  " };
-            let line = if header.is_some() && area.width >= 40 {
+            let line = if header.is_some() && area.width >= FULL_LAYOUT_WIDTH {
                 let name_width = usize::from(area.width / 3).clamp(18, 32);
                 let label = safe_truncate(name, name_width);
                 let padding = name_width.saturating_sub(UnicodeWidthStr::width(label.as_str()));
@@ -1602,7 +1615,7 @@ pub(super) fn draw_session_picker_frame(
         Rect::new(area.x, area.y, area.width, 1),
     );
     let rows = usize::from(area.height.saturating_sub(6));
-    let start = session_picker_start(selected, rows);
+    let start = window_start(Some(selected), rows);
     for (row, item) in items.iter().enumerate().skip(start).take(rows) {
         frame.render_widget(
             Paragraph::new(numbered_line(
@@ -1617,7 +1630,7 @@ pub(super) fn draw_session_picker_frame(
     if area.height >= 6
         && let Some(item) = items.get(selected)
     {
-        let short = area.width < 40;
+        let short = area.width < FULL_LAYOUT_WIDTH;
         let created = if short {
             item.created_at.get(..10).unwrap_or(&item.created_at)
         } else {
@@ -1659,7 +1672,7 @@ pub(super) fn draw_session_picker_frame(
             "Up/Dn Enter Esc"
         } else if area.width < 24 {
             "Up/Dn Enter:go Esc"
-        } else if area.width < 40 {
+        } else if area.width < FULL_LAYOUT_WIDTH {
             "Up/Dn Enter:resume Esc"
         } else {
             "Up/Down select · Enter resume · Esc close"
@@ -1757,7 +1770,7 @@ fn draw_composer(
         rendered_lines.push(Line::from(spans));
     }
     let mut position = if visible_lines > 0 && draft_rows.lines.len() > visible_lines {
-        if composer_area.width >= 40 {
+        if composer_area.width >= FULL_LAYOUT_WIDTH {
             format!(
                 " · rows {}-{}/{}",
                 first_line + 1,
@@ -1853,18 +1866,18 @@ fn draw_composer(
     if visible_lines > 0 && composer_area.width >= 3 {
         if draft.is_empty() {
             let hint = if !composer.images().is_empty() {
-                if composer_area.width < 40 {
+                if composer_area.width < FULL_LAYOUT_WIDTH {
                     "Message or Enter"
                 } else {
                     "Add a message, or Enter to send image"
                 }
             } else if model.setup_required {
-                if composer_area.width < 40 {
+                if composer_area.width < FULL_LAYOUT_WIDTH {
                     "Type /setup"
                 } else {
                     "Type /setup to connect an account"
                 }
-            } else if composer_area.width < 40 {
+            } else if composer_area.width < FULL_LAYOUT_WIDTH {
                 "Message Arany"
             } else {
                 "Ask a question, or type / for commands"
@@ -1891,18 +1904,20 @@ fn draw_composer(
                 " Tab / Del "
             }
         } else if picker_focused {
-            if composer_area.width < 40 {
+            if composer_area.width < FULL_LAYOUT_WIDTH {
                 " Draft kept "
             } else {
                 " Draft kept · Esc returns "
             }
-        } else if model.draft_action == DraftAction::Retain && composer_area.width >= 40 {
+        } else if model.draft_action == DraftAction::Retain
+            && composer_area.width >= FULL_LAYOUT_WIDTH
+        {
             "Enter keeps draft · \\ then Enter newline"
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 24 {
             " Enter keeps · \\ Enter "
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 16 {
             " Enter keeps "
-        } else if menu_height > 0 && composer_area.width >= 40 {
+        } else if menu_height > 0 && composer_area.width >= FULL_LAYOUT_WIDTH {
             if draft.starts_with('/') {
                 " Tab completes · Enter invokes · Esc close "
             } else {
@@ -1920,17 +1935,19 @@ fn draw_composer(
             } else {
                 " Tab/Enter Esc "
             }
-        } else if command && composer_area.width >= 40 {
+        } else if command && composer_area.width >= FULL_LAYOUT_WIDTH {
             " Enter command · \\ then Enter newline "
         } else if command && composer_area.width >= 16 {
             " Enter command "
-        } else if model.draft_action != DraftAction::Submit && composer_area.width >= 40 {
+        } else if model.draft_action != DraftAction::Submit
+            && composer_area.width >= FULL_LAYOUT_WIDTH
+        {
             "Enter keeps draft · \\ then Enter newline"
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 24 {
             " Enter keeps · \\ Enter "
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 16 {
             " Enter keeps "
-        } else if composer_area.width >= 40 {
+        } else if composer_area.width >= FULL_LAYOUT_WIDTH {
             " Enter sends · \\ then Enter newline "
         } else if composer_area.width >= 16 {
             " Enter · \\ Enter "
@@ -1943,11 +1960,11 @@ fn draw_composer(
             && menu_height == 0
             && !picker_focused;
         let hint = match composer_area.width {
-            40.. if agents_hint => " Alt+Left/Right agents ",
+            FULL_LAYOUT_WIDTH.. if agents_hint => " Alt+Left/Right agents ",
             24.. if agents_hint => " Alt+←/→ agents ",
             _ => hint,
         };
-        let hint = if composer_area.width >= 40 && newline != "\\ then Enter" {
+        let hint = if composer_area.width >= FULL_LAYOUT_WIDTH && newline != "\\ then Enter" {
             hint.replace("\\ then Enter newline", &format!("{} / \\ Enter", newline))
                 .replace("Enter keeps draft", "Enter keeps")
         } else {
@@ -2012,7 +2029,7 @@ pub(super) fn draw_quick_actions_frame(
     );
     let labels = if area.width < 24 {
         ["Models", "Agents", "Resume", "Setup", "Usage"]
-    } else if area.width < 40 {
+    } else if area.width < FULL_LAYOUT_WIDTH {
         [
             "Models · choose",
             "Agents · inspect",
@@ -2038,9 +2055,7 @@ pub(super) fn draw_quick_actions_frame(
         ]
     };
     let visible = usize::from(area.height.saturating_sub(2));
-    let first = selected
-        .saturating_sub(visible.saturating_sub(1))
-        .min(labels.len().saturating_sub(visible));
+    let first = window_start(Some(selected), visible).min(labels.len().saturating_sub(visible));
     for (index, label) in labels.into_iter().enumerate().skip(first).take(visible) {
         frame.render_widget(
             Paragraph::new(numbered_line(
@@ -2058,14 +2073,14 @@ pub(super) fn draw_quick_actions_frame(
                 "Draft first Esc"
             } else if area.width < 24 {
                 "Submit draft · Esc"
-            } else if area.width < 40 {
+            } else if area.width < FULL_LAYOUT_WIDTH {
                 "Submit draft · Esc back"
             } else {
                 "Submit or clear draft · Esc return"
             }
         } else if area.width < 20 {
             "1-5 Enter Esc"
-        } else if area.width < 40 {
+        } else if area.width < FULL_LAYOUT_WIDTH {
             "1-5 Enter:open Esc"
         } else {
             "1-5 or Up/Down · Enter open · Esc return"
@@ -2087,6 +2102,22 @@ fn settings_stacked(rows: &[String], width: usize) -> bool {
 // Classic selector lists show at most this many rows and scroll inside, like Codex's
 // MAX_POPUP_ROWS; ten matches the page size of the linear pickers.
 pub(super) const SELECTOR_ROWS: usize = 10;
+
+// From this width dialogs keep side gutters and full labels and hints; narrower ones shorten.
+pub(super) const FULL_LAYOUT_WIDTH: u16 = 40;
+
+// Every selector and confirmation fits this area; a smaller one asks for a resize.
+pub(super) const MIN_DIALOG_WIDTH: u16 = 16;
+pub(super) const MIN_DIALOG_HEIGHT: u16 = 8;
+
+pub(super) fn dialog_fits(area: Rect) -> bool {
+    area.width >= MIN_DIALOG_WIDTH && area.height >= MIN_DIALOG_HEIGHT
+}
+
+// The first shown row of a window that keeps the focused row in view.
+pub(super) fn window_start(selected: Option<usize>, visible: usize) -> usize {
+    selected.map_or(0, |index| index.saturating_sub(visible.saturating_sub(1)))
+}
 
 pub(super) fn settings_height(rows: &[String], width: u16, max_rows: usize) -> u16 {
     let lines_per_row = if settings_stacked(rows, usize::from(width)) {
@@ -2135,7 +2166,7 @@ pub(super) fn draw_settings_frame(
         .min(usize::from(area.height.saturating_sub(2 + lines_per_row)));
     let visible =
         (usize::from(area.height.saturating_sub(2)) - guidance_rows) / usize::from(lines_per_row);
-    let start = session_picker_start(selected, visible);
+    let start = window_start(Some(selected), visible);
     for (index, row) in rows.iter().enumerate().skip(start).take(visible) {
         let y = area.y + 1 + ((index - start) * usize::from(lines_per_row)) as u16;
         let (label, value) = match row.split_once(": ") {
@@ -2221,7 +2252,7 @@ pub(super) fn draw_usage_frame(
         );
     }
     if armed && area.height > 1 {
-        let hint = if area.width < 40 {
+        let hint = if area.width < FULL_LAYOUT_WIDTH {
             "↑↓ ←→ Esc"
         } else {
             "Up/Down · Left/Right page · Esc close"
@@ -2261,7 +2292,7 @@ pub(super) fn draw_help_frame(
         .len()
         .min(usize::from(area.height.saturating_sub(3)));
     let visible = usize::from(area.height.saturating_sub(2)) - description_rows;
-    let start = session_picker_start(selected, visible);
+    let start = window_start(Some(selected), visible);
     for row in 0..visible {
         let index = start + row;
         let Some(entry) = help_entry(index) else {
@@ -2329,7 +2360,7 @@ pub(super) fn draw_model_catalog_frame(
 ) {
     let palette = hints.palette;
     let full = frame.area();
-    if full.height < 8 || full.width < 16 {
+    if !dialog_fits(full) {
         frame.render_widget(Paragraph::new("Resize or Esc").style(palette.error()), full);
         return;
     }
@@ -2419,7 +2450,7 @@ pub(super) fn draw_model_catalog_frame(
         );
     }
     let rows = usize::from(area.height - 3);
-    let start = session_picker_start(selected, rows);
+    let start = window_start(Some(selected), rows);
     if picker.items.is_empty() {
         frame.render_widget(
             Paragraph::new(if picker.filter.is_empty() {
@@ -2459,14 +2490,14 @@ pub(super) fn draw_model_catalog_frame(
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
         );
     }
-    let navigation = if area.width < 40 {
+    let navigation = if area.width < FULL_LAYOUT_WIDTH {
         "Up/Dn L/R effort"
     } else {
         "Up/Down model · Left/Right reasoning"
     };
     let action = if picker.items.is_empty() {
         "Type/BS · Esc"
-    } else if area.width < 40 {
+    } else if area.width < FULL_LAYOUT_WIDTH {
         "Enter pick Esc"
     } else if area.width < 60 || picker.exact_custom {
         "Enter selects both · Esc · Type/BS filter"
@@ -2481,9 +2512,6 @@ pub(super) fn draw_model_catalog_frame(
             Rect::new(area.x, area.bottom() - offset, area.width, 1),
         );
     }
-}
-fn session_picker_start(selected: usize, visible_rows: usize) -> usize {
-    selected.saturating_sub(visible_rows.saturating_sub(1))
 }
 
 pub(super) fn session_picker_index(
@@ -2503,7 +2531,7 @@ pub(super) fn session_picker_index(
     }
     let visible_rows = usize::from(area.height.saturating_sub(6));
     let offset = usize::from(row - area.top() - 1);
-    let index = session_picker_start(selected, visible_rows).saturating_add(offset);
+    let index = window_start(Some(selected), visible_rows).saturating_add(offset);
     (index < count).then_some(index)
 }
 
@@ -2552,7 +2580,7 @@ pub(super) fn draw_agent_inspector_frame(
         );
     }
     let choices = agent_choice_rows(area.height, model.choices.len());
-    let start = super::agents::window_start(model.selected, choices);
+    let start = window_start(model.selected, choices);
     for (index, choice) in model.choices.iter().enumerate().skip(start).take(choices) {
         frame.render_widget(
             Paragraph::new(numbered_line(
@@ -2582,7 +2610,7 @@ pub(super) fn draw_agent_inspector_frame(
     if armed && area.height > 2 {
         let hint = match area.width {
             70.. => "Enter open · Esc close · Up/Down agent · type to search · PgUp/PgDn",
-            40.. => "Enter open · Esc close · type to search",
+            FULL_LAYOUT_WIDTH.. => "Enter open · Esc close · type to search",
             20.. => "Type Enter Esc Up/Dn",
             _ => "Esc Up/Dn Pg",
         };
@@ -2647,15 +2675,15 @@ pub(super) fn draw_agent_chat_frame(
     let composer = if state.editable {
         "> Message · Enter offers guidance"
     } else {
-        match width {
-            40.. => "> Read-only · Esc returns to primary",
+        match area.width {
+            FULL_LAYOUT_WIDTH.. => "> Read-only · Esc returns to primary",
             20.. => "> Read-only · Esc",
             _ => "> Read-only",
         }
     };
-    let hint = match (width, fullscreen) {
+    let hint = match (area.width, fullscreen) {
         (60.., true) => "Alt+Left/Right agents · Esc primary · PgUp/PgDn scroll",
-        (40.., _) => "Alt+Left/Right agents · Esc primary",
+        (FULL_LAYOUT_WIDTH.., _) => "Alt+Left/Right agents · Esc primary",
         (24.., _) => "Alt+←/→ agents · Esc",
         _ => "Esc primary",
     };
@@ -2730,7 +2758,7 @@ pub(super) fn agent_picker_index(
     {
         return None;
     }
-    let index = super::agents::window_start(selected, visible) + usize::from(row - first);
+    let index = window_start(selected, visible) + usize::from(row - first);
     (index < count).then_some(index)
 }
 

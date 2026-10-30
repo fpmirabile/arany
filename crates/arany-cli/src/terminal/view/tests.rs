@@ -1619,3 +1619,21 @@ fn agent_chat_frames_label_a_read_only_child_and_hint_keys_only_once_armed() {
         }
     }
 }
+
+#[test]
+fn windows_keep_the_focused_row_last_once_it_passes_the_first_window() {
+    for (selected, visible, start) in [
+        (None, 10, 0),
+        (Some(0), 10, 0),
+        (Some(9), 10, 0),
+        (Some(10), 10, 1),
+        (Some(143), 10, 134),
+        (Some(3), 0, 3),
+    ] {
+        assert_eq!(
+            window_start(selected, visible),
+            start,
+            "{selected:?} of {visible}"
+        );
+    }
+}

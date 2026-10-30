@@ -40,7 +40,7 @@ pub use rewind::RewindPanelError;
 mod view;
 use agent_chat::AgentChat;
 pub use agent_chat::{AgentChatFollow, AgentChatInput};
-use agents::{AgentPanel, PanelUpdate, window_start};
+use agents::{AgentPanel, PanelUpdate};
 use backend::TerminalBackend;
 use clipboard::{
     COPY_TOO_LARGE, ClipboardContent, ClipboardRead, MAX_COPY_BYTES, display_bytes, display_text,
@@ -1582,11 +1582,7 @@ impl AttachedTerminal {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let linear = self.linear.is_some();
             lines.extend(options.iter().enumerate().map(|(index, option)| {
-                let marker = if focused_profile == Some(index) {
-                    "›"
-                } else {
-                    " "
-                };
+                let marker = view::focus_marker(focused_profile == Some(index));
                 let checked = selected_profiles
                     .get(index)
                     .copied()
@@ -1638,7 +1634,7 @@ impl AttachedTerminal {
         let width = self.owned().size()?.width;
         let height = view::permission_height(&lines, width, false, profile_start);
         self.draw_frame(height, |frame, area| {
-            if area.width >= 16 && area.height >= 8 {
+            if view::dialog_fits(area) {
                 progress = view::draw_permission_frame(
                     frame,
                     area,
@@ -3476,7 +3472,7 @@ impl AttachedTerminal {
         let width = self.owned().size()?.width;
         let height = view::setup_warning_height(warning, width);
         self.draw_frame(height, |frame, area| {
-            visible = area.width >= 16 && area.height >= 8;
+            visible = view::dialog_fits(area);
             has_more = draw_setup_warning_frame(
                 frame,
                 area,
@@ -3491,7 +3487,11 @@ impl AttachedTerminal {
         if !visible {
             return Err(TerminalError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Confirmation needs a visible terminal with at least 16 columns and 8 rows; nothing accepted",
+                format!(
+                    "Confirmation needs a visible terminal with at least {} columns and {} rows; nothing accepted",
+                    view::MIN_DIALOG_WIDTH,
+                    view::MIN_DIALOG_HEIGHT,
+                ),
             )));
         }
         Ok(has_more)
@@ -3902,7 +3902,10 @@ impl AttachedTerminal {
         self.owned
             .terminal_with_context("inline terminal")
             .hide_cursor()?;
-        Ok(area.width >= 16 && area.height >= 8)
+        Ok(view::dialog_fits(Rect::from((
+            ratatui::layout::Position::ORIGIN,
+            area,
+        ))))
     }
 
     pub fn close_models(&mut self) {
@@ -4046,7 +4049,7 @@ impl AttachedTerminal {
         if let Some(linear) = &mut self.linear {
             // Committed changes never renumber printed choices; only a user action reprints.
             if panel.printed.is_none() {
-                let start = window_start(model.selected, MAX_AGENT_ROWS);
+                let start = view::window_start(model.selected, MAX_AGENT_ROWS);
                 linear.write_agents(&mut io::stderr(), &model, start, panel.notice.take())?;
                 let rows = model.rows.iter().skip(start).take(MAX_AGENT_ROWS);
                 panel.printed = Some((start, rows.copied().collect()));
