@@ -30,45 +30,16 @@ pub(in crate::terminal) fn draw_permission_frame(
         choices,
         page,
         focus,
-        profile_start,
-        profile_count,
         focused_profile,
-        profile_selection_enabled,
-        footer,
         palette,
         boxed,
+        ..
     } = state;
     let (gutter, width) = permission_layout(full.width, boxed);
     if width == 0 || full.height < MIN_DIALOG_HEIGHT {
         return PermissionFrameProgress { more: true, page };
     }
-    let mut rows = Vec::new();
-    let mut profile_rows = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let row_start = rows.len();
-        let focused = profile_start
-            .zip(focused_profile)
-            .is_some_and(|(start, selected)| index == start + selected);
-        let profile_row = profile_line(index, profile_start, profile_count);
-        let indent = if profile_row {
-            PROFILE_HANGING_INDENT
-        } else {
-            0
-        };
-        let style = if index == 0 || focused {
-            palette.selection()
-        } else {
-            Style::default()
-        };
-        for text in wrap_cells(line, usize::from(width), indent) {
-            rows.push(Line::styled(text, style));
-        }
-        if let Some(start) = profile_start
-            && profile_row
-        {
-            profile_rows.push((index - start, row_start));
-        }
-    }
+    let (rows, profile_rows) = permission_rows(lines, width, &state);
     let area = if boxed {
         let height = full
             .height
@@ -84,19 +55,7 @@ pub(in crate::terminal) fn draw_permission_frame(
         frame.render_widget(Clear, full);
         Rect::new(full.x + gutter, full.y, width, full.height)
     };
-    let mut choice_rows = u16::try_from(choices.len().max(3))
-        .unwrap_or(u16::MAX)
-        .min(area.height.saturating_sub(3));
-    let mut body_height = usize::from(area.height - choice_rows - 2);
-    // Dropping the spare choice row and spacer keeps a dialog that is two rows over on one page.
-    let compact_rows = u16::try_from(choices.len()).unwrap_or(u16::MAX);
-    if rows.len() > body_height
-        && area.height > compact_rows + 1
-        && rows.len() <= usize::from(area.height - compact_rows - 1)
-    {
-        choice_rows = compact_rows;
-        body_height = usize::from(area.height - choice_rows - 1);
-    }
+    let (choice_rows, body_height) = permission_body(choices.len(), area.height, rows.len());
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
         .iter()
@@ -108,7 +67,7 @@ pub(in crate::terminal) fn draw_permission_frame(
         Paragraph::new(rows[start..rows.len().min(start + body_height)].to_vec()),
         Rect::new(area.x, area.y, width, body_height as u16),
     );
-    let options_y = area.bottom() - choice_rows - 1;
+    let options = Rect::new(area.x, area.bottom() - choice_rows - 1, width, choice_rows);
     if more {
         let prompt = if width < 24 {
             format!("Page {}/{} Enter", page + 1, pages)
@@ -117,24 +76,99 @@ pub(in crate::terminal) fn draw_permission_frame(
         };
         frame.render_widget(
             Paragraph::new(safe_truncate(&prompt, usize::from(width))).style(palette.attention()),
-            Rect::new(area.x, options_y, width, 1),
+            Rect::new(options.x, options.y, width, 1),
         );
     } else {
-        for (index, choice) in choices.iter().enumerate() {
-            let focused = focus == index;
-            let label = format!("{} {choice}", focus_marker(focused));
-            frame.render_widget(
-                Paragraph::new(safe_truncate(&label, usize::from(width))).style(if focused {
-                    palette.selection()
-                } else {
-                    Style::default()
-                }),
-                Rect::new(area.x, options_y + index as u16, width, 1),
-            );
+        draw_permission_choices(frame, options, choices, focus, palette);
+    }
+    frame.render_widget(
+        Paragraph::new(safe_truncate(
+            permission_footer(&state, more, width),
+            usize::from(width),
+        )),
+        Rect::new(area.x, area.bottom() - 1, width, 1),
+    );
+    PermissionFrameProgress { more, page }
+}
+
+// Wrapped body rows, with each profile's first row so its focus can pick the page.
+fn permission_rows(
+    lines: &[String],
+    width: u16,
+    state: &PermissionFrameState<'_>,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let (profile_start, focused_profile) = (state.profile_start, state.focused_profile);
+    let mut rows = Vec::new();
+    let mut profile_rows = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let row_start = rows.len();
+        let focused = profile_start
+            .zip(focused_profile)
+            .is_some_and(|(start, selected)| index == start + selected);
+        let profile_row = profile_line(index, profile_start, state.profile_count);
+        let indent = if profile_row {
+            PROFILE_HANGING_INDENT
+        } else {
+            0
+        };
+        let style = if index == 0 || focused {
+            state.palette.selection()
+        } else {
+            Style::default()
+        };
+        for text in wrap_cells(line, usize::from(width), indent) {
+            rows.push(Line::styled(text, style));
+        }
+        if let Some(start) = profile_start
+            && profile_row
+        {
+            profile_rows.push((index - start, row_start));
         }
     }
-    let footer = match profile_selection_enabled {
-        Some(_) if focused_profile.is_some() => {
+    (rows, profile_rows)
+}
+
+// Choice rows and body height; a dialog two rows over drops the spare choice row and spacer.
+fn permission_body(choices: usize, height: u16, rows: usize) -> (u16, usize) {
+    let mut choice_rows = u16::try_from(choices.max(3))
+        .unwrap_or(u16::MAX)
+        .min(height.saturating_sub(3));
+    let mut body_height = usize::from(height - choice_rows - 2);
+    let compact_rows = u16::try_from(choices).unwrap_or(u16::MAX);
+    if rows > body_height
+        && height > compact_rows + 1
+        && rows <= usize::from(height - compact_rows - 1)
+    {
+        choice_rows = compact_rows;
+        body_height = usize::from(height - choice_rows - 1);
+    }
+    (choice_rows, body_height)
+}
+
+fn draw_permission_choices(
+    frame: &mut Frame,
+    area: Rect,
+    choices: &[&str],
+    focus: usize,
+    palette: Palette,
+) {
+    for (index, choice) in choices.iter().enumerate() {
+        let focused = focus == index;
+        let label = format!("{} {choice}", focus_marker(focused));
+        frame.render_widget(
+            Paragraph::new(safe_truncate(&label, usize::from(area.width))).style(if focused {
+                palette.selection()
+            } else {
+                Style::default()
+            }),
+            Rect::new(area.x, area.y + index as u16, area.width, 1),
+        );
+    }
+}
+
+fn permission_footer<'a>(state: &PermissionFrameState<'a>, more: bool, width: u16) -> &'a str {
+    match state.profile_selection_enabled {
+        Some(_) if state.focused_profile.is_some() => {
             if width < 24 {
                 "↑↓ Space · Tab back · ^C"
             } else if width < 50 {
@@ -157,7 +191,7 @@ pub(in crate::terminal) fn draw_permission_frame(
                 "Enter/PgDn continues · Tab profiles · Ctrl+C exit"
             }
         }
-        Some(_) if profile_count > 0 => {
+        Some(_) if state.profile_count > 0 => {
             if width < 24 {
                 "↑↓ Tab · Enter · ^C"
             } else if width < 50 {
@@ -175,13 +209,8 @@ pub(in crate::terminal) fn draw_permission_frame(
                 "↑↓ choose · Tab next · Enter confirm · Ctrl+C exit"
             }
         }
-        None => footer.unwrap_or_default(),
-    };
-    frame.render_widget(
-        Paragraph::new(safe_truncate(footer, usize::from(width))),
-        Rect::new(area.x, area.bottom() - 1, width, 1),
-    );
-    PermissionFrameProgress { more, page }
+        None => state.footer.unwrap_or_default(),
+    }
 }
 
 pub(in crate::terminal) fn tool_approval_height(
@@ -275,22 +304,7 @@ pub(in crate::terminal) fn draw_tool_approval_frame(
         );
         return true;
     }
-    let rows = lines
-        .iter()
-        .enumerate()
-        .flat_map(|(index, line)| {
-            let style = if index == 0 && line == crate::presentation::HOST_SENSITIVE_PATH_WARNING {
-                palette.attention()
-            } else if line == crate::presentation::HOST_SESSION_APPROVAL_HINT {
-                Style::default().add_modifier(Modifier::DIM)
-            } else {
-                Style::default()
-            };
-            wrap_cells(line, width, 0)
-                .into_iter()
-                .map(move |row| Line::styled(row, style))
-        })
-        .collect::<Vec<_>>();
+    let rows = tool_approval_rows(lines, width, palette);
     let body_height = usize::from(area.height) - chrome;
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = page.min(pages - 1);
@@ -337,6 +351,26 @@ pub(in crate::terminal) fn draw_tool_approval_frame(
         ),
     );
     more
+}
+
+// The sensitive-path warning leads in the warning color; the session-approval hint is dim.
+fn tool_approval_rows(lines: &[String], width: usize, palette: Palette) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .enumerate()
+        .flat_map(|(index, line)| {
+            let style = if index == 0 && line == crate::presentation::HOST_SENSITIVE_PATH_WARNING {
+                palette.attention()
+            } else if line == crate::presentation::HOST_SESSION_APPROVAL_HINT {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
+            wrap_cells(line, width, 0)
+                .into_iter()
+                .map(move |row| Line::styled(row, style))
+        })
+        .collect()
 }
 
 // The side gutter and text width of a permission dialog drawn across `width` columns.
