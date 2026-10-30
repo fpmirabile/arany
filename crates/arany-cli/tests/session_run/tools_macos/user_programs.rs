@@ -55,27 +55,23 @@ fn selected_permissions(workspace: &Path) -> (arany::WorkspacePermissions, UserP
         permissions.discovery_error()
     );
     let choices = permissions.runtime_profile_choices();
+    // Runner images ship rustup either from rustup.rs (~/.cargo/bin) or from Homebrew (Cellar libexec).
     let shims = choices
         .iter()
-        .find(|option| {
-            option.group == "Manager shims"
-                && option
-                    .path
-                    .components()
-                    .any(|part| part.as_os_str() == "Cellar")
-        })
-        .expect("CI installs rustup through Homebrew");
-    let prefix = shims
-        .path
-        .ancestors()
-        .find(|path| path.ends_with("Cellar"))
-        .and_then(Path::parent)
-        .unwrap()
-        .to_owned();
+        .find(|option| option.group == "Manager shims" && option.path.join("rustup").is_file())
+        .expect("CI installs a rustup proxy");
     let programs = choices
         .iter()
-        .find(|option| option.group == "User programs" && option.path == prefix.join("bin"))
+        .find(|option| {
+            option.group == "User programs"
+                && option.path.ends_with("bin")
+                && option
+                    .path
+                    .parent()
+                    .is_some_and(|prefix| prefix.join("Cellar").is_dir())
+        })
         .expect("Homebrew bin on PATH");
+    let prefix = programs.path.parent().unwrap().to_owned();
     for option in [shims, programs] {
         assert!(option.detected && !option.exclusive && !option.selected);
         assert!(
@@ -118,7 +114,8 @@ impl UserPrograms {
             probes(&self.home, &self.prefix).map(|path| path.display().to_string());
         // The Guard exports Homebrew's fallback settings exactly when its wrappers would.
         let settings = self.prefix.join("etc/rustup/settings.toml");
-        let settings = if settings.is_file() {
+        let homebrew_rustup = self.shims.starts_with(self.prefix.join("Cellar"));
+        let settings = if homebrew_rustup && settings.is_file() {
             format!(
                 "test \"$RUSTUP_OVERRIDE_UNIX_FALLBACK_SETTINGS\" = '{0}' && cat '{0}' >/dev/null",
                 settings.display()
@@ -132,7 +129,7 @@ impl UserPrograms {
 toolchain=$(rustc --version) || exit 83
 case "$toolchain" in "rustc {channel} "*) ;; *) exit 84 ;; esac
 test "$RUSTUP_HOME" = '{home}/.rustup' || exit 85
-test "$PATH" = '{shims}:{prefix}/bin:/usr/bin:/bin' || exit 86
+test "$PATH" = '{shims}:{prefix}/bin:/usr/bin:/bin' || test "$PATH" = '{prefix}/bin:{shims}:/usr/bin:/bin' || exit 86
 test "$HOME" = "$TMPDIR" || exit 87
 test "$HOME" != '{home}' || exit 88
 for path in '{prefix_probe}' '{cargo_probe}' '{rustup_probe}'; do
