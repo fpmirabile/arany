@@ -715,11 +715,13 @@ impl AttachedSession {
     async fn settings(&mut self, panel: controls::Panel) -> Result<(), String> {
         self.ui.notice = Some(Feedback::History(
             controls::settings(
-                &mut self.terminal,
+                super::run::RunUi {
+                    terminal: &mut self.terminal,
+                    view: &mut self.view,
+                    composer: &mut self.composer,
+                },
                 &self.admission,
-                &mut self.composer,
                 &mut self.ui.saved_view,
-                &self.view,
                 panel,
             )
             .await?,

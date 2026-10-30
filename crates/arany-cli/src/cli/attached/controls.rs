@@ -1042,87 +1042,34 @@ async fn choose_panel(
     view: &SessionView,
     panel: Panel,
 ) -> Result<Option<Preferences>, String> {
-    let table = panel.table();
     let linear = terminal.is_linear();
-    let model_window = model_window(view);
-    let mut selected_row = 0usize;
+    let mut dialog = SettingsDialog {
+        table: panel.table(),
+        panel,
+        cache_used,
+        linear,
+        model_window: model_window(view),
+        selected_row: 0,
+        field: None,
+        invalid: false,
+        linear_guidance: linear && panel == Panel::Settings,
+    };
     let mut answer = Composer::default();
-    let mut field: Option<String> = None;
-    let mut invalid = false;
-    let mut linear_guidance = linear && panel == Panel::Settings;
     terminal.begin_dialog();
     loop {
-        let input_kind = table[selected_row].input;
-        let notice = match &field {
-            Some(_) => Some(field_notice(&table[selected_row], &mut invalid)),
-            None if input_kind == SettingInput::Typed && !linear && !invalid => {
-                Some(format!("Enter types a value: {}", table[selected_row].hint))
-            }
-            None if input_kind == SettingInput::Link && !linear && !invalid => {
-                Some(format!("Enter {}", table[selected_row].hint))
-            }
-            None => settings_notice(
-                terminal,
-                table,
-                selected_row,
-                &mut invalid,
-                &mut linear_guidance,
-            ),
+        let input_kind = dialog.table[dialog.selected_row].input;
+        let Some((input, rows)) = dialog.read_key(terminal, chosen, view).await? else {
+            continue;
         };
-        let rows = if linear {
-            linear_setting_rows(table, chosen, cache_used)
-        } else {
-            visual_rows(table, chosen, cache_used, selected_row, field.as_deref())
-        };
-        terminal
-            .draw_settings(panel.title(), &rows, selected_row, notice.as_deref(), view)
-            .map_err(|error| error.to_string())?;
-        if terminal
-            .arm_dialog()
-            .await
-            .map_err(|error| error.to_string())?
-        {
+        match dialog.field_input(input, &mut chosen) {
+            FieldStep::Continue => continue,
+            FieldStep::Finish => return Ok(Some(chosen)),
+            FieldStep::Pass => {}
+        }
+        if !linear && dialog.visual_key(input, &mut chosen, rows) {
             continue;
         }
-        let input = terminal
-            .next_input()
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(text) = field.as_mut() {
-            match field_key(text, input) {
-                FieldKey::Edited => continue,
-                FieldKey::Cancel => {
-                    field = None;
-                    continue;
-                }
-                FieldKey::Submit if text.trim().is_empty() => return Ok(Some(chosen)),
-                FieldKey::Submit => {
-                    if apply_row(table, &mut chosen, selected_row, &text.to_ascii_lowercase()) {
-                        field = None;
-                    } else {
-                        invalid = true;
-                    }
-                    continue;
-                }
-                FieldKey::Pass => {}
-            }
-        }
         match input {
-            TerminalInput::Up if !linear => selected_row = selected_row.saturating_sub(1),
-            TerminalInput::Down if !linear => selected_row = (selected_row + 1).min(rows.len() - 1),
-            TerminalInput::Left | TerminalInput::Right if !linear => cycle_setting(
-                table,
-                &mut chosen,
-                selected_row,
-                input == TerminalInput::Right,
-                model_window,
-            ),
-            TerminalInput::Backspace | TerminalInput::Delete if !linear => {
-                reset_setting(table, &mut chosen, selected_row);
-            }
-            TerminalInput::Character(_) if !linear => {
-                selected_row = input.choice_index(rows.len()).unwrap_or(selected_row);
-            }
             TerminalInput::Character(character) => {
                 answer.apply(TerminalInput::Character(character));
             }
@@ -1134,23 +1081,17 @@ async fn choose_panel(
                 match value.as_str() {
                     "" => return Ok(Some(chosen)),
                     "q" => return Ok(None),
-                    value if linear_link(table, value) => {
-                        chosen = choose_settings(terminal, chosen, cache_used, view, Panel::Limits)
-                            .await?
-                            .unwrap_or(chosen);
-                        terminal.begin_dialog();
+                    value if linear_link(dialog.table, value) => {
+                        chosen = open_limits(terminal, chosen, cache_used, view).await?;
                     }
-                    value => invalid = !apply_setting(table, &mut chosen, value),
+                    value => dialog.invalid = !apply_setting(dialog.table, &mut chosen, value),
                 }
             }
             TerminalInput::Submit if input_kind == SettingInput::Typed => {
-                field = Some(String::new());
+                dialog.field = Some(String::new());
             }
             TerminalInput::Submit if input_kind == SettingInput::Link => {
-                chosen = choose_settings(terminal, chosen, cache_used, view, Panel::Limits)
-                    .await?
-                    .unwrap_or(chosen);
-                terminal.begin_dialog();
+                chosen = open_limits(terminal, chosen, cache_used, view).await?;
             }
             TerminalInput::Submit => return Ok(Some(chosen)),
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
@@ -1164,21 +1105,177 @@ async fn choose_panel(
             }
             TerminalInput::LineRejected => {
                 answer.clear();
-                invalid = true;
+                dialog.invalid = true;
             }
             _ => {}
         }
     }
 }
 
-pub(super) async fn settings(
+// The Limits panel opened from Settings returns to the Settings dialog.
+async fn open_limits(
     terminal: &mut AttachedTerminal,
-    admission: &Admission,
-    composer: &mut Composer,
-    saved_view: &mut TerminalMode,
+    chosen: Preferences,
+    cache_used: Option<u64>,
     view: &SessionView,
+) -> Result<Preferences, String> {
+    let chosen = choose_settings(terminal, chosen, cache_used, view, Panel::Limits)
+        .await?
+        .unwrap_or(chosen);
+    terminal.begin_dialog();
+    Ok(chosen)
+}
+
+struct SettingsDialog {
+    table: &'static [Setting],
+    panel: Panel,
+    cache_used: Option<u64>,
+    linear: bool,
+    model_window: Option<u32>,
+    selected_row: usize,
+    field: Option<String>,
+    invalid: bool,
+    linear_guidance: bool,
+}
+
+enum FieldStep {
+    Continue,
+    Finish,
+    Pass,
+}
+
+impl SettingsDialog {
+    fn notice(&mut self, terminal: &AttachedTerminal) -> Option<String> {
+        let row = &self.table[self.selected_row];
+        match &self.field {
+            Some(_) => Some(field_notice(row, &mut self.invalid)),
+            None if row.input == SettingInput::Typed && !self.linear && !self.invalid => {
+                Some(format!("Enter types a value: {}", row.hint))
+            }
+            None if row.input == SettingInput::Link && !self.linear && !self.invalid => {
+                Some(format!("Enter {}", row.hint))
+            }
+            None => settings_notice(
+                terminal,
+                self.table,
+                self.selected_row,
+                &mut self.invalid,
+                &mut self.linear_guidance,
+            ),
+        }
+    }
+
+    // Draws the table and reads one key; None when the dialog was re-armed and must redraw.
+    async fn read_key(
+        &mut self,
+        terminal: &mut AttachedTerminal,
+        chosen: Preferences,
+        view: &SessionView,
+    ) -> Result<Option<(TerminalInput, usize)>, String> {
+        let notice = self.notice(terminal);
+        let rows = self.rows(chosen);
+        terminal
+            .draw_settings(
+                self.panel.title(),
+                &rows,
+                self.selected_row,
+                notice.as_deref(),
+                view,
+            )
+            .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(None);
+        }
+        let input = terminal
+            .next_input()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some((input, rows.len())))
+    }
+
+    fn rows(&self, chosen: Preferences) -> Vec<String> {
+        if self.linear {
+            linear_setting_rows(self.table, chosen, self.cache_used)
+        } else {
+            visual_rows(
+                self.table,
+                chosen,
+                self.cache_used,
+                self.selected_row,
+                self.field.as_deref(),
+            )
+        }
+    }
+
+    // An open field takes edits; Enter applies a valid value or keeps the field open as invalid.
+    fn field_input(&mut self, input: TerminalInput, chosen: &mut Preferences) -> FieldStep {
+        let Some(text) = self.field.as_mut() else {
+            return FieldStep::Pass;
+        };
+        match field_key(text, input) {
+            FieldKey::Edited => FieldStep::Continue,
+            FieldKey::Cancel => {
+                self.field = None;
+                FieldStep::Continue
+            }
+            FieldKey::Submit if text.trim().is_empty() => FieldStep::Finish,
+            FieldKey::Submit => {
+                if apply_row(
+                    self.table,
+                    chosen,
+                    self.selected_row,
+                    &text.to_ascii_lowercase(),
+                ) {
+                    self.field = None;
+                } else {
+                    self.invalid = true;
+                }
+                FieldStep::Continue
+            }
+            FieldKey::Pass => FieldStep::Pass,
+        }
+    }
+
+    // Arrow, edit and digit keys of the visual table; false leaves the key to the dialog.
+    fn visual_key(&mut self, input: TerminalInput, chosen: &mut Preferences, rows: usize) -> bool {
+        match input {
+            TerminalInput::Up => self.selected_row = self.selected_row.saturating_sub(1),
+            TerminalInput::Down => self.selected_row = (self.selected_row + 1).min(rows - 1),
+            TerminalInput::Left | TerminalInput::Right => cycle_setting(
+                self.table,
+                chosen,
+                self.selected_row,
+                input == TerminalInput::Right,
+                self.model_window,
+            ),
+            TerminalInput::Backspace | TerminalInput::Delete => {
+                reset_setting(self.table, chosen, self.selected_row);
+            }
+            TerminalInput::Character(_) => {
+                self.selected_row = input.choice_index(rows).unwrap_or(self.selected_row);
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+pub(super) async fn settings(
+    ui: super::run::RunUi<'_>,
+    admission: &Admission,
+    saved_view: &mut TerminalMode,
     panel: Panel,
 ) -> Result<String, String> {
+    let super::run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
+    let view: &SessionView = view;
     let linear = terminal.is_linear();
     let mut current = restore_settings(admission).await?;
     current.completion = composer.completion_layout();
@@ -1363,23 +1460,12 @@ pub(super) fn handle_active_submission(
     view: &SessionView,
     starting_sequence: u64,
 ) -> ActiveSubmission {
-    let notice = match composer.submission() {
-        Ok(Submission::Command {
-            command: command @ (InteractiveCommand::Usage | InteractiveCommand::Status),
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenUsage {
-                status: command == InteractiveCommand::Status,
-            };
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Transcript,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenTranscript;
-        }
+    let submission = composer.submission();
+    if let Some(opened) = active_panel(&submission) {
+        composer.take();
+        return opened;
+    }
+    let notice = match submission {
         Ok(Submission::Command {
             command: InteractiveCommand::Transcript,
             argument: Some(argument),
@@ -1395,34 +1481,6 @@ pub(super) fn handle_active_submission(
             return ActiveSubmission::Rejected(format!(
                 "/{name} starts a new turn and cannot join the running one; wait for it or press Ctrl+C to cancel"
             ));
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Goal,
-            argument: Some("pause"),
-        }) => {
-            composer.take();
-            return ActiveSubmission::Pause;
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Paste,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::ReadClipboard;
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Agents,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenAgents;
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Help,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenHelp;
         }
         Ok(Submission::Command {
             command: InteractiveCommand::Goal,
@@ -1447,6 +1505,28 @@ pub(super) fn handle_active_submission(
     };
     composer.take();
     ActiveSubmission::Notice(notice)
+}
+
+// Commands that open a panel or act during a Run consume the draft.
+fn active_panel(
+    submission: &Result<Submission<'_>, CommandParseError>,
+) -> Option<ActiveSubmission> {
+    let Ok(Submission::Command { command, argument }) = submission else {
+        return None;
+    };
+    Some(match (command, argument) {
+        (InteractiveCommand::Usage | InteractiveCommand::Status, None) => {
+            ActiveSubmission::OpenUsage {
+                status: *command == InteractiveCommand::Status,
+            }
+        }
+        (InteractiveCommand::Transcript, None) => ActiveSubmission::OpenTranscript,
+        (InteractiveCommand::Goal, Some("pause")) => ActiveSubmission::Pause,
+        (InteractiveCommand::Paste, None) => ActiveSubmission::ReadClipboard,
+        (InteractiveCommand::Agents, None) => ActiveSubmission::OpenAgents,
+        (InteractiveCommand::Help, None) => ActiveSubmission::OpenHelp,
+        _ => return None,
+    })
 }
 
 pub(super) fn validate_idle_command(
@@ -1537,53 +1617,64 @@ pub(super) async fn handle_command(
             };
             return select_model(admission, *session_id, view, model, effort).await;
         }
-        InteractiveCommand::Agents => match argument {
-            Some(argument) => match parse_policy(argument) {
-                Ok(policy) => {
-                    let mut defaults = view.defaults.clone();
-                    defaults.policy = policy;
-                    if let Err(error) =
-                        update_defaults(admission, *session_id, view, defaults).await
-                    {
-                        return recover_defaults_change(error);
-                    }
-                    format!("Next-Run collaboration: {policy}")
-                }
-                Err(error) => error.into(),
-            },
-            None => format!("Next-Run collaboration: {}", view.defaults.policy),
-        },
+        InteractiveCommand::Agents => {
+            return agents_command(admission, *session_id, view, argument).await;
+        }
         InteractiveCommand::Usage | InteractiveCommand::Status => {
             return Err("Usage requires the terminal report".into());
         }
         InteractiveCommand::Help => {
             return Err("Help requires the terminal command registry".into());
         }
-        InteractiveCommand::Permissions => {
-            if admission.tools {
-                "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
-            } else if let Some(access) = admission
-                .workspace_permissions
-                .as_ref()
-                .filter(|access| access.is_trusted())
-            {
-                let profiles = access.selected_runtime_profiles();
-                format!(
-                    "Folder trusted; file Tools use the Workspace. Commands/MCP use a private selected-project copy without network or account state; only these selected read-only toolchains and caches are mounted: {}. Arany requests: selected Provider; OS TLS checks may connect separately.",
-                    if profiles.is_empty() {
-                        "none".into()
-                    } else {
-                        profiles.join("; ")
-                    }
-                )
-            } else {
-                "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
-            }
-        }
+        InteractiveCommand::Permissions => permissions_notice(admission),
         InteractiveCommand::Cache => return Ok(cache_command(admission, argument).await),
         _ => "Command is not available in this build".into(),
     };
     Ok(notice)
+}
+
+async fn agents_command(
+    admission: &Admission,
+    session_id: SessionId,
+    view: &mut SessionView,
+    argument: Option<&str>,
+) -> Result<String, LoopError> {
+    Ok(match argument {
+        Some(argument) => match parse_policy(argument) {
+            Ok(policy) => {
+                let mut defaults = view.defaults.clone();
+                defaults.policy = policy;
+                if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
+                    return recover_defaults_change(error);
+                }
+                format!("Next-Run collaboration: {policy}")
+            }
+            Err(error) => error.into(),
+        },
+        None => format!("Next-Run collaboration: {}", view.defaults.policy),
+    })
+}
+
+fn permissions_notice(admission: &Admission) -> String {
+    if admission.tools {
+        "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+    } else if let Some(access) = admission
+        .workspace_permissions
+        .as_ref()
+        .filter(|access| access.is_trusted())
+    {
+        let profiles = access.selected_runtime_profiles();
+        format!(
+            "Folder trusted; file Tools use the Workspace. Commands/MCP use a private selected-project copy without network or account state; only these selected read-only toolchains and caches are mounted: {}. Arany requests: selected Provider; OS TLS checks may connect separately.",
+            if profiles.is_empty() {
+                "none".into()
+            } else {
+                profiles.join("; ")
+            }
+        )
+    } else {
+        "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
+    }
 }
 
 async fn resume_command(
