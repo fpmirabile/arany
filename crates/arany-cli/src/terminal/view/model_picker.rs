@@ -55,8 +55,26 @@ pub(in crate::terminal) fn draw_model_catalog_frame(
         return;
     }
     frame.render_widget(ratatui::widgets::Clear, area);
-    let selected = picker.selected;
-    let label = picker.items.get(selected).map_or("models", |item| {
+    let header = catalog_header(picker, area.width);
+    frame.render_widget(
+        Paragraph::new(safe_truncate(&header, usize::from(area.width))).style(palette.selection()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if picker.catalog_state != super::super::ModelCatalogState::Current {
+        draw_catalog_status(frame, full, picker, palette);
+    }
+    draw_catalog_rows(frame, area, picker, armed);
+    let (navigation, action) = catalog_hints(picker, area.width);
+    for (offset, text) in [(2, navigation), (1, action)].into_iter().filter(|_| armed) {
+        frame.render_widget(
+            Paragraph::new(safe_truncate(text, usize::from(area.width))),
+            Rect::new(area.x, area.bottom() - offset, area.width, 1),
+        );
+    }
+}
+
+fn catalog_header(picker: &super::super::ModelPicker<'_>, width: u16) -> String {
+    let label = picker.items.get(picker.selected).map_or("models", |item| {
         if picker.exact_custom {
             "exact"
         } else if item.runnable {
@@ -65,7 +83,7 @@ pub(in crate::terminal) fn draw_model_catalog_frame(
             "listed"
         }
     });
-    let header = if picker.filter.is_empty() {
+    if picker.filter.is_empty() {
         format!("Models · {label} · {} available", picker.items.len())
     } else {
         let suffix = if picker.filter.len() >= 64 {
@@ -77,41 +95,52 @@ pub(in crate::terminal) fn draw_model_catalog_frame(
             "Find {}{suffix}",
             model_id_preview(
                 picker.filter,
-                usize::from(area.width).saturating_sub(5 + suffix.len())
+                usize::from(width).saturating_sub(5 + suffix.len())
             )
         )
+    }
+}
+
+fn draw_catalog_status(
+    frame: &mut Frame,
+    full: Rect,
+    picker: &super::super::ModelPicker<'_>,
+    palette: Palette,
+) {
+    let status = match picker.catalog_state {
+        super::super::ModelCatalogState::Refreshing if full.width >= 50 => {
+            "Refreshing models · cached choices remain selectable".into()
+        }
+        super::super::ModelCatalogState::Refreshing => "Refreshing".into(),
+        super::super::ModelCatalogState::Updated if full.width >= 50 => {
+            "Model list refreshed".into()
+        }
+        super::super::ModelCatalogState::Updated => "Refreshed".into(),
+        _ if full.width >= 50 => match picker.refresh_error {
+            Some(error) => format!("Refresh failed: {error} · cached choices kept"),
+            None => "Refresh failed · cached choices kept · Ctrl+R retries".into(),
+        },
+        _ => "Refresh failed".to_owned(),
     };
     frame.render_widget(
-        Paragraph::new(safe_truncate(&header, usize::from(area.width))).style(palette.selection()),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
-    if picker.catalog_state != super::super::ModelCatalogState::Current {
-        let status = match picker.catalog_state {
-            super::super::ModelCatalogState::Refreshing if full.width >= 50 => {
-                "Refreshing models · cached choices remain selectable".into()
-            }
-            super::super::ModelCatalogState::Refreshing => "Refreshing".into(),
-            super::super::ModelCatalogState::Updated if full.width >= 50 => {
-                "Model list refreshed".into()
-            }
-            super::super::ModelCatalogState::Updated => "Refreshed".into(),
-            _ if full.width >= 50 => match picker.refresh_error {
-                Some(error) => format!("Refresh failed: {error} · cached choices kept"),
-                None => "Refresh failed · cached choices kept · Ctrl+R retries".into(),
+        Paragraph::new(safe_truncate(&status, usize::from(full.width))).style(
+            if picker.catalog_state == super::super::ModelCatalogState::RefreshFailed {
+                palette.error()
+            } else {
+                palette.selection()
             },
-            _ => "Refresh failed".to_owned(),
-        };
-        frame.render_widget(
-            Paragraph::new(safe_truncate(&status, usize::from(full.width))).style(
-                if picker.catalog_state == super::super::ModelCatalogState::RefreshFailed {
-                    palette.error()
-                } else {
-                    palette.selection()
-                },
-            ),
-            Rect::new(full.x, full.bottom() - 1, full.width, 1),
-        );
-    }
+        ),
+        Rect::new(full.x, full.bottom() - 1, full.width, 1),
+    );
+}
+
+fn draw_catalog_rows(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &super::super::ModelPicker<'_>,
+    armed: bool,
+) {
+    let selected = picker.selected;
     let rows = usize::from(area.height - 3);
     let start = window_start(Some(selected), rows);
     if picker.items.is_empty() {
@@ -153,26 +182,27 @@ pub(in crate::terminal) fn draw_model_catalog_frame(
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
         );
     }
-    let navigation = if area.width < FULL_LAYOUT_WIDTH {
+}
+
+fn catalog_hints(
+    picker: &super::super::ModelPicker<'_>,
+    width: u16,
+) -> (&'static str, &'static str) {
+    let navigation = if width < FULL_LAYOUT_WIDTH {
         "Up/Dn L/R effort"
     } else {
         "Up/Down model · Left/Right reasoning"
     };
     let action = if picker.items.is_empty() {
         "Type/BS · Esc"
-    } else if area.width < FULL_LAYOUT_WIDTH {
+    } else if width < FULL_LAYOUT_WIDTH {
         "Enter pick Esc"
-    } else if area.width < 60 || picker.exact_custom {
+    } else if width < 60 || picker.exact_custom {
         "Enter selects both · Esc · Type/BS filter"
-    } else if area.width < 84 {
+    } else if width < 84 {
         "Enter selects both · Esc · Type/BS filter · Ctrl+R refresh"
     } else {
         "Enter selects both · Esc keeps draft · Type/BS filter · PgUp/PgDn · Ctrl+R refresh"
     };
-    for (offset, text) in [(2, navigation), (1, action)].into_iter().filter(|_| armed) {
-        frame.render_widget(
-            Paragraph::new(safe_truncate(text, usize::from(area.width))),
-            Rect::new(area.x, area.bottom() - offset, area.width, 1),
-        );
-    }
+    (navigation, action)
 }
