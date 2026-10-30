@@ -145,6 +145,29 @@ async fn emit(output: &mpsc::Sender<Value>, value: Value) -> Result<(), String> 
         .map_err(|_| "ACP output closed".into())
 }
 
+fn request_refusal(state: &Shared, id: &RequestId, method: &str) -> Option<Value> {
+    let state = locked(state);
+    if method == "initialize" && state.initialized {
+        Some(wire::error(
+            Some(id.clone()),
+            -32600,
+            "Already initialized",
+            "alreadyInitialized",
+        ))
+    } else if method != "initialize" && !state.initialized {
+        Some(wire::error(
+            Some(id.clone()),
+            -32600,
+            "Initialize first",
+            "notInitialized",
+        ))
+    } else if state.pending.len() >= 61 {
+        Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
+    } else {
+        None
+    }
+}
+
 pub(super) async fn input(
     message: wire::Input,
     config: &Config,
@@ -170,28 +193,7 @@ pub(super) async fn input(
             ),
         );
     }
-    let refusal = {
-        let state = locked(state);
-        if request.method == "initialize" && state.initialized {
-            Some(wire::error(
-                Some(id.clone()),
-                -32600,
-                "Already initialized",
-                "alreadyInitialized",
-            ))
-        } else if request.method != "initialize" && !state.initialized {
-            Some(wire::error(
-                Some(id.clone()),
-                -32600,
-                "Initialize first",
-                "notInitialized",
-            ))
-        } else if state.pending.len() >= 61 {
-            Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
-        } else {
-            None
-        }
-    };
+    let refusal = request_refusal(state, &id, &request.method);
     if let Some(error) = refusal {
         return immediate(output, error);
     }
@@ -1572,31 +1574,56 @@ async fn finish(
         task.abort();
     }
     let turn = active.completion.ok_or("no committed turn completion")?;
-    if let Some((_, mut plan)) = active.plan {
-        let status = if turn
-            .goal
-            .as_ref()
-            .is_some_and(|g| g.status == GoalStatus::Completed)
-        {
-            "completed"
-        } else {
-            "pending"
-        };
-        for entry in plan["params"]["update"]["entries"]
-            .as_array_mut()
-            .expect("plan entries")
-        {
-            entry["status"] = json!(status);
-        }
-        emit(output, plan).await?;
+    if let Some((_, plan)) = active.plan {
+        emit(output, settled_plan(plan, &turn)).await?;
     }
     let incomplete = incomplete
         || active.incomplete
         || (turn.status == TurnStatus::Completed && !active.answered);
-    let mut response = match prompt_outcome(active.cancelled, active.uncertain > 0, &turn) {
-        Ok(stop_reason) => wire::response(active.id, json!({ "stopReason": stop_reason })),
+    emit(
+        output,
+        prompt_response(
+            active.id,
+            &turn,
+            active.cancelled,
+            active.uncertain,
+            incomplete,
+        ),
+    )
+    .await
+}
+
+// A Goal that completed marks every plan entry completed; otherwise they stay pending.
+fn settled_plan(mut plan: Value, turn: &Turn) -> Value {
+    let status = if turn
+        .goal
+        .as_ref()
+        .is_some_and(|g| g.status == GoalStatus::Completed)
+    {
+        "completed"
+    } else {
+        "pending"
+    };
+    for entry in plan["params"]["update"]["entries"]
+        .as_array_mut()
+        .expect("plan entries")
+    {
+        entry["status"] = json!(status);
+    }
+    plan
+}
+
+fn prompt_response(
+    id: RequestId,
+    turn: &Turn,
+    cancelled: bool,
+    uncertain: usize,
+    incomplete: bool,
+) -> Value {
+    let mut response = match prompt_outcome(cancelled, uncertain > 0, turn) {
+        Ok(stop_reason) => wire::response(id, json!({ "stopReason": stop_reason })),
         Err(reason) => wire::error(
-            Some(active.id),
+            Some(id),
             -32603,
             if reason == "effectUncertain" {
                 tools::UNKNOWN_ACP_TOOL_OUTCOME
@@ -1608,8 +1635,8 @@ async fn finish(
             reason,
         ),
     };
-    if active.uncertain > 0 && response.get("result").is_some() {
-        response["result"]["_meta"]["arany.uncertainEffects"] = json!(active.uncertain);
+    if uncertain > 0 && response.get("result").is_some() {
+        response["result"]["_meta"]["arany.uncertainEffects"] = json!(uncertain);
     }
     if turn
         .goal
@@ -1625,7 +1652,7 @@ async fn finish(
     if incomplete && response.get("result").is_some() {
         response["result"]["_meta"]["arany.incompleteUpdates"] = json!(true);
     }
-    emit(output, response).await
+    response
 }
 
 // The ACP stopReason for a committed turn, or the `data.reason` of its -32603 error.
@@ -1827,82 +1854,94 @@ async fn permission_request(
     };
     let intent: arany::EffectIntent = serde_json::from_value(params.intent.clone())
         .map_err(|_| "invalid serve approval intent")?;
-    let prepared = {
-        let mut state = locked(state);
-        let valid = state.active.as_ref().is_some_and(|a| {
-            a.session == params.thread_id
-                && a.turn.is_none_or(|run| run == params.turn_id)
-                && !a.cancelled
-                && a.completion.is_none()
-        });
-        if !valid
-            || state.permission.is_some()
-            || intent.call.is_unguarded()
-            || intent.call.is_host()
-        {
-            None
-        } else {
-            let cwd = &state
-                .sessions
-                .get(&params.thread_id)
-                .ok_or("missing Session")?
-                .cwd;
-            let item = crate::cli::serve::items::tool_item(&intent, None, false);
-            let mut tool = tools::project(&item, cwd, params.thread_id, true)
-                .ok_or("invalid approval Tool")?;
-            tool.as_object_mut()
-                .expect("Tool update")
-                .remove("sessionUpdate");
-            tool["rawInput"] = params.intent;
-            tool["content"] = tools::approval_content(&params.lines);
-            state.next_permission = state
-                .next_permission
-                .checked_add(1)
-                .ok_or("ACP permission IDs exhausted")?;
-            let id = RequestId::Integer(state.next_permission);
-            let message = json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{
-                "sessionId":params.thread_id,"toolCall":tool,"options":[
-                    {"optionId":"deny","kind":"reject_once","name":"Deny"},
-                    {"optionId":"allow_once","kind":"allow_once","name":"Allow once"}
-                ]
-            }});
-            if encode_line(&message).is_err() {
-                None
-            } else {
-                state.permission = Some(Permission {
-                    id,
-                    serve_id: request.id.clone(),
-                    item_id: params.item_id.clone(),
-                    sent: false,
-                });
-                Some(message)
-            }
-        }
-    };
-    let Some(message) = prepared else {
+    let Some(message) = prepare_permission(state, &request.id, params, &intent)? else {
         return approval_response(serve, request.id, ApprovalDecision::Unavailable).await;
     };
-    let delivered = {
-        let mut state = locked(state);
-        let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
-        let live = state
-            .permission
-            .as_ref()
-            .is_some_and(|p| p.serve_id == request.id);
-        if cancelled || !live {
-            return Ok(());
-        }
-        if let Ok(permit) = output.try_reserve() {
-            state.permission.as_mut().expect("live permission").sent = true;
-            permit.send(message);
-            true
-        } else {
-            state.permission = None;
-            false
-        }
+    let Some(delivered) = deliver_permission(state, output, &request.id, message) else {
+        return Ok(());
     };
     if !delivered {
         approval_response(serve, request.id, ApprovalDecision::Unavailable).await?;
     }
     Ok(())
+}
+
+fn prepare_permission(
+    state: &Shared,
+    serve_id: &RequestId,
+    params: ApprovalParams,
+    intent: &arany::EffectIntent,
+) -> Result<Option<Value>, String> {
+    let mut state = locked(state);
+    let valid = state.active.as_ref().is_some_and(|a| {
+        a.session == params.thread_id
+            && a.turn.is_none_or(|run| run == params.turn_id)
+            && !a.cancelled
+            && a.completion.is_none()
+    });
+    if !valid || state.permission.is_some() || intent.call.is_unguarded() || intent.call.is_host() {
+        Ok(None)
+    } else {
+        let cwd = &state
+            .sessions
+            .get(&params.thread_id)
+            .ok_or("missing Session")?
+            .cwd;
+        let item = crate::cli::serve::items::tool_item(intent, None, false);
+        let mut tool =
+            tools::project(&item, cwd, params.thread_id, true).ok_or("invalid approval Tool")?;
+        tool.as_object_mut()
+            .expect("Tool update")
+            .remove("sessionUpdate");
+        tool["rawInput"] = params.intent;
+        tool["content"] = tools::approval_content(&params.lines);
+        state.next_permission = state
+            .next_permission
+            .checked_add(1)
+            .ok_or("ACP permission IDs exhausted")?;
+        let id = RequestId::Integer(state.next_permission);
+        let message = json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{
+            "sessionId":params.thread_id,"toolCall":tool,"options":[
+                {"optionId":"deny","kind":"reject_once","name":"Deny"},
+                {"optionId":"allow_once","kind":"allow_once","name":"Allow once"}
+            ]
+        }});
+        if encode_line(&message).is_err() {
+            Ok(None)
+        } else {
+            state.permission = Some(Permission {
+                id,
+                serve_id: serve_id.clone(),
+                item_id: params.item_id.clone(),
+                sent: false,
+            });
+            Ok(Some(message))
+        }
+    }
+}
+
+// Sends a still-live request; None when cancellation or a withdrawal already settled it.
+fn deliver_permission(
+    state: &Shared,
+    output: &mpsc::Sender<Value>,
+    serve_id: &RequestId,
+    message: Value,
+) -> Option<bool> {
+    let mut state = locked(state);
+    let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
+    let live = state
+        .permission
+        .as_ref()
+        .is_some_and(|p| p.serve_id == *serve_id);
+    if cancelled || !live {
+        return None;
+    }
+    if let Ok(permit) = output.try_reserve() {
+        state.permission.as_mut().expect("live permission").sent = true;
+        permit.send(message);
+        Some(true)
+    } else {
+        state.permission = None;
+        Some(false)
+    }
 }

@@ -172,11 +172,13 @@ fn start_with_config(
     let (shutdown, _) = watch::channel(false);
     let reader_task = tokio::spawn(read_messages(
         input,
-        config,
-        shared.clone(),
-        inbound.clone(),
-        outbound.clone(),
-        shutdown.clone(),
+        AcpReader {
+            config,
+            shared: shared.clone(),
+            inbound: inbound.clone(),
+            outbound: outbound.clone(),
+            shutdown: shutdown.clone(),
+        },
     ));
     let writer_task = tokio::spawn(serve::write_messages(output, writer_rx));
     let translation_input = inbound.clone();
