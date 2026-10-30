@@ -125,14 +125,7 @@ impl DisplayFollower {
         tokio::select! {
             preview = self.previews.changed() => {
                 let run = preview.as_ref().map(|preview| preview.run_id);
-                let preview = preview.map(|preview| DisplayPreview {
-                    agent_run_id: preview.agent_run_id,
-                    call_index: preview.call_index,
-                    answer: preview.text.answer.clone(),
-                    commentary: preview.text.commentary.clone(),
-                    commentary_limited: preview.text.commentary_limited,
-                    tentative: preview.text.tentative,
-                });
+                let preview = preview.as_ref().map(DisplayPreview::from);
                 (run, DisplayUpdate::Preview { preview })
             }
             intent_id = self.waiting.waiting_changed() => (None, DisplayUpdate::Waiting { intent_id }),

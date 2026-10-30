@@ -256,7 +256,7 @@ impl Connection {
             while let Some(message) = messages.recv().await {
                 let relevant = match &message {
                     Message::Request(_) => true,
-                    Message::Notification(note) => note.method == "$/cancel_request",
+                    Message::Notification(note) => note.method == CANCEL_REQUEST_METHOD,
                     _ => false,
                 };
                 if !relevant {

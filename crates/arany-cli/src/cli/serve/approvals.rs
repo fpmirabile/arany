@@ -213,8 +213,10 @@ async fn notify_withdrawal(
 ) {
     if enabled && let Some(pending) = pending {
         let message = Message::Notification(super::items::notification(
-            "$/cancel_request",
-            serde_json::json!({"requestId": pending.id}),
+            CANCEL_REQUEST_METHOD,
+            CancelRequestParams {
+                request_id: pending.id,
+            },
         ));
         if reliable {
             let _ = output.send(message).await;

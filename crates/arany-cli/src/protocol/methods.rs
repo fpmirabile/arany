@@ -815,6 +815,36 @@ pub struct DisplayPreview {
     pub tentative: bool,
 }
 
+impl From<&arany::DisplayUpdate> for DisplayPreview {
+    fn from(update: &arany::DisplayUpdate) -> Self {
+        Self {
+            agent_run_id: update.agent_run_id,
+            call_index: update.call_index,
+            answer: update.text.answer.clone(),
+            commentary: update.text.commentary.clone(),
+            commentary_limited: update.text.commentary_limited,
+            tentative: update.text.tentative,
+        }
+    }
+}
+
+impl DisplayPreview {
+    #[must_use]
+    pub fn into_update(self, run_id: RunId) -> arany::DisplayUpdate {
+        arany::DisplayUpdate {
+            run_id,
+            agent_run_id: self.agent_run_id,
+            call_index: self.call_index,
+            text: std::sync::Arc::new(arany::PreviewText {
+                answer: self.answer,
+                commentary: self.commentary,
+                commentary_limited: self.commentary_limited,
+                tentative: self.tentative,
+            }),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ItemStartedNotification {

@@ -40,6 +40,14 @@ pub struct Notification {
     pub params: Option<Value>,
 }
 
+pub const CANCEL_REQUEST_METHOD: &str = "$/cancel_request";
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRequestParams {
+    pub request_id: RequestId,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Response {

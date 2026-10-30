@@ -716,12 +716,15 @@ impl RunProgress<'_> {
                 self.approval_ui.pending = Some(embedded::Approval::from_request(request)?);
                 self.receive_approval(ui);
             }
-            Message::Notification(note) if note.method == "$/cancel_request" => {
-                if self.approval_ui.pending.as_ref().is_some_and(|approval| {
-                    note.params
+            Message::Notification(note) if note.method == CANCEL_REQUEST_METHOD => {
+                let withdrawn = note
+                    .params
+                    .and_then(|params| serde_json::from_value::<CancelRequestParams>(params).ok());
+                if withdrawn.is_some_and(|params| {
+                    self.approval_ui
+                        .pending
                         .as_ref()
-                        .and_then(|params| params.get("requestId"))
-                        == Some(&serde_json::json!(approval.request_id))
+                        .is_some_and(|approval| approval.request_id == params.request_id)
                 }) {
                     self.approval_ui.pending.take();
                     self.approval_ui.answer.clear();
@@ -743,17 +746,7 @@ impl RunProgress<'_> {
                     }
                     arany_cli::protocol::methods::DisplayUpdate::Preview { preview } => ui
                         .terminal
-                        .set_preview(preview.map(|preview| arany::DisplayUpdate {
-                            run_id: display.turn_id,
-                            agent_run_id: preview.agent_run_id,
-                            call_index: preview.call_index,
-                            text: std::sync::Arc::new(arany::PreviewText {
-                                answer: preview.answer,
-                                commentary: preview.commentary,
-                                commentary_limited: preview.commentary_limited,
-                                tentative: preview.tentative,
-                            }),
-                        })),
+                        .set_preview(preview.map(|preview| preview.into_update(display.turn_id))),
                 };
                 if changed {
                     self.draw_hint(ui)?;

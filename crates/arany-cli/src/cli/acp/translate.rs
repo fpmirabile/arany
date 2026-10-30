@@ -544,7 +544,7 @@ async fn input_notification(
                 "session/cancel" => {
                     parse::<wire::Cancel>(note.params).is_ok_and(|p| p.session_id == active.session)
                 }
-                "$/cancel_request" => parse::<wire::CancelRequest>(note.params)
+                CANCEL_REQUEST_METHOD => parse::<CancelRequestParams>(note.params)
                     .is_ok_and(|p| p.request_id == active.id),
                 _ => false,
             };
@@ -760,8 +760,8 @@ pub(super) async fn output(
                             permission_request(&state, &serve, &outbound, request).await?;
                         }
                     },
-                    Some(Message::Notification(note)) if note.method == "$/cancel_request" => {
-                        if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+                    Some(Message::Notification(note)) if note.method == CANCEL_REQUEST_METHOD => {
+                        if let Ok(params) = parse::<CancelRequestParams>(note.params)
                             && let Some(cancel) = withdraw_permission(&state, Some(&params.request_id), true)
                         {
                             // Admit no new permission until this withdrawal drains.
@@ -1288,7 +1288,7 @@ async fn on_notification(
             }
         }
         "events/committed" => committed_event_notification(note, context).await?,
-        "$/cancel_request" => cancel_request_notification(note, context).await?,
+        CANCEL_REQUEST_METHOD => cancel_request_notification(note, context).await?,
         _ => (),
     }
     Ok(())
@@ -1409,7 +1409,7 @@ async fn cancel_request_notification(
     note: Notification,
     context: &ActiveResponseContext<'_>,
 ) -> Result<(), String> {
-    if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+    if let Ok(params) = parse::<CancelRequestParams>(note.params)
         && let Some(withdrawal) = withdraw_permission(context.state, Some(&params.request_id), true)
     {
         emit(context.outbound, withdrawal).await?;
@@ -1812,7 +1812,7 @@ fn withdraw_permission(state: &Shared, id: Option<&RequestId>, force: bool) -> O
         .permission
         .take_if(|p| id.is_none_or(|id| *id == p.serve_id) && (force || cancelled))?;
     pending.sent.then(
-        || json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":pending.id}}),
+        || json!({"jsonrpc":"2.0","method":CANCEL_REQUEST_METHOD,"params":CancelRequestParams { request_id: pending.id }}),
     )
 }
 
