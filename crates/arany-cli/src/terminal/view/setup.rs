@@ -256,26 +256,11 @@ pub(in crate::terminal) fn draw_setup_choices_frame(
         .saturating_sub(row_count.saturating_sub(1))
         .min(choices.len().saturating_sub(row_count));
     for (offset, (_, label)) in choices.iter().enumerate().skip(first).take(row_count) {
-        let highlighted = offset == selected;
-        let line = format!("{} {label}", if highlighted { '>' } else { ' ' });
-        frame.render_widget(
-            Paragraph::new(safe_truncate(&line, usize::from(area.width))).style(if highlighted {
-                palette.selection()
-            } else {
-                Style::default()
-            }),
-            Rect::new(area.x, area.y + 2 + (offset - first) as u16, area.width, 1),
-        );
+        let row = Rect::new(area.x, area.y + 2 + (offset - first) as u16, area.width, 1);
+        draw_setup_choice(frame, row, label, offset == selected, palette);
     }
     if !dense {
-        let instruction_y = area.y + 2 + row_count as u16;
-        let instruction_height = area.bottom().saturating_sub(instruction_y + 1);
-        if instruction_height > 0 {
-            frame.render_widget(
-                Paragraph::new(instruction).wrap(Wrap { trim: false }),
-                Rect::new(area.x, instruction_y, area.width, instruction_height),
-            );
-        }
+        draw_setup_instruction(frame, area, instruction, row_count);
     }
     if !dense || notice.is_some() {
         let footer = notice.unwrap_or(if compact {
@@ -283,17 +268,51 @@ pub(in crate::terminal) fn draw_setup_choices_frame(
         } else {
             "Up/Down · Enter selects · Esc closes"
         });
+        let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+        draw_setup_notice(frame, row, footer, notice.is_some(), palette);
+    }
+}
+
+// The instruction wraps below the choices, above the footer row.
+fn draw_setup_instruction(frame: &mut Frame, area: Rect, instruction: String, row_count: usize) {
+    let instruction_y = area.y + 2 + row_count as u16;
+    let instruction_height = area.bottom().saturating_sub(instruction_y + 1);
+    if instruction_height > 0 {
         frame.render_widget(
-            Paragraph::new(safe_truncate(footer, usize::from(area.width))).style(
-                if notice.is_some() {
-                    palette.attention()
-                } else {
-                    Style::default()
-                },
-            ),
-            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            Paragraph::new(instruction).wrap(Wrap { trim: false }),
+            Rect::new(area.x, instruction_y, area.width, instruction_height),
         );
     }
+}
+
+fn draw_setup_choice(
+    frame: &mut Frame,
+    row: Rect,
+    label: &str,
+    highlighted: bool,
+    palette: Palette,
+) {
+    let line = format!("{} {label}", if highlighted { '>' } else { ' ' });
+    frame.render_widget(
+        Paragraph::new(safe_truncate(&line, usize::from(row.width))).style(if highlighted {
+            palette.selection()
+        } else {
+            Style::default()
+        }),
+        row,
+    );
+}
+
+// A notice takes the footer row in the attention color.
+fn draw_setup_notice(frame: &mut Frame, row: Rect, text: &str, notice: bool, palette: Palette) {
+    frame.render_widget(
+        Paragraph::new(safe_truncate(text, usize::from(row.width))).style(if notice {
+            palette.attention()
+        } else {
+            Style::default()
+        }),
+        row,
+    );
 }
 
 pub(in crate::terminal) fn setup_warning_height(warning: &str, width: u16) -> u16 {
@@ -357,32 +376,19 @@ pub(in crate::terminal) fn draw_setup_warning_frame(
         Paragraph::new(lines[start..end].join("\n")),
         Rect::new(area.x, area.y + 1, width, body_height),
     );
-    let prompt = if has_more {
-        if width <= 24 {
+    if has_more {
+        let prompt = if width <= 24 {
             format!("Page {}/{} Enter", page + 1, pages)
         } else {
             format!("Page {}/{} · PgDn/Enter", page + 1, pages)
-        }
-    } else {
-        String::new()
-    };
-    if has_more {
+        };
         frame.render_widget(
             Paragraph::new(safe_truncate(&prompt, usize::from(width))),
             Rect::new(area.x, area.bottom() - 4, width, 1),
         );
     } else {
-        for (index, label) in ["Back", "Accept"].iter().enumerate() {
-            let focused = accept_selected == (index == 1);
-            frame.render_widget(
-                Paragraph::new(format!("{} {label}", focus_marker(focused))).style(if focused {
-                    palette.selection()
-                } else {
-                    Style::default()
-                }),
-                Rect::new(area.x, area.bottom() - 4 + index as u16, width, 1),
-            );
-        }
+        let choices = Rect::new(area.x, area.bottom() - 4, width, 2);
+        draw_warning_choices(frame, choices, accept_selected, palette);
     }
     frame.render_widget(
         Paragraph::new(if has_more {
@@ -392,19 +398,29 @@ pub(in crate::terminal) fn draw_setup_warning_frame(
         }),
         Rect::new(area.x, area.bottom() - 2, width, 1),
     );
-    frame.render_widget(
-        Paragraph::new(safe_truncate(
-            notice.unwrap_or("Esc cancels"),
-            usize::from(width),
-        ))
-        .style(if notice.is_some() {
-            palette.attention()
-        } else {
-            Style::default()
-        }),
-        Rect::new(area.x, area.bottom() - 1, width, 1),
+    let row = Rect::new(area.x, area.bottom() - 1, width, 1);
+    draw_setup_notice(
+        frame,
+        row,
+        notice.unwrap_or("Esc cancels"),
+        notice.is_some(),
+        palette,
     );
     has_more
+}
+
+fn draw_warning_choices(frame: &mut Frame, area: Rect, accept_selected: bool, palette: Palette) {
+    for (index, label) in ["Back", "Accept"].iter().enumerate() {
+        let focused = accept_selected == (index == 1);
+        frame.render_widget(
+            Paragraph::new(format!("{} {label}", focus_marker(focused))).style(if focused {
+                palette.selection()
+            } else {
+                Style::default()
+            }),
+            Rect::new(area.x, area.y + index as u16, area.width, 1),
+        );
+    }
 }
 
 pub(super) fn wrap_setup_warning(warning: &str, width: usize) -> Vec<String> {
