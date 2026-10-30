@@ -1283,6 +1283,17 @@ async fn native_offline_rust_build_helper() {
         Path::new(env!("CARGO_BIN_EXE_arany")),
     )
     .await;
+    let team = tempfile::tempdir_in(root).unwrap();
+    let (mut permissions, tokens, _) =
+        offline_rust_workspace(root, &team.path().join("workspace"), &rust_sysroot);
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::Request, &tokens)
+        .unwrap();
+    arany::test_support::worker_teams::cargo_editor_journey(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        team,
+    )
+    .await;
 }
 
 fn private_rust_sysroot(root: &Path) -> std::path::PathBuf {

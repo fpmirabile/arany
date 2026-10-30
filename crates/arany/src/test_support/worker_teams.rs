@@ -1,7 +1,10 @@
 mod background;
 mod bounds;
+mod cargo;
 mod commands;
 mod waves;
+
+pub use cargo::cargo_editor_journey;
 
 use super::goals::{assert_action_bounds, finish_with, replayed};
 use super::scenario::{request, tool_outcome};
@@ -346,6 +349,8 @@ impl Provider for LiveProvider {
             self.background_outcome(&request, step).await
         } else if commands::is_case(self.case) {
             self.command_outcome(&request, step)
+        } else if self.case == cargo::CASE {
+            self.cargo_outcome(&request, step)
         } else if matches!(self.case, "waves_stale" | "waves_fresh") {
             self.wave_outcome(&request, step)
         } else {
@@ -412,9 +417,6 @@ async fn run_case_inner(
         &state.join("tools.json"),
         br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     );
-    std::fs::create_dir(state.join("agents")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     let definition = if case == "invalid_turns" {
         "maxTurns: 1\n"
     } else {
@@ -429,11 +431,7 @@ async fn run_case_inner(
     } else {
         "Read, Write"
     };
-    crate::test_support::private_file(&state.join("agents/editor.md"), format!("---\nname: editor\ndescription: Edit leased notes\ntools: {tools}\n{definition}isolation: worktree\n---\nEdit the live Workspace within the lease.\n").as_bytes());
-    crate::test_support::private_file(
-        &state.join("permissions.json"),
-        br#"{"permissions":{"defaultMode":"default"}}"#,
-    );
+    write_editor(&state, tools, definition);
     if case == "hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         crate::test_support::private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
@@ -457,6 +455,17 @@ async fn run_case_inner(
         commands::configure(&state, case);
     }
     run_live(directory, root, guard, case, LiveStart::New { padding }).await
+}
+
+fn write_editor(state: &Path, tools: &str, definition: &str) {
+    std::fs::create_dir(state.join("agents")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::private_file(&state.join("agents/editor.md"), format!("---\nname: editor\ndescription: Edit leased notes\ntools: {tools}\n{definition}isolation: worktree\n---\nEdit the live Workspace within the lease.\n").as_bytes());
+    crate::test_support::private_file(
+        &state.join("permissions.json"),
+        br#"{"permissions":{"defaultMode":"default"}}"#,
+    );
 }
 
 async fn run_live(
@@ -540,7 +549,12 @@ async fn run_live(
             AdmittedProviders::single(provider.clone()),
             input,
             RunControls {
-                tools: ToolGrant::Configured,
+                // Only a trusted Workspace grant carries the selected runtime profiles.
+                tools: if case == cargo::CASE {
+                    ToolGrant::Trusted(WorkspacePermissions::open(&workspace).unwrap())
+                } else {
+                    ToolGrant::Configured
+                },
                 approvals: (case != "no_channel").then_some(approvals),
                 cancellation,
                 steering: Some(steering),

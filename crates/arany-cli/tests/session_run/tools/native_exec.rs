@@ -1351,6 +1351,15 @@ async fn offline_cargo_helper() {
         Path::new(env!("CARGO_BIN_EXE_arany")),
     )
     .await;
+    let team = tempfile::tempdir_in(root).unwrap();
+    let workspace = team.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), &workspace);
+    arany::test_support::worker_teams::cargo_editor_journey(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        team,
+    )
+    .await;
 }
 
 #[test]

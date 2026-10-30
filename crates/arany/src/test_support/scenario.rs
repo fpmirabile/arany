@@ -1041,21 +1041,9 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
     }
 }
 
-pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
-    use crate::{
-        ApprovalMode, CacheUpdate, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion,
-        RunControls, RunStatus, SessionView, StateRoot, Store, ToolApprovals, ToolCall, ToolGrant,
-        ToolResourceClass, WorkspacePermissions,
-    };
-    let home = root.join("home");
-    let registry = home.join(".cargo/registry");
-    let index = registry
-        .join("index/index.crates.io-1949cf8c6b5b557f/.cache/ar/an/arany-fixture-dependency");
-    let source =
-        registry.join("src/index.crates.io-1949cf8c6b5b557f/arany-fixture-dependency-0.1.0");
-    let index_bytes = std::fs::read(&index).unwrap();
-    let source_bytes = std::fs::read(source.join("src/lib.rs")).unwrap();
-    let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
+// Remembers every default-selected profile, the private registry caches included; returns the Rust sysroot.
+pub(crate) fn select_offline_cargo_profiles(workspace: &Path) -> std::path::PathBuf {
+    use crate::{ApprovalMode, StateRoot, WorkspacePermissions};
     let mut permissions = WorkspacePermissions::open(workspace)
         .unwrap()
         .prepare_profile_selection(&StateRoot::account_path().unwrap());
@@ -1076,9 +1064,34 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
             .expect("private registry candidate");
         assert!(choice.selected);
     }
+    let rust = choices
+        .iter()
+        .find(|choice| choice.group == "Rust" && choice.selected)
+        .expect("selected Rust toolchain")
+        .path
+        .clone();
     permissions
         .remember_profiles(true, ApprovalMode::Request, &tokens)
         .unwrap();
+    rust
+}
+
+pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
+    use crate::{
+        ApprovalMode, CacheUpdate, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion,
+        RunControls, RunStatus, SessionView, StateRoot, Store, ToolApprovals, ToolCall, ToolGrant,
+        ToolResourceClass, WorkspacePermissions,
+    };
+    let home = root.join("home");
+    let registry = home.join(".cargo/registry");
+    let index = registry
+        .join("index/index.crates.io-1949cf8c6b5b557f/.cache/ar/an/arany-fixture-dependency");
+    let source =
+        registry.join("src/index.crates.io-1949cf8c6b5b557f/arany-fixture-dependency-0.1.0");
+    let index_bytes = std::fs::read(&index).unwrap();
+    let source_bytes = std::fs::read(source.join("src/lib.rs")).unwrap();
+    let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
+    select_offline_cargo_profiles(workspace);
     let state = root.join("cargo-state");
     let cores = u32::try_from(std::thread::available_parallelism().unwrap().get()).unwrap();
     let jobs = cores.min(2);
