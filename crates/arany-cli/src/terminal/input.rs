@@ -1002,34 +1002,10 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
         return Some(TerminalInput::CopySelection);
     }
     if key.modifiers == KeyModifiers::CONTROL {
-        return match key.code {
-            KeyCode::Char('c' | 'C') => Some(TerminalInput::Interrupt),
-            KeyCode::Char('d' | 'D') => Some(TerminalInput::EndOfInput),
-            KeyCode::Char('u' | 'U') => Some(TerminalInput::HalfPageUp),
-            KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
-            KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
-            KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
-            KeyCode::Char('r' | 'R') => Some(TerminalInput::Refresh),
-            KeyCode::Char('o' | 'O') => Some(TerminalInput::Transcript),
-            KeyCode::Char('j' | 'J') => Some(TerminalInput::Newline),
-            KeyCode::Left => Some(TerminalInput::WordLeft),
-            KeyCode::Right => Some(TerminalInput::WordRight),
-            KeyCode::Char('w' | 'W') => Some(TerminalInput::BackspaceWord),
-            KeyCode::Char('z' | 'Z') => Some(TerminalInput::Suspend),
-            _ => None,
-        };
+        return control_key(key.code);
     }
     if key.modifiers == KeyModifiers::ALT {
-        return match key.code {
-            KeyCode::Left => Some(TerminalInput::AgentPrevious),
-            KeyCode::Right => Some(TerminalInput::AgentNext),
-            // Option+Left/Right arrive as `ESC b`/`ESC f` without enhanced key reporting, as in Codex.
-            #[cfg(target_os = "macos")]
-            KeyCode::Char('b') => Some(TerminalInput::AgentPrevious),
-            #[cfg(target_os = "macos")]
-            KeyCode::Char('f') => Some(TerminalInput::AgentNext),
-            _ => None,
-        };
+        return alt_key(key.code);
     }
     if key.modifiers.intersects(
         KeyModifiers::CONTROL
@@ -1040,6 +1016,42 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
     ) {
         return None;
     }
+    plain_key(key)
+}
+
+fn control_key(code: KeyCode) -> Option<TerminalInput> {
+    match code {
+        KeyCode::Char('c' | 'C') => Some(TerminalInput::Interrupt),
+        KeyCode::Char('d' | 'D') => Some(TerminalInput::EndOfInput),
+        KeyCode::Char('u' | 'U') => Some(TerminalInput::HalfPageUp),
+        KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
+        KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
+        KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
+        KeyCode::Char('r' | 'R') => Some(TerminalInput::Refresh),
+        KeyCode::Char('o' | 'O') => Some(TerminalInput::Transcript),
+        KeyCode::Char('j' | 'J') => Some(TerminalInput::Newline),
+        KeyCode::Left => Some(TerminalInput::WordLeft),
+        KeyCode::Right => Some(TerminalInput::WordRight),
+        KeyCode::Char('w' | 'W') => Some(TerminalInput::BackspaceWord),
+        KeyCode::Char('z' | 'Z') => Some(TerminalInput::Suspend),
+        _ => None,
+    }
+}
+
+fn alt_key(code: KeyCode) -> Option<TerminalInput> {
+    match code {
+        KeyCode::Left => Some(TerminalInput::AgentPrevious),
+        KeyCode::Right => Some(TerminalInput::AgentNext),
+        // Option+Left/Right arrive as `ESC b`/`ESC f` without enhanced key reporting, as in Codex.
+        #[cfg(target_os = "macos")]
+        KeyCode::Char('b') => Some(TerminalInput::AgentPrevious),
+        #[cfg(target_os = "macos")]
+        KeyCode::Char('f') => Some(TerminalInput::AgentNext),
+        _ => None,
+    }
+}
+
+fn plain_key(key: KeyEvent) -> Option<TerminalInput> {
     match key.code {
         KeyCode::Char(character) if !character.is_control() => {
             Some(TerminalInput::Character(character))
