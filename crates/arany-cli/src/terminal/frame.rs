@@ -179,6 +179,148 @@ impl AttachedTerminal {
         Ok(area)
     }
 
+    // Overlays own the screen: the scrollback dump, help, agents, agent chat and linear output.
+    fn draw_snapshot_overlay(
+        &mut self,
+        view: &SessionView,
+        composer: &Composer,
+        notice: Option<TerminalNotice<'_>>,
+    ) -> Option<Result<(), TerminalError>> {
+        // The primary screen shows the dump until Enter; the Run keeps going without redraws.
+        if self.transcript.scrollback_dump {
+            if let Some(notice) = notice {
+                self.transcript.history.record_notice(notice);
+            }
+            return Some(Ok(()));
+        }
+        if let Some(selected) = self.panels.help_selected {
+            return Some(self.draw_help(selected, view));
+        }
+        if self.agent_panel.is_some() {
+            return Some(self.draw_agents(view));
+        }
+        if self.agent_chat_shown(view) {
+            return Some(self.draw_agent_chat(view, notice));
+        }
+        let linear = self.linear.as_mut()?;
+        if std::mem::take(&mut self.clipboard_preview)
+            && let Err(error) = linear.write_clipboard_draft(&mut io::stderr(), composer)
+        {
+            return Some(Err(TerminalError::Io(error)));
+        }
+        Some(
+            linear
+                .draw(
+                    view,
+                    notice.map(TerminalNotice::text),
+                    composer.approval_mode(),
+                )
+                .map_err(TerminalError::Io),
+        )
+    }
+
+    // A resized screen or a changed image under the pointer invalidates the hover.
+    fn drop_stale_hover(&mut self, screen: Rect, composer: &Composer) {
+        if self
+            .panels
+            .frame_area
+            .is_some_and(|previous| previous != screen)
+        {
+            self.clear_graphics_hover();
+        }
+        self.panels.frame_area = Some(screen);
+        if let Some(index) = self.hovered_image
+            && self.hovered_image_digest.is_some_and(|digest| {
+                composer.images().get(index).map(ImageAttachment::digest) != Some(digest)
+            })
+        {
+            self.clear_graphics_hover();
+        }
+    }
+
+    fn snapshot_height(
+        &mut self,
+        view: &SessionView,
+        composer: &Composer,
+        model: &PresentationModel,
+        screen: Rect,
+        picker: Option<&ModelPicker<'_>>,
+    ) -> u16 {
+        if let Some(picker) = picker {
+            composer_height(composer, screen)
+                .saturating_add(1)
+                .saturating_add(
+                    u16::try_from(picker.items.len().max(1).saturating_add(3))
+                        .unwrap_or(u16::MAX)
+                        .min(12),
+                )
+                .max(view::MIN_DIALOG_HEIGHT)
+                .min(screen.height)
+        } else if self.mode == TerminalMode::Classic {
+            self.transcript.classic_history.sync(
+                view,
+                usize::from(screen.width),
+                usize::from(screen.height),
+            );
+            view::classic_height(
+                model,
+                composer,
+                screen,
+                self.transcript.classic_history.live_rows(view).len(),
+            )
+        } else {
+            screen.height
+        }
+    }
+
+    // A Classic History notice goes to native scrollback once per Session sequence.
+    fn record_classic_notice(
+        &mut self,
+        view: &SessionView,
+        text: &str,
+    ) -> Result<(), TerminalError> {
+        let text = history::bounded_notice_text(text).into_owned();
+        if self
+            .transcript
+            .native
+            .last_notice
+            .as_ref()
+            .is_none_or(|(sequence, prior)| *sequence != view.last_sequence || prior != &text)
+        {
+            let (kind, body) = history::notice_kind(&text);
+            self.insert_native(kind, body, None)?;
+            self.transcript.native.last_notice = Some((view.last_sequence, text));
+        }
+        Ok(())
+    }
+
+    fn history_status(
+        &mut self,
+        view: &SessionView,
+        model: &mut PresentationModel,
+        width: u16,
+    ) -> Option<String> {
+        let native_transcript = self.mode == TerminalMode::Classic && !view.runs.is_empty();
+        if !native_transcript {
+            return self.history_mut().status();
+        }
+        let hint = classic_history_status(
+            width,
+            self.transcript.native.omitted_history,
+            self.classic_pinned,
+        );
+        if self.transcript.native.omitted_history {
+            Some(hint.to_owned())
+        } else {
+            // State and model lead; the mode hint is secondary and truncation drops it first.
+            model.status_line = crate::presentation::safe_truncate(
+                &format!("{} · {hint}", model.status_line),
+                usize::from(width),
+            );
+            None
+        }
+    }
+
     pub(super) fn draw_snapshot(
         &mut self,
         view: &SessionView,
@@ -200,35 +342,8 @@ impl AttachedTerminal {
             crate::presentation::tool_capacity_notice(view, self.waiting_tool)
                 .map(TerminalNotice::Transient)
         });
-        // The primary screen shows the dump until Enter; the Run keeps going without redraws.
-        if self.transcript.scrollback_dump {
-            if let Some(notice) = notice {
-                self.transcript.history.record_notice(notice);
-            }
-            return Ok(());
-        }
-        if let Some(selected) = self.panels.help_selected {
-            return self.draw_help(selected, view);
-        }
-        if self.agent_panel.is_some() {
-            return self.draw_agents(view);
-        }
-        if self.agent_chat_shown(view) {
-            return self.draw_agent_chat(view, notice);
-        }
-        if let Some(linear) = &mut self.linear {
-            if std::mem::take(&mut self.clipboard_preview) {
-                linear
-                    .write_clipboard_draft(&mut io::stderr(), composer)
-                    .map_err(TerminalError::Io)?;
-            }
-            return linear
-                .draw(
-                    view,
-                    notice.map(TerminalNotice::text),
-                    composer.approval_mode(),
-                )
-                .map_err(TerminalError::Io);
+        if let Some(drawn) = self.draw_snapshot_overlay(view, composer, notice) {
+            return drawn;
         }
         let notice = notice.or_else(|| {
             self.clipboard
@@ -238,21 +353,7 @@ impl AttachedTerminal {
         let cue = self.panels.selection_cue.clone();
         let notice = notice.or_else(|| cue.as_deref().map(TerminalNotice::Transient));
         let screen = Rect::from((ratatui::layout::Position::ORIGIN, self.owned().size()?));
-        if self
-            .panels
-            .frame_area
-            .is_some_and(|previous| previous != screen)
-        {
-            self.clear_graphics_hover();
-        }
-        self.panels.frame_area = Some(screen);
-        if let Some(index) = self.hovered_image
-            && self.hovered_image_digest.is_some_and(|digest| {
-                composer.images().get(index).map(ImageAttachment::digest) != Some(digest)
-            })
-        {
-            self.clear_graphics_hover();
-        }
+        self.drop_stale_hover(screen, composer);
         if let Some((label, text, scroll)) = composer.paste_detail() {
             let palette = self.palette();
             return self.draw_frame(screen.height, |frame, area| {
@@ -271,52 +372,41 @@ impl AttachedTerminal {
         if self.mode == TerminalMode::Fullscreen && self.transcript.transcript_open {
             return self.draw_pager(view, notice, screen);
         }
+        let snapshot = ChatSnapshot {
+            view,
+            composer,
+            notice,
+            state,
+            picker,
+            screen,
+        };
+        let input = self.chat_frame_input(&snapshot)?;
+        self.render_chat_frame(&snapshot, input)
+    }
+
+    fn chat_frame_input<'a>(
+        &mut self,
+        snapshot: &ChatSnapshot<'a>,
+    ) -> Result<ChatFrameInput<'a>, TerminalError> {
+        let ChatSnapshot {
+            view,
+            composer,
+            notice,
+            state,
+            picker,
+            screen,
+        } = *snapshot;
         let mut model = match state {
             SnapshotState::Preparing => PresentationModel::preparing(view, screen.width),
             _ => PresentationModel::from_session(view, screen.width),
         };
-        let height = if let Some(picker) = picker {
-            composer_height(composer, screen)
-                .saturating_add(1)
-                .saturating_add(
-                    u16::try_from(picker.items.len().max(1).saturating_add(3))
-                        .unwrap_or(u16::MAX)
-                        .min(12),
-                )
-                .max(view::MIN_DIALOG_HEIGHT)
-                .min(screen.height)
-        } else if self.mode == TerminalMode::Classic {
-            self.transcript.classic_history.sync(
-                view,
-                usize::from(screen.width),
-                usize::from(screen.height),
-            );
-            view::classic_height(
-                &model,
-                composer,
-                screen,
-                self.transcript.classic_history.live_rows(view).len(),
-            )
-        } else {
-            screen.height
-        };
+        let height = self.snapshot_height(view, composer, &model, screen, picker);
         self.prepare_frame_height(height)?;
         self.sync_native(view)?;
         if self.mode == TerminalMode::Classic
             && let Some(TerminalNotice::History(text)) = notice
         {
-            let text = history::bounded_notice_text(text).into_owned();
-            if self
-                .transcript
-                .native
-                .last_notice
-                .as_ref()
-                .is_none_or(|(sequence, prior)| *sequence != view.last_sequence || prior != &text)
-            {
-                let (kind, body) = history::notice_kind(&text);
-                self.insert_native(kind, body, None)?;
-                self.transcript.native.last_notice = Some((view.last_sequence, text));
-            }
+            self.record_classic_notice(view, text)?;
         }
         let area = self
             .owned
@@ -331,15 +421,7 @@ impl AttachedTerminal {
             model.draft_action = DraftAction::Retain;
         }
         if let Some(mode) = composer.approval_mode() {
-            let permissions = if area.width >= 64 {
-                format!("{} · Shift+Tab", mode.label())
-            } else {
-                mode.label().to_owned()
-            };
-            model.status_line = crate::presentation::safe_truncate(
-                &format!("{} · {permissions}", model.status_line),
-                usize::from(area.width),
-            );
+            append_approval_mode(&mut model, mode, area.width);
         }
         let history_height = view::frame_layout(composer, area, model.activity_lines.len()).history;
         self.history_mut()
@@ -352,32 +434,35 @@ impl AttachedTerminal {
         } else {
             self.transcript.classic_history.live_rows(view)
         };
-        let native_transcript = self.mode == TerminalMode::Classic && !view.runs.is_empty();
-        let history_status = if native_transcript {
-            let hint = classic_history_status(
-                area.width,
-                self.transcript.native.omitted_history,
-                self.classic_pinned,
-            );
-            if self.transcript.native.omitted_history {
-                Some(hint.to_owned())
-            } else {
-                // State and model lead; the mode hint is secondary and truncation drops it first.
-                model.status_line = crate::presentation::safe_truncate(
-                    &format!("{} · {hint}", model.status_line),
-                    usize::from(area.width),
-                );
-                None
-            }
-        } else {
-            self.history_mut().status()
-        };
+        let history_status = self.history_status(view, &mut model, area.width);
         let status_notice = notice
             .filter(|notice| {
                 matches!(notice, TerminalNotice::Transient(_))
                     || (self.mode == TerminalMode::Fullscreen && history_height == 0)
             })
             .map(TerminalNotice::text);
+        Ok(ChatFrameInput {
+            model,
+            height,
+            history_rows,
+            history_status,
+            status_notice,
+        })
+    }
+
+    fn render_chat_frame(
+        &mut self,
+        snapshot: &ChatSnapshot<'_>,
+        input: ChatFrameInput<'_>,
+    ) -> Result<(), TerminalError> {
+        let (composer, picker) = (snapshot.composer, snapshot.picker);
+        let ChatFrameInput {
+            model,
+            height,
+            history_rows,
+            history_status,
+            status_notice,
+        } = input;
         let palette = self.palette();
         let armed = self.panels.dialog_armed;
         let mut history_area = Rect::default();
@@ -406,32 +491,16 @@ impl AttachedTerminal {
             if let Some(position) = pointer_position {
                 hovered_image = hovered_image_at(&image_chip_areas, position.x, position.y);
             }
-            if let Some(index) = hovered_image
-                && let Some(image) = composer.images().get(index)
-                && let Some(chip) = image_chip_areas
-                    .iter()
-                    .find_map(|(chip_index, area)| (*chip_index == index).then_some(*area))
-                && let Some((balloon, inner)) =
-                    graphics::preview_geometry(frame.area(), chip, image)
-            {
-                let placement = GraphicsPlacement {
-                    image_index: index,
-                    digest: image.digest(),
-                    inner,
-                };
-                let interior = graphics::preview_interior(
-                    graphics_protocol,
-                    published_graphics,
-                    ready_graphics,
-                    placement,
-                );
-                view::draw_image_preview(
-                    frame,
-                    balloon,
-                    &image_description(image, index),
-                    interior,
-                );
-                preview_inner = Some(inner);
+            if let Some(index) = hovered_image {
+                preview_inner =
+                    draw_hover_preview(frame, composer, &image_chip_areas, index, |placement| {
+                        graphics::preview_interior(
+                            graphics_protocol,
+                            published_graphics,
+                            ready_graphics,
+                            placement,
+                        )
+                    });
             }
             if let Some(picker) = picker {
                 draw_model_catalog_frame(
@@ -642,4 +711,61 @@ pub(super) fn dialog_area(frame: Rect, height: u16, classic: bool) -> Rect {
     } else {
         bottom_area(frame, height)
     }
+}
+
+fn append_approval_mode(model: &mut PresentationModel, mode: arany::ApprovalMode, width: u16) {
+    let permissions = if width >= 64 {
+        format!("{} · Shift+Tab", mode.label())
+    } else {
+        mode.label().to_owned()
+    };
+    model.status_line = crate::presentation::safe_truncate(
+        &format!("{} · {permissions}", model.status_line),
+        usize::from(width),
+    );
+}
+
+// The hovered image's preview balloon, drawn beside its chip; returns the preview interior.
+fn draw_hover_preview(
+    frame: &mut ratatui::Frame,
+    composer: &Composer,
+    chips: &[(usize, Rect)],
+    index: usize,
+    interior: impl FnOnce(GraphicsPlacement) -> view::PreviewInterior,
+) -> Option<Rect> {
+    let image = composer.images().get(index)?;
+    let chip = chips
+        .iter()
+        .find_map(|(chip_index, area)| (*chip_index == index).then_some(*area))?;
+    let (balloon, inner) = graphics::preview_geometry(frame.area(), chip, image)?;
+    let placement = GraphicsPlacement {
+        image_index: index,
+        digest: image.digest(),
+        inner,
+    };
+    view::draw_image_preview(
+        frame,
+        balloon,
+        &image_description(image, index),
+        interior(placement),
+    );
+    Some(inner)
+}
+
+#[derive(Clone, Copy)]
+struct ChatSnapshot<'a> {
+    view: &'a SessionView,
+    composer: &'a Composer,
+    notice: Option<TerminalNotice<'a>>,
+    state: SnapshotState,
+    picker: Option<&'a ModelPicker<'a>>,
+    screen: Rect,
+}
+
+struct ChatFrameInput<'a> {
+    model: PresentationModel,
+    height: u16,
+    history_rows: Vec<history::HistoryRow>,
+    history_status: Option<String>,
+    status_notice: Option<&'a str>,
 }
