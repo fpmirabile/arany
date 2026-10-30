@@ -1404,7 +1404,7 @@ mod tests {
         let trust = serde_json::to_vec(&serde_json::json!({
             "workspaces": [{ "path": workspace,
                 "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
-                "runtime_grants": [] }]
+                "runtime_grants": [], "git_hooks": null }]
         }))
         .unwrap();
         let trust_path = state.path().join("workspace-permissions.json");
@@ -1979,7 +1979,7 @@ mod tests {
         let remembered = serde_json::to_vec(&serde_json::json!({
             "workspaces": [{ "path": workspace,
                 "device": metadata.dev(), "inode": metadata.ino(), "mode": "auto_edits",
-                "runtime_grants": [] }]
+                "runtime_grants": [], "git_hooks": null }]
         }))
         .unwrap();
         let trust_record = account.path().join("workspace-permissions.json");

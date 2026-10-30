@@ -49,6 +49,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .and_then(|config| config.tool_policy.as_ref());
             let permissions_pinned =
                 policy.is_some_and(|policy| policy.permissions_digest.is_some());
+            let hooks_pinned = policy
+                .and_then(|policy| policy.git.as_ref())
+                .is_some_and(|git| git.hooks.is_some());
             let pending_call = tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?
                 .intent
                 .call
@@ -82,6 +85,21 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                             | PermissionSource::AiReview
                             | PermissionSource::UnavailableApproval
                     ))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            // With accepted hooks a Git write is approved only by a human or a user-owned allow rule.
+            if verdict.approved
+                && pending_call.facts().site == crate::tools::catalog::Site::Git
+                && pending_call.mutates()
+                && hooks_pinned
+                && !matches!(
+                    verdict.source,
+                    PermissionSource::Human
+                        | PermissionSource::SessionApproval
+                        | PermissionSource::Rule
+                        | PermissionSource::TypedPrefixRule
+                )
             {
                 return Err(ReplayError::InvalidTransition);
             }

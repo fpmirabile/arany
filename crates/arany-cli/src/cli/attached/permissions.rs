@@ -1,5 +1,7 @@
 mod command_tools;
 pub(super) use command_tools::manage_command_tools;
+mod git_hooks;
+pub(super) use git_hooks::ask as ask_git_hooks;
 
 use super::setup::SetupError;
 use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput};
@@ -89,6 +91,7 @@ pub(super) enum PermissionArea {
     CommandEnvironment,
     CommandTools,
     NetworkDomains,
+    GitHooks,
 }
 
 pub(super) async fn choose_area(
@@ -107,6 +110,7 @@ pub(super) async fn choose_area(
                 (b'4', "Command environment"),
                 (b'5', "Command tools"),
                 (b'6', "Network domains"),
+                (b'7', "Git hooks"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -119,6 +123,7 @@ pub(super) async fn choose_area(
             Some(b'4') => Some(PermissionArea::CommandEnvironment),
             Some(b'5') => Some(PermissionArea::CommandTools),
             Some(b'6') => Some(PermissionArea::NetworkDomains),
+            Some(b'7') => Some(PermissionArea::GitHooks),
             _ => None,
         },
     )

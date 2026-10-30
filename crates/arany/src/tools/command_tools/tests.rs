@@ -28,7 +28,7 @@ pub(super) fn fixture(root: &Path) -> (StateRoot, std::path::PathBuf, String, Ru
         .replace(
             &serde_json::to_vec(&serde_json::json!({"workspaces":[{
                 "path":workspace,"device":metadata.dev(),"inode":metadata.ino(),
-                "mode":"request","runtime_grants":[grant]
+                "mode":"request","runtime_grants":[grant],"git_hooks":null
             }]}))
             .unwrap(),
         )

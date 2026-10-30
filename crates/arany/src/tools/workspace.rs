@@ -70,6 +70,25 @@ pub struct WorkspacePermissions {
     pub(super) runtime_grants: Vec<RuntimeGrant>,
     candidates: Vec<Candidate>,
     discovery_error: Option<String>,
+    git_hooks: Option<GitHooksAnswer>,
+}
+
+// The user's answer for one exact set of hook files, so a new or edited hook asks again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitHooksAnswer {
+    accepted: bool,
+    sha256: [u8; 32],
+}
+
+/// The Git hooks active for a folder, and the user's saved answer when it covers exactly these files.
+#[derive(Clone, Debug)]
+pub struct GitHooksQuestion {
+    pub names: Vec<String>,
+    pub directory: PathBuf,
+    pub pre_commit_framework: bool,
+    pub saved: Option<bool>,
+    digest: [u8; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +143,8 @@ struct Entry {
     inode: u64,
     mode: ApprovalMode,
     runtime_grants: Vec<RuntimeGrant>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    git_hooks: Option<GitHooksAnswer>,
 }
 
 fn record_error(error: StoreError) -> TrustRecordError {
@@ -296,6 +317,7 @@ impl WorkspacePermissions {
                     runtime_grants: Vec::new(),
                     candidates: Vec::new(),
                     discovery_error: None,
+                    git_hooks: None,
                 })
             }
             Err(error) => Err(state_error(error)),
@@ -348,7 +370,54 @@ impl WorkspacePermissions {
             runtime_grants,
             candidates: Vec::new(),
             discovery_error: None,
+            git_hooks: entry.and_then(|entry| entry.git_hooks.clone()),
         })
+    }
+
+    /// Detects the folder's active Git hooks with the Git a Run would resolve; `None` when there are none.
+    pub async fn git_hooks(&self, state_dir: &Path) -> Option<GitHooksQuestion> {
+        let hooks =
+            super::git::folder_hooks(&self.path, &state_dir.join(super::editors::EDITORS)).await?;
+        Some(GitHooksQuestion {
+            saved: self
+                .git_hooks
+                .as_ref()
+                .filter(|answer| answer.sha256 == hooks.digest)
+                .map(|answer| answer.accepted),
+            names: hooks.names,
+            directory: hooks.directory,
+            pre_commit_framework: hooks.pre_commit_framework,
+            digest: hooks.digest,
+        })
+    }
+
+    /// Saves the answer for exactly the asked hook files in this folder's trust entry.
+    pub fn remember_git_hooks(
+        &mut self,
+        question: &GitHooksQuestion,
+        accepted: bool,
+    ) -> Result<(), ToolError> {
+        if !self.trusted {
+            return Err(ToolError::Configuration);
+        }
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
+        let previous = self.git_hooks.replace(GitHooksAnswer {
+            accepted,
+            sha256: question.digest,
+        });
+        let saved = self.save(&root, true, self.mode, self.runtime_grants.clone());
+        if saved.is_err() {
+            self.git_hooks = previous;
+        }
+        saved
+    }
+
+    pub(crate) fn accepted_git_hooks(&self) -> Option<[u8; 32]> {
+        self.git_hooks
+            .as_ref()
+            .filter(|answer| answer.accepted)
+            .map(|answer| answer.sha256)
     }
 
     pub fn remember_profiles(
@@ -432,6 +501,7 @@ impl WorkspacePermissions {
                     } else {
                         Vec::new()
                     },
+                    git_hooks: self.git_hooks.clone(),
                 });
             }
             let bytes = serde_json::to_vec(&record).map_err(|_| ToolError::Configuration)?;
@@ -584,6 +654,7 @@ mod tests {
                 runtime_grants: vec![ordered[0].grant.clone()],
                 candidates,
                 discovery_error: None,
+                git_hooks: None,
             };
             assert_eq!(
                 access

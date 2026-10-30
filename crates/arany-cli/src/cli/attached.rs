@@ -786,9 +786,17 @@ async fn admit_startup(
     )
     .await
     {
-        Ok(permissions::PermissionChoice::Selected(access)) => {
+        Ok(permissions::PermissionChoice::Selected(mut access)) => {
             for notice in access.stale_runtime_notices() {
                 append_notice(setup_notice, &notice);
+            }
+            match permissions::ask_git_hooks(terminal, &mut access, &admission.state_dir, false)
+                .await
+            {
+                Ok(Some(notice)) => append_notice(setup_notice, &notice),
+                Ok(None) => {}
+                Err(setup::SetupError::Recoverable(error)) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
             admission.workspace_permissions = Some(access);
         }

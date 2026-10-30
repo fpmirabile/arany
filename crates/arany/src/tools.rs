@@ -131,7 +131,9 @@ pub(crate) use git::stale_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
 pub(crate) use workspace::WORKSPACE_PERMISSIONS;
-pub use workspace::{RuntimeProfileOption, TrustRecordError, WorkspacePermissions, mention_paths};
+pub use workspace::{
+    GitHooksQuestion, RuntimeProfileOption, TrustRecordError, WorkspacePermissions, mention_paths,
+};
 
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?
@@ -366,6 +368,10 @@ pub(crate) struct ToolRuntime {
     guard_available: bool,
     config: Config,
     git_environment: Option<std::sync::Arc<git::Environment>>,
+    // Hooks the user accepted for this folder that still match on disk; `None` keeps hooks off.
+    git_hooks: Option<std::sync::Arc<git::Hooks>>,
+    // Whether a human can answer approvals in this Run.
+    human_approvals: bool,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -913,6 +919,12 @@ impl ToolRuntime {
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         match call {
+            _ if call.facts().site == Site::Git
+                && call.mutates()
+                && !git::offers_write(self, call) =>
+            {
+                false
+            }
             ToolCall::Command { program, .. } if Path::new(program).is_absolute() => {
                 self.command_tools.entries().iter().any(|tool| {
                     tool.enabled
@@ -1184,6 +1196,8 @@ impl ToolRuntime {
             definitions: std::sync::Arc::new(definitions),
             config,
             git_environment,
+            git_hooks: None,
+            human_approvals: false,
             handover: None,
             permissions,
             result_filter: None,
@@ -1239,7 +1253,26 @@ impl ToolRuntime {
         receipt.host_prefixes = self
             .permissions()
             .map_or_else(Vec::new, |permissions| permissions.host.clone());
+        if let Some(git) = &mut receipt.git {
+            git.hooks = self.git_hooks.as_ref().map(|hooks| hooks.digest);
+        }
         receipt
+    }
+
+    // Accepted hooks run only while they match what the user accepted for this folder.
+    pub(crate) async fn admit_git_hooks(
+        &mut self,
+        accepted: Option<[u8; 32]>,
+        human_approvals: bool,
+    ) {
+        self.human_approvals = human_approvals;
+        self.git_hooks = git::accepted_hooks(self, accepted)
+            .await
+            .map(std::sync::Arc::new);
+    }
+
+    pub(crate) fn git_hooks_pinned(&self) -> bool {
+        self.git_hooks.is_some()
     }
 
     pub(crate) fn hidden_paths(&self, call: &ToolCall) -> permissions::HiddenPaths {
@@ -1389,13 +1422,7 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| server.catalog_row(catalog::MCP_PROTOCOL)).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
-                let write = self.config.write;
-                let operations: Vec<_> = catalog::git_operations(write, true)
-                    .into_iter()
-                    .filter(|name| !matches!(*name, "git_push" | "gh_pr_create") || self.config.write)
-                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view") || self.config.pinned_gh().is_some())
-                    .collect();
-                serde_json::json!({"write":write,"host":true,"operations":operations,"scope":catalog::GIT_SCOPE})
+                git::catalog(self)
             } else {
                 serde_json::json!("unavailable")
             },

@@ -2055,6 +2055,14 @@ impl Engine {
         if let Some(runtime) = &mut tools {
             runtime.host_settings_admitted =
                 self.host_settings_match(runtime.receipt().permissions_digest);
+            runtime
+                .admit_git_hooks(
+                    submission
+                        .permissions()
+                        .and_then(crate::tools::WorkspacePermissions::accepted_git_hooks),
+                    submission.approvals.is_some(),
+                )
+                .await;
         }
         if let Some(runtime) = &tools
             && runtime.workspace_identity() != workspace_identity

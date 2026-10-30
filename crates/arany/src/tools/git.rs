@@ -1,7 +1,9 @@
+mod hooks;
 pub(crate) mod host;
 mod runner;
 mod write;
 
+pub(crate) use hooks::Hooks;
 pub(crate) use runner::{Environment, resolve, stale_locks};
 
 use super::permissions::HiddenPaths;
@@ -714,6 +716,91 @@ fn path_git_read(call: &ToolCall) -> bool {
     )
 }
 
+const WRITES_LEFT_TO_USER: &str = "Commits, branch creation and switches are left to the user; leave changes in the working tree.";
+const HOOKS_NOT_RUN: &str = "Repository hooks did not run: the user has not accepted them for this folder, or they changed since; accept them with /permissions in the terminal.";
+
+// With accepted hooks and no human to ask, a Git write is offered only where a user-owned allow rule covers it.
+pub(super) fn offers_write(runtime: &ToolRuntime, call: &ToolCall) -> bool {
+    use super::permissions::{Decision, PermissionSource};
+    runtime.git_hooks.is_none()
+        || runtime.human_approvals
+        || runtime.permissions().is_some_and(|config| {
+            let (decision, basis, _) = config.evaluate_skill_file(call, None);
+            decision == Decision::Allow
+                && matches!(
+                    basis,
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule
+                )
+        })
+}
+
+pub(super) fn catalog(runtime: &ToolRuntime) -> Value {
+    let write = runtime.config.write;
+    let offered = |name: &str| {
+        let call = match name {
+            "git_commit" => ToolCall::GitCommit {
+                message: "commit".into(),
+                paths: vec![".".into()],
+                staged: false,
+            },
+            "git_switch" => ToolCall::GitSwitch {
+                branch: "main".into(),
+            },
+            _ => ToolCall::GitBranch {
+                name: Some("branch".into()),
+                start_point: None,
+                scope: None,
+                base: None,
+                max_count: None,
+            },
+        };
+        offers_write(runtime, &call)
+    };
+    let branch_create = write && offered("git_branch");
+    let operations: Vec<_> = super::catalog::git_operations(write, true)
+        .into_iter()
+        .filter(|name| !matches!(*name, "git_push" | "gh_pr_create") || write)
+        .filter(|name| {
+            !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view")
+                || runtime.config.pinned_gh().is_some()
+        })
+        .filter(|name| !matches!(*name, "git_commit" | "git_switch") || offered(name))
+        .collect();
+    let local_writes = operations
+        .iter()
+        .any(|name| matches!(*name, "git_commit" | "git_switch"));
+    let mut value = json!({"write": branch_create || local_writes, "host": true,
+        "operations": operations, "scope": super::catalog::GIT_SCOPE});
+    if write && !branch_create {
+        value["branch_create"] = json!(false);
+    }
+    if write && !(branch_create && offered("git_commit") && offered("git_switch")) {
+        value["writes"] = json!(WRITES_LEFT_TO_USER);
+    }
+    value
+}
+
+pub(super) async fn folder_hooks(workspace: &Path, editors: &Path) -> Option<Hooks> {
+    let environment = Environment::capture(workspace, editors)?;
+    let program = resolve(&environment)?;
+    hooks::detect(&Git::workspace(&program, &environment))
+        .await
+        .ok()?
+}
+
+pub(super) async fn accepted_hooks(
+    runtime: &ToolRuntime,
+    accepted: Option<[u8; 32]>,
+) -> Option<Hooks> {
+    let accepted = accepted?;
+    let git = Git::workspace(
+        runtime.config.git.as_ref()?,
+        runtime.git_environment.as_deref()?,
+    );
+    let hooks = hooks::detect(&git).await.ok()??;
+    (hooks.digest == accepted).then_some(hooks)
+}
+
 // Binds Git intents to the cage and disclosure contract they ran under.
 pub(super) fn enforcement_digest() -> [u8; 32] {
     let mut contract = b"arany-native-git-v1:user-configuration;cage-hooks-off-fsmonitor-off-pager-cat-editor-false-no-network;workspace-config-and-programs-refused".to_vec();
@@ -797,6 +884,37 @@ fn uncertain(intent: EffectIntent, workspace: &Path) -> ToolObservation {
     observation(intent, ToolDisposition::Uncertain, output, None, None)
 }
 
+// A write runs the folder's hooks only while they match what the user accepted; otherwise it says so.
+async fn write_hooks(
+    runtime: &ToolRuntime,
+    git: &Git<'_>,
+) -> (Option<std::path::PathBuf>, Option<&'static str>) {
+    match hooks::detect(git).await {
+        Ok(Some(found)) if runtime.git_hooks.as_deref() == Some(&found) => {
+            (Some(found.directory), None)
+        }
+        Ok(Some(_)) | Err(_) => (None, Some(HOOKS_NOT_RUN)),
+        Ok(None) => (None, None),
+    }
+}
+
+fn with_hooks_note(
+    mut written: write::Written,
+    note: Option<&str>,
+    max_bytes: usize,
+) -> write::Written {
+    if let Some(note) = note
+        && let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(&written.output)
+    {
+        fields.insert("hooks_not_run".into(), json!(note));
+        let output = Value::Object(fields).to_string();
+        if output.len() <= max_bytes {
+            written.output = output;
+        }
+    }
+    written
+}
+
 // Typed Git runs natively in the Engine under the cage, with the user's configuration.
 pub(super) async fn run(
     runtime: &ToolRuntime,
@@ -814,11 +932,14 @@ pub(super) async fn run(
         Ok(window) => window,
         Err(error) => return super::unstarted_observation(intent, error),
     };
-    let limit =
-        Duration::from_millis(u64::from(intent.effective_timeout_ms())).min(MAX_GIT_RUNTIME);
-    let deadline = window.map_or(started + limit, |window| {
-        (started + limit).min(window.payload_deadline)
-    });
+    let deadline_after = |limit: Duration| {
+        window.map_or(started + limit, |window| {
+            (started + limit).min(window.payload_deadline)
+        })
+    };
+    let mut deadline = deadline_after(
+        Duration::from_millis(u64::from(intent.effective_timeout_ms())).min(MAX_GIT_RUNTIME),
+    );
     if let Err(error) = runtime
         .before_dispatch(window, intent.limits.runtime_ms, &cancellation)
         .await
@@ -827,7 +948,7 @@ pub(super) async fn run(
     }
     let hidden = runtime.hidden_paths(&intent.call);
     let max_bytes = intent.limits.result_bytes as usize;
-    let git = Git::workspace(program, environment);
+    let mut git = Git::workspace(program, environment);
     if std::fs::symlink_metadata(&git.git_dir).is_err() {
         return refused(intent, failure(NO_REPOSITORY, &[], max_bytes, &hidden));
     }
@@ -842,6 +963,14 @@ pub(super) async fn run(
         Err(error) => return not_run(intent, error),
     }
     let mutates = intent.call.mutates();
+    let mut hooks_note = None;
+    if mutates {
+        (git.hooks, hooks_note) = write_hooks(runtime, &git).await;
+        // Accepted hooks may run a project's checks, so the write gets the command runtime ceiling.
+        if git.hooks.is_some() {
+            deadline = deadline_after(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
+        }
+    }
     let work = async {
         if mutates {
             write::execute(&git, &intent.call, &hidden, max_bytes, deadline).await
@@ -861,7 +990,7 @@ pub(super) async fn run(
         result = work => result,
     };
     let written = match result {
-        Ok(written) => written,
+        Ok(written) => with_hooks_note(written, hooks_note, max_bytes),
         Err(_) if mutates => return uncertain(intent, environment.workspace()),
         Err(ToolError::Cancelled) => return super::cancelled_read(intent),
         Err(ToolError::ChangedInput) => return not_run(intent, ToolError::ChangedInput),

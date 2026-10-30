@@ -496,7 +496,11 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                             matches!(facts.name, "gh_pr_list" | "gh_pr_view")
                         };
                 }
-                if !facts.mutates || catalog["write"] == true && git_writes {
+                if !facts.mutates
+                    || catalog["write"] == true
+                        && git_writes
+                        && !(facts.name == "git_branch" && catalog["git"]["branch_create"] == false)
+                {
                     return true;
                 }
                 if facts.name == "git_branch" {

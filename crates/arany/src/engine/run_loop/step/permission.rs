@@ -590,6 +590,19 @@ impl RunLoop<'_> {
             decision = Decision::Ask;
             approval = Some(ApprovalMode::Request);
         }
+        if git_write
+            && runtime.git_hooks_pinned()
+            && decision != Decision::Deny
+            && !(decision == Decision::Allow
+                && matches!(
+                    basis,
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule
+                ))
+        {
+            // Accepted hooks run host code: only a human or a user-owned allow rule approves the write.
+            decision = Decision::Ask;
+            approval = Some(ApprovalMode::Request);
+        }
         if researcher
             && (call.is_web() && !runtime.allows_research_web(call) || runtime.is_remote_mcp(call))
         {

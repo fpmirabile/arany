@@ -2426,6 +2426,8 @@ done
         }
         ToolRuntime {
             git_environment: None,
+            git_hooks: None,
+            human_approvals: false,
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available: true,

@@ -1114,6 +1114,8 @@ impl Task {
             host_settings_saved: Default::default(),
             guard_available: false,
             git_environment: None,
+            git_hooks: None,
+            human_approvals: false,
             handover,
             definitions: super::super::definitions::DefinitionSnapshots::from_payload(
                 &self.intent.call,

@@ -950,6 +950,24 @@ impl AttachedSession {
                 readmit_host_permissions(&self.engine, &mut self.ui.notice);
                 return Ok(IdleAction::Handled);
             }
+            Some(permissions::PermissionArea::GitHooks) => {
+                let summary = match self.admission.workspace_permissions.as_mut() {
+                    Some(access) => permissions::ask_git_hooks(
+                        &mut self.terminal,
+                        access,
+                        &self.admission.state_dir,
+                        true,
+                    )
+                    .await?
+                    .unwrap_or_else(|| "Git hooks unchanged".into()),
+                    None => "Trust this folder before choosing its Git hooks".into(),
+                };
+                self.terminal
+                    .restore_draft_input(self.composer.input_capacity())
+                    .map_err(|error| error.to_string())?;
+                self.ui.notice = Some(Feedback::History(summary));
+                return Ok(IdleAction::Handled);
+            }
             Some(permissions::PermissionArea::FolderTrust) => {}
         }
 

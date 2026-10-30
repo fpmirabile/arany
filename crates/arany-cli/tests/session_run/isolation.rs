@@ -367,7 +367,7 @@ pub fn remember_workspace_trust(
     let bytes = serde_json::to_vec(&serde_json::json!({
         "workspaces": [{ "path": admitted_path,
             "device": identity.dev(), "inode": identity.ino(), "mode": "auto_edits",
-            "runtime_grants": [] }]
+            "runtime_grants": [], "git_hooks": null }]
     }))
     .unwrap();
     let mut file = std::fs::OpenOptions::new()

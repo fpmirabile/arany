@@ -1839,3 +1839,61 @@ fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
     let intent = child_intent(run, researcher, commit);
     assert!(rejected(&child, tool_proposed(run, researcher, &intent)));
 }
+
+#[test]
+fn hooked_git_writes_reject_ai_review_and_mode_approvals() {
+    use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+    let commit = ToolCall::GitCommit {
+        message: "m".into(),
+        paths: vec!["src/lib.rs".into()],
+        staged: false,
+    };
+    {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let policy = view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap();
+        policy.permissions_digest = Some([3; 32]);
+        policy.git = Some(crate::tools::types::GitRunPin {
+            executable: "/usr/bin/git".into(),
+            sha256: "0".repeat(64),
+            hooks: Some([4; 32]),
+        });
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = child_intent(run, agent, commit.clone());
+        apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
+        let mode = Some(PermissionMode::Default);
+        let human = verdict_event(
+            &intent,
+            mode,
+            Decision::Ask,
+            PermissionSource::Mode,
+            PermissionSource::Human,
+            true,
+        );
+        assert!(!rejected(&view, human));
+        let reviewed = verdict_event(
+            &intent,
+            Some(PermissionMode::Auto),
+            Decision::Ask,
+            PermissionSource::Mode,
+            PermissionSource::AiReview,
+            true,
+        );
+        assert!(rejected(&view, reviewed));
+        let ruled = verdict_event(
+            &intent,
+            mode,
+            Decision::Allow,
+            PermissionSource::Rule,
+            PermissionSource::Rule,
+            true,
+        );
+        assert!(!rejected(&view, ruled));
+    }
+}

@@ -112,6 +112,10 @@ impl Environment {
         &self.workspace
     }
 
+    pub(super) fn home(&self) -> &Path {
+        &self.home
+    }
+
     // A host process with the user's home, configuration and agent that never prompts.
     pub(super) fn command(&self, executable: &Path) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(executable);
@@ -258,6 +262,8 @@ pub(super) struct Git<'a> {
     pub(super) environment: &'a Environment,
     pub(super) git_dir: PathBuf,
     pub(super) work_tree: PathBuf,
+    // The accepted hooks directory; without it every invocation runs with hooks off.
+    pub(super) hooks: Option<PathBuf>,
     exit: std::sync::Mutex<Option<i32>>,
 }
 
@@ -268,6 +274,7 @@ impl<'a> Git<'a> {
             environment,
             git_dir: environment.workspace.join(".git"),
             work_tree: environment.workspace.clone(),
+            hooks: None,
             exit: Default::default(),
         }
     }
@@ -282,7 +289,10 @@ impl<'a> Git<'a> {
         let mut command = self
             .environment
             .command(Path::new(&self.program.executable));
-        command.args(["-c", &format!("core.hooksPath={NO_HOOKS}")]);
+        let hooks = self.hooks.as_deref().unwrap_or(Path::new(NO_HOOKS));
+        let mut setting = OsString::from("core.hooksPath=");
+        setting.push(hooks);
+        command.arg("-c").arg(setting);
         for setting in CAGE {
             command.args(["-c", setting]);
         }
