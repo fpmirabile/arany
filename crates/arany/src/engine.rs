@@ -2055,13 +2055,18 @@ impl Engine {
         if let Some(runtime) = &mut tools {
             runtime.host_settings_admitted =
                 self.host_settings_match(runtime.receipt().permissions_digest);
+            // A configured Run also honors the hooks answer saved with the folder's trust entry.
+            let accepted = match (&submission.grant, submission.permissions()) {
+                (_, Some(permissions)) => permissions.accepted_git_hooks(),
+                (ToolGrant::Configured, None) => {
+                    crate::tools::WorkspacePermissions::open(&request.workspace)
+                        .ok()
+                        .and_then(|permissions| permissions.accepted_git_hooks())
+                }
+                _ => None,
+            };
             runtime
-                .admit_git_hooks(
-                    submission
-                        .permissions()
-                        .and_then(crate::tools::WorkspacePermissions::accepted_git_hooks),
-                    submission.approvals.is_some(),
-                )
+                .admit_git_hooks(accepted, submission.approvals.is_some())
                 .await;
         }
         if let Some(runtime) = &tools
