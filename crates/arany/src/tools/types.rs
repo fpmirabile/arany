@@ -601,11 +601,31 @@ impl ToolCall {
         self.facts().researcher
     }
 
+    // Paths a command-receipt or editor integration publishes; empty for every other call.
+    pub(crate) fn changeset_paths(&self) -> Vec<&str> {
+        match self {
+            Self::ApplyChangeset {
+                source: ChangesetSource::CommandReceipt { changeset, .. },
+            } => changeset
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect(),
+            Self::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            } => files.iter().map(|file| file.path.as_str()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn argument_limit(&self) -> usize {
         match self {
-            Self::Write { .. } | Self::Edit { .. } | Self::MultiEdit { .. } => {
-                MAX_TOOL_ARGUMENT_BYTES
-            }
+            Self::Write { .. }
+            | Self::Edit { .. }
+            | Self::MultiEdit { .. }
+            | Self::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { .. },
+            } => MAX_TOOL_ARGUMENT_BYTES,
             Self::ApplyChangeset {
                 source: ChangesetSource::CommandReceipt { .. },
             } => MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES,
@@ -1000,6 +1020,8 @@ pub struct ToolResourceSettings {
     pub build_cpu_cores: Option<u32>,
     pub build_project_bytes: u64,
     pub build_cache_bytes: BuildCacheSize,
+    pub editor_change_files: u32,
+    pub editor_change_bytes: u64,
 }
 
 // Stored as a whole-MiB byte count (zero disables the cache) or the string "unlimited".
@@ -1074,6 +1096,8 @@ impl Default for ToolResourceSettings {
             build_cpu_cores: one_setting(),
             build_project_bytes: MAX_BUILD_PROJECT_BYTES,
             build_cache_bytes: BuildCacheSize::Unlimited,
+            editor_change_files: crate::session::worker::DEFAULT_EDITOR_CHANGE_FILES,
+            editor_change_bytes: crate::session::worker::DEFAULT_EDITOR_CHANGE_BYTES,
         }
     }
 }
@@ -1091,6 +1115,11 @@ impl ToolResourceSettings {
             && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
             && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
             && self.build_cache_bytes.valid()
+            && (1..=crate::session::worker::MAX_EDITOR_CHANGE_FILES)
+                .contains(&self.editor_change_files)
+            && (BYTES_PER_MEBIBYTE..=crate::session::worker::MAX_EDITOR_CHANGE_BYTES)
+                .contains(&self.editor_change_bytes)
+            && self.editor_change_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
     }
 }
 
@@ -1294,8 +1323,7 @@ impl Attestation {
                 workspace_device,
                 workspace_inode,
             } => {
-                intent.target == EffectTarget::Workspace
-                    && intent.call.facts().site == Site::InProcess
+                intent.call.facts().site == Site::InProcess
                     && (!intent.call.facts().mutates || super::fs::in_process_mutation(intent))
                     && receipt.as_ref().is_none_or(|receipt| {
                         intent.call.facts().mutates && receipt.intent_digest == intent.digest()
@@ -1305,11 +1333,10 @@ impl Attestation {
                     && *workspace_inode == intent.workspace_inode
             }
             Self::Guard(receipt) => {
-                intent.target == EffectTarget::Workspace
-                    && (intent.call.facts().site == Site::Guard
-                        || intent.call.facts().family == super::catalog::Family::File
-                            && intent.call.facts().mutates
-                            && !super::fs::in_process_mutation(intent))
+                (intent.call.facts().site == Site::Guard
+                    || intent.call.facts().family == super::catalog::Family::File
+                        && intent.call.facts().mutates
+                        && !super::fs::in_process_mutation(intent))
                     && receipt.valid_for(intent)
             }
             Self::Host(receipt) => {
@@ -1622,8 +1649,7 @@ impl ToolObservation {
     }
 
     pub(super) fn cache_publication_eligible(&self) -> bool {
-        self.intent.target == EffectTarget::Workspace
-            && self.intent.call.is_process()
+        self.intent.call.is_process()
             && self.attestation.is_some()
             && (self.disposition == ToolDisposition::Succeeded
                 || self.disposition == ToolDisposition::Limit
@@ -1679,7 +1705,6 @@ impl ToolObservation {
         ) || (self.disposition == ToolDisposition::Limit
             && self.limit_cause == Some(LimitCause::Resource)
             && self.attestation.is_none()
-            && self.intent.target == EffectTarget::Workspace
             && matches!(&self.intent.call, ToolCall::Command { .. }))
             || (self.disposition == ToolDisposition::Failed
                 && self.attestation.is_none()

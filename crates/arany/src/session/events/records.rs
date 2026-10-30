@@ -8,10 +8,23 @@ use crate::validate::{MAX_PATH_BYTES, valid_digest, valid_relative};
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectTarget {
     Workspace,
+    // An editor's private copy-on-write workspace, pinned by its root identity.
+    EditorWorkspace {
+        assignment_id: AgentRunId,
+        device: u64,
+        inode: u64,
+    },
 }
 impl EffectTarget {
+    pub(crate) fn editor(&self) -> bool {
+        matches!(self, Self::EditorWorkspace { .. })
+    }
+
     pub(crate) fn valid(&self) -> bool {
-        true
+        match self {
+            Self::Workspace => true,
+            Self::EditorWorkspace { assignment_id, .. } => assignment_id.valid(),
+        }
     }
 }
 

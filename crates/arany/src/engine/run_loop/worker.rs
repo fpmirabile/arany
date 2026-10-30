@@ -25,6 +25,8 @@ pub(super) struct WorkerEnd {
     pub(super) torn_down: bool,
     pub(super) failure: WorkerCause,
     pub(super) step_stop: Option<StopCause>,
+    // Why an answered editor's workspace was not integrated, with a note naming the cause for the primary.
+    pub(super) integration: Option<(WorkerCause, String)>,
 }
 impl WorkerEnd {
     pub(super) fn stopped(stop: super::children::WaveStop) -> Self {
@@ -37,6 +39,7 @@ impl WorkerEnd {
             ),
             failure: WorkerCause::ToolFailed,
             step_stop: None,
+            integration: None,
         }
     }
 }
@@ -53,6 +56,7 @@ struct EditorFacts {
     cancelled: bool,
     actor_hook_stop: bool,
     step_stop: Option<StopCause>,
+    integration: Option<WorkerCause>,
 }
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]
@@ -74,7 +78,7 @@ fn editor_terminal(failure: WorkerCause, facts: &EditorFacts) -> EditorTerminal 
     } else if facts.stopped {
         WorkerCause::Budget
     } else if facts.answered {
-        WorkerCause::Finished
+        facts.integration.unwrap_or(WorkerCause::Finished)
     } else {
         facts.step_stop.map_or(failure, step_cause)
     };
@@ -94,7 +98,9 @@ fn editor_terminal(failure: WorkerCause, facts: &EditorFacts) -> EditorTerminal 
         | WorkerCause::TurnLimit
         | WorkerCause::Budget
         | WorkerCause::SnapshotDrift
-        | WorkerCause::CriterionUnverified => (AgentDisposition::Failed, WorkerDisposition::Failed),
+        | WorkerCause::CriterionUnverified
+        | WorkerCause::ChangesTooLarge
+        | WorkerCause::IntegrationConflict => (AgentDisposition::Failed, WorkerDisposition::Failed),
     };
     EditorTerminal::Known {
         agent,
@@ -334,6 +340,16 @@ impl RunLoop<'_> {
             assignment: &assignment,
         };
         let grant = self.editor_grant(&assignment)?;
+        // The workspace exists before the spawn commits; an unspawned one is swept as unknown.
+        let (creator, session, id, resumes) = (
+            runtime.clone(),
+            self.session_id,
+            spawn.id,
+            assignment.resumes,
+        );
+        tokio::task::spawn_blocking(move || creator.create_editor_workspace(session, id, resumes))
+            .await
+            .map_err(|_| EngineError::CoordinatorFailed)??;
         self.spawn_worker(&spawn, &grant).await?;
         Ok(WorkerAdmission::Admitted(Box::new(
             self.worker_child(&spawn, &grant)?,
@@ -473,7 +489,7 @@ impl RunLoop<'_> {
                     .iter()
                     .any(crate::session::ToolView::outcome_unknown),
                 a.tools.iter().any(|t| {
-                    t.intent.call.mutates()
+                    crate::session::editor_integration(&t.intent.call)
                         && t.observation.as_ref().is_some_and(|o| {
                             o.disposition == ToolDisposition::Succeeded && o.attested_for(&t.intent)
                         })
@@ -493,6 +509,7 @@ impl RunLoop<'_> {
                     || self.hook_requested_stop()?,
                 actor_hook_stop: self.actor_hook_requested_stop(id)?,
                 step_stop: end.step_stop,
+                integration: end.integration.as_ref().map(|(cause, _)| *cause),
             },
         );
         let EditorTerminal::Known {
@@ -500,19 +517,23 @@ impl RunLoop<'_> {
             outcome,
         } = terminal
         else {
+            if let Some(runtime) = self.controls.tools {
+                runtime.release_editor_workspace(self.session_id, id, false);
+            }
             return Ok(WorkerCompletion::Uncertain);
         };
         let success = disposition == AgentDisposition::Finished;
+        let refusal = end
+            .integration
+            .filter(|(cause, _)| *cause == outcome.cause)
+            .map(|(_, note)| note);
+        let result = refusal.or_else(|| end.answer.filter(|_| success).map(|a| a.text));
         self.append(Event::AgentFinished {
             run_id: self.run_id,
             agent_run_id: id,
             disposition,
-            summary: end
-                .answer
-                .as_ref()
-                .filter(|_| success)
-                .map(|a| crate::session::answer_summary(&a.text)),
-            result: end.answer.filter(|_| success).map(|a| a.text),
+            summary: result.as_deref().map(crate::session::answer_summary),
+            result,
             worker: Some(outcome),
         })
         .await?;
@@ -526,8 +547,12 @@ impl RunLoop<'_> {
             },
         })
         .await?;
+        if let Some(runtime) = self.controls.tools {
+            runtime.release_editor_workspace(self.session_id, id, success);
+        }
         Ok(WorkerCompletion::Settled)
     }
+
     pub(super) async fn record_capacity_stop(&self) -> Result<(), EngineError> {
         if self
             .ledger()
@@ -658,6 +683,179 @@ impl RunLoop<'_> {
         }
         Ok(())
     }
+
+    // Before a Run, keeps only workspaces of unintegrated editors whose Goal can still resume them.
+    pub(super) async fn sweep_editor_workspaces(&self) -> Result<(), EngineError> {
+        let Some(runtime) = self.controls.tools else {
+            return Ok(());
+        };
+        let resumable = self.ledger().view(|v| {
+            v.goals
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.status,
+                        crate::session::GoalStatus::Running
+                            | crate::session::GoalStatus::Interrupted
+                    )
+                })
+                .flat_map(|g| v.runs.iter().filter(|r| g.run_ids.contains(&r.id)))
+                .flat_map(|r| &r.agents)
+                .filter(|a| {
+                    a.assignment.as_ref().is_some_and(|w| {
+                        !w.outcome.as_ref().is_some_and(|(_, o)| {
+                            matches!(
+                                o.disposition,
+                                WorkerDisposition::Ready | WorkerDisposition::NoChange
+                            )
+                        })
+                    })
+                })
+                .map(|a| a.id)
+                .collect::<std::collections::HashSet<_>>()
+        })?;
+        let (sweeper, session) = (runtime.clone(), self.session_id);
+        tokio::task::spawn_blocking(move || {
+            sweeper.sweep_editor_workspaces(session, |id| resumable.contains(&id));
+        })
+        .await
+        .map_err(|_| EngineError::CoordinatorFailed)
+    }
+
+    // Integrates an answered editor's workspace once; returns why it was not integrated, if so.
+    pub(super) async fn integrate_editor(
+        &self,
+        child: &mut ChildWork,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<(WorkerCause, String)>, EngineError> {
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let id = child.agent_run_id;
+        let settings = self.ledger().resource_settings()?;
+        let walker = runtime.clone();
+        let changes = tokio::task::spawn_blocking(move || {
+            walker.editor_changes(
+                id,
+                settings.editor_change_files,
+                settings.editor_change_bytes,
+            )
+        })
+        .await
+        .map_err(|_| EngineError::CoordinatorFailed)?;
+        let files = match changes {
+            Ok(files) if files.is_empty() => return Ok(None),
+            Ok(files) => files,
+            Err(error) => return Ok(Some(changes_refusal(error, &settings))),
+        };
+        let call = crate::tools::ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        };
+        if !call.valid() {
+            return Ok(Some(refused(
+                WorkerCause::ChangesTooLarge,
+                &format!(
+                    "the change record exceeds {} bytes",
+                    crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
+                ),
+            )));
+        }
+        let outside = self.ledger().view(|v| {
+            let run = v.runs.last().expect("active Run");
+            let foreign = crate::session::validate_tool_lease(run, id, &call).is_err();
+            let lease = run
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .and_then(|a| a.assignment.as_ref())
+                .map(|w| w.pins.request.lease.clone())
+                .unwrap_or_default();
+            call.changeset_paths()
+                .into_iter()
+                .filter(|path| foreign || !within(path, &lease))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })?;
+        if !outside.is_empty() {
+            return Ok(Some(refused(
+                WorkerCause::IntegrationConflict,
+                &format!(
+                    "these changes leave the editor's lease or enter a sibling's: {}",
+                    outside.join(", ")
+                ),
+            )));
+        }
+        let post_call = call.clone();
+        let Some(mut intent) = self.researcher_intent(runtime, child, call, deadline)? else {
+            return Ok(Some(refused(
+                WorkerCause::ToolFailed,
+                "no delegation time is left for the integration",
+            )));
+        };
+        intent.target = crate::session::EffectTarget::Workspace;
+        let active_deadline = child.active_deadline.clone();
+        let grant = super::step::Grant::Researcher {
+            child,
+            deadline,
+            active_deadline,
+        };
+        let observed = self
+            .run_intent(&grant, runtime, intent, &post_call, false)
+            .await?;
+        Ok(match observed {
+            Ok((observation, _)) => match observation.disposition {
+                ToolDisposition::Succeeded | ToolDisposition::Uncertain => None,
+                ToolDisposition::Conflict => Some(refused(
+                    WorkerCause::IntegrationConflict,
+                    &observation.output,
+                )),
+                _ => Some(refused(WorkerCause::ToolFailed, &observation.output)),
+            },
+            Err(_) => Some(refused(
+                WorkerCause::ToolFailed,
+                "the integration stopped before it ran",
+            )),
+        })
+    }
+}
+
+// The primary reads why an editor's workspace was not integrated; the note is bounded like its report.
+fn refused(cause: WorkerCause, reason: &str) -> (WorkerCause, String) {
+    let mut note = format!("Nothing was integrated: {reason}. The editor's workspace is kept.");
+    note.truncate(crate::tools::types::truncate_utf8(&note, MAX_EDITOR_CHANGE_REPORT_BYTES).len());
+    (cause, note)
+}
+
+fn changes_refusal(
+    error: crate::tools::ToolError,
+    settings: &crate::tools::ToolResourceSettings,
+) -> (WorkerCause, String) {
+    use crate::tools::ToolError;
+    let (path, error) = match error {
+        ToolError::AtPath { path, source } => (Some(path), *source),
+        error => (None, error),
+    };
+    match (error, path) {
+        (ToolError::Limit, Some(path)) => refused(
+            WorkerCause::ChangesTooLarge,
+            &format!(
+                "{path} is larger than the {} bytes one integration can publish per file; split the task or change that file in the primary",
+                crate::tools::types::MAX_FILE_BYTES
+            ),
+        ),
+        (ToolError::Limit, None) => refused(
+            WorkerCause::ChangesTooLarge,
+            &format!(
+                "the changes exceed the pinned Editor changes bounds ({} files, {} bytes); split the task",
+                settings.editor_change_files, settings.editor_change_bytes
+            ),
+        ),
+        (_, path) => refused(
+            WorkerCause::ToolFailed,
+            &format!(
+                "the editor's workspace holds an unsafe or unreadable entry{}",
+                path.map(|path| format!(" at {path}")).unwrap_or_default()
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -715,6 +913,7 @@ mod tests {
                     cancelled: end.torn_down,
                     actor_hook_stop: false,
                     step_stop: end.step_stop,
+                    integration: None,
                 },
             );
             let EditorTerminal::Known { agent, outcome } = terminal else {
@@ -781,6 +980,7 @@ mod tests {
                     cancelled,
                     actor_hook_stop: hook,
                     step_stop: None,
+                    integration: None,
                 },
             );
             match (terminal, expected) {

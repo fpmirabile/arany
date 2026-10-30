@@ -9,6 +9,7 @@ pub enum InteractiveCommand {
     Help,
     Setup,
     Settings,
+    Limits,
     Transcript,
     Paste,
     Copy,
@@ -63,6 +64,7 @@ impl InteractiveCommand {
             Self::Setup
             | Self::Copy
             | Self::Settings
+            | Self::Limits
             | Self::Cache
             | Self::Storage
             | Self::New
@@ -124,7 +126,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 23] = [
+const COMMANDS: [CommandSpec; 24] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -176,6 +178,7 @@ const COMMANDS: [CommandSpec; 23] = [
     ),
     spec("storage", InteractiveCommand::Storage, None, &[]),
     spec("settings", InteractiveCommand::Settings, None, &[]),
+    spec("limits", InteractiveCommand::Limits, None, &[]),
     spec(
         "transcript",
         InteractiveCommand::Transcript,
@@ -218,6 +221,9 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
         InteractiveCommand::Settings => "Slash menu, chat view and newline shortcut",
+        InteractiveCommand::Limits => {
+            "Task budgets, command timeouts, build resources, context window and editor changes"
+        }
         InteractiveCommand::Transcript => {
             "Write or toggle transcript details; agents lists this Run's agent chats"
         }
@@ -768,7 +774,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 23);
+        assert_eq!(COMMANDS.len(), 24);
         assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
         assert_eq!(
             completion_suffix("/ca", &CommandChoices::default()),

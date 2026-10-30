@@ -458,7 +458,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
     let modified = std::fs::File::open(workspace.join("modified")).unwrap();
     let original_inode = modified.metadata().unwrap().ino();
     let removed = std::fs::File::open(workspace.join("removed")).unwrap();
-    let before = super::fs::command_snapshot(&command).unwrap();
+    let before = super::fs::test_baseline(&command).unwrap();
     std::fs::write(command.join("binary"), b"\xff\0\x02").unwrap();
     std::fs::write(command.join("modified"), b"formatted").unwrap();
     std::fs::remove_file(command.join("removed")).unwrap();
@@ -917,8 +917,6 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         "directory-to-file",
         "replaced-root",
         "file-overflow",
-        "snapshot-bytes-overflow",
-        "snapshot-count-overflow",
         "changeset-count-limit",
         "changeset-count-overflow",
         "changeset-byte-limit",
@@ -931,28 +929,28 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         std::fs::create_dir(&command).unwrap();
         std::fs::write(command.join("unchanged"), b"seed").unwrap();
         if case == "file-to-directory" {
-            std::fs::write(command.join("target"), b"old").unwrap();
+            std::fs::write(command.join("output"), b"old").unwrap();
         }
         if case == "directory-to-file" {
-            std::fs::create_dir(command.join("target")).unwrap();
+            std::fs::create_dir(command.join("output")).unwrap();
         }
-        let before = super::fs::command_snapshot(&command).unwrap();
+        let before = super::fs::test_baseline(&command).unwrap();
         match case {
-            "symlink" => std::os::unix::fs::symlink("unchanged", command.join("target")).unwrap(),
+            "symlink" => std::os::unix::fs::symlink("unchanged", command.join("output")).unwrap(),
             "symlink-parent" => {
                 std::fs::create_dir(command.join("directory")).unwrap();
                 std::fs::write(command.join("directory/file"), b"child").unwrap();
-                std::os::unix::fs::symlink("directory", command.join("target")).unwrap();
+                std::os::unix::fs::symlink("directory", command.join("output")).unwrap();
             }
             "hardlink" => {
-                std::fs::hard_link(command.join("unchanged"), command.join("target")).unwrap()
+                std::fs::hard_link(command.join("unchanged"), command.join("output")).unwrap()
             }
-            "fifo" => mkfifo(&command.join("target"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap(),
+            "fifo" => mkfifo(&command.join("output"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap(),
             "set-id-file" | "set-id-directory" | "set-id-root" => {
                 let target = if case == "set-id-root" {
                     command.clone()
                 } else {
-                    command.join("target")
+                    command.join("output")
                 };
                 if case == "set-id-file" {
                     std::fs::write(&target, b"child").unwrap();
@@ -964,7 +962,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 let target = if case == "set-id-root" {
                     &command
                 } else {
-                    &command.join("target")
+                    &command.join("output")
                 };
                 assert_ne!(
                     std::fs::metadata(target).unwrap().mode() & 0o6000,
@@ -978,12 +976,12 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
             }
             "invalid-name" => std::fs::write(command.join("line\nbreak"), b"invalid").unwrap(),
             "file-to-directory" => {
-                std::fs::remove_file(command.join("target")).unwrap();
-                std::fs::create_dir(command.join("target")).unwrap();
+                std::fs::remove_file(command.join("output")).unwrap();
+                std::fs::create_dir(command.join("output")).unwrap();
             }
             "directory-to-file" => {
-                std::fs::remove_dir(command.join("target")).unwrap();
-                std::fs::write(command.join("target"), b"new").unwrap();
+                std::fs::remove_dir(command.join("output")).unwrap();
+                std::fs::write(command.join("output"), b"new").unwrap();
             }
             "replaced-root" => {
                 std::fs::rename(&command, temp.path().join("replaced")).unwrap();
@@ -991,20 +989,10 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 std::fs::write(command.join("unchanged"), b"seed").unwrap();
             }
             "file-overflow" => {
-                std::fs::write(command.join("target"), vec![0; MAX_FILE_BYTES + 1]).unwrap()
+                std::fs::write(command.join("large"), vec![0; MAX_FILE_BYTES + 1]).unwrap()
             }
-            "snapshot-bytes-overflow" => {
-                for index in 0..=COMMAND_SNAPSHOT_BYTES / MAX_FILE_BYTES {
-                    std::fs::write(
-                        command.join(format!("file-{index:02}")),
-                        vec![0; MAX_FILE_BYTES],
-                    )
-                    .unwrap();
-                }
-            }
-            "snapshot-count-overflow" | "changeset-count-limit" | "changeset-count-overflow" => {
+            "changeset-count-limit" | "changeset-count-overflow" => {
                 let count = match case {
-                    "snapshot-count-overflow" => COMMAND_SNAPSHOT_FILES + 1,
                     "changeset-count-limit" => MAX_CHANGESET_FILES,
                     _ => MAX_CHANGESET_FILES + 1,
                 };
@@ -1014,7 +1002,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
             }
             "changeset-byte-limit" | "changeset-byte-overflow" => {
                 let count = MAX_CHANGESET_BYTES + usize::from(case == "changeset-byte-overflow");
-                std::fs::write(command.join("target"), vec![0; count]).unwrap();
+                std::fs::write(command.join("output"), vec![0; count]).unwrap();
             }
             "depth-limit" | "depth-overflow" => {
                 let path = vec![
@@ -1027,7 +1015,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 ]
                 .join("/");
                 std::fs::create_dir_all(command.join(&path)).unwrap();
-                std::fs::write(command.join(path).join("target"), b"child").unwrap();
+                std::fs::write(command.join(path).join("output"), b"child").unwrap();
             }
             _ => unreachable!(),
         }
@@ -1040,8 +1028,6 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 assert_eq!(result.unwrap().files.len(), 1, "{case}")
             }
             "file-overflow"
-            | "snapshot-bytes-overflow"
-            | "snapshot-count-overflow"
             | "changeset-count-overflow"
             | "changeset-byte-overflow"
             | "depth-overflow" => assert!(

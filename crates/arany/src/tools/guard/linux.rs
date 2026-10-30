@@ -731,8 +731,11 @@ fn unit_command(
         .into_iter()
         .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
         .collect::<Vec<_>>();
+    // An editor command runs directly in its editor's private workspace.
     let workspace_mount = if let Some(overlay) = &launch.overlay {
         Some(overlay.workspace_mount(seed_path))
+    } else if let Some(tree) = runtime.editor_tree(intent) {
+        Some((tree, true))
     } else {
         native.then(|| (runtime.workspace.clone(), intent.call.mutates()))
     };
@@ -943,7 +946,7 @@ fn prepare_seed(
     let (path, directory) = permit.prepare_seed(
         &workspace,
         &guard_config(runtime, intent),
-        intent.call.is_process() && !primary_command(intent),
+        intent.call.is_process() && !primary_command(intent) && !intent.target.editor(),
     )?;
     Ok((path, directory))
 }
@@ -1482,6 +1485,11 @@ fn read_mountinfo() -> Result<Vec<MountInfoEntry>, ToolError> {
 
 pub(super) fn verify_copy_mount(project_bytes: u64) -> Result<(), ToolError> {
     verify_copy_entries(&read_mountinfo()?, project_bytes)
+}
+
+// An editor workspace is one bind of its private directory, with no submounts.
+pub(super) fn verify_editor_mount() -> Result<(), ToolError> {
+    verify_mount_entries(&read_mountinfo()?, &[PathBuf::from("/workspace")])
 }
 
 fn verify_copy_entries(mounts: &[MountInfoEntry], project_bytes: u64) -> Result<(), ToolError> {

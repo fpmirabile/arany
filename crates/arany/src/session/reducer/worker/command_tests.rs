@@ -67,7 +67,8 @@ fn command_criterion() -> GoalSuccessCriterion {
     }
 }
 
-fn command(f: &mut Fixture, paths: &[&str]) -> EffectIntent {
+// An editor command runs in the editor's workspace and publishes nothing itself.
+fn command(f: &mut Fixture) -> EffectIntent {
     f.call(
         f.child,
         AgentPhase::ChildWork,
@@ -83,26 +84,16 @@ fn command(f: &mut Fixture, paths: &[&str]) -> EffectIntent {
             resource_class: None,
             timeout_ms: None,
         },
-        EffectTarget::Workspace,
+        f.editor_workspace(),
     );
     f.started(&intent);
-    let changeset = CommandChangeset {
-        files: paths
-            .iter()
-            .map(|path| FileChange {
-                path: (*path).into(),
-                before: None,
-                after: Some(FileVersion::from_bytes(b"new", false)),
-            })
-            .collect(),
-    };
     let output = CommandResult {
         exit_code: Some(0),
         stdout: String::new(),
         stderr: String::new(),
         stdout_total: OutputTotal::default(),
         stderr_total: OutputTotal::default(),
-        changeset,
+        changeset: CommandChangeset::default(),
         selection: None,
         network_refusals: Vec::new(),
     };
@@ -115,21 +106,47 @@ fn command(f: &mut Fixture, paths: &[&str]) -> EffectIntent {
     intent
 }
 
-fn publication(f: &Fixture, source: &EffectIntent) -> EffectIntent {
-    let Event::ToolFinished { observation, .. } = f.events.last().unwrap() else {
-        unreachable!()
-    };
-    let result: CommandResult = serde_json::from_str(&observation.output).unwrap();
+fn answer(f: &mut Fixture) {
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+}
+
+fn integration(f: &Fixture, paths: &[&str]) -> EffectIntent {
     f.intent(
         f.child,
         ToolCall::ApplyChangeset {
-            source: ChangesetSource::CommandReceipt {
-                source_intent_digest: source.digest(),
-                changeset: result.changeset,
+            source: ChangesetSource::EditorWorkspace {
+                files: paths
+                    .iter()
+                    .map(|path| EditorChange {
+                        path: (*path).into(),
+                        before: None,
+                        after: Some(crate::session::rewind::FileState {
+                            sha256: crate::validate::hex_digest(b"new"),
+                            bytes: 3,
+                            executable: false,
+                        }),
+                    })
+                    .collect(),
             },
         },
         EffectTarget::Workspace,
     )
+}
+
+fn integrate(f: &mut Fixture, paths: &[&str]) {
+    let intent = integration(f, paths);
+    f.started(&intent);
+    f.observed(
+        &intent,
+        ToolDisposition::Succeeded,
+        Some(Attestation::for_site(&intent)),
+        r#"{"applied":1}"#,
+    );
 }
 
 fn rejected(f: &Fixture, intent: &EffectIntent) {
@@ -197,33 +214,14 @@ fn editor_admission_refuses_partially_granted_command_lists() {
 }
 
 #[test]
-fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion() {
+fn editor_integration_follows_the_answer_once_within_the_lease() {
     for (outside, only_command) in [(false, false), (true, false), (false, true)] {
         let mut f = command_fixture_with_tools(only_command);
-        if only_command {
-            let view = f.view();
-            assert_eq!(
-                view.runs[0].agents[1]
-                    .assignment
-                    .as_ref()
-                    .unwrap()
-                    .pins
-                    .grant
-                    .tools,
-                [WorkerTool::Command]
-            );
-        }
-        let source = command(
-            &mut f,
-            if outside {
-                &["src/a", "src/unleased"]
-            } else {
-                &["src/a"]
-            },
-        );
-        let intent = publication(&f, &source);
+        let source = command(&mut f);
+        rejected(&f, &integration(&f, &["src/a"]));
+        answer(&mut f);
         if outside {
-            rejected(&f, &intent);
+            rejected(&f, &integration(&f, &["src/a", "src/unleased"]));
             assert!(
                 f.view().runs[0].worker_history()[0]
                     .changed_paths
@@ -231,43 +229,15 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
             );
             continue;
         }
-        let count = f.events.len();
-        f.call(
-            f.child,
-            AgentPhase::ChildWork,
-            ProviderCallDisposition::ToolRequested,
-            None,
-        );
-        assert!(
-            matches!(
-                SessionView::replay_open(f.session, &f.envelopes()),
-                Err(ReplayError::InvalidTransition)
-            ),
-            "a captured batch requires publication before continuation"
-        );
-        f.events.truncate(count);
-        let mut forged = intent.clone();
-        let ToolCall::ApplyChangeset {
-            source:
-                ChangesetSource::CommandReceipt {
-                    source_intent_digest,
-                    ..
-                },
-        } = &mut forged.call
-        else {
-            unreachable!()
-        };
-        *source_intent_digest = [9; 32];
-        rejected(&f, &forged);
-        f.started(&intent);
-        f.observed(
-            &intent,
-            ToolDisposition::Succeeded,
-            Some(Attestation::for_site(&intent)),
-            "{}",
-        );
+        let mut private = integration(&f, &["src/a"]);
+        private.target = f.editor_workspace();
+        rejected(&f, &private);
+        integrate(&mut f, &["src/a"]);
+        rejected(&f, &integration(&f, &["src/a"]));
         let view = f.view();
-        assert!(view.runs[0].agents[1].tools[1].checkpoint.is_some());
+        let tools = &view.runs[0].agents[1].tools;
+        assert!(tools[0].checkpoint.is_none());
+        assert!(tools[1].checkpoint.is_some());
         let report = &view.runs[0].worker_history()[0].changed_paths;
         assert!(report.contains(&crate::validate::hex_digest(b"new")));
         assert!(report.contains("src/a"));
@@ -281,16 +251,7 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
             .criterion = GoalSuccessCriterion::ToolCallSucceeded {
             call: Box::new(source.call.clone()),
         };
-        assert_eq!(editor_criterion_evidence(&run, f.child).unwrap().len(), 2);
-        run.agents[1].tools.pop();
-        assert!(editor_criterion_evidence(&run, f.child).unwrap().is_empty());
-        f.call(
-            f.child,
-            AgentPhase::ChildWork,
-            ProviderCallDisposition::ToolRequested,
-            None,
-        );
-        f.view();
+        assert_eq!(editor_criterion_evidence(&run, f.child).unwrap().len(), 1);
         for end in 1..=f.events.len() {
             assert!(SessionView::replay(f.session, &f.envelopes()[..end]).is_ok());
         }
@@ -300,7 +261,7 @@ fn command_publication_is_child_causal_lease_bounded_and_required_for_criterion(
 #[test]
 fn unknown_editor_cache_update_blocks_release_continuation_and_goal_recovery() {
     let mut f = command_fixture();
-    command(&mut f, &[]);
+    command(&mut f);
     let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
         unreachable!()
     };
@@ -322,7 +283,7 @@ fn unknown_editor_cache_update_blocks_release_continuation_and_goal_recovery() {
 fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() {
     for unknown in [false, true] {
         let mut f = command_fixture();
-        command(&mut f, &[]);
+        command(&mut f);
         let Event::ToolFinished { observation, .. } = f.events.last_mut().unwrap() else {
             unreachable!()
         };
@@ -366,7 +327,7 @@ fn uncertain_editor_cache_blocks_continuation_and_recovery_after_interruption() 
 #[test]
 fn uncertain_command_cache_blocks_an_otherwise_settled_editor_wave() {
     let mut f = command_fixture();
-    command(&mut f, &[]);
+    command(&mut f);
     f.mutation();
     let cause = f.finish_worker();
     f.release(cause);
@@ -407,17 +368,11 @@ fn editor_reports_are_bounded_untrusted_latest_observation_facts() {
         }
     }
     let paths: Vec<_> = (0..64).map(|index| format!("src/file{index:03}")).collect();
-    let source = command(
+    command(&mut f);
+    answer(&mut f);
+    integrate(
         &mut f,
         &paths.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    let intent = publication(&f, &source);
-    f.started(&intent);
-    f.observed(
-        &intent,
-        ToolDisposition::Succeeded,
-        Some(Attestation::for_site(&intent)),
-        "{}",
     );
     let mut view = f.view();
     view.runs[0].agents[1].result = Some("forged-path-with-forged-digest".into());
@@ -504,20 +459,15 @@ fn background_lease_admission_is_symmetric_with_sibling_and_primary_writes() {
             allowed
         );
     }
-    let source = command(&mut f, &["src/a"]);
-    let intent = publication(&f, &source);
-    f.started(&intent);
-    f.observed(
-        &intent,
-        ToolDisposition::Succeeded,
-        Some(Attestation::for_site(&intent)),
-        "{}",
-    );
+    command(&mut f);
+    answer(&mut f);
+    rejected(&f, &integration(&f, &["src/a", "src/b"]));
+    integrate(&mut f, &["src/a"]);
     f.view();
 }
 
 #[test]
-fn changed_path_reports_keep_only_the_latest_digest_for_each_path() {
+fn changed_path_reports_name_only_integrated_changes() {
     let mut f = fixture();
     f.mutation();
     f.call(
@@ -533,15 +483,21 @@ fn changed_path_reports_keep_only_the_latest_digest_for_each_path() {
             expected_digest: Some(crate::validate::hex_digest(b"new")),
             content: "latest".into(),
         },
-        EffectTarget::Workspace,
+        f.editor_workspace(),
     );
     f.started(&intent);
     f.observed(&intent, ToolDisposition::Succeeded, Some(Attestation::for_site(&intent)),
         &serde_json::json!({"sha256":crate::validate::hex_digest(b"latest"),"bytes":6,"executable":false,
             "before":{"sha256":crate::validate::hex_digest(b"new"),"bytes":3,"executable":false}}).to_string());
+    assert!(
+        f.view().runs[0].worker_history()[0]
+            .changed_paths
+            .is_empty()
+    );
+    answer(&mut f);
+    integrate(&mut f, &["src/a"]);
     let view = f.view();
     let report = &view.runs[0].worker_history()[0].changed_paths;
     assert_eq!(report.matches("src/a").count(), 1);
-    assert!(report.contains(&crate::validate::hex_digest(b"latest")));
-    assert!(!report.contains(&crate::validate::hex_digest(b"new")));
+    assert!(report.contains(&crate::validate::hex_digest(b"new")));
 }

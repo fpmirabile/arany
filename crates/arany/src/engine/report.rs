@@ -715,14 +715,35 @@ fn push_success_facts(
             let Some(observation) = tool.observation.as_ref() else {
                 continue;
             };
+            // An editor's own workspace is private; only its integration changed the Workspace.
             if observation.disposition != crate::tools::ToolDisposition::Succeeded
                 || !observation.attested_for(&tool.intent)
+                || tool.intent.target.editor()
             {
                 continue;
             }
             let call = &tool.intent.call;
             match call {
                 crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
+                crate::tools::ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+                } => {
+                    for change in files {
+                        let action = if change.after.is_none() {
+                            "removed"
+                        } else if change.before.is_none() {
+                            "created"
+                        } else {
+                            "updated"
+                        };
+                        push_goal_report_item(
+                            report,
+                            GoalReportSection::Changes,
+                            &format!("Editor {action} {}.", change.path),
+                            omitted_facts,
+                        );
+                    }
+                }
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. }
                 | crate::tools::ToolCall::Delete { path, .. }
@@ -916,6 +937,14 @@ fn goal_report_evidence(
             format!(
                 "{attester} attested publication of {} command file change(s).",
                 changeset.files.len()
+            )
+        }
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+        } => {
+            format!(
+                "{attester} attested integration of {} editor file change(s).",
+                files.len()
             )
         }
         crate::tools::ToolCall::Read { path, .. } => {

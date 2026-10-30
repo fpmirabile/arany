@@ -100,12 +100,13 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
 }
 
 #[test]
-fn local_registry_has_twenty_three_commands_and_refuses_arguments_without_state_access() {
+fn local_registry_has_twenty_four_commands_and_refuses_arguments_without_state_access() {
     use arany_cli::terminal::{
         CommandParseError, InteractiveCommand, Submission, command_completions, parse_submission,
     };
     let names = command_completions("/");
-    assert_eq!(names.len(), 23);
+    assert_eq!(names.len(), 24);
+    assert!(names.contains(&"limits"));
     assert!(names.contains(&"rewind"));
     assert!(names.contains(&"storage"));
     assert!(names.contains(&"usage"));
@@ -208,32 +209,40 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         Some(cores) => format!("automatic; {cores} effective (1..{cores})"),
         None => "automatic; Build unavailable".into(),
     };
-    pty.send_and_wait(b"/settings\r", format!("Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
+    let settings = "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
           Choice 1: Slash menu: tabs (default) (tabs|combined)\r\n\
           Choice 2: Chat view: fullscreen (default) (fullscreen|classic)\r\n\
-          Choice 3: Provider calls per task: unlimited (default) (number or unlimited)\r\n\
-          Choice 4: Tokens per task: unlimited (default) (number or unlimited)\r\n\
-          Choice 5: Active time per task: unlimited (default) (duration or unlimited)\r\n\
-          Choice 6: Default command timeout: 2 min (default) (duration, e.g. 30s)\r\n\
-          Choice 7: Maximum command timeout: 10 min (default) (duration, e.g. 5m)\r\n\
-          Choice 8: Build memory: 4.0 GB (default) (size, e.g. 512MB)\r\n\
-          Choice 9: Build processes/threads: 256 (default) (number)\r\n\
-          Choice 10: Build writable project: 1.0 GB (default) (size, e.g. 1GB)\r\n\
-          Choice 11: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)\r\n\
-          Choice 12: Copy on select: on (default) (on|off)\r\n\
-          Choice 13: Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)\r\n\
-          Choice 14: Build jobs: {build_jobs} (default) (automatic or 1..cores)\r\n\
-          Choice 15: Build CPU cores: {build_cpu} (default) (automatic or 1..cores; Linux quota)\r\n\
-          Choice 16: Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)\r\n\
-          Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
+          Choice 3: Copy on select: on (default) (on|off)\r\n\
+          Choice 4: Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)\r\n\
+          Choice 5: Limits: opens /limits\r\n";
+    pty.send_and_wait(
+        b"/settings\r",
+        format!("{settings}Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\nInput:\r\n").as_bytes(),
+    );
+    pty.send_and_wait(b"5\r", format!("Limits: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
+          Choice 1: Provider calls per task: unlimited (default) (number or unlimited)\r\n\
+          Choice 2: Tokens per task: unlimited (default) (number or unlimited)\r\n\
+          Choice 3: Active time per task: unlimited (default) (duration or unlimited)\r\n\
+          Choice 4: Default command timeout: 2 min (default) (duration, e.g. 30s)\r\n\
+          Choice 5: Maximum command timeout: 10 min (default) (duration, e.g. 5m)\r\n\
+          Choice 6: Build memory: 4.0 GB (default) (size, e.g. 512MB)\r\n\
+          Choice 7: Build processes/threads: 256 (default) (number)\r\n\
+          Choice 8: Build writable project: 1.0 GB (default) (size, e.g. 1GB)\r\n\
+          Choice 9: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)\r\n\
+          Choice 10: Build jobs: {build_jobs} (default) (automatic or 1..cores)\r\n\
+          Choice 11: Build CPU cores: {build_cpu} (default) (automatic or 1..cores; Linux quota)\r\n\
+          Choice 12: Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)\r\n\
+          Choice 13: Editor changes: files: 512 (default) (number of files)\r\n\
+          Choice 14: Editor changes: size: 64.0 MB (default) (size, e.g. 64MB)\r\n\
           Input:\r\n").as_bytes());
-    let over_active_limit = format!("5 {}h\r", arany::MAX_GOAL_ACTIVE_MS / 3_600_000 + 1);
+    let over_active_limit = format!("3 {}h\r", arany::MAX_GOAL_ACTIVE_MS / 3_600_000 + 1);
     for rejected in [
         &b"combined\r"[..],
         b"12 combined\r",
         b"1 classic\r",
-        b"6 30000\r",
-        b"8 512\r",
+        b"4 30000\r",
+        b"6 512\r",
+        b"13 0\r",
         over_active_limit.as_bytes(),
     ] {
         pty.send_and_wait(
@@ -243,40 +252,40 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     }
     for (value, row) in [
         (
-            "5 5m",
-            "Choice 5: Active time per task: 5 min (duration or unlimited)",
+            "3 5m",
+            "Choice 3: Active time per task: 5 min (duration or unlimited)",
         ),
         (
-            "5 unlimited",
-            "Choice 5: Active time per task: unlimited (default) (duration or unlimited)",
+            "3 unlimited",
+            "Choice 3: Active time per task: unlimited (default) (duration or unlimited)",
         ),
         (
-            "6 30s",
-            "Choice 6: Default command timeout: 30 s (duration, e.g. 30s)",
+            "4 30s",
+            "Choice 4: Default command timeout: 30 s (duration, e.g. 30s)",
         ),
         (
-            "6 2min",
-            "Choice 6: Default command timeout: 2 min (default) (duration, e.g. 30s)",
+            "4 2min",
+            "Choice 4: Default command timeout: 2 min (default) (duration, e.g. 30s)",
         ),
         (
-            "8 512MB",
-            "Choice 8: Build memory: 512.0 MB (size, e.g. 512MB)",
+            "6 512MB",
+            "Choice 6: Build memory: 512.0 MB (size, e.g. 512MB)",
         ),
         (
-            "8 4GB",
-            "Choice 8: Build memory: 4.0 GB (default) (size, e.g. 512MB)",
+            "6 4GB",
+            "Choice 6: Build memory: 4.0 GB (default) (size, e.g. 512MB)",
         ),
         (
-            "11 0B",
-            "Choice 11: Build cache: 0 B · 0 B used (size or unlimited, e.g. 8GB)",
+            "9 0B",
+            "Choice 9: Build cache: 0 B · 0 B used (size or unlimited, e.g. 8GB)",
         ),
         (
-            "11 8GB",
-            "Choice 11: Build cache: 8.0 GB · 0 B used (size or unlimited, e.g. 8GB)",
+            "9 8GB",
+            "Choice 9: Build cache: 8.0 GB · 0 B used (size or unlimited, e.g. 8GB)",
         ),
         (
-            "11 unlimited",
-            "Choice 11: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)",
+            "9 unlimited",
+            "Choice 9: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)",
         ),
     ] {
         let changed_at = pty.send_and_wait(
@@ -285,6 +294,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         );
         pty.wait_for_after(changed_at, b"Input:\r\n");
     }
+    // Closing /limits returns to /settings, which saves both.
+    pty.send_and_wait(b"\r", format!("{settings}Input:\r\n").as_bytes());
     pty.send_and_wait(
         b"1 combined\r",
         b"Choice 1: Slash menu: combined (tabs|combined)\r\n",
@@ -976,7 +987,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::fs::remove_file(pending).unwrap();
     let tabs_at = pty.send(b"/settings\r");
     wait_armed(&mut pty, tabs_at);
-    pty.send(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(12)).as_bytes());
+    pty.send(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(3)).as_bytes());
     wait_for_caret(&mut pty, tabs_at, 3);
     let record = |view: &str| {
         ui_preferences(&[

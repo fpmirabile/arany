@@ -3622,6 +3622,7 @@ impl AttachedTerminal {
 
     pub fn draw_settings(
         &mut self,
+        title: &str,
         rows: &[String],
         selected: usize,
         notice: Option<&str>,
@@ -3630,7 +3631,7 @@ impl AttachedTerminal {
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
             return linear
-                .draw_settings(rows, notice)
+                .draw_settings(title, rows, notice)
                 .map_err(TerminalError::Io);
         }
         self.panels.panel_selection.enabled = true;
@@ -3646,7 +3647,9 @@ impl AttachedTerminal {
             Some(session),
             view::settings_height(rows, width, max_rows)
                 .saturating_add(notice.map_or(0, |text| view::guidance_height(text, width))),
-            |frame, area| draw_settings_frame(frame, area, rows, selected, armed, notice, palette),
+            |frame, area| {
+                draw_settings_frame(frame, area, title, rows, selected, armed, notice, palette);
+            },
         )?;
         Ok(())
     }

@@ -2101,9 +2101,14 @@ pub(super) fn guidance_height(text: &str, width: u16) -> u16 {
     u16::try_from(wrap_cells(text, usize::from(width.max(1)), 0).len()).unwrap_or(u16::MAX)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a dialog frame takes its title, rows, focus and notice together"
+)]
 pub(super) fn draw_settings_frame(
     frame: &mut Frame,
     area: Rect,
+    title: &str,
     rows: &[String],
     selected: usize,
     armed: bool,
@@ -2115,7 +2120,7 @@ pub(super) fn draw_settings_frame(
     }
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new("Settings").style(palette.selection()),
+        Paragraph::new(title.to_owned()).style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
     let width = usize::from(area.width);

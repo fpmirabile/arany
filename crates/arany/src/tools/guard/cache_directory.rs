@@ -8,8 +8,9 @@ pub(in crate::tools) struct Session {
     pub(super) upper: Option<Dir>,
 }
 
+// Primary and editor commands both take the Workspace's build cache.
 pub(super) fn selected(intent: &EffectIntent) -> bool {
-    selection_phase::primary_command(intent)
+    matches!(intent.call, crate::tools::ToolCall::Command { .. })
 }
 
 pub(super) async fn session(

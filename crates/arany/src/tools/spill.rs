@@ -68,7 +68,9 @@ const UTF8_EDGE_BYTES: usize = char::MAX.len_utf8() - 1;
 pub(crate) const CUT_MARKER: &[u8] = b"\n[spill truncated]\n";
 
 pub(super) fn report_cap(intent: &super::EffectIntent) -> usize {
-    if intent.target == crate::session::worker::EffectTarget::Workspace
+    // Editor commands run in their private workspace; every other reported call targets the Workspace.
+    if (intent.target == crate::session::worker::EffectTarget::Workspace
+        || matches!(intent.call, ToolCall::Command { .. }))
         && matches!(
             intent.call,
             ToolCall::Command { .. }
@@ -119,7 +121,8 @@ impl OutputSpill {
                     | ToolCall::McpList { .. }
                     | ToolCall::WebFetch { .. }
             )
-            && observation.intent.target == crate::session::worker::EffectTarget::Workspace
+            && (observation.intent.target == crate::session::worker::EffectTarget::Workspace
+                || matches!(observation.intent.call, ToolCall::Command { .. }))
     }
 
     pub(super) fn captured(

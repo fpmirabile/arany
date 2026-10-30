@@ -116,6 +116,12 @@ pub(crate) fn before_versions(_run: &RunView, call: &ToolCall) -> Vec<(String, O
             .iter()
             .map(|f| (f.path.clone(), f.before.as_ref().map(|v| v.sha256.clone())))
             .collect(),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .map(|f| (f.path.clone(), f.before.as_ref().map(|v| v.sha256.clone())))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -169,6 +175,12 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
                 source: ChangesetSource::CommandReceipt { changeset, .. },
             } => changeset
                 .files
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| f.after.as_ref().map(|v| v.sha256.clone())),
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            } => files
                 .iter()
                 .find(|f| f.path == path)
                 .map(|f| f.after.as_ref().map(|v| v.sha256.clone())),

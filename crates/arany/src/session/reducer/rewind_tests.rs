@@ -618,7 +618,8 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
         (1, 1024 * 1024 + 1, false),
     ] {
         let (_, mut view) = fixture();
-        let template = view.runs[0].agents[1].tools[0].clone();
+        let mut template = view.runs[0].agents[1].tools[0].clone();
+        template.intent.target = crate::session::EffectTarget::Workspace;
         view.runs[0].agents[1].tools.clear();
         for index in 0..files {
             let mut tool = template.clone();
@@ -650,6 +651,7 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
     }
     let (_, mut view) = fixture();
     let t = &mut view.runs[0].agents[1].tools[0];
+    t.intent.target = crate::session::EffectTarget::Workspace;
     let digest = "a".repeat(64);
     if let ToolCall::Write {
         expected_digest, ..

@@ -59,6 +59,12 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
 
 fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
     if agent.role == AgentRole::Child {
+        // An answered editor's integration is reviewed like a requested Tool.
+        let integrating = agent
+            .tools
+            .iter()
+            .find(|tool| tool.observation.is_none())
+            .is_some_and(|tool| super::super::worker::editor_integration(&tool.intent.call));
         return record.phase == AgentPhase::ToolReview
             && matches!(
                 agent.grant,
@@ -69,7 +75,10 @@ fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord)
                 .iter()
                 .rev()
                 .find(|call| call.phase != AgentPhase::ToolReview)
-                .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+                .is_some_and(|call| {
+                    call.disposition == ProviderCallDisposition::ToolRequested
+                        || integrating && call.disposition == ProviderCallDisposition::Finished
+                })
             && agent
                 .tools
                 .iter()

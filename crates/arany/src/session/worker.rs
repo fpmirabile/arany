@@ -363,6 +363,8 @@ pub enum WorkerCause {
     Budget,
     SnapshotDrift,
     CriterionUnverified,
+    ChangesTooLarge,
+    IntegrationConflict,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -439,6 +441,46 @@ pub enum ChangesetSource {
         source_intent_digest: [u8; 32],
         changeset: crate::tools::CommandChangeset,
     },
+    // An editor's one integration of its workspace; content stays in that workspace until publication.
+    EditorWorkspace {
+        files: Vec<EditorChange>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorChange {
+    pub path: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub before: Option<super::rewind::FileState>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub after: Option<super::rewind::FileState>,
+}
+
+// The user's "Editor changes" settings bound one integration; the Goal pins them at admission.
+pub const DEFAULT_EDITOR_CHANGE_FILES: u32 = 512;
+pub const DEFAULT_EDITOR_CHANGE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_EDITOR_CHANGE_FILES: u32 = WORKER_FILES as u32;
+pub const MAX_EDITOR_CHANGE_BYTES: u64 = 1024 * 1024 * 1024;
+
+pub(crate) fn valid_editor_changes(files: &[EditorChange]) -> bool {
+    !files.is_empty()
+        && files.len() <= WORKER_FILES
+        && files.iter().enumerate().all(|(index, change)| {
+            writable_path(&change.path)
+                && change.before != change.after
+                && change
+                    .before
+                    .iter()
+                    .chain(&change.after)
+                    .all(|state| state.valid())
+                && files[..index].iter().all(|earlier| {
+                    earlier.path < change.path
+                        && !std::path::Path::new(&change.path).starts_with(&earlier.path)
+                })
+        })
+        && serde_json::to_vec(files)
+            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
 }
 impl ChangesetSource {
     pub(crate) fn valid(&self) -> bool {
@@ -459,6 +501,7 @@ impl ChangesetSource {
             } => {
                 *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid()
             }
+            Self::EditorWorkspace { files } => valid_editor_changes(files),
         }
     }
 }
@@ -666,6 +709,8 @@ impl WorkerOutcome {
                     | WorkerCause::Budget
                     | WorkerCause::SnapshotDrift
                     | WorkerCause::CriterionUnverified
+                    | WorkerCause::ChangesTooLarge
+                    | WorkerCause::IntegrationConflict
             ) | (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         )
     }

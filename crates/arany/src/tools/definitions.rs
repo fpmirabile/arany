@@ -300,6 +300,14 @@ impl AgentDefinition {
         ) {
             return self.editor() && self.allows_worker_tool(crate::worker::WorkerTool::Command);
         }
+        if matches!(
+            call,
+            ToolCall::ApplyChangeset {
+                source: crate::worker::ChangesetSource::EditorWorkspace { .. }
+            }
+        ) {
+            return self.editor();
+        }
         crate::session::worker::WorkerTool::of(call)
             .is_some_and(|tool| self.allows_worker_tool(tool))
     }

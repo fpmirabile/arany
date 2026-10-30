@@ -201,7 +201,7 @@ impl Fixture {
                 expected_digest: None,
                 content: "new".into(),
             },
-            EffectTarget::Workspace,
+            self.editor_workspace(),
         );
         self.started(&intent);
         if self.events.iter().any(|e| matches!(e, Event::RunStarted { config, .. } if config.tool_policy.as_ref().unwrap().permissions_digest.is_some())) {
@@ -210,12 +210,52 @@ impl Fixture {
         self.observed(&intent, ToolDisposition::Succeeded, Some(Attestation::for_site(&intent)),
             &serde_json::json!({"sha256":crate::validate::hex_digest(b"new"),"bytes":3,"executable":false,"before":null}).to_string());
     }
+    pub(crate) fn editor_workspace(&self) -> EffectTarget {
+        EffectTarget::EditorWorkspace {
+            assignment_id: self.child,
+            device: 1,
+            inode: 9,
+        }
+    }
+    pub(crate) fn integrated_change(&self) -> EditorChange {
+        EditorChange {
+            path: self.changes.files[0].path.clone(),
+            before: None,
+            after: Some(crate::session::rewind::FileState {
+                sha256: crate::validate::hex_digest(b"new"),
+                bytes: 3,
+                executable: false,
+            }),
+        }
+    }
     fn finish_worker(&mut self) -> u64 {
+        let change = self.integrated_change();
+        self.finish_worker_with(vec![change])
+    }
+    // The editor's answer, then its one integration of the workspace into the Workspace.
+    pub(crate) fn finish_worker_with(&mut self, files: Vec<EditorChange>) -> u64 {
         self.call(
             self.child,
             AgentPhase::ChildWork,
             ProviderCallDisposition::Finished,
             None,
+        );
+        let integration = self.intent(
+            self.child,
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            },
+            EffectTarget::Workspace,
+        );
+        self.started(&integration);
+        if self.events.iter().any(|e| matches!(e, Event::RunStarted { config, .. } if config.tool_policy.as_ref().unwrap().permissions_digest.is_some())) {
+            allow_permission(self, &integration);
+        }
+        self.observed(
+            &integration,
+            ToolDisposition::Succeeded,
+            Some(Attestation::for_site(&integration)),
+            r#"{"applied":1}"#,
         );
         self.push(Event::AgentFinished {
             run_id: self.run,

@@ -17,6 +17,11 @@ pub(super) fn admissible(
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt { .. },
         } => super::super::tool::valid_integration_source(run, intent),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .all(|file| within(&file.path, &worker.pins.request.lease)),
         _ => {
             super::super::agent::child_tool_requests(agent) == originals + 1
                 && worker.pins.grant.allows(&intent.call)

@@ -174,9 +174,12 @@ impl LiveProvider {
             assignment.mode = WorkerMode::Background;
             assignment.lease = vec!["notes/0".into()];
             assignment.commands = vec!["build".into()];
-            if matches!(self.case, "command_criterion" | "command_bash_only") {
+            if matches!(
+                self.case,
+                "command_criterion" | "command_bash_only" | "command_large"
+            ) {
                 assignment.criterion = GoalSuccessCriterion::ToolCallSucceeded {
-                    call: Box::new(commands::call(false)),
+                    call: Box::new(commands::case_call(self.case)),
                 };
             }
         }
@@ -232,9 +235,10 @@ impl LiveProvider {
             _ if self.case == "no_change" => finish_with("No change required"),
             0 | 1 => {
                 if step == 1 && self.case != "no_channel" {
+                    // The editor works in its own workspace; the Workspace changes only at integration.
                     assert_eq!(
                         std::fs::read(self.workspace.join("notes/0")).unwrap(),
-                        b"edited 0"
+                        b"original 0"
                     );
                     if self.case == "cancel_landed" {
                         self.cancellation.cancel();
@@ -452,7 +456,6 @@ async fn run_case_inner(
     if commands::is_case(case) {
         commands::configure(&state, case);
     }
-    commands::overlay::configure(&workspace, case);
     run_live(directory, root, guard, case, LiveStart::New { padding }).await
 }
 
@@ -531,7 +534,6 @@ async fn run_live(
     } else {
         ApprovalMode::Request
     });
-    let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
     let mut cache_failure: Option<commands::CacheFailure> = None;
     let mut running = engine
         .submit(
@@ -551,16 +553,6 @@ async fn run_live(
         tokio::select! {
             result = &mut running => break result,
             Some(()) = clock_gate.recv() => bounds::exhaust(case).await,
-            dispatched = async {
-                match &mut overlay_dispatch {
-                    Some(dispatch) => dispatch.await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                dispatched.expect("editor command reached GO");
-                commands::overlay::dispatched(&state, &workspace, case);
-                overlay_dispatch = None;
-            }
             () = async {
                 match &mut cache_failure {
                     Some(failure) => failure.inject().await,
@@ -568,7 +560,6 @@ async fn run_live(
                 }
             } => cache_failure = None,
             Some(approval) = inbox.next() => {
-                commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
                     cache_failure = Some(commands::CacheFailure::new(&state, &workspace, &approval.intent));
                 }
@@ -596,22 +587,12 @@ async fn run_live(
             "uncertain command cache must stop the Run with Tool(Uncertain): {result:?}"
         );
     }
-    if case == "command_overlay_uncertain" {
-        assert!(matches!(
-            &result,
-            Err(EngineError::Tool(ToolError::Uncertain))
-        ));
-    }
-    let result = if matches!(
-        case,
-        "uncertain" | "capacity" | "command_cache_unknown" | "command_overlay_uncertain"
-    ) {
+    let result = if matches!(case, "uncertain" | "capacity" | "command_cache_unknown") {
         result.ok()
     } else {
         Some(result.unwrap())
     };
     engine.close().await.unwrap();
-    commands::overlay::assert_cache_reusable(case, &state, &workspace);
     let (events, view) = replayed(&state, session).await;
     let run = view.runs.last().unwrap();
     if let Some(result) = result {
@@ -636,9 +617,10 @@ async fn run_live(
                 .released
                 .is_none()
         );
+        // The unknown edit was in the editor's workspace; the Workspace itself is untouched.
         assert_eq!(
             std::fs::read(workspace.join("notes/0")).unwrap(),
-            b"edited 0"
+            b"original 0"
         );
         assert_eq!(
             std::fs::read(workspace.join("notes/1")).unwrap(),
@@ -648,15 +630,21 @@ async fn run_live(
     if case == "cancel_landed" {
         assert_eq!(
             std::fs::read(workspace.join("notes/0")).unwrap(),
+            b"original 0"
+        );
+        let kept = state
+            .join("editors")
+            .join(session.to_string())
+            .join(run.agents[1].id.to_string());
+        assert_eq!(
+            std::fs::read(kept.join("tree/notes/0")).unwrap(),
             b"edited 0"
         );
-        assert!(run.agents[1].tools[0].checkpoint.is_some());
-        assert!(run.worker_history()[0].changed_paths.contains("notes/0"));
         assert!(
-            run.worker_history()[0]
-                .changed_paths
-                .contains(&crate::validate::hex_digest(b"edited 0"))
+            run.agents[1].tools[0].intent.target.editor()
+                && run.agents[1].tools[0].checkpoint.is_none()
         );
+        assert!(run.worker_history()[0].changed_paths.is_empty());
         assert_eq!(run.status, RunStatus::Cancelled);
         let goal = view.goals.last().unwrap();
         assert_eq!(goal.status, GoalStatus::Interrupted);
@@ -714,7 +702,8 @@ async fn run_live(
     }
     if case == "hooks" {
         let child = &run.agents[1];
-        for tool in &child.tools {
+        let (_, edits) = child.tools.split_last().unwrap();
+        for tool in edits {
             assert_eq!(tool.hooks.len(), 2);
             assert!(
                 tool.hooks
@@ -794,11 +783,20 @@ fn assert_live_editor_evidence(
         assert_eq!(
             run.agents[1].tools.len(),
             if matches!(case, "discovery" | "omitted_digest") {
-                4
+                5
             } else {
-                3
+                4
             }
         );
+        let (integration, edits) = run.agents[1].tools.split_last().unwrap();
+        assert!(
+            edits
+                .iter()
+                .all(|t| t.intent.target.editor() && t.checkpoint.is_none())
+        );
+        assert!(crate::session::editor_integration(&integration.intent.call));
+        assert_eq!(integration.intent.target, EffectTarget::Workspace);
+        assert!(integration.checkpoint.is_some());
         if case == "omitted_digest" {
             assert!(matches!(
                 &run.agents[1].tools[1].intent.call,
@@ -819,12 +817,6 @@ fn assert_live_editor_evidence(
                 Some(Attestation::InProcess { .. })
             ));
         }
-        assert!(
-            run.agents[1]
-                .tools
-                .iter()
-                .all(|t| t.intent.target == EffectTarget::Workspace)
-        );
         let goal = view.goals.last().unwrap();
         assert_eq!(goal.status, GoalStatus::Completed);
         assert!(

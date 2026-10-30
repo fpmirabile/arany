@@ -247,6 +247,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
                 .collect(),
             root: std::sync::Arc::new(root),
             slots: std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IN_PROCESS_READS)),
+            editors: Default::default(),
         }),
         guard_executable: std::path::PathBuf::new(),
         enforcement_digest: [1; 32],

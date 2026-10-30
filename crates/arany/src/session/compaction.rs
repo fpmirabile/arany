@@ -86,6 +86,17 @@ fn observation_changes(observation: &crate::tools::ToolObservation) -> Vec<Recen
                 )
             })
             .collect(),
+        ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .map(|change| {
+                (
+                    change.path.clone(),
+                    change.after.as_ref().map(|after| after.sha256.clone()),
+                )
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }

@@ -756,7 +756,10 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
         &["workspace", "scratch"][..]
     };
     for name in grants {
-        let path = root.join(name);
+        let path = match (&task.editor_tree, *name) {
+            (Some(tree), "workspace") => tree.clone(),
+            _ => root.join(name),
+        };
         profile.grant(
             "allow file-read* file-write* file-map-executable process-exec",
             "subpath",
@@ -1191,6 +1194,7 @@ impl Task {
                 .as_ref()
                 .and_then(|_| super::transfer::handover_ref(intent)),
             workspace: runtime.workspace.clone(),
+            editor_tree: runtime.editor_tree(intent),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
                 runtime.system_programs.as_deref().cloned()
@@ -1389,13 +1393,19 @@ async fn execute_worker(
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     gate: GoGate,
-    (root, command_deadline, proxy_port): (&Path, Option<[u8; 8]>, Option<u16>),
+    (root, command_deadline, proxy_port, editor_tree): (
+        &Path,
+        Option<[u8; 8]>,
+        Option<u16>,
+        Option<&Path>,
+    ),
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let git_stage = gate.git_stage;
     #[cfg(any(test, feature = "test-support"))]
     let git_fault = gate.git_fault;
     let mut task = Task::new(runtime, intent, None)?;
+    task.editor_tree = editor_tree.map(Path::to_owned);
     task.command_deadline = command_deadline;
     task.proxy_port = proxy_port;
     task.git_stage = git_stage;
@@ -1955,6 +1965,7 @@ mod tests {
             secret: None,
             hidden: Default::default(),
             workspace,
+            editor_tree: None,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,
@@ -2400,6 +2411,7 @@ mod tests {
             secret: None,
             hidden: Default::default(),
             workspace: workspace.clone(),
+            editor_tree: None,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
             git_stage: None,

@@ -11,8 +11,9 @@ mod agent;
 mod worker;
 pub use worker::{WorkerState, WorkerView};
 pub(crate) use worker::{
-    coordination_ready, criterion_unmet_in_view, editor_tool_failed, evidence_admitted,
-    validate_request as validate_editor_request, verification_passed, wave_settled,
+    coordination_ready, criterion_unmet_in_view, editor_integration, editor_tool_failed,
+    evidence_admitted, validate_request as validate_editor_request, verification_passed,
+    wave_settled,
 };
 mod goal;
 mod rewind;
@@ -27,7 +28,8 @@ mod test_support;
 pub use test_support::selection_failure_session;
 mod tool;
 pub(crate) use tool::{
-    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_lease,
+    validate_tool_started,
 };
 mod usage;
 pub use usage::{ApiUsage, PlanUsage, TokenCount, UsageGroup, UsageView};

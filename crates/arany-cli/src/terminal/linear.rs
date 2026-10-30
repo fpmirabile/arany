@@ -571,15 +571,17 @@ impl LinearState {
 
     pub(super) fn draw_settings(
         &mut self,
+        title: &str,
         rows: &[String],
         notice: Option<&str>,
     ) -> io::Result<()> {
-        self.write_settings(&mut io::stderr(), rows, notice)
+        self.write_settings(&mut io::stderr(), title, rows, notice)
     }
 
     fn write_settings(
         &mut self,
         writer: &mut impl Write,
+        title: &str,
         rows: &[String],
         notice: Option<&str>,
     ) -> io::Result<()> {
@@ -587,8 +589,8 @@ impl LinearState {
         let unchanged = self
             .last_setup
             .as_ref()
-            .is_some_and(|(step, title, previous)| {
-                *step == 0 && title == "Settings" && *previous == listing
+            .is_some_and(|(step, previous_title, previous)| {
+                *step == 0 && previous_title == title && *previous == listing
             });
         if unchanged && notice.is_none() {
             return Ok(());
@@ -601,7 +603,7 @@ impl LinearState {
         if !unchanged {
             writeln!(
                 writer,
-                "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels"
+                "{title}: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels"
             )?;
             for (index, row) in rows.iter().enumerate() {
                 writeln!(
@@ -611,7 +613,7 @@ impl LinearState {
                     safe_truncate(row, MAX_ROW_WIDTH)
                 )?;
             }
-            self.last_setup = Some((0, "Settings".into(), listing));
+            self.last_setup = Some((0, title.into(), listing));
         }
         if let Some(notice) = notice {
             writeln!(writer, "Notice: {}", safe_truncate(notice, MAX_ROW_WIDTH))?;
@@ -1125,18 +1127,23 @@ mod tests {
             "Tokens per task: unlimited (number or unlimited)".to_owned(),
         ];
         state.disarm();
-        state.write_settings(&mut output, &rows, None).unwrap();
+        state
+            .write_settings(&mut output, "Settings", &rows, None)
+            .unwrap();
         assert!(
             !String::from_utf8_lossy(&output).contains("Input:"),
             "an unarmed selector holds its prompt"
         );
         state.arm(&mut output).unwrap();
-        state.write_settings(&mut output, &rows, None).unwrap();
+        state
+            .write_settings(&mut output, "Settings", &rows, None)
+            .unwrap();
         state.prompt_needed = true;
         state.line_open = false;
         state
             .write_settings(
                 &mut output,
+                "Settings",
                 &rows,
                 Some("Type NUMBER VALUE from the list; q cancels"),
             )
@@ -1147,7 +1154,9 @@ mod tests {
             "Slash menu: combined (tabs|combined)".to_owned(),
             "Tokens per task: unlimited (number or unlimited)".to_owned(),
         ];
-        state.write_settings(&mut output, &changed, None).unwrap();
+        state
+            .write_settings(&mut output, "Settings", &changed, None)
+            .unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
             "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\n\
@@ -1449,6 +1458,7 @@ mod tests {
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /storage; Report owned storage metadata; during Run: locked\n",
                 "Command: /settings; Slash menu, chat view and newline shortcut; during Run: locked\n",
+                "Command: /limits; Task budgets, command timeouts, build resources, context window and editor changes; during Run: locked\n",
                 "Command: /transcript [agents [number]]; Write or toggle transcript details; agents lists this Run's agent chats; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()

@@ -1,5 +1,6 @@
 use super::*;
 use crate::store::{CACHE_ROOTS, CacheChange};
+use crate::tools::fs::tree::{self, Pair};
 use cap_std::fs::{Metadata, MetadataExt};
 
 #[cfg(test)]
@@ -13,37 +14,62 @@ pub(in crate::tools) fn capture(
     deadline: Instant,
     limit: u64,
 ) -> Result<Vec<CacheChange>, ToolError> {
-    let before = inventory(lower, exclusions, deadline)?;
-    let after = inventory(view, exclusions, deadline)?;
-    let mut changes = before
-        .iter()
-        .filter(|(path, old)| {
-            after
-                .get(*path)
-                .is_none_or(|new| new.is_dir() != old.is_dir())
-        })
-        .map(|(path, _)| CacheChange::Remove(path.clone()))
-        .rev()
-        .collect::<Vec<_>>();
+    let mut removals = Vec::new();
+    let mut additions = Vec::new();
+    let mut held = 0usize;
     let mut total = 0u64;
-    for (path, entry) in &after {
-        Selector::new(0, deadline).check_time()?;
-        if entry.is_file() {
-            total = total.checked_add(entry.len()).ok_or(ToolError::Limit)?;
-        }
-        if before.get(path).is_some_and(|old| same(old, entry)) {
-            continue;
-        }
-        changes.push(if entry.is_dir() {
-            CacheChange::Directory(path.clone())
-        } else {
-            CacheChange::File(path.clone())
-        });
-    }
+    tree::diff(
+        &mut tree::Walk::new(lower, deadline)?,
+        &mut tree::Walk::new(view, deadline)?,
+        |pair| {
+            let path = match &pair {
+                Pair::Left(node) | Pair::Right(node) | Pair::Both(_, node) => node.path.clone(),
+            };
+            if excluded(&path, exclusions) {
+                return Ok(false);
+            }
+            let (old, new) = match pair {
+                Pair::Left(old) => (Some(old.metadata), None),
+                Pair::Right(new) => (None, Some(new.metadata)),
+                Pair::Both(old, new) => (Some(old.metadata), Some(new.metadata)),
+            };
+            for metadata in old.iter().chain(&new) {
+                validate(&path, metadata)?;
+            }
+            if !selected(&path) {
+                return Ok(true);
+            }
+            held = held.checked_add(path.len()).ok_or(ToolError::Limit)?;
+            if held > tree::HELD_NAME_BYTES {
+                return Err(ToolError::Limit);
+            }
+            if old
+                .as_ref()
+                .is_some_and(|old| new.as_ref().is_none_or(|new| new.is_dir() != old.is_dir()))
+            {
+                removals.push(CacheChange::Remove(path.clone()));
+            }
+            if let Some(new) = new {
+                if new.is_file() {
+                    total = total.checked_add(new.len()).ok_or(ToolError::Limit)?;
+                }
+                if !old.is_some_and(|old| same(&old, &new)) {
+                    additions.push(if new.is_dir() {
+                        CacheChange::Directory(path)
+                    } else {
+                        CacheChange::File(path)
+                    });
+                }
+            }
+            Ok(true)
+        },
+    )?;
     if total > limit {
         return Err(ToolError::Limit);
     }
-    Ok(changes)
+    removals.reverse();
+    removals.extend(additions);
+    Ok(removals)
 }
 
 fn same(old: &Metadata, new: &Metadata) -> bool {
@@ -66,60 +92,18 @@ fn excluded(path: &str, exclusions: &[String]) -> bool {
 }
 
 // Safe output outside the cache roots is validated and discarded; links, special and set-ID files refuse.
-fn inventory(
-    root: &Dir,
-    exclusions: &[String],
-    deadline: Instant,
-) -> Result<BTreeMap<String, Metadata>, ToolError> {
-    let mut budget = CommandScanBudget::default();
-    let mut pending = vec![(
-        String::new(),
-        root.try_clone().map_err(|_| ToolError::Path)?,
-    )];
-    let mut entries = BTreeMap::new();
-    while let Some((path, directory)) = pending.pop() {
-        for entry in directory.entries().map_err(|_| ToolError::Path)? {
-            Selector::new(0, deadline).check_time()?;
-            let name = entry
-                .map_err(|_| ToolError::Path)?
-                .file_name()
-                .into_string()
-                .map_err(|_| ToolError::Path)?;
-            let path = if path.is_empty() {
-                name.clone()
-            } else {
-                format!("{path}/{name}")
-            };
-            budget.entry(&path)?;
-            if excluded(&path, exclusions) {
-                continue;
-            }
-            if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
-                return Err(ToolError::Limit);
-            }
-            if if selected(&path) {
-                crate::store::validate_cache_path(&path).is_err()
-            } else {
-                !valid_relative(&path, false)
-            } {
-                return Err(ToolError::Path);
-            }
-            let metadata = directory
-                .symlink_metadata(&name)
-                .map_err(|_| ToolError::Path)?;
-            if metadata.mode() & 0o6000 != 0 || !(metadata.is_dir() || metadata.is_file()) {
-                return Err(ToolError::Path);
-            }
-            if metadata.is_dir() {
-                let child = directory
-                    .open_dir_nofollow(&name)
-                    .map_err(|_| ToolError::Path)?;
-                pending.push((path.clone(), child));
-            }
-            if selected(&path) {
-                entries.insert(path, metadata);
-            }
-        }
+fn validate(path: &str, metadata: &Metadata) -> Result<(), ToolError> {
+    if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
+        return Err(ToolError::Limit);
     }
-    Ok(entries)
+    if if selected(path) {
+        crate::store::validate_cache_path(path).is_err()
+    } else {
+        !valid_relative(path, false)
+    } || metadata.mode() & 0o6000 != 0
+        || !(metadata.is_dir() || metadata.is_file())
+    {
+        return Err(ToolError::Path);
+    }
+    Ok(())
 }

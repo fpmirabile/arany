@@ -110,7 +110,8 @@ pub(super) fn assert_stopped(
         tool.observation.as_ref().unwrap().disposition,
         ToolDisposition::Succeeded
     );
-    assert!(tool.checkpoint.is_some());
+    // The stopped editor's edit stays in its workspace: no checkpoint, nothing integrated.
+    assert!(tool.intent.target.editor() && tool.checkpoint.is_none());
     let calls = provider.calls.lock().unwrap();
     assert_eq!(
         calls

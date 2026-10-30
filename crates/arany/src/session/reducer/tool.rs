@@ -178,15 +178,17 @@ pub(crate) fn validate_tool_lease(
         | ToolCall::MultiEdit {
             file_path: path, ..
         }
-        | ToolCall::Mkdir { path } => vec![path],
+        | ToolCall::Mkdir { path } => vec![path.as_str()],
         ToolCall::Move {
             source,
             destination,
             ..
-        } => vec![source, destination],
+        } => vec![source.as_str(), destination.as_str()],
         ToolCall::ApplyChangeset {
-            source: crate::worker::ChangesetSource::CommandReceipt { changeset, .. },
-        } => changeset.files.iter().map(|file| &file.path).collect(),
+            source:
+                crate::worker::ChangesetSource::CommandReceipt { .. }
+                | crate::worker::ChangesetSource::EditorWorkspace { .. },
+        } => call.changeset_paths(),
         _ if !leases.is_empty() => return Err(LeaseOverlap),
         _ => Vec::new(),
     };

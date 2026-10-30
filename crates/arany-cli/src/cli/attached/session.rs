@@ -646,7 +646,8 @@ impl AttachedSession {
                 });
             }
             InteractiveCommand::Transcript => self.transcript(argument).await?,
-            InteractiveCommand::Settings => self.settings().await?,
+            InteractiveCommand::Settings => self.settings(controls::Panel::Settings).await?,
+            InteractiveCommand::Limits => self.settings(controls::Panel::Limits).await?,
             InteractiveCommand::Permissions => return self.permissions().await,
             InteractiveCommand::Setup => {
                 self.ui.notice = Some(
@@ -713,7 +714,7 @@ impl AttachedSession {
         Ok(IdleAction::Continue)
     }
 
-    async fn settings(&mut self) -> Result<(), String> {
+    async fn settings(&mut self, panel: controls::Panel) -> Result<(), String> {
         self.ui.notice = Some(Feedback::History(
             controls::settings(
                 &mut self.terminal,
@@ -721,6 +722,7 @@ impl AttachedSession {
                 &mut self.composer,
                 &mut self.ui.saved_view,
                 &self.view,
+                panel,
             )
             .await?,
         ));

@@ -173,9 +173,11 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
         Err(ToolError::NotFound | ToolError::ProjectSelection(SelectionCause::InputVanished)) => {
             b"SELECT_NOT_FOUND\n"
         }
-        Err(ToolError::Conflict | ToolError::ProjectSelection(SelectionCause::InputConflict)) => {
-            b"SELECT_CONFLICT\n"
-        }
+        Err(
+            ToolError::Conflict
+            | ToolError::Conflicts(_)
+            | ToolError::ProjectSelection(SelectionCause::InputConflict),
+        ) => b"SELECT_CONFLICT\n",
         Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
         Err(
             ToolError::SpillUnavailable

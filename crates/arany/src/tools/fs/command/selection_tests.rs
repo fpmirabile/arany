@@ -4,49 +4,6 @@ use crate::tools::types::*;
 use serde_json::json;
 
 #[test]
-fn command_snapshots_exceed_previous_capacity_and_reject_new_limits() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    for index in 0..=MAX_SNAPSHOT_FILES {
-        std::fs::write(
-            workspace.join(format!("source-{index:04}")),
-            vec![b'x'; 16 * 1024],
-        )
-        .unwrap();
-    }
-    assert!(super::fs::command_snapshot(&workspace).is_ok());
-
-    let many = temp.path().join("many");
-    std::fs::create_dir(&many).unwrap();
-    for index in 0..COMMAND_SNAPSHOT_FILES {
-        std::fs::write(many.join(format!("entry-{index:05}")), b"").unwrap();
-    }
-    assert!(super::fs::command_snapshot(&many).is_ok());
-    std::fs::write(many.join("overflow"), b"").unwrap();
-    assert!(matches!(
-        super::fs::command_snapshot(&many),
-        Err(super::ToolError::Limit)
-    ));
-
-    let bytes = temp.path().join("bytes");
-    std::fs::create_dir(&bytes).unwrap();
-    for index in 0..COMMAND_SNAPSHOT_BYTES / MAX_FILE_BYTES {
-        std::fs::write(
-            bytes.join(format!("content-{index:03}")),
-            vec![b'x'; MAX_FILE_BYTES],
-        )
-        .unwrap();
-    }
-    assert!(super::fs::command_snapshot(&bytes).is_ok());
-    std::fs::write(bytes.join("overflow"), b"x").unwrap();
-    assert!(matches!(
-        super::fs::command_snapshot(&bytes),
-        Err(super::ToolError::Limit)
-    ));
-}
-
-#[test]
 fn command_selection_freezes_rules_and_validates_ignored_output() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     for case in [
@@ -129,7 +86,7 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
             std::fs::read(target.join("nested/keep.bin")).unwrap(),
             b"kept"
         );
-        let before = super::fs::command_snapshot(&target).unwrap();
+        let before = super::fs::test_baseline(&target).unwrap();
         std::fs::write(target.join("source.txt"), b"after").unwrap();
         std::fs::write(target.join(".gitignore"), b"*\n").unwrap();
         std::fs::create_dir(target.join("pruned")).unwrap();
@@ -486,7 +443,7 @@ fn command_selection_prunes_nested_repositories_and_discards_their_outputs() {
         }
         assert_eq!(selection.summary.pruned_directories, 2);
         assert!(!target.path().join("worktree").exists() && !target.path().join("repo").exists());
-        let before = super::fs::command_snapshot(target.path()).unwrap();
+        let before = super::fs::test_baseline(target.path()).unwrap();
         std::fs::create_dir(target.path().join("worktree")).unwrap();
         std::fs::write(target.path().join("worktree/generated"), b"output").unwrap();
         std::fs::write(target.path().join("fresh"), b"output").unwrap();

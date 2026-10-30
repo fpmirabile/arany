@@ -1535,6 +1535,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             None
         };
         let proxy_port = task.proxy_port;
+        let editor_tree = task.editor_tree.clone();
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
@@ -1577,7 +1578,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         path.parent().ok_or(ToolError::Path)?,
                         &runtime,
                         &intent.limits,
-                        primary_command(&intent),
+                        primary_command(&intent) || intent.target.editor(),
                         cache.is_some(),
                     )?)
                 } else {
@@ -1669,8 +1670,17 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 }));
                 if primary_command(&intent) {
                     let root = path.parent().ok_or(ToolError::Path)?;
+                    crate::private_fs::clone_at(
+                        &crate::tools::fs::open_directory(&root.join("workspace"))?,
+                        &crate::tools::fs::open_directory(root)?,
+                        "base",
+                    )
+                    .map_err(|_| ToolError::Operation)?;
                     command_before = Some((
-                        crate::tools::fs::command_snapshot(&root.join("workspace"))?,
+                        crate::tools::fs::command_baseline(
+                            &root.join("base"),
+                            &root.join("workspace"),
+                        )?,
                         crate::tools::fs::CommandSelection::read(root)?,
                     ));
                 }
@@ -1693,6 +1703,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         path.parent().ok_or(ToolError::Path)?,
                         command_deadline,
                         proxy_port,
+                        editor_tree.as_deref(),
                     ),
                 )
                 .await
@@ -3871,6 +3882,7 @@ int main(int argc, char **argv) {
                         use_count: 1,
                     },
                     workspace: runtime.workspace.clone(),
+                    editor_tree: None,
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
                     git_stage: None,

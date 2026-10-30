@@ -42,7 +42,7 @@ pub struct FileState {
     pub executable: bool,
 }
 impl FileState {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         crate::validate::valid_digest(&self.sha256) && self.bytes <= 1024 * 1024
     }
 }
@@ -441,6 +441,12 @@ pub(crate) fn publication_files(
                 ))
             })
             .collect(),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => Ok(files
+            .iter()
+            .map(|f| file(f.path.clone(), f.before.clone(), f.after.clone()))
+            .collect()),
         _ => Err(ReplayError::InvalidTransition),
     }
 }

@@ -107,6 +107,7 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
                 draw_settings_frame(
                     frame,
                     frame.area(),
+                    "Settings",
                     &["Newline shortcut: Shift+Enter".into()],
                     0,
                     true,

@@ -73,7 +73,7 @@ in `crates/arany/src/engine/run_loop/step/permission.rs`; its result enters the
 shared ask and dispatch flow. The Engine composes per-dispatch queue progress,
 active-action and checkpoint senders through consuming ToolRuntime builders.
 The Session reducer owns shared editor-request validation, and the Engine consumes its typed causes. The [execution contract](../specs/execution.md) owns refusal and failure behavior.
-The Engine coordinator schedules Run-scoped foreground editors through the shared Tool step. Editors mutate the Workspace within their leases, using ordinary typed receipts and checkpoints under the child identity. The reducer owns leases, terminal dispositions, causal release and independent primary verification; it rejects private data and handover transitions. Tools owns admitted-capability file publication, while Guard retains discovery and process enforcement. Journal acknowledgment precedes continuation. The [execution contract](../specs/execution.md)
+The Engine coordinator schedules Run-scoped editors through the shared Tool step. Each editor works in an isolated copy-on-write workspace owned by Tools, and the Engine is the one integration owner: when the editor finishes, its lease-bounded project changes publish into the Workspace as one checkpointed changeset under the child identity, or nothing does. The reducer owns leases, workspace targets, the single integration, terminal dispositions, causal release and independent primary verification. Tools owns admitted-capability file publication and the editor workspaces, while Guard retains process enforcement. Journal acknowledgment precedes continuation. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
 The RunLoop owns wave-primary request assembly; the [Execution collaboration contract](../specs/execution.md#collaboration) owns its preparation and admission ordering.
@@ -158,7 +158,7 @@ functions because the host kernel, not runtime configuration, selects them.
 
 Researcher children are direct read-only AgentRuns: without Tools they make one reasoning
 call; with Tools they may make up to 16 read-only Tool calls before reporting.
-Run-scoped foreground editors edit the Workspace through the shared Tool step within their leases,
+Run-scoped editors edit private workspaces through the shared Tool step, integrate once within their leases,
 report once and wait for fresh primary criterion verification.
 Explicit ID reassignment creates a fresh attempt; the reducer projects historical dispositions and lineage,
 while native Guard admission alone owns abandoned-storage containment and cleanup.
@@ -262,7 +262,7 @@ team(max_active_children = N)
   primary must propose a non-empty team decomposition
 ```
 
-The product default is `auto` with at most three total direct children. The historical field name `max_active_children` bounds total delegation size, not only simultaneous dispatch. `N` is a numeric input and bounded by policy, process safety and remaining call/token/byte/time budgets. The separate Provider concurrency ceiling limits simultaneous calls; admitted children can wait in the ordered queue. Children cannot create nested teams in beta.
+The product default is `single`; opt-in `auto` allows at most three total direct children. The historical field name `max_active_children` bounds total delegation size, not only simultaneous dispatch. `N` is a numeric input and bounded by policy, process safety and remaining call/token/byte/time budgets. The separate Provider concurrency ceiling limits simultaneous calls; admitted children can wait in the ordered queue. Children cannot create nested teams in beta.
 
 The semantic Provider outcome is:
 
@@ -423,7 +423,6 @@ human evidence gaps remain in [next steps](../../NEXT_STEPS.md).
 | Local tool workloads exceed the proven base | Reviewed runtime/cache/artifact adapters, bounded larger profiles and actual workload evidence |
 | Interactive or background jobs need network effects | Exact protocol/auth/data-disclosure grants and enforcing transport adapters |
 | Children need nested delegation | Bounded recursive supervision and depth budgets; beta remains flat |
-| Agents write concurrently | Isolated Workspace views and one integration owner |
 | Work needs dependencies/ownership transfer | Assignment DAG, attempts, leases, fencing |
 | Knowledge must improve another Session | Scoped Memory plus retrieval/deletion evaluation |
 | Event payloads exceed their bound | Content-addressed Artifacts |

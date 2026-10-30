@@ -147,7 +147,9 @@ pub(super) fn assert_background(case: &str, events: &[EventEnvelope], view: &Ses
         assert_eq!(worker.pins.request.mode, WorkerMode::Background);
         assert!(worker.verification.as_ref().unwrap().1.passed);
         assert!(primary_write.finished_sequence.unwrap() < worker.released.unwrap());
-        assert!(editor.tools[0].checkpoint.is_some());
+        let integration = editor.tools.last().unwrap();
+        assert!(crate::session::editor_integration(&integration.intent.call));
+        assert!(integration.checkpoint.is_some());
         let history = run
             .worker_history()
             .into_iter()

@@ -583,6 +583,12 @@ fn file_observation_digest(
             .iter()
             .find(|change| change.path == path)
             .and_then(|change| change.after.as_ref().map(|version| version.sha256.clone())),
+        ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .find(|change| change.path == path)
+            .and_then(|change| change.after.as_ref().map(|state| state.sha256.clone())),
         ToolCall::McpCall { .. } | ToolCall::GitSwitch { .. } => return Some(None),
         _ => return None,
     };
@@ -647,11 +653,13 @@ impl GoalPlanContract {
                 self.commands.contains(program)
             }
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
-            } => changeset
-                .files
-                .iter()
-                .all(|change| self.allows_path(&change.path)),
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                    | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
+            } => call
+                .changeset_paths()
+                .into_iter()
+                .all(|path| self.allows_path(path)),
             ToolCall::McpCall { server, tool, .. } => self
                 .mcp_tools
                 .iter()

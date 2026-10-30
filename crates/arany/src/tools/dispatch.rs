@@ -123,6 +123,10 @@ pub(super) fn outcome(
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),
         ),
+        Err(ToolError::Conflicts(paths)) => (
+            ToolDisposition::Conflict,
+            format!("Nothing was integrated; these Workspace files changed since the editor started: {paths}"),
+        ),
         Err(ToolError::NotFound)
             if matches!(
                 intent.call,

@@ -13,10 +13,12 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 pub(super) mod command;
+pub(super) mod editor;
 mod removal;
+pub(super) mod tree;
 #[cfg(any(test, target_os = "macos"))]
 pub(super) use command::prepare_command;
-pub(super) use command::{CommandSelection, selected_command_changeset};
+pub(super) use command::{CommandSelection, command_baseline, selected_command_changeset};
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
@@ -224,11 +226,6 @@ struct Entry {
     executable: bool,
 }
 
-pub(super) struct CommandSnapshot {
-    root_identity: WorkspaceIdentity,
-    entries: BTreeMap<String, Entry>,
-}
-
 #[derive(Default)]
 pub(super) struct CommandScanBudget {
     bytes: usize,
@@ -288,187 +285,31 @@ mod command_budget_tests {
     }
 }
 
-pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, ToolError> {
-    let root = open_directory(workspace)?;
-    check_change_directory(&root, &root)?;
-    let mut builder = CommandSnapshotBuilder {
-        root: &root,
-        entries: BTreeMap::new(),
-        budget: CommandScanBudget::default(),
-        retained: 0,
-    };
-    builder.collect("")?;
-    Ok(CommandSnapshot {
-        root_identity: workspace_identity(&root)?,
-        entries: builder.entries,
-    })
-}
-
-struct CommandSnapshotBuilder<'a> {
-    root: &'a Dir,
-    entries: BTreeMap<String, Entry>,
-    budget: CommandScanBudget,
-    retained: usize,
-}
-
-impl CommandSnapshotBuilder<'_> {
-    fn collect(&mut self, path: &str) -> Result<(), ToolError> {
-        let directory = if path.is_empty() {
-            self.root.try_clone().map_err(|_| ToolError::Path)?
-        } else {
-            Dir::from_std_file(open_file(self.root, path)?)
-        };
-        let mut names = Vec::new();
-        for entry in directory.entries().map_err(|_| ToolError::Path)? {
-            let name = entry
-                .map_err(|_| ToolError::Path)?
-                .file_name()
-                .into_string()
-                .map_err(|_| ToolError::Path)?;
-            let selected = if path.is_empty() {
-                name
-            } else {
-                format!("{path}/{name}")
-            };
-            self.budget.entry(&selected)?;
-            if !valid_relative(&selected, false) {
-                return Err(if selected.split('/').any(forbidden) {
-                    ToolError::FilesystemDenied
-                } else {
-                    ToolError::Path
-                });
-            }
-            if selected.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
-                return Err(ToolError::Limit);
-            }
-            names.push(selected);
-        }
-        names.sort();
-        if names.is_empty() && !path.is_empty() {
-            self.retain()?;
-        }
-        drop(directory);
-        for selected in names {
-            self.entry(selected)?;
-        }
-        Ok(())
-    }
-
-    fn entry(&mut self, path: String) -> Result<(), ToolError> {
-        let file = open_file(self.root, &path)?;
-        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.mode() & 0o6000 != 0 {
-                return Err(ToolError::FilesystemDenied);
-            }
-        }
-        let entry = if metadata.is_dir() {
-            drop(file);
-            self.collect(&path)?;
-            Entry {
-                path: path.clone(),
-                content: None,
-                executable: false,
-            }
-        } else {
-            let executable = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o111 != 0
-            };
-            let cap = MAX_FILE_BYTES.min(COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget.bytes));
-            let content = read_regular(file, cap)?;
-            self.budget.content(content.len())?;
-            self.retain()?;
-            Entry {
-                path: path.clone(),
-                content: Some(content),
-                executable,
-            }
-        };
-        self.entries.insert(path, entry);
-        Ok(())
-    }
-
-    fn retain(&mut self) -> Result<(), ToolError> {
-        self.retained += 1;
-        if self.retained > COMMAND_SNAPSHOT_FILES {
-            return Err(ToolError::Limit);
-        }
-        Ok(())
-    }
+#[cfg(test)]
+pub(super) fn test_baseline(workspace: &Path) -> Result<command::CommandBaseline, ToolError> {
+    let base = workspace.with_extension("base");
+    let copied = std::process::Command::new("cp")
+        .arg("-Rp")
+        .arg(workspace)
+        .arg(&base)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    command_baseline(&base, workspace)
 }
 
 #[cfg(test)]
 pub(super) fn command_changeset(
     workspace: &Path,
-    before: &CommandSnapshot,
+    before: &command::CommandBaseline,
 ) -> Result<CommandChangeset, ToolError> {
-    let after = command_snapshot(workspace)?;
-    compare_command_snapshots(before, &after)
-}
-
-#[cfg(test)]
-fn compare_command_snapshots(
-    before: &CommandSnapshot,
-    after: &CommandSnapshot,
-) -> Result<CommandChangeset, ToolError> {
-    if after.root_identity != before.root_identity {
-        return Err(ToolError::ChangedInput);
-    }
-    let mut files = Vec::new();
-    let mut changed_bytes = 0usize;
-    let paths: BTreeSet<_> = before.entries.keys().chain(after.entries.keys()).collect();
-    for path in paths {
-        let old = before.entries.get(path);
-        let new = after.entries.get(path);
-        if old.is_some_and(|entry| entry.content.is_none())
-            && new.is_some_and(|entry| entry.content.is_some())
-            || old.is_some_and(|entry| entry.content.is_some())
-                && new.is_some_and(|entry| entry.content.is_none())
-        {
-            return Err(ToolError::Path);
-        }
-        if old.map(|entry| (&entry.content, entry.executable))
-            == new.map(|entry| (&entry.content, entry.executable))
-            || old
-                .into_iter()
-                .chain(new)
-                .all(|entry| entry.content.is_none())
-        {
-            continue;
-        }
-        for entry in old.into_iter().chain(new) {
-            changed_bytes = changed_bytes
-                .checked_add(entry.content.as_ref().map_or(0, Vec::len))
-                .ok_or(ToolError::Limit)?;
-        }
-        if changed_bytes > MAX_CHANGESET_BYTES || files.len() >= MAX_CHANGESET_FILES {
-            return Err(ToolError::Limit);
-        }
-        let version = |entry: Option<&Entry>| {
-            entry.and_then(|entry| {
-                entry
-                    .content
-                    .as_ref()
-                    .map(|content| FileVersion::from_bytes(content, entry.executable))
-            })
-        };
-        let old = version(old);
-        let new = version(new);
-        if old != new {
-            files.push(FileChange {
-                path: path.clone(),
-                before: old,
-                after: new,
-            });
-        }
-    }
-    let changeset = CommandChangeset { files };
-    if !changeset.valid() {
-        return Err(ToolError::Limit);
-    }
-    Ok(changeset)
+    selected_command_changeset(
+        workspace,
+        before,
+        &CommandSelection::default(),
+        std::time::Instant::now() + super::selection::TEST_RUNTIME,
+    )
+    .map(|(changeset, _)| changeset)
 }
 
 #[cfg(target_os = "macos")]
@@ -1148,8 +989,11 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
 }
 
 #[cfg(not(target_os = "macos"))]
+pub(super) const COMMAND_SEED: &str = "/seed/workspace";
+
+#[cfg(not(target_os = "macos"))]
 pub(super) fn copy_command_seed() -> Result<(), ToolError> {
-    let root = open_directory(Path::new("/seed/workspace"))?;
+    let root = open_directory(Path::new(COMMAND_SEED))?;
     let target = open_directory(Path::new("/workspace"))?;
     CommandSeedCopy {
         root: &root,
@@ -1454,8 +1298,7 @@ pub(super) fn fit_rows(
 }
 
 pub(super) fn in_process_mutation(intent: &EffectIntent) -> bool {
-    intent.target == crate::session::worker::EffectTarget::Workspace
-        && intent.call.facts().family == super::catalog::Family::File
+    intent.call.facts().family == super::catalog::Family::File
         && intent.call.facts().mutates
         && intent.enforcement_digest == FileReceipt::enforcement_digest()
 }
@@ -1940,10 +1783,91 @@ pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, To
     apply_files_controlled(root, files, &MutationControl::default())
 }
 
+// Publishes an editor's integration: every base digest must still hold in the Workspace, or the
+// conflicting paths are reported and nothing is written; after bytes come from the editor's tree.
+pub(super) fn apply_editor_changes(
+    root: &Dir,
+    tree: &Dir,
+    files: &[crate::session::worker::EditorChange],
+    control: &MutationControl,
+) -> Result<String, ToolError> {
+    let version = |state: &crate::session::rewind::FileState| FileVersion {
+        sha256: state.sha256.clone(),
+        content: String::new(),
+        executable: state.executable,
+    };
+    let changes: Vec<_> = files
+        .iter()
+        .map(|file| FileChange {
+            path: file.path.clone(),
+            before: file.before.as_ref().map(version),
+            after: file.after.as_ref().map(version),
+        })
+        .collect();
+    worker_publication_paths(root, &changes)?;
+    let mut conflicts = Vec::new();
+    for change in &changes {
+        control.check()?;
+        let parent = change_parent(root, &change.path)?;
+        let held = if parent.missing.is_empty() {
+            check_change_file(&parent.directory, &parent.leaf, change.before.as_ref()).map(|_| ())
+        } else if change.before.is_some() {
+            Err(ToolError::Conflict)
+        } else {
+            Ok(())
+        };
+        match held {
+            Ok(()) => {}
+            Err(ToolError::Conflict | ToolError::Limit) => conflicts.push(change.path.as_str()),
+            Err(error) => return Err(error),
+        }
+    }
+    if !conflicts.is_empty() {
+        return Err(ToolError::Conflicts(conflict_list(&conflicts)));
+    }
+    apply_files_with(root, &changes, control, |change, after| {
+        let file = open_file(tree, &change.path)?;
+        let metadata = command::command_metadata(&file)?;
+        let bytes = read_regular(file, MAX_FILE_BYTES)?;
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        if hex_digest(&bytes) != after.sha256 || executable != after.executable {
+            return Err(ToolError::ChangedInput);
+        }
+        Ok(bytes)
+    })
+}
+
+// At most this many conflicting paths are named; the rest are counted.
+const MAX_NAMED_CONFLICTS: usize = 32;
+
+fn conflict_list(paths: &[&str]) -> String {
+    let mut list = paths[..paths.len().min(MAX_NAMED_CONFLICTS)].join(", ");
+    if paths.len() > MAX_NAMED_CONFLICTS {
+        list.push_str(&format!(" and {} more", paths.len() - MAX_NAMED_CONFLICTS));
+    }
+    list
+}
+
 fn apply_files_controlled(
     root: &Dir,
     files: &[FileChange],
     control: &MutationControl,
+) -> Result<String, ToolError> {
+    apply_files_with(root, files, control, |_, after| {
+        after
+            .bytes_with_limit(MAX_FILE_BYTES)
+            .ok_or(ToolError::Path)
+    })
+}
+
+fn apply_files_with(
+    root: &Dir,
+    files: &[FileChange],
+    control: &MutationControl,
+    content: impl Fn(&FileChange, &FileVersion) -> Result<Vec<u8>, ToolError>,
 ) -> Result<String, ToolError> {
     check_change_directory(root, root)?;
     let mut parents = Vec::new();
@@ -2030,9 +1954,7 @@ fn apply_files_controlled(
             verify_change_parent(root, &parent)?;
             let mode = check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
             if let Some(after) = &change.after {
-                let bytes = after
-                    .bytes_with_limit(MAX_FILE_BYTES)
-                    .ok_or(ToolError::Path)?;
+                let bytes = content(change, after)?;
                 let mode = mode & 0o666
                     | if after.executable {
                         if mode & 0o111 == 0 {

@@ -158,7 +158,7 @@ fn change_goal_file(f: &mut Fixture) {
             expected_digest: Some(crate::validate::hex_digest(b"original")),
             content: "changed".into(),
         },
-        EffectTarget::Workspace,
+        f.editor_workspace(),
     );
     f.started(&intent);
     f.observed(&intent, ToolDisposition::Succeeded, Some(Attestation::for_site(&intent)),
@@ -171,9 +171,26 @@ fn editor_mutation_invalidates_goal_even_after_primary_verifies_a_distinct_assig
     let mut f = stale_goal_fixture();
     assert!(f.view().goal(f.goal).unwrap().success_criterion_satisfied);
     change_goal_file(&mut f);
-    assert!(!f.view().goal(f.goal).unwrap().success_criterion_satisfied);
+    // The edit is private until the editor's integration lands it in the Workspace.
+    assert!(f.view().goal(f.goal).unwrap().success_criterion_satisfied);
     f.mutation();
-    let cause = f.finish_worker();
+    let cause = f.finish_worker_with(vec![
+        f.integrated_change(),
+        EditorChange {
+            path: "src/base".into(),
+            before: Some(crate::session::rewind::FileState {
+                sha256: crate::validate::hex_digest(b"original"),
+                bytes: 8,
+                executable: false,
+            }),
+            after: Some(crate::session::rewind::FileState {
+                sha256: crate::validate::hex_digest(b"changed"),
+                bytes: 7,
+                executable: false,
+            }),
+        },
+    ]);
+    assert!(!f.view().goal(f.goal).unwrap().success_criterion_satisfied);
     f.release(cause);
     f.verify();
     let view = f.view();
@@ -275,7 +292,11 @@ fn write_observation(f: &mut Fixture, actor: AgentRunId, before: &str, after: &s
             expected_digest: Some(crate::validate::hex_digest(before.as_bytes())),
             content: after.into(),
         },
-        EffectTarget::Workspace,
+        if actor == f.primary {
+            EffectTarget::Workspace
+        } else {
+            f.editor_workspace()
+        },
     );
     f.started(&intent);
     f.observed(&intent, ToolDisposition::Succeeded, Some(Attestation::for_site(&intent)),

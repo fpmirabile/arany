@@ -117,7 +117,7 @@ fn researcher_completion_cannot_retain_editor_checkpoint_metadata() {
             offset: None,
             limit: Some(32),
         },
-        EffectTarget::Workspace,
+        f.editor_workspace(),
     );
     f.started(&intent);
     let mut view = f.view();

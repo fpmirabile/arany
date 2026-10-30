@@ -1127,7 +1127,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                                 }
                                 "help" => draw_help_frame(frame, area, 0, armed, palette),
                                 "settings" => draw_settings_frame(
-                                    frame, area, &settings, 3, armed, None, palette,
+                                    frame, area, "Settings", &settings, 3, armed, None, palette,
                                 ),
                                 _ => draw_agent_inspector_frame(
                                     frame, area, &agents, 0, armed, None, palette,

@@ -965,19 +965,20 @@ impl Rule {
                 source: crate::session::worker::ChangesetSource::Rewind { .. },
             } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                    | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
             } => {
+                let paths = call.changeset_paths();
                 if decision == Decision::Allow {
-                    !changeset.files.is_empty()
-                        && changeset
-                            .files
+                    !paths.is_empty()
+                        && paths
                             .iter()
-                            .all(|file| path_matches(pattern, &file.path, decision))
+                            .all(|path| path_matches(pattern, path, decision))
                 } else {
-                    changeset
-                        .files
+                    paths
                         .iter()
-                        .any(|file| path_matches(pattern, &file.path, decision))
+                        .any(|path| path_matches(pattern, path, decision))
                 }
             }
             _ => path_of(call).is_some_and(|path| path_matches(pattern, path, decision)),

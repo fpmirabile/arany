@@ -84,7 +84,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             expected_digest: None,
             content: "new".into(),
         },
-        EffectTarget::Workspace,
+        f.editor_workspace(),
     );
     f.started(&intent);
     f.push(Event::ToolStarted {

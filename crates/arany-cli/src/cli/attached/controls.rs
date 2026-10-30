@@ -86,6 +86,29 @@ fn on_off(value: bool) -> &'static str {
 enum SettingInput {
     Choice,
     Typed,
+    Link,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Panel {
+    Settings,
+    Limits,
+}
+
+impl Panel {
+    fn table(self) -> &'static [Setting] {
+        match self {
+            Self::Settings => SETTINGS,
+            Self::Limits => LIMITS,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::Limits => "Limits",
+        }
+    }
 }
 
 struct Setting {
@@ -134,6 +157,57 @@ const SETTINGS: &[Setting] = &[
         reset: |p, default| p.view = default.view,
         guidance: None,
     },
+    Setting {
+        label: "Copy on select",
+        hint: "on|off",
+        input: SettingInput::Choice,
+        value: |p| on_off(p.copy_on_select).into(),
+        apply: |p, raw| {
+            p.copy_on_select = [true, false]
+                .into_iter()
+                .find(|value| on_off(*value) == raw)?;
+            Some(())
+        },
+        cycle: |p, _| {
+            p.copy_on_select = !p.copy_on_select;
+        },
+        reset: |p, default| p.copy_on_select = default.copy_on_select,
+        guidance: None,
+    },
+    Setting {
+        label: "Newline shortcut",
+        hint: "shift+enter|alt+enter|ctrl+enter",
+        input: SettingInput::Choice,
+        value: |p| p.newline.label().into(),
+        apply: |p, raw| {
+            p.newline = NewlineShortcut::ALL
+                .into_iter()
+                .find(|value| value.label().eq_ignore_ascii_case(raw))?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
+        },
+        reset: |p, default| p.newline = default.newline,
+        guidance: Some(AttachedTerminal::newline_shortcut_guidance),
+    },
+    LIMITS_LINK,
+];
+
+// The settings panel's last row opens `/limits` and returns here when it closes.
+const LIMITS_LINK: Setting = Setting {
+    label: "Limits",
+    hint: "opens /limits",
+    input: SettingInput::Link,
+    value: |_| "opens /limits".into(),
+    apply: |_, _| None,
+    cycle: |_, _| {},
+    reset: |_, _| {},
+    guidance: None,
+};
+
+// `/limits` holds the bounds pinned into each Goal; `/settings` links to it.
+const LIMITS: &[Setting] = &[
     Setting {
         label: "Provider calls per task",
         hint: "number or unlimited",
@@ -342,40 +416,6 @@ const SETTINGS: &[Setting] = &[
         reset: |p, default| p.resources.build_cache_bytes = default.resources.build_cache_bytes,
         guidance: None,
     },
-    Setting {
-        label: "Copy on select",
-        hint: "on|off",
-        input: SettingInput::Choice,
-        value: |p| on_off(p.copy_on_select).into(),
-        apply: |p, raw| {
-            p.copy_on_select = [true, false]
-                .into_iter()
-                .find(|value| on_off(*value) == raw)?;
-            Some(())
-        },
-        cycle: |p, _| {
-            p.copy_on_select = !p.copy_on_select;
-        },
-        reset: |p, default| p.copy_on_select = default.copy_on_select,
-        guidance: None,
-    },
-    Setting {
-        label: "Newline shortcut",
-        hint: "shift+enter|alt+enter|ctrl+enter",
-        input: SettingInput::Choice,
-        value: |p| p.newline.label().into(),
-        apply: |p, raw| {
-            p.newline = NewlineShortcut::ALL
-                .into_iter()
-                .find(|value| value.label().eq_ignore_ascii_case(raw))?;
-            Some(())
-        },
-        cycle: |p, forward| {
-            p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
-        },
-        reset: |p, default| p.newline = default.newline,
-        guidance: Some(AttachedTerminal::newline_shortcut_guidance),
-    },
     build_jobs::SETTING,
     build_cpu::SETTING,
     Setting {
@@ -391,6 +431,49 @@ const SETTINGS: &[Setting] = &[
             p.context_window = step(p.context_window, &CONTEXT_WINDOW_PRESETS, forward);
         },
         reset: |p, default| p.context_window = default.context_window,
+        guidance: None,
+    },
+    Setting {
+        label: "Editor changes: files",
+        hint: "number of files",
+        input: SettingInput::Typed,
+        value: |p| p.resources.editor_change_files.to_string(),
+        apply: |p, raw| {
+            p.resources.editor_change_files = raw.parse().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.editor_change_files = step(
+                p.resources.editor_change_files,
+                &[512, 1024, 2048, 128, 256],
+                forward,
+            );
+        },
+        reset: |p, default| p.resources.editor_change_files = default.resources.editor_change_files,
+        guidance: None,
+    },
+    Setting {
+        label: "Editor changes: size",
+        hint: "size, e.g. 64MB",
+        input: SettingInput::Typed,
+        value: |p| format_setting_size(p.resources.editor_change_bytes),
+        apply: |p, raw| {
+            p.resources.editor_change_bytes = parse_size(raw)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.editor_change_bytes = step(
+                p.resources.editor_change_bytes,
+                &[
+                    64 * 1024 * 1024,
+                    256 * 1024 * 1024,
+                    1024_u64.pow(3),
+                    16 * 1024 * 1024,
+                ],
+                forward,
+            );
+        },
+        reset: |p, default| p.resources.editor_change_bytes = default.resources.editor_change_bytes,
         guidance: None,
     },
 ];
@@ -527,7 +610,7 @@ fn format_setting_size(bytes: u64) -> String {
 }
 
 // Linear rows take `NUMBER VALUE`, numbered by the same table that renders them.
-fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
+fn apply_setting(table: &[Setting], preferences: &mut Preferences, value: &str) -> bool {
     let Some((number, raw)) = value.split_once(' ') else {
         return false;
     };
@@ -535,12 +618,22 @@ fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
         .parse::<usize>()
         .ok()
         .and_then(|number| number.checked_sub(1))
-        .is_some_and(|row| apply_row(preferences, row, raw))
+        .is_some_and(|row| apply_row(table, preferences, row, raw))
+}
+
+// A linear bare row NUMBER selects a link row.
+fn linear_link(table: &[Setting], value: &str) -> bool {
+    value
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|row| table.get(row))
+        .is_some_and(|setting| setting.input == SettingInput::Link)
 }
 
 // Linear `NUMBER VALUE` and the visual value field share this parser.
-fn apply_row(preferences: &mut Preferences, row: usize, raw: &str) -> bool {
-    let Some(setting) = SETTINGS.get(row) else {
+fn apply_row(table: &[Setting], preferences: &mut Preferences, row: usize, raw: &str) -> bool {
+    let Some(setting) = table.get(row) else {
         return false;
     };
     let mut chosen = *preferences;
@@ -558,6 +651,9 @@ fn apply_row(preferences: &mut Preferences, row: usize, raw: &str) -> bool {
 }
 
 fn setting_value(setting: &Setting, preferences: &Preferences) -> String {
+    if setting.input == SettingInput::Link {
+        return (setting.value)(preferences);
+    }
     let mut reset = *preferences;
     (setting.reset)(&mut reset, &Preferences::default());
     let value = (setting.value)(preferences);
@@ -583,29 +679,39 @@ fn setting_value_used(
     }
 }
 
-fn setting_rows(preferences: Preferences, cache_used: Option<u64>) -> Vec<String> {
-    SETTINGS
+fn setting_rows(
+    table: &[Setting],
+    preferences: Preferences,
+    cache_used: Option<u64>,
+) -> Vec<String> {
+    table
         .iter()
-        .map(|setting| {
-            format!(
+        .map(|setting| match setting.input {
+            SettingInput::Link => format!("{} ›", setting.label),
+            SettingInput::Choice | SettingInput::Typed => format!(
                 "{}: {}",
                 setting.label,
                 setting_value_used(setting, &preferences, cache_used)
-            )
+            ),
         })
         .collect()
 }
 
-fn linear_setting_rows(preferences: Preferences, cache_used: Option<u64>) -> Vec<String> {
-    SETTINGS
+fn linear_setting_rows(
+    table: &[Setting],
+    preferences: Preferences,
+    cache_used: Option<u64>,
+) -> Vec<String> {
+    table
         .iter()
-        .map(|setting| {
-            format!(
+        .map(|setting| match setting.input {
+            SettingInput::Link => format!("{}: {}", setting.label, setting.hint),
+            SettingInput::Choice | SettingInput::Typed => format!(
                 "{}: {} ({})",
                 setting.label,
                 setting_value_used(setting, &preferences, cache_used),
                 setting.hint
-            )
+            ),
         })
         .collect()
 }
@@ -622,19 +728,20 @@ fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
     }]
 }
 
-fn reset_setting(preferences: &mut Preferences, row: usize) {
-    if let Some(setting) = SETTINGS.get(row) {
+fn reset_setting(table: &[Setting], preferences: &mut Preferences, row: usize) {
+    if let Some(setting) = table.get(row) {
         (setting.reset)(preferences, &Preferences::default());
     }
 }
 
 fn cycle_setting(
+    table: &[Setting],
     preferences: &mut Preferences,
     row: usize,
     forward: bool,
     model_window: Option<u32>,
 ) {
-    if let Some(setting) = SETTINGS.get(row) {
+    if let Some(setting) = table.get(row) {
         let mut chosen = *preferences;
         (setting.cycle)(&mut chosen, forward);
         // Token presets larger than the known model window are skipped; percentages always fit.
@@ -825,6 +932,7 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
 
 fn settings_notice(
     terminal: &AttachedTerminal,
+    table: &[Setting],
     selected_row: usize,
     invalid: &mut bool,
     linear_guidance: &mut bool,
@@ -842,7 +950,7 @@ fn settings_notice(
     } else if std::mem::take(linear_guidance) {
         Some("Modified newline shortcuts apply only to visual sessions; use backslash then Enter here".to_owned())
     } else {
-        SETTINGS
+        table
             .get(selected_row)
             .and_then(|setting| setting.guidance)
             .map(|guidance| guidance(terminal))
@@ -901,53 +1009,73 @@ fn field_notice(setting: &Setting, invalid: &mut bool) -> String {
 }
 
 fn visual_rows(
+    table: &[Setting],
     chosen: Preferences,
     cache_used: Option<u64>,
     selected_row: usize,
     field: Option<&str>,
 ) -> Vec<String> {
-    let mut rows = setting_rows(chosen, cache_used);
-    if let (Some(text), Some(row), Some(setting)) = (
-        field,
-        rows.get_mut(selected_row),
-        SETTINGS.get(selected_row),
-    ) {
+    let mut rows = setting_rows(table, chosen, cache_used);
+    if let (Some(text), Some(row), Some(setting)) =
+        (field, rows.get_mut(selected_row), table.get(selected_row))
+    {
         *row = format!("{}: {text}▏", setting.label);
     }
     rows
 }
 
-async fn choose_settings(
+// Boxed so the settings panel can open its `/limits` link and return to itself.
+fn choose_settings<'a>(
+    terminal: &'a mut AttachedTerminal,
+    chosen: Preferences,
+    cache_used: Option<u64>,
+    view: &'a SessionView,
+    panel: Panel,
+) -> std::pin::Pin<Box<dyn Future<Output = Result<Option<Preferences>, String>> + 'a>> {
+    Box::pin(choose_panel(terminal, chosen, cache_used, view, panel))
+}
+
+async fn choose_panel(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
     cache_used: Option<u64>,
     view: &SessionView,
+    panel: Panel,
 ) -> Result<Option<Preferences>, String> {
+    let table = panel.table();
     let linear = terminal.is_linear();
     let model_window = model_window(view);
     let mut selected_row = 0usize;
     let mut answer = Composer::default();
     let mut field: Option<String> = None;
     let mut invalid = false;
-    let mut linear_guidance = linear;
+    let mut linear_guidance = linear && panel == Panel::Settings;
     terminal.begin_dialog();
     loop {
-        let typed_row = SETTINGS[selected_row].input == SettingInput::Typed;
+        let input_kind = table[selected_row].input;
         let notice = match &field {
-            Some(_) => Some(field_notice(&SETTINGS[selected_row], &mut invalid)),
-            None if typed_row && !linear && !invalid => Some(format!(
-                "Enter types a value: {}",
-                SETTINGS[selected_row].hint
-            )),
-            None => settings_notice(terminal, selected_row, &mut invalid, &mut linear_guidance),
+            Some(_) => Some(field_notice(&table[selected_row], &mut invalid)),
+            None if input_kind == SettingInput::Typed && !linear && !invalid => {
+                Some(format!("Enter types a value: {}", table[selected_row].hint))
+            }
+            None if input_kind == SettingInput::Link && !linear && !invalid => {
+                Some(format!("Enter {}", table[selected_row].hint))
+            }
+            None => settings_notice(
+                terminal,
+                table,
+                selected_row,
+                &mut invalid,
+                &mut linear_guidance,
+            ),
         };
         let rows = if linear {
-            linear_setting_rows(chosen, cache_used)
+            linear_setting_rows(table, chosen, cache_used)
         } else {
-            visual_rows(chosen, cache_used, selected_row, field.as_deref())
+            visual_rows(table, chosen, cache_used, selected_row, field.as_deref())
         };
         terminal
-            .draw_settings(&rows, selected_row, notice.as_deref(), view)
+            .draw_settings(panel.title(), &rows, selected_row, notice.as_deref(), view)
             .map_err(|error| error.to_string())?;
         if terminal
             .arm_dialog()
@@ -969,7 +1097,7 @@ async fn choose_settings(
                 }
                 FieldKey::Submit if text.trim().is_empty() => return Ok(Some(chosen)),
                 FieldKey::Submit => {
-                    if apply_row(&mut chosen, selected_row, &text.to_ascii_lowercase()) {
+                    if apply_row(table, &mut chosen, selected_row, &text.to_ascii_lowercase()) {
                         field = None;
                     } else {
                         invalid = true;
@@ -983,13 +1111,14 @@ async fn choose_settings(
             TerminalInput::Up if !linear => selected_row = selected_row.saturating_sub(1),
             TerminalInput::Down if !linear => selected_row = (selected_row + 1).min(rows.len() - 1),
             TerminalInput::Left | TerminalInput::Right if !linear => cycle_setting(
+                table,
                 &mut chosen,
                 selected_row,
                 input == TerminalInput::Right,
                 model_window,
             ),
             TerminalInput::Backspace | TerminalInput::Delete if !linear => {
-                reset_setting(&mut chosen, selected_row);
+                reset_setting(table, &mut chosen, selected_row);
             }
             TerminalInput::Character(_) if !linear => {
                 selected_row = input.choice_index(rows.len()).unwrap_or(selected_row);
@@ -1005,10 +1134,24 @@ async fn choose_settings(
                 match value.as_str() {
                     "" => return Ok(Some(chosen)),
                     "q" => return Ok(None),
-                    value => invalid = !apply_setting(&mut chosen, value),
+                    value if linear_link(table, value) => {
+                        chosen = choose_settings(terminal, chosen, cache_used, view, Panel::Limits)
+                            .await?
+                            .unwrap_or(chosen);
+                        terminal.begin_dialog();
+                    }
+                    value => invalid = !apply_setting(table, &mut chosen, value),
                 }
             }
-            TerminalInput::Submit if typed_row => field = Some(String::new()),
+            TerminalInput::Submit if input_kind == SettingInput::Typed => {
+                field = Some(String::new());
+            }
+            TerminalInput::Submit if input_kind == SettingInput::Link => {
+                chosen = choose_settings(terminal, chosen, cache_used, view, Panel::Limits)
+                    .await?
+                    .unwrap_or(chosen);
+                terminal.begin_dialog();
+            }
             TerminalInput::Submit => return Ok(Some(chosen)),
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(None);
@@ -1034,6 +1177,7 @@ pub(super) async fn settings(
     composer: &mut Composer,
     saved_view: &mut TerminalMode,
     view: &SessionView,
+    panel: Panel,
 ) -> Result<String, String> {
     let linear = terminal.is_linear();
     let mut current = restore_settings(admission).await?;
@@ -1041,8 +1185,8 @@ pub(super) async fn settings(
     current.newline = composer.newline_shortcut();
     current.view = *saved_view;
     let cache_used = build_cache_used(admission).await;
-    let notice = match choose_settings(terminal, current, cache_used, view).await? {
-        None => "Settings unchanged".to_owned(),
+    let notice = match choose_settings(terminal, current, cache_used, view, panel).await? {
+        None => format!("{} unchanged", panel.title()),
         Some(chosen) => match save_settings(admission, chosen).await {
             Ok(()) => {
                 let view_changed = chosen.view != *saved_view;
@@ -1057,7 +1201,8 @@ pub(super) async fn settings(
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
-                    "Settings saved · calls {} · active {} · command max {}{}",
+                    "{} saved · calls {} · active {} · command max {}{}",
+                    panel.title(),
                     chosen
                         .goal_budget
                         .max_provider_calls
@@ -2143,64 +2288,64 @@ mod tests {
     fn linear_settings_take_number_value_and_reject_invalid_rows_unchanged() {
         let mut preferences = Preferences::default();
         let original = preferences;
-        for value in [
-            "",
-            "3",
-            "3 ",
-            "0 64",
-            "12 64",
-            "12 yes",
-            "12 wheel only",
-            "13 yes",
-            "14 on",
-            "x 64",
-            "calls=64",
-            "combined",
-            "1 fullscreen",
-            "2 tabs",
-            "3 0",
-            "3 4294967296",
-            "4 0",
-            "5 0s",
-            "6 600.001s",
-            "7 119.999s",
-            "6 unlimited",
-            "8 0B",
-            "9 257",
-            "10 1073741825B",
-            "10 1B",
-            "10 1073741823B",
-            "11 8589934593B",
-            "11 1B",
-            "11 8589934591B",
-            "5 60000",
-            "6 30000",
-            "8 512",
-            "5 8.001h",
-            "5 -1s",
-            "5 +1s",
-            "5 NaNs",
-            "5 1e3s",
-            "5 .5s",
-            "5 1.s",
-            "5 1..5s",
-            "5 1ms",
-            "5 0.0001s",
-            "5 1s 1m",
-            "5 1s 1s",
-            "5 1s junk",
-            "5 18446744073709551615h",
-            "5 18446744073709551.615s 1s",
-            "6 4294967.296s",
-            "8 unlimited",
-            "8 0.1B",
-            "8 1GB 1MB",
-            "8 1XB",
-            "8 18446744073709551616B",
-            "8 18446744073709551615TB",
-            "8 0.0000000000000000000000000000000000000001KB",
+        for (table, value) in [
+            (SETTINGS, ""),
+            (LIMITS, "1"),
+            (LIMITS, "1 "),
+            (LIMITS, "0 64"),
+            (SETTINGS, "3 64"),
+            (SETTINGS, "3 yes"),
+            (SETTINGS, "3 wheel only"),
+            (SETTINGS, "4 yes"),
+            (LIMITS, "10 on"),
+            (SETTINGS, "x 64"),
+            (SETTINGS, "calls=64"),
+            (SETTINGS, "combined"),
+            (SETTINGS, "1 fullscreen"),
+            (SETTINGS, "2 tabs"),
+            (LIMITS, "1 0"),
+            (LIMITS, "1 4294967296"),
+            (LIMITS, "2 0"),
+            (LIMITS, "3 0s"),
+            (LIMITS, "4 600.001s"),
+            (LIMITS, "5 119.999s"),
+            (LIMITS, "4 unlimited"),
+            (LIMITS, "6 0B"),
+            (LIMITS, "7 257"),
+            (LIMITS, "8 1073741825B"),
+            (LIMITS, "8 1B"),
+            (LIMITS, "8 1073741823B"),
+            (LIMITS, "9 8589934593B"),
+            (LIMITS, "9 1B"),
+            (LIMITS, "9 8589934591B"),
+            (LIMITS, "3 60000"),
+            (LIMITS, "4 30000"),
+            (LIMITS, "6 512"),
+            (LIMITS, "3 8.001h"),
+            (LIMITS, "3 -1s"),
+            (LIMITS, "3 +1s"),
+            (LIMITS, "3 NaNs"),
+            (LIMITS, "3 1e3s"),
+            (LIMITS, "3 .5s"),
+            (LIMITS, "3 1.s"),
+            (LIMITS, "3 1..5s"),
+            (LIMITS, "3 1ms"),
+            (LIMITS, "3 0.0001s"),
+            (LIMITS, "3 1s 1m"),
+            (LIMITS, "3 1s 1s"),
+            (LIMITS, "3 1s junk"),
+            (LIMITS, "3 18446744073709551615h"),
+            (LIMITS, "3 18446744073709551.615s 1s"),
+            (LIMITS, "4 4294967.296s"),
+            (LIMITS, "6 unlimited"),
+            (LIMITS, "6 0.1B"),
+            (LIMITS, "6 1GB 1MB"),
+            (LIMITS, "6 1XB"),
+            (LIMITS, "6 18446744073709551616B"),
+            (LIMITS, "6 18446744073709551615TB"),
+            (LIMITS, "6 0.0000000000000000000000000000000000000001KB"),
         ] {
-            assert!(!apply_setting(&mut preferences, value), "{value}");
+            assert!(!apply_setting(table, &mut preferences, value), "{value}");
             assert_eq!(
                 preferences, original,
                 "invalid value changed draft: {value}"
@@ -2229,10 +2374,21 @@ mod tests {
             }
         };
         assert_eq!(
-            linear_setting_rows(preferences, None),
+            linear_setting_rows(SETTINGS, preferences, None),
             [
                 "Slash menu: tabs (default) (tabs|combined)",
                 "Chat view: fullscreen (default) (fullscreen|classic)",
+                "Copy on select: on (default) (on|off)",
+                "Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)",
+                "Limits: opens /limits",
+            ]
+        );
+        assert_eq!(setting_rows(SETTINGS, preferences, None)[4], "Limits ›");
+        assert!(linear_link(SETTINGS, "5") && !linear_link(SETTINGS, "4"));
+        assert!(!apply_setting(SETTINGS, &mut preferences, "5 on"));
+        assert_eq!(
+            linear_setting_rows(LIMITS, preferences, None),
+            [
                 "Provider calls per task: unlimited (default) (number or unlimited)",
                 "Tokens per task: unlimited (default) (number or unlimited)",
                 "Active time per task: unlimited (default) (duration or unlimited)",
@@ -2242,11 +2398,11 @@ mod tests {
                 "Build processes/threads: 256 (default) (number)",
                 "Build writable project: 1.0 GB (default) (size, e.g. 1GB)",
                 "Build cache: unlimited (default) (size or unlimited, e.g. 8GB)",
-                "Copy on select: on (default) (on|off)",
-                "Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)",
                 build_jobs.as_str(),
                 build_cpu.as_str(),
                 "Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)",
+                "Editor changes: files: 512 (default) (number of files)",
+                "Editor changes: size: 64.0 MB (default) (size, e.g. 64MB)",
             ]
         );
         for (raw, expected) in [
@@ -2254,11 +2410,18 @@ mod tests {
             ("500k", arany::ContextWindow::Tokens(500_000)),
             ("500000", arany::ContextWindow::Tokens(500_000)),
         ] {
-            assert!(apply_setting(&mut preferences, &format!("16 {raw}")));
+            assert!(apply_setting(
+                LIMITS,
+                &mut preferences,
+                &format!("12 {raw}")
+            ));
             assert_eq!(preferences.context_window, expected);
         }
-        for rejected in ["16 5%", "16 101%", "16 1000", "16 3m"] {
-            assert!(!apply_setting(&mut preferences, rejected), "{rejected}");
+        for rejected in ["12 5%", "12 101%", "12 1000", "12 3m"] {
+            assert!(
+                !apply_setting(LIMITS, &mut preferences, rejected),
+                "{rejected}"
+            );
         }
         assert_eq!(
             preferences.context_window,
@@ -2271,11 +2434,31 @@ mod tests {
             "only the changed key is saved"
         );
         assert_eq!(decode_settings(&saved), preferences);
-        assert!(apply_setting(&mut preferences, "16 default"));
+        assert!(apply_setting(LIMITS, &mut preferences, "12 default"));
+        assert_eq!(preferences, Preferences::default());
+        assert!(apply_setting(LIMITS, &mut preferences, "13 300"));
+        assert!(apply_setting(LIMITS, &mut preferences, "14 128MB"));
+        assert_eq!(preferences.resources.editor_change_files, 300);
+        assert_eq!(preferences.resources.editor_change_bytes, 128 * 1024 * 1024);
+        for rejected in [
+            "13 0",
+            "13 2049",
+            "13 unlimited",
+            "14 1B",
+            "14 2GB",
+            "14 unlimited",
+        ] {
+            assert!(
+                !apply_setting(LIMITS, &mut preferences, rejected),
+                "{rejected}"
+            );
+        }
+        assert!(apply_setting(LIMITS, &mut preferences, "13 default"));
+        assert!(apply_setting(LIMITS, &mut preferences, "14 default"));
         assert_eq!(preferences, Preferences::default());
         let mut cycled = Vec::new();
         for _ in 0..CONTEXT_WINDOW_PRESETS.len() {
-            cycle_setting(&mut preferences, 15, true, Some(400_000));
+            cycle_setting(LIMITS, &mut preferences, 11, true, Some(400_000));
             cycled.push(preferences.context_window.to_string());
         }
         assert_eq!(
@@ -2284,10 +2467,15 @@ mod tests {
             "token presets above the model window are skipped"
         );
         preferences = Preferences::default();
-        cycle_setting(&mut preferences, 15, false, None);
+        cycle_setting(LIMITS, &mut preferences, 11, false, None);
         assert_eq!(preferences.context_window.to_string(), "128k");
         preferences = Preferences::default();
-        let typed = SETTINGS
+        assert!(
+            SETTINGS
+                .iter()
+                .all(|setting| setting.input != SettingInput::Typed)
+        );
+        let typed = LIMITS
             .iter()
             .filter(|setting| setting.input == SettingInput::Typed)
             .map(|setting| setting.label)
@@ -2303,7 +2491,7 @@ mod tests {
             ("0.001S", 1),
             ("0.0001m", 6),
         ] {
-            assert!(apply_setting(&mut preferences, &format!("5 {raw}")));
+            assert!(apply_setting(LIMITS, &mut preferences, &format!("3 {raw}")));
             assert_eq!(preferences.goal_budget.max_active_ms, Some(expected));
         }
         for (raw, expected) in [
@@ -2315,72 +2503,77 @@ mod tests {
             ("0.00390625KB", 4),
             ("4.0 GB", 4 * 1024_u64.pow(3)),
         ] {
-            assert!(apply_setting(&mut preferences, &format!("8 {raw}")));
+            assert!(apply_setting(LIMITS, &mut preferences, &format!("6 {raw}")));
             assert_eq!(preferences.resources.build_memory_bytes, expected);
         }
-        assert!(apply_setting(&mut preferences, "6 1.5s"));
+        assert!(apply_setting(LIMITS, &mut preferences, "4 1.5s"));
         assert_eq!(preferences.resources.default_command_timeout_ms, 1500);
-        assert!(apply_setting(&mut preferences, "10 512MB"));
+        assert!(apply_setting(LIMITS, &mut preferences, "8 512MB"));
         assert_eq!(preferences.resources.build_project_bytes, 512 * 1024 * 1024);
-        assert!(apply_setting(&mut preferences, "11 0B"));
+        assert!(apply_setting(LIMITS, &mut preferences, "9 0B"));
         assert_eq!(
             preferences.resources.build_cache_bytes,
             BuildCacheSize::DISABLED
         );
-        assert!(apply_setting(&mut preferences, "11 8gb"));
+        assert!(apply_setting(LIMITS, &mut preferences, "9 8gb"));
         assert_eq!(
             preferences.resources.build_cache_bytes,
             BuildCacheSize::Bytes(8 * 1024_u64.pow(3))
         );
-        assert!(apply_setting(&mut preferences, "11 unlimited"));
+        assert!(apply_setting(LIMITS, &mut preferences, "9 unlimited"));
         assert_eq!(
             preferences.resources.build_cache_bytes,
             BuildCacheSize::Unlimited
         );
         assert_eq!(
-            setting_rows(preferences, Some(3_435_973_837))[10],
+            setting_rows(LIMITS, preferences, Some(3_435_973_837))[8],
             "Build cache: unlimited (default) · 3.2 GB used"
         );
         for shortcut in NewlineShortcut::ALL {
             assert!(apply_setting(
+                SETTINGS,
                 &mut preferences,
-                &format!("13 {}", shortcut.label().to_ascii_lowercase())
+                &format!("4 {}", shortcut.label().to_ascii_lowercase())
             ));
             assert_eq!(preferences.newline, shortcut);
-            cycle_setting(&mut preferences, 12, true, None);
-            cycle_setting(&mut preferences, 12, false, None);
+            cycle_setting(SETTINGS, &mut preferences, 3, true, None);
+            cycle_setting(SETTINGS, &mut preferences, 3, false, None);
             assert_eq!(preferences.newline, shortcut);
         }
-        assert!(apply_setting(&mut preferences, "1 combined"));
-        assert!(apply_setting(&mut preferences, "2  fullscreen"));
-        assert!(apply_setting(&mut preferences, "3 8"));
+        assert!(apply_setting(SETTINGS, &mut preferences, "1 combined"));
+        assert!(apply_setting(SETTINGS, &mut preferences, "2  fullscreen"));
+        assert!(apply_setting(LIMITS, &mut preferences, "1 8"));
         assert_eq!(preferences.goal_budget.max_provider_calls, Some(8));
-        assert!(apply_setting(&mut preferences, "3 unlimited"));
-        assert!(apply_setting(&mut preferences, "5 1min"));
+        assert!(apply_setting(LIMITS, &mut preferences, "1 unlimited"));
+        assert!(apply_setting(LIMITS, &mut preferences, "3 1min"));
         assert_eq!(preferences.goal_budget.max_active_ms, Some(60_000));
-        assert!(apply_setting(&mut preferences, "5 unlimited"));
-        assert!(apply_setting(&mut preferences, "4 100000"));
-        assert!(apply_setting(&mut preferences, "7 5m"));
-        assert!(apply_setting(&mut preferences, "12 off"));
+        assert!(apply_setting(LIMITS, &mut preferences, "3 unlimited"));
+        assert!(apply_setting(LIMITS, &mut preferences, "2 100000"));
+        assert!(apply_setting(LIMITS, &mut preferences, "5 5m"));
+        assert!(apply_setting(SETTINGS, &mut preferences, "3 off"));
         assert!(!preferences.copy_on_select);
-        cycle_setting(&mut preferences, 11, true, None);
+        cycle_setting(SETTINGS, &mut preferences, 2, true, None);
         assert!(preferences.copy_on_select);
         assert_eq!(preferences.completion, CompletionLayout::Combined);
         assert_eq!(preferences.view, TerminalMode::Fullscreen);
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
         assert_eq!(preferences.goal_budget.max_tokens, Some(100_000));
         assert_eq!(preferences.resources.max_command_timeout_ms, 300_000);
-        assert!(setting_rows(preferences, None).contains(&"Tokens per task: 100000".into()));
-        assert!(apply_setting(&mut preferences, "4 default"));
         assert!(
-            setting_rows(preferences, None)
+            setting_rows(LIMITS, preferences, None).contains(&"Tokens per task: 100000".into())
+        );
+        assert!(apply_setting(LIMITS, &mut preferences, "2 default"));
+        assert!(
+            setting_rows(LIMITS, preferences, None)
                 .contains(&"Tokens per task: unlimited (default)".into())
         );
-        assert!(apply_setting(&mut preferences, "3 64"));
-        reset_setting(&mut preferences, 2);
+        assert!(apply_setting(LIMITS, &mut preferences, "1 64"));
+        reset_setting(LIMITS, &mut preferences, 0);
         assert_eq!(preferences.goal_budget, Preferences::default().goal_budget);
-        for row in 0..SETTINGS.len() {
-            reset_setting(&mut preferences, row);
+        for table in [SETTINGS, LIMITS] {
+            for row in 0..table.len() {
+                reset_setting(table, &mut preferences, row);
+            }
         }
         assert_eq!(preferences, Preferences::default());
     }
@@ -2388,8 +2581,8 @@ mod tests {
     #[test]
     fn goal_budget_cycles_start_at_their_unlimited_default() {
         let mut preferences = Preferences::default();
-        for (row, first) in [(2, Some(256)), (4, Some(arany::MAX_GOAL_ACTIVE_MS))] {
-            cycle_setting(&mut preferences, row, true, None);
+        for (row, first) in [(0, Some(256)), (2, Some(arany::MAX_GOAL_ACTIVE_MS))] {
+            cycle_setting(LIMITS, &mut preferences, row, true, None);
             let budget = preferences.goal_budget;
             assert_eq!(
                 budget
@@ -2398,7 +2591,7 @@ mod tests {
                     .or(budget.max_active_ms),
                 first
             );
-            cycle_setting(&mut preferences, row, false, None);
+            cycle_setting(LIMITS, &mut preferences, row, false, None);
             assert_eq!(preferences, Preferences::default());
         }
     }
@@ -2467,14 +2660,18 @@ mod tests {
                 build_cpu_cores: None,
                 build_project_bytes: 513 * 1024 * 1024,
                 build_cache_bytes: BuildCacheSize::Bytes(1025 * 1024 * 1024),
+                editor_change_files: 300,
+                editor_change_bytes: 33 * 1024 * 1024,
             },
             copy_on_select: false,
             newline: NewlineShortcut::AltEnter,
             context_window: arany::ContextWindow::Tokens(123_456),
         };
-        assert!(setting_rows(custom, None).contains(&"Build memory: 1.0009765625 KB".into()));
-        assert!(setting_rows(custom, None).contains(&"Context window: 123456".into()));
-        assert!(setting_rows(custom, None).contains(&"Build cache: 1.0009765625 GB".into()));
+        let rows = setting_rows(LIMITS, custom, None);
+        assert!(rows.contains(&"Build memory: 1.0009765625 KB".into()));
+        assert!(rows.contains(&"Context window: 123456".into()));
+        assert!(rows.contains(&"Build cache: 1.0009765625 GB".into()));
+        assert!(rows.contains(&"Editor changes: size: 33.0 MB".into()));
         for mut original in [defaults, custom] {
             for memory in [
                 1,
@@ -2488,19 +2685,26 @@ mod tests {
             ] {
                 original.resources.build_memory_bytes = memory;
                 assert!(original.resources.valid());
-                for (index, setting) in SETTINGS.iter().enumerate() {
+                for (table, index, setting) in [SETTINGS, LIMITS].into_iter().flat_map(|table| {
+                    table
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, setting)| setting.input != SettingInput::Link)
+                        .map(move |(index, setting)| (table, index, setting))
+                }) {
                     let number = index + 1;
                     let rendered = (setting.value)(&original);
                     let mut chosen = original;
                     assert!(
-                        apply_setting(&mut chosen, &format!("{number} {rendered}")),
+                        apply_setting(table, &mut chosen, &format!("{number} {rendered}")),
                         "{}: {rendered}",
                         setting.label
                     );
                     assert_eq!(chosen, original, "{}: {rendered}", setting.label);
-                    let accepts_unlimited = matches!(number, 3..=5 | 11);
+                    let accepts_unlimited =
+                        std::ptr::eq(table, LIMITS) && matches!(number, 1..=3 | 9);
                     assert_eq!(
-                        apply_setting(&mut chosen, &format!("{number} unlimited")),
+                        apply_setting(table, &mut chosen, &format!("{number} unlimited")),
                         accepts_unlimited,
                         "{}",
                         setting.label

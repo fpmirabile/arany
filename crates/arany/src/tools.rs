@@ -9,6 +9,7 @@ mod display;
 pub use display::DisplayFacts;
 mod discovery;
 mod dispatch;
+mod editors;
 pub use discovery::{
     FileSuggestionSource, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
 };
@@ -255,6 +256,8 @@ pub enum ToolError {
     DiskSpace(String),
     #[error("Tool file precondition changed")]
     Conflict,
+    #[error("Workspace files changed since the editor started: {0}")]
+    Conflicts(String),
     #[error("Search pattern refused: {0}")]
     Pattern(&'static str),
     #[error("Tool operation failed")]
@@ -329,6 +332,7 @@ impl ToolError {
             Self::Timeout(_) => "Timeout",
             Self::DiskSpace(_) => "DiskSpace",
             Self::Conflict => "Conflict",
+            Self::Conflicts(_) => "Conflicts",
             Self::Pattern(_) => "Pattern",
             Self::Operation => "Operation",
             Self::Cancelled => "Cancelled",
@@ -756,7 +760,10 @@ impl ToolRuntime {
             | ToolCall::Edit { .. }
             | ToolCall::MultiEdit { .. }
             | ToolCall::Delete { .. }
-            | ToolCall::Move { .. } => paths
+            | ToolCall::Move { .. }
+            | ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::EditorWorkspace { .. },
+            } => paths
                 .iter()
                 .map(|(path, expected)| {
                     let bytes =
@@ -1208,6 +1215,7 @@ impl ToolRuntime {
                 skills,
                 root: std::sync::Arc::new(root),
                 slots: std::sync::Arc::clone(&IN_PROCESS_READS),
+                editors: Default::default(),
             }),
             workspace_identity,
             guard_executable,
@@ -1607,7 +1615,14 @@ impl ToolRuntime {
                 }
                 _ => None,
             },
-            target: crate::session::worker::EffectTarget::Workspace,
+            target: self.editor_root(agent_run_id).map_or(
+                crate::session::worker::EffectTarget::Workspace,
+                |root| crate::session::worker::EffectTarget::EditorWorkspace {
+                    assignment_id: agent_run_id,
+                    device: root.identity.device,
+                    inode: root.identity.inode,
+                },
+            ),
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
@@ -1707,8 +1722,7 @@ impl ToolRuntime {
         if let Err(error) = self.verify_wrap_async(&intent).await {
             return unstarted_observation(intent, error);
         }
-        if intent.target != crate::session::worker::EffectTarget::Workspace
-            || !command_tools::prefix::allowed(&self.config, &intent)
+        if !self.target_admitted(&intent) || !command_tools::prefix::allowed(&self.config, &intent)
         {
             return ToolObservation {
                 spill: None,
@@ -1804,6 +1818,18 @@ impl ToolRuntime {
                 let changeset =
                     guard::transfer::decode_handover(&file_intent, bytes, &runtime.config)?;
                 fs::apply_worker_changeset(&root, &changeset, &control)
+            } else if let ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+            } = &file_intent.call
+            {
+                let tree = runtime
+                    .editor_root(file_intent.agent_run_id)
+                    .ok_or(ToolError::Configuration)?
+                    .dir;
+                if !runtime.config.allows(&file_intent.call) {
+                    return Err(ToolError::Path);
+                }
+                fs::apply_editor_changes(&root, &tree, files, &control)
             } else {
                 fs::mutate(&root, &file_intent.call, &runtime.config, &control)
             };
@@ -1939,13 +1965,26 @@ impl ToolRuntime {
         &self,
         intent: &EffectIntent,
     ) -> Result<std::sync::Arc<cap_std::fs::Dir>, ToolError> {
-        let root = self
-            .reads
-            .as_ref()
-            .map(|reads| std::sync::Arc::clone(&reads.root))
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        if intent.target != crate::session::worker::EffectTarget::Workspace
-            || !intent.valid()
+        let (root, identity) = match intent.target {
+            crate::session::worker::EffectTarget::Workspace => (
+                self.reads
+                    .as_ref()
+                    .map(|reads| std::sync::Arc::clone(&reads.root))
+                    .ok_or(ToolError::ProtectionUnavailable)?,
+                (intent.workspace_device, intent.workspace_inode),
+            ),
+            crate::session::worker::EffectTarget::EditorWorkspace {
+                assignment_id,
+                device,
+                inode,
+            } => (
+                self.editor_root(assignment_id)
+                    .ok_or(ToolError::Configuration)?
+                    .dir,
+                (device, inode),
+            ),
+        };
+        if !intent.valid()
             || intent.policy_digest != self.config.digest()
             || intent.enforcement_digest
                 != if fs::in_process_mutation(intent) {
@@ -1960,11 +1999,66 @@ impl ToolRuntime {
         {
             return Err(ToolError::Configuration);
         }
-        if fs::identity(&root)? != (intent.workspace_device, intent.workspace_inode) {
+        if fs::identity(&root)? != identity {
             return Err(ToolError::ChangedInput);
         }
         fs::validate_workspace(self)?;
         Ok(root)
+    }
+
+    pub(crate) fn attach_editor(&self, id: AgentRunId, path: &Path) -> Result<(), ToolError> {
+        let reads = self
+            .reads
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let dir = fs::open_directory(path)?;
+        let identity = fs::workspace_identity(&dir)?;
+        reads
+            .editors
+            .lock()
+            .map_err(|_| ToolError::Operation)?
+            .insert(
+                id,
+                EditorRoot {
+                    path: path.to_owned(),
+                    dir: std::sync::Arc::new(dir),
+                    identity,
+                },
+            );
+        Ok(())
+    }
+
+    pub(crate) fn detach_editor(&self, id: AgentRunId) {
+        if let Some(reads) = &self.reads
+            && let Ok(mut editors) = reads.editors.lock()
+        {
+            editors.remove(&id);
+        }
+    }
+
+    fn editor_root(&self, id: AgentRunId) -> Option<EditorRoot> {
+        self.reads.as_ref()?.editors.lock().ok()?.get(&id).cloned()
+    }
+
+    // An editor-workspace effect needs that editor's attached root; only typed file operations and commands run there.
+    fn target_admitted(&self, intent: &EffectIntent) -> bool {
+        match intent.target {
+            crate::session::worker::EffectTarget::Workspace => true,
+            crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => {
+                self.editor_root(assignment_id).is_some()
+                    && (matches!(intent.call, ToolCall::Command { .. })
+                        || intent.call.facts().family == catalog::Family::File)
+            }
+        }
+    }
+
+    pub(crate) fn editor_tree(&self, intent: &EffectIntent) -> Option<PathBuf> {
+        match intent.target {
+            crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => {
+                self.editor_root(assignment_id).map(|root| root.path)
+            }
+            crate::session::worker::EffectTarget::Workspace => None,
+        }
     }
 
     async fn run_in_process(
@@ -2136,6 +2230,15 @@ struct InProcessReads {
     skills: std::collections::BTreeMap<String, Option<std::sync::Arc<cap_std::fs::Dir>>>,
     root: std::sync::Arc<cap_std::fs::Dir>,
     slots: std::sync::Arc<tokio::sync::Semaphore>,
+    // Shared by the Run's clones; each live editor works only in its own workspace.
+    editors: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<AgentRunId, EditorRoot>>>,
+}
+
+#[derive(Clone)]
+struct EditorRoot {
+    path: PathBuf,
+    dir: std::sync::Arc<cap_std::fs::Dir>,
+    identity: WorkspaceIdentity,
 }
 
 const MAX_IN_PROCESS_READS: usize = 16;
@@ -2244,9 +2347,8 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     if let ToolError::DiskSpace(message) = &error {
         return unattested_limit(intent, LimitCause::Resource, message);
     }
-    let resource_limit = matches!(&error, ToolError::Limit)
-        && matches!(&intent.call, ToolCall::Command { .. })
-        && intent.target == crate::session::worker::EffectTarget::Workspace;
+    let resource_limit =
+        matches!(&error, ToolError::Limit) && matches!(&intent.call, ToolCall::Command { .. });
     let enforcement_cause =
         matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
             .then_some(EnforcementCause::GuardBootstrap);

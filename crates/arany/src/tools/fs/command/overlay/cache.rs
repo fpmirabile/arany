@@ -1,10 +1,12 @@
 use super::*;
 use crate::store::{CACHE_ROOTS, CacheChange};
-use std::os::unix::fs::FileTypeExt;
+use crate::tools::fs::tree::{self, Pair};
 
 #[cfg(test)]
 mod tests;
 
+// Streams the upper against the lower it covers; whiteouts, opaque directories and type changes remove
+// the lower subtree beneath them.
 pub(in crate::tools) fn capture(
     lower: &Dir,
     upper: &Dir,
@@ -12,86 +14,128 @@ pub(in crate::tools) fn capture(
     deadline: Instant,
     limit: u64,
 ) -> Result<Vec<CacheChange>, ToolError> {
-    let before = inventory(
-        lower,
-        Layer::Lower,
-        &mut CommandScanBudget::default(),
-        deadline,
-    )?;
-    let after = inventory(
-        upper,
-        Layer::Upper,
-        &mut CommandScanBudget::default(),
-        deadline,
-    )?;
-    let mut removals = BTreeSet::new();
-    let mut additions = Vec::new();
-    let mut sizes = before
-        .iter()
-        .filter(|(path, (entry, _))| {
-            selected(path) && !excluded(path, exclusions) && entry.is_file()
-        })
-        .map(|(path, (entry, _))| (path.clone(), entry.len()))
-        .collect::<BTreeMap<_, _>>();
-    for (path, (entry, opaque)) in &after {
-        Selector::new(0, deadline).check_time()?;
-        if excluded(path, exclusions) {
-            continue;
-        }
-        let whiteout = entry.file_type().is_char_device() && entry.rdev() == 0;
-        if *opaque
-            || whiteout
-            || entry.is_file() && before.get(path).is_some_and(|(old, _)| old.is_dir())
-            || entry.is_dir() && before.get(path).is_some_and(|(old, _)| old.is_file())
-        {
-            let prefix = format!("{path}/");
-            let subtree = before.get_key_value(path).into_iter().chain(
-                before
-                    .range(prefix.clone()..)
-                    .take_while(|(child, _)| child.starts_with(&prefix)),
-            );
-            for (child, _) in subtree {
-                Selector::new(0, deadline).check_time()?;
-                if selected(child)
-                    && !excluded(child, exclusions)
-                    && !exclusions
-                        .iter()
-                        .any(|root| Path::new(root).starts_with(child))
-                {
-                    removals.insert(child.clone());
-                    sizes.remove(child);
-                }
-            }
-        }
-        if !selected(path) {
-            continue;
-        }
-        if entry.is_file() {
-            sizes.insert(path.clone(), entry.len());
-            additions.push(CacheChange::File(path.clone()));
-        } else if entry.is_dir() {
-            additions.push(CacheChange::Directory(path.clone()));
-        }
+    let mut budget = CommandScanBudget::default();
+    drop(readable(lower, "")?);
+    drop(readable(upper, "")?);
+    if metadata::validate(&pin(upper, "")?, &mut budget)? {
+        return Err(ToolError::Path);
     }
-    let total = sizes.values().try_fold(0u64, |sum, bytes| {
-        sum.checked_add(*bytes).ok_or(ToolError::Limit)
-    })?;
+    let mut removals = Vec::new();
+    let mut additions = Vec::new();
+    let mut removing: Option<String> = None;
+    let mut held = 0usize;
+    let mut total = 0u64;
+    tree::diff(
+        &mut tree::Walk::new(lower, deadline)?,
+        &mut tree::Walk::new(upper, deadline)?,
+        |pair| {
+            let (old, new) = match pair {
+                Pair::Left(old) => (Some(old), None),
+                Pair::Right(new) => (None, Some(new)),
+                Pair::Both(old, new) => (Some(old), Some(new)),
+            };
+            let path = old.as_ref().or(new.as_ref()).map(|node| node.path.clone());
+            let path = path.ok_or(ToolError::Operation)?;
+            if removing
+                .as_ref()
+                .is_some_and(|root| !Path::new(&path).starts_with(root))
+            {
+                removing = None;
+            }
+            if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
+                return Err(ToolError::Limit);
+            }
+            if if selected(&path) {
+                crate::store::validate_cache_path(&path).is_err()
+            } else {
+                !valid_relative(&path, false)
+            } {
+                return Err(ToolError::Path);
+            }
+            let old = old.map(|node| node.metadata);
+            let new = new.map(|node| node.metadata);
+            if let Some(old) = &old {
+                admit(lower, &path, old, false)?;
+            }
+            let (mut opaque, mut whiteout) = (false, false);
+            if let Some(new) = &new {
+                whiteout = admit(upper, &path, new, true)?;
+                opaque = metadata::validate(&pin(upper, &path)?, &mut budget)?;
+            }
+            if excluded(&path, exclusions) {
+                return Ok(true);
+            }
+            if removing.is_none()
+                && new.as_ref().is_some_and(|new| {
+                    opaque
+                        || whiteout
+                        || old.as_ref().is_some_and(|old| old.is_dir() != new.is_dir())
+                })
+            {
+                removing = Some(path.clone());
+            }
+            let removed = old.is_some()
+                && removing.is_some()
+                && selected(&path)
+                && !exclusions
+                    .iter()
+                    .any(|root| Path::new(root).starts_with(&path));
+            let mut charge = |path: &str| {
+                held = held.checked_add(path.len()).ok_or(ToolError::Limit)?;
+                if held > tree::HELD_NAME_BYTES {
+                    return Err(ToolError::Limit);
+                }
+                Ok(())
+            };
+            if removed {
+                charge(&path)?;
+                removals.push(CacheChange::Remove(path.clone()));
+            }
+            if !selected(&path) {
+                return Ok(true);
+            }
+            match (&old, &new) {
+                (_, Some(new)) if new.is_file() => {
+                    total = total.checked_add(new.len()).ok_or(ToolError::Limit)?;
+                    charge(&path)?;
+                    additions.push(CacheChange::File(path));
+                }
+                (_, Some(new)) if new.is_dir() => {
+                    charge(&path)?;
+                    additions.push(CacheChange::Directory(path));
+                }
+                (Some(old), None) if old.is_file() && !removed => {
+                    total = total.checked_add(old.len()).ok_or(ToolError::Limit)?;
+                }
+                _ => {}
+            }
+            Ok(true)
+        },
+    )?;
     if total > limit {
         return Err(ToolError::Limit);
     }
-    let mut changes = removals
-        .into_iter()
-        .rev()
-        .map(CacheChange::Remove)
-        .collect::<Vec<_>>();
-    changes.extend(additions);
-    Selector::new(0, deadline).check_time()?;
-    Ok(changes)
+    removals.reverse();
+    removals.extend(additions);
+    Ok(removals)
 }
 
-enum Layer {
-    Lower,
-    Upper,
+// Only directories, regular files and upper 0/0 whiteouts are admitted; returns whether it is a whiteout.
+fn admit(
+    root: &Dir,
+    path: &str,
+    entry: &cap_std::fs::Metadata,
+    upper: bool,
+) -> Result<bool, ToolError> {
+    use cap_std::fs::FileTypeExt as _;
+    let whiteout = upper && entry.file_type().is_char_device() && entry.rdev() == 0;
+    if entry.mode() & 0o6000 != 0 || !(entry.is_dir() || entry.is_file() || whiteout) {
+        return Err(ToolError::Path);
+    }
+    if !whiteout {
+        drop(readable(root, path)?);
+    }
+    Ok(whiteout)
 }
 
 fn selected(path: &str) -> bool {
@@ -104,61 +148,4 @@ fn excluded(path: &str, exclusions: &[String]) -> bool {
     exclusions
         .iter()
         .any(|root| Path::new(path).starts_with(root))
-}
-
-fn inventory(
-    root: &Dir,
-    layer: Layer,
-    budget: &mut CommandScanBudget,
-    deadline: Instant,
-) -> Result<BTreeMap<String, (std::fs::Metadata, bool)>, ToolError> {
-    let mut pending = vec![String::new()];
-    let mut entries = BTreeMap::new();
-    if matches!(layer, Layer::Upper) && metadata::validate(&pin(root, "")?, budget)? {
-        return Err(ToolError::Path);
-    }
-    while let Some(path) = pending.pop() {
-        Selector::new(0, deadline).check_time()?;
-        let dir = Dir::from_std_file(readable(root, &path)?);
-        for entry in dir.entries().map_err(|_| ToolError::Path)? {
-            Selector::new(0, deadline).check_time()?;
-            let name = entry
-                .map_err(|_| ToolError::Path)?
-                .file_name()
-                .into_string()
-                .map_err(|_| ToolError::Path)?;
-            let path = joined(&path, &name);
-            budget.entry(&path)?;
-            if path.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
-                return Err(ToolError::Limit);
-            }
-            if if selected(&path) {
-                crate::store::validate_cache_path(&path).is_err()
-            } else {
-                !valid_relative(&path, false)
-            } {
-                return Err(ToolError::Path);
-            }
-            let handle = pin(root, &path)?;
-            let entry = handle.metadata().map_err(|_| ToolError::Path)?;
-            if entry.mode() & 0o6000 != 0
-                || !(entry.is_dir()
-                    || entry.is_file()
-                    || matches!(layer, Layer::Upper)
-                        && entry.file_type().is_char_device()
-                        && entry.rdev() == 0)
-            {
-                return Err(ToolError::Path);
-            }
-            let opaque = matches!(layer, Layer::Upper) && metadata::validate(&handle, budget)?;
-            if entry.is_dir() {
-                pending.push(path.clone());
-            }
-            if entry.is_dir() || entry.is_file() {
-                drop(readable(root, &path)?);
-            }
-            entries.insert(path, (entry, opaque));
-        }
-    }
-    Ok(entries)
 }

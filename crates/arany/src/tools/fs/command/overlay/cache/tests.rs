@@ -75,7 +75,7 @@ fn cache_capture_recreates_subtrees_preserves_host_exclusions_and_rejects_unsafe
 }
 
 #[test]
-fn cache_capture_has_no_entry_cap_but_rejects_an_upper_past_the_scan_bound() {
+fn cache_capture_streams_an_upper_past_the_former_scan_bound() {
     let temp = tempfile::tempdir().unwrap();
     let lower_path = temp.path().join("lower");
     let files = temp.path().join("upper/target/inodes");
@@ -94,16 +94,11 @@ fn cache_capture_has_no_entry_cap_but_rejects_an_upper_past_the_scan_bound() {
         )
     };
     let mut created = 0;
-    for (count, accepted) in [
-        (COMMAND_SCAN_ENTRIES / 4, true),
-        (COMMAND_SCAN_ENTRIES, false),
-    ] {
+    for count in [COMMAND_SCAN_ENTRIES / 4, COMMAND_SCAN_ENTRIES + 1] {
         for index in created..count {
             File::create(files.join(index.to_string())).unwrap();
         }
         created = count;
-        let result = capture();
-        assert_eq!(result.is_ok(), accepted, "{count} entries");
-        assert!(accepted || matches!(result, Err(ToolError::Limit)));
+        assert_eq!(capture().unwrap().len(), count + 2, "{count} entries");
     }
 }

@@ -42,7 +42,10 @@ use crate::{
             MCP_TIMEOUT_MS, MEMORY_BYTES, SCRATCH_BYTES,
         },
     },
-    worker::MAX_EDITOR_CHANGE_REPORT_BYTES,
+    worker::{
+        DEFAULT_EDITOR_CHANGE_BYTES, DEFAULT_EDITOR_CHANGE_FILES, MAX_EDITOR_CHANGE_BYTES,
+        MAX_EDITOR_CHANGE_FILES, MAX_EDITOR_CHANGE_REPORT_BYTES,
+    },
 };
 
 #[derive(Debug)]
@@ -93,6 +96,30 @@ pub const LIMITS: LimitsTable = LimitsTable {
         Limit {
             name: "MAX_EDITOR_CHANGE_REPORT_BYTES",
             value: MAX_EDITOR_CHANGE_REPORT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "DEFAULT_EDITOR_CHANGE_FILES",
+            value: DEFAULT_EDITOR_CHANGE_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "MAX_EDITOR_CHANGE_FILES",
+            value: MAX_EDITOR_CHANGE_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "DEFAULT_EDITOR_CHANGE_BYTES",
+            value: DEFAULT_EDITOR_CHANGE_BYTES,
+            unit: "bytes",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "MAX_EDITOR_CHANGE_BYTES",
+            value: MAX_EDITOR_CHANGE_BYTES,
             unit: "bytes",
             owner: "crates/arany/src/session/worker.rs",
         },

@@ -462,12 +462,14 @@ impl Config {
                 return self.commands.iter().any(|value| &value.name == program);
             }
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                    | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
             } => {
-                return changeset
-                    .files
-                    .iter()
-                    .all(|change| self.in_workspace_scope(&change.path));
+                return call
+                    .changeset_paths()
+                    .into_iter()
+                    .all(|path| self.in_workspace_scope(path));
             }
             ToolCall::Skill { name, resource } => {
                 return self.skills.iter().any(|value| {

@@ -73,12 +73,21 @@ fn worker_outcome(
         o.disposition,
         WorkerDisposition::Ready | WorkerDisposition::NoChange
     );
-    let changed = a.tools.iter().any(|t| {
-        t.intent.call.mutates()
-            && t.observation.as_ref().is_some_and(|o| {
-                o.disposition == ToolDisposition::Succeeded && o.attested_for(&t.intent)
-            })
-    });
+    let integration = a
+        .tools
+        .iter()
+        .find(|t| editor_integration(&t.intent.call))
+        .map(|t| t.observation.as_ref().map(|o| o.disposition));
+    let changed = integration == Some(Some(ToolDisposition::Succeeded));
+    // A lease refusal or an overflow writes nothing and commits no integration.
+    let integration_consistent = match o.cause {
+        WorkerCause::IntegrationConflict => {
+            matches!(integration, None | Some(Some(ToolDisposition::Conflict)))
+        }
+        WorkerCause::ChangesTooLarge => integration.is_none(),
+        WorkerCause::Finished => integration.is_none() || changed,
+        _ => !changed,
+    };
     if w.outcome.is_some()
         || !o.valid()
         || (o.cause == WorkerCause::StoppedByHook)
@@ -87,6 +96,7 @@ fn worker_outcome(
         || (*disposition == AgentDisposition::Cancelled)
             != (o.disposition == WorkerDisposition::Cancelled)
         || a.tools.iter().any(ToolView::outcome_unknown)
+        || !integration_consistent
         || success
             && (editor_criterion_evidence(run, *id)?.is_empty()
                 || (o.disposition == WorkerDisposition::NoChange) == changed)
@@ -212,11 +222,20 @@ pub(super) fn tool_started(
 
 pub(super) fn tool_finished(
     _view: &SessionView,
-    _run: &RunView,
-    _actor: &AgentRunId,
+    run: &RunView,
+    actor: &AgentRunId,
     o: &crate::tools::ToolObservation,
 ) -> Result<(), ReplayError> {
-    if o.intent.target != EffectTarget::Workspace {
+    let editor = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == *actor && agent.assignment.is_some());
+    let valid = match editor {
+        Some(_) if editor_integration(&o.intent.call) => o.intent.target == EffectTarget::Workspace,
+        Some(agent) => super::editor_target(agent, o.intent.target),
+        None => o.intent.target == EffectTarget::Workspace,
+    };
+    if !valid {
         return Err(ReplayError::InvalidTransition);
     }
     Ok(())

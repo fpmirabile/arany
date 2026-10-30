@@ -143,6 +143,10 @@ struct Task {
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
     workspace: std::path::PathBuf,
+    // An editor command runs directly in its editor's workspace instead of a selected copy.
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    editor_tree: Option<std::path::PathBuf>,
     #[cfg(target_os = "macos")]
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
@@ -774,6 +778,8 @@ fn attest_task_mounts(
         *stage = BootstrapStage::RuntimeMounts;
         if linux::overlay::selected(&task.intent, &task.config) {
             linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
+        } else if task.intent.target.editor() {
+            linux::verify_editor_mount()?;
         } else {
             linux::verify_copy_mount(task.intent.limits.project_bytes)?;
         }
@@ -1371,7 +1377,9 @@ fn bootstrap_locations(
     *stage = BootstrapStage::Capabilities;
     let root = macos::install(task, stage)?;
     let workspace = if task.intent.call.is_process() {
-        root.join("workspace")
+        task.editor_tree
+            .clone()
+            .unwrap_or_else(|| root.join("workspace"))
     } else {
         task.workspace.clone()
     };
@@ -1392,7 +1400,10 @@ fn bootstrap_locations(
 pub(super) struct GuardContext<'a> {
     pub(super) captured: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "linux")]
-    pub(super) command_before: Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>,
+    pub(super) command_before: Option<(
+        super::fs::command::CommandBaseline,
+        super::fs::CommandSelection,
+    )>,
     pub(super) intent: &'a EffectIntent,
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
@@ -1478,7 +1489,14 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     }
     network::validate(task)?;
     #[cfg(target_os = "macos")]
-    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
+    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates())
+        || task.editor_tree.is_some()
+            != (task.intent.target.editor() && matches!(task.intent.call, ToolCall::Command { .. }))
+        || task
+            .editor_tree
+            .as_ref()
+            .is_some_and(|tree| !tree.is_absolute())
+    {
         return Err(ToolError::Configuration);
     }
     if !task.intent.valid()
@@ -1899,8 +1917,14 @@ fn prepare_command_baseline(
     task: &Task,
     workspace: &Path,
     stdin: &mut impl Read,
-) -> Result<Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>, ToolError> {
-    if linux::overlay::selected(&task.intent, &task.config) {
+) -> Result<
+    Option<(
+        super::fs::command::CommandBaseline,
+        super::fs::CommandSelection,
+    )>,
+    ToolError,
+> {
+    if linux::overlay::selected(&task.intent, &task.config) || task.intent.target.editor() {
         return Ok(None);
     }
     let command_before = if matches!(task.intent.call, ToolCall::Command { .. }) {
@@ -1911,7 +1935,10 @@ fn prepare_command_baseline(
             .map_err(|_| ToolError::Operation)?;
         let selection = super::fs::CommandSelection::receive(stdin)?;
         super::fs::copy_command_seed()?;
-        Some((super::fs::command_snapshot(workspace)?, selection))
+        Some((
+            super::fs::command_baseline(Path::new(super::fs::COMMAND_SEED), workspace)?,
+            selection,
+        ))
     } else {
         None
     };
@@ -2189,6 +2216,8 @@ mod tests {
             #[cfg(target_os = "macos")]
             workspace: "/private/fixture/workspace".into(),
             #[cfg(target_os = "macos")]
+            editor_tree: None,
+            #[cfg(target_os = "macos")]
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
@@ -2292,6 +2321,8 @@ mod tests {
             parent_namespaces: profile::Namespaces::read().unwrap(),
             #[cfg(target_os = "macos")]
             workspace: "/private/fixture/workspace".into(),
+            #[cfg(target_os = "macos")]
+            editor_tree: None,
             #[cfg(target_os = "macos")]
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
@@ -2821,7 +2852,7 @@ mod tests {
                 std::time::Instant::now() + super::super::selection::TEST_RUNTIME,
             )
             .unwrap();
-            let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
+            let snapshot = super::super::fs::test_baseline(workspace.path()).unwrap();
             let output_path = workspace.path().join(path);
             std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
             std::fs::write(&output_path, b"protected fixture content").unwrap();
@@ -3307,6 +3338,8 @@ mod tests {
                 parent_namespaces: profile::Namespaces::read().unwrap(),
                 #[cfg(target_os = "macos")]
                 workspace: std::path::PathBuf::new(),
+                #[cfg(target_os = "macos")]
+                editor_tree: None,
                 #[cfg(target_os = "macos")]
                 guard_executable: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]

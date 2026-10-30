@@ -935,7 +935,13 @@ mod tests {
     }
     fn publications_at(view: &mut SessionView, paths: &[String], bytes: u32) {
         let run = &mut view.runs[0];
-        let template = run.agents[1].tools[0].clone();
+        let mut template = run.agents[1].tools[0].clone();
+        template.intent.target = crate::session::EffectTarget::Workspace;
+        template.checkpoint = Some(crate::session::Checkpoint {
+            status: crate::session::CheckpointStatus::Captured,
+            reason: None,
+            pruned_before_run: None,
+        });
         run.agents[1].tools.clear();
         for (i, path) in paths.iter().enumerate() {
             let mut tool = template.clone();

@@ -103,6 +103,17 @@ impl Event {
                     {
                         Ok(())
                     }
+                    // A failed editor carries the Engine's note on why nothing was integrated.
+                    AgentDisposition::Failed if worker.is_some() => {
+                        bounded(
+                            summary.as_deref().ok_or(ReplayError::InvalidPayload)?,
+                            crate::session::worker::MAX_EDITOR_CHANGE_REPORT_BYTES,
+                        )?;
+                        bounded(
+                            result.as_deref().ok_or(ReplayError::InvalidPayload)?,
+                            crate::session::worker::MAX_EDITOR_CHANGE_REPORT_BYTES,
+                        )
+                    }
                     _ => Err(ReplayError::InvalidPayload),
                 }
             }

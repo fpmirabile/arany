@@ -973,6 +973,7 @@ impl RunLoop<'_> {
                         &mut children[index],
                         WorkerEnd {
                             answer: None,
+                            integration: None,
                             ..end
                         },
                     )
@@ -1822,6 +1823,13 @@ impl RunLoop<'_> {
         }
         {
             let _active_work = self.ledger().active_work();
+            let deadline = wave.deadline();
+            let integration = if answer.is_some() && abort.is_none() {
+                self.integrate_editor(&mut wave.children[index], deadline)
+                    .await?
+            } else {
+                None
+            };
             let completion = self
                 .complete_worker(
                     &mut wave.children[index],
@@ -1830,6 +1838,7 @@ impl RunLoop<'_> {
                         torn_down: matches!(abort, Some(WaveStop::Abort(_))),
                         failure,
                         step_stop,
+                        integration,
                     },
                 )
                 .await?;

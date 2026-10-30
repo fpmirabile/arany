@@ -103,6 +103,14 @@ fn observed_digest(
             .after
             .as_ref()
             .map(|version| version.sha256.clone()),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .find(|change| change.path == path)?
+            .after
+            .as_ref()
+            .map(|state| state.sha256.clone()),
         _ => return None,
     };
     match observation.disposition {

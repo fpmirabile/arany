@@ -510,6 +510,7 @@ impl<'a> RunLoop<'a> {
         &self,
         root_request: &mut ProviderRequest,
     ) -> Result<RunProgress<()>, EngineError> {
+        self.sweep_editor_workspaces().await?;
         let end = match self.initialize_definitions(root_request).await? {
             RunProgress::Ready(step::DefinitionInitialization::Ready) => None,
             RunProgress::Ready(step::DefinitionInitialization::Stopped)
