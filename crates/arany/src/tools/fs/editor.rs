@@ -13,6 +13,8 @@ mod tests;
 pub(in crate::tools) const TREE: &str = "tree";
 const BASE: &str = "base";
 const READY: &str = "ready";
+// A linked Git worktree's record; its absence means the tree is Arany's own copy.
+const WORKTREE: &str = "worktree";
 // One base record: a path within the Tool path bound, its digest and the clone identity.
 const BASE_LINE_BYTES: usize = 4 * 1024;
 
@@ -72,7 +74,7 @@ fn hash(mut file: File) -> Result<(String, u64), ToolError> {
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 // A byte copy may not take the volume holding the workspace below the free-space reserve.
-fn require_reserve(directory: &Dir, bytes: u64) -> Result<(), ToolError> {
+pub(in crate::tools) fn require_reserve(directory: &Dir, bytes: u64) -> Result<(), ToolError> {
     let capacity = rustix::fs::fstatvfs(directory).map_err(|_| ToolError::Operation)?;
     let free = capacity.f_bavail.saturating_mul(capacity.f_frsize);
     if free >= GUARD_DISK_RESERVE_BYTES.saturating_add(bytes) {
@@ -400,4 +402,136 @@ impl Sorted for BaseReader {
     }
 
     fn skip(&mut self) {}
+}
+
+pub(in crate::tools) fn worktree(directory: &Dir) -> Option<crate::tools::git::Worktree> {
+    let bytes = read_regular(open_file(directory, WORKTREE).ok()?, BASE_LINE_BYTES).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn excluded_path(path: &str) -> bool {
+    path.split('/')
+        .any(|part| forbidden(part) || ignored_directory(part))
+}
+
+// Finishes a checked-out worktree: protected tracked files leave the tree, unchanged files keep the
+// Workspace's times, untracked inputs are copied in and recorded, then the record and ready marker land.
+pub(in crate::tools) fn complete_worktree(
+    directory: &Dir,
+    workspace: &Dir,
+    worktree: &crate::tools::git::Worktree,
+    tracked: &[(String, u64)],
+    untracked: &[String],
+) -> Result<(), ToolError> {
+    let tree = directory
+        .open_dir_nofollow(&worktree.name)
+        .map_err(|_| ToolError::Path)?;
+    for (path, size) in tracked {
+        if path.split('/').any(forbidden) {
+            let _ = tree.remove_file(path);
+            continue;
+        }
+        if let Ok(source) = workspace.symlink_metadata(path)
+            && source.is_file()
+            && source.len() == *size
+            && let (Ok(modified), Ok(file)) = (source.modified(), open_file(&tree, path))
+        {
+            let _ = file.set_modified(modified.into_std());
+        }
+    }
+    let mut base = Vec::new();
+    for path in untracked.iter().filter(|path| !excluded_path(path)) {
+        if base.len() == MAX_SNAPSHOT_FILES {
+            return Err(ToolError::Limit);
+        }
+        let source = open_file(workspace, path)?;
+        let metadata = command_metadata(&source)?;
+        base.push(copy_input(&tree, path, source, &metadata)?);
+    }
+    base.sort_by(|left, right| tree::order(&left.path, &right.path));
+    let mut lines = Vec::new();
+    for file in &base {
+        serde_json::to_writer(&mut lines, file).map_err(|_| ToolError::Operation)?;
+        lines.push(b'\n');
+    }
+    put(directory, BASE, &lines, false)?;
+    put(
+        directory,
+        WORKTREE,
+        &serde_json::to_vec(worktree).map_err(|_| ToolError::Operation)?,
+        false,
+    )?;
+    put(directory, READY, b"", false)?;
+    sync_directory(directory)
+}
+
+// A worktree's project changes: tracked paths Git reports against the base, plus untracked files
+// against the copied record. Excluded paths never integrate; one shadowing a Workspace path refuses.
+pub(in crate::tools) fn worktree_changes(
+    directory: &Dir,
+    workspace: &Dir,
+    limits: &ChangeLimits,
+    tracked: Vec<(String, Option<FileState>)>,
+    untracked: &[String],
+) -> Result<Vec<EditorChange>, ToolError> {
+    if !ready(directory) {
+        return Err(ToolError::Path);
+    }
+    let worktree = worktree(directory).ok_or(ToolError::Path)?;
+    let tree = directory
+        .open_dir_nofollow(&worktree.name)
+        .map_err(|_| ToolError::Path)?;
+    let mut copied = std::collections::BTreeMap::new();
+    let mut reader = BaseReader::new(open_file(directory, BASE)?);
+    while let Some(file) = reader.next()? {
+        copied.insert(file.path.clone(), file.state()?);
+    }
+    let mut listed = tracked;
+    for path in untracked {
+        listed.push((path.clone(), copied.remove(path)));
+    }
+    listed.extend(copied.into_iter().map(|(path, state)| (path, Some(state))));
+    let (mut changes, mut shadowing, mut bytes) = (Vec::new(), Vec::new(), 0u64);
+    for (path, before) in listed {
+        if excluded_path(&path) {
+            if before.is_none() && workspace.symlink_metadata(&path).is_ok() {
+                shadowing.push(path);
+            }
+            continue;
+        }
+        let after = match tree.symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                let file = open_file(&tree, &path)?;
+                let executable = executable(&command_metadata(&file)?);
+                let (sha256, size) = hash(file)?;
+                Some(FileState {
+                    sha256,
+                    bytes: integrable(size).map_err(|error| error.at_path(&path))?,
+                    executable,
+                })
+            }
+            Ok(_) => return Err(ToolError::Path.at_path(&path)),
+            Err(_) => None,
+        };
+        if before == after {
+            continue;
+        }
+        bytes = bytes
+            .checked_add(after.as_ref().map_or(0, |after| u64::from(after.bytes)))
+            .ok_or(ToolError::Limit)?;
+        if changes.len() >= limits.files || bytes > limits.bytes {
+            return Err(ToolError::Limit);
+        }
+        changes.push(EditorChange {
+            path,
+            before,
+            after,
+        });
+    }
+    if !shadowing.is_empty() {
+        let paths: Vec<_> = shadowing.iter().map(String::as_str).collect();
+        return Err(ToolError::Conflicts(conflict_list(&paths)));
+    }
+    changes.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(changes)
 }

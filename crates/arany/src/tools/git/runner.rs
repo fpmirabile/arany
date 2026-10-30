@@ -270,6 +270,8 @@ pub(super) struct Git<'a> {
     pub(super) work_tree: PathBuf,
     // The accepted hooks directory; without it every invocation runs with hooks off.
     pub(super) hooks: Option<PathBuf>,
+    // Editor checkouts keep LFS pointers instead of downloading content.
+    pub(super) skip_lfs_smudge: bool,
     exit: std::sync::Mutex<Option<i32>>,
 }
 
@@ -281,6 +283,7 @@ impl<'a> Git<'a> {
             git_dir: environment.workspace.join(".git"),
             work_tree: environment.workspace.clone(),
             hooks: None,
+            skip_lfs_smudge: false,
             exit: Default::default(),
         }
     }
@@ -318,6 +321,9 @@ impl<'a> Git<'a> {
             .env("GIT_DIR", &self.git_dir)
             .env("GIT_WORK_TREE", &self.work_tree)
             .current_dir(&self.work_tree);
+        if self.skip_lfs_smudge {
+            command.env("GIT_LFS_SKIP_SMUDGE", "1");
+        }
         command
     }
 
@@ -469,16 +475,34 @@ impl<'a> Git<'a> {
 
     // The same resolution for intent construction, which is synchronous.
     pub(super) fn push_destination_blocking(&self, url: &str) -> Result<String, ToolError> {
-        let (status, stdout, _) = self.output_blocking(&push_rewrites_argv())?;
+        let query =
+            |argv: &[String]| self.output_blocking(argv, CONFIG_ADMISSION_TIME, DESTINATION_BYTES);
+        let (status, stdout, _) = query(&push_rewrites_argv())?;
         if let Some(pushed) = push_rewrite(&stdout, status, url)? {
             return Ok(pushed);
         }
-        let (status, stdout, overflow) = self.output_blocking(&get_url_argv(url))?;
+        let (status, stdout, overflow) = query(&get_url_argv(url))?;
         destination(&stdout, status, overflow)
     }
 
-    // A short read-only Git query outside async code, killed by a watchdog at the config deadline.
-    fn output_blocking(&self, argv: &[String]) -> Result<(Option<i32>, Vec<u8>, bool), ToolError> {
+    // Config admission for synchronous callers, such as editor workspace creation.
+    pub(super) fn admit_blocking(&self) -> Result<Option<String>, ToolError> {
+        let argv = ["config", "--list", "--show-origin", "-z"].map(String::from);
+        let (status, stdout, overflow) =
+            self.output_blocking(&argv, CONFIG_ADMISSION_TIME, CONFIG_LIST_BYTES)?;
+        if overflow || status != Some(0) {
+            return Ok(Some(CONFIG_UNREADABLE.into()));
+        }
+        Ok(self.refusal(&stdout))
+    }
+
+    // Git outside async code: stdout is capped and a watchdog kills the process at `time`.
+    pub(super) fn output_blocking(
+        &self,
+        argv: &[String],
+        time: Duration,
+        cap: usize,
+    ) -> Result<(Option<i32>, Vec<u8>, bool), ToolError> {
         use std::process::Stdio;
         verify(self.program)?;
         let mut child = self
@@ -492,7 +516,7 @@ impl<'a> Git<'a> {
         let (done, finished) = std::sync::mpsc::channel();
         let pid = child.id();
         std::thread::spawn(move || {
-            if finished.recv_timeout(CONFIG_ADMISSION_TIME).is_err()
+            if finished.recv_timeout(time).is_err()
                 && let Some(pid) = i32::try_from(pid)
                     .ok()
                     .and_then(rustix::process::Pid::from_raw)
@@ -501,13 +525,12 @@ impl<'a> Git<'a> {
             }
         });
         let mut bytes = Vec::new();
-        let read = (&mut stdout)
-            .take(DESTINATION_BYTES as u64 + 1)
-            .read_to_end(&mut bytes);
+        let read = (&mut stdout).take(cap as u64 + 1).read_to_end(&mut bytes);
         let status = child.wait().map_err(|_| ToolError::Operation)?;
         let _ = done.send(());
         read.map_err(|_| ToolError::Operation)?;
-        let overflow = bytes.len() > DESTINATION_BYTES;
+        let overflow = bytes.len() > cap;
+        bytes.truncate(cap);
         Ok((status.code(), bytes, overflow))
     }
 

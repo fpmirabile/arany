@@ -1,4 +1,4 @@
-use super::{ToolError, ToolRuntime, fs};
+use super::{ToolError, ToolRuntime, fs, git};
 use crate::session::worker::EditorChange;
 use crate::session::{AgentRunId, SessionId};
 use std::os::unix::fs::DirBuilderExt;
@@ -43,7 +43,14 @@ impl ToolRuntime {
             let kept = self.editor_directory(session, source)?;
             if fs::open_directory(&kept).is_ok_and(|kept| fs::editor::ready(&kept)) {
                 std::fs::rename(&kept, &directory).map_err(|_| ToolError::Operation)?;
-                return self.attach_editor(id, &directory.join(fs::editor::TREE));
+                let tree = self.tree_in(&directory)?;
+                if let Some(record) = fs::open_directory(&directory)
+                    .ok()
+                    .and_then(|directory| fs::editor::worktree(&directory))
+                {
+                    git::relocate_worktree(self, &tree, &record)?;
+                }
+                return self.attach_editor(id, &tree);
             }
         }
         std::fs::DirBuilder::new()
@@ -54,18 +61,63 @@ impl ToolRuntime {
             if fs::workspace_identity(&workspace)? != self.workspace_identity {
                 return Err(ToolError::ChangedInput);
             }
-            fs::editor::create(
-                &fs::open_directory(&directory)?,
-                &workspace,
-                &self.config,
-                Instant::now() + EDITOR_WORKSPACE_TIME,
-            )
+            let editor = fs::open_directory(&directory)?;
+            match git::create_worktree(self, &directory, &format!("{}{id}", git::WORKTREE_PREFIX))?
+            {
+                Some((record, tracked, untracked)) => fs::editor::complete_worktree(
+                    &editor, &workspace, &record, &tracked, &untracked,
+                ),
+                None => fs::editor::create(
+                    &editor,
+                    &workspace,
+                    &self.config,
+                    Instant::now() + EDITOR_WORKSPACE_TIME,
+                ),
+            }
         });
         if let Err(error) = created {
-            let _ = std::fs::remove_dir_all(&directory);
+            self.discard_editor_directory(&directory);
             return Err(error);
         }
-        self.attach_editor(id, &directory.join(fs::editor::TREE))
+        self.attach_editor(id, &self.tree_in(&directory)?)
+    }
+
+    // A worktree editor's tree carries its Git name; a copy's is the fixed tree directory.
+    fn tree_in(&self, directory: &std::path::Path) -> Result<PathBuf, ToolError> {
+        let record = fs::editor::worktree(&fs::open_directory(directory)?);
+        Ok(directory.join(record.map_or(fs::editor::TREE.to_owned(), |record| record.name)))
+    }
+
+    // Arany's own worktree leaves Git's records before its directory is deleted.
+    fn discard_editor_directory(&self, directory: &std::path::Path) {
+        let record = fs::open_directory(directory)
+            .ok()
+            .and_then(|directory| fs::editor::worktree(&directory));
+        let tree = record
+            .as_ref()
+            .map(|record| directory.join(&record.name))
+            .or_else(|| {
+                std::fs::read_dir(directory)
+                    .ok()?
+                    .flatten()
+                    .find_map(|entry| {
+                        let name = entry.file_name().into_string().ok()?;
+                        name.starts_with(git::WORKTREE_PREFIX).then(|| entry.path())
+                    })
+            });
+        if let Some(tree) = tree {
+            let name = tree
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            let record = record.unwrap_or(git::Worktree {
+                name,
+                base: String::new(),
+            });
+            git::remove_worktree(self, &tree, &record);
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[cfg(test)]
@@ -85,14 +137,21 @@ impl ToolRuntime {
         if fs::workspace_identity(&workspace)? != self.workspace_identity {
             return Err(ToolError::ChangedInput);
         }
+        let limits = fs::editor::ChangeLimits {
+            files: files as usize,
+            bytes,
+        };
+        if let Some(record) = fs::editor::worktree(&directory) {
+            let (tracked, untracked) = git::worktree_changes(self, &root.path, &record)?;
+            return fs::editor::worktree_changes(
+                &directory, &workspace, &limits, tracked, &untracked,
+            );
+        }
         fs::editor::changes(
             &directory,
             &workspace,
             Instant::now() + EDITOR_WORKSPACE_TIME,
-            &fs::editor::ChangeLimits {
-                files: files as usize,
-                bytes,
-            },
+            &limits,
         )
     }
 
@@ -105,7 +164,7 @@ impl ToolRuntime {
     ) {
         self.detach_editor(id);
         if discard && let Ok(directory) = self.editor_directory(session, id) {
-            let _ = std::fs::remove_dir_all(directory);
+            self.discard_editor_directory(&directory);
         }
     }
 
@@ -132,7 +191,7 @@ impl ToolRuntime {
                             .is_ok_and(|directory| fs::editor::ready(&directory))
                 });
             if !keep {
-                let _ = std::fs::remove_dir_all(entry.path());
+                self.discard_editor_directory(&entry.path());
             }
         }
     }

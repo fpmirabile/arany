@@ -1,10 +1,12 @@
 mod hooks;
 pub(crate) mod host;
 mod runner;
+mod worktree;
 mod write;
 
 pub(crate) use hooks::Hooks;
 pub(crate) use runner::{Environment, resolve, stale_locks};
+pub(crate) use worktree::{PREFIX as WORKTREE_PREFIX, Worktree};
 
 use super::permissions::HiddenPaths;
 use super::selection::{CONTROL_BYTES, Selector};
@@ -778,6 +780,64 @@ pub(super) fn catalog(runtime: &ToolRuntime) -> Value {
         value["writes"] = json!(WRITES_LEFT_TO_USER);
     }
     value
+}
+
+// Editors in a Git repository work in a linked worktree; these wrap its lifecycle for the editor store.
+pub(super) fn create_worktree(
+    runtime: &ToolRuntime,
+    directory: &Path,
+    tree_name: &str,
+) -> Result<Option<worktree::Created>, ToolError> {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    if std::fs::symlink_metadata(environment.workspace().join(".git")).is_err() {
+        return Ok(None);
+    }
+    let parent = super::fs::open_directory(directory)?;
+    let reserve = |bytes| super::fs::editor::require_reserve(&parent, bytes);
+    worktree::create(program, environment, &directory.join(tree_name), reserve)
+}
+
+pub(super) fn worktree_changes(
+    runtime: &ToolRuntime,
+    tree: &Path,
+    record: &Worktree,
+) -> Result<worktree::Changed, ToolError> {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return Err(ToolError::Configuration);
+    };
+    let git = worktree::worktree_git(program, environment, tree, record)?;
+    worktree::changed(&git, &record.base)
+}
+
+pub(super) fn remove_worktree(runtime: &ToolRuntime, tree: &Path, record: &Worktree) {
+    if let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) {
+        worktree::remove(program, environment, tree, record);
+    }
+}
+
+pub(super) fn relocate_worktree(
+    runtime: &ToolRuntime,
+    tree: &Path,
+    record: &Worktree,
+) -> Result<(), ToolError> {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return Err(ToolError::Configuration);
+    };
+    worktree::relocate(program, environment, tree, record)
 }
 
 pub(super) async fn folder_hooks(workspace: &Path, editors: &Path) -> Option<Hooks> {
