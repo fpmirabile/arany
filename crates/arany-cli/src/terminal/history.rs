@@ -161,228 +161,21 @@ impl History {
             .last()
             .is_some_and(|run| run.assistant_message.is_some());
         let new_session = self.session != Some(view.id);
-        let width_changed = self.width != width;
         let rebuild = new_session
-            || width_changed
+            || self.width != width
             || self.run_count != view.runs.len()
             || self.last_run != last_run
-            || self.last_answered != last_answered;
-        let rebuild =
-            rebuild || self.dirty || self.preview_dirty || self.sequence != view.last_sequence;
-        let anchor = if !new_session && rebuild && !self.follow_tail {
-            self.messages.iter().find_map(|message| {
-                (message.start <= self.top && self.top < message.start + message.rows).then(|| {
-                    let offset = self.top - message.start;
-                    let rows = message_rows(
-                        message.kind,
-                        &message_text(view, message, &self.notices),
-                        self.width,
-                    );
-                    (message.source, row_coordinate(&rows[offset]), offset == 0)
-                })
-            })
-        } else {
-            None
-        };
+            || self.last_answered != last_answered
+            || self.dirty
+            || self.preview_dirty
+            || self.sequence != view.last_sequence;
         if rebuild {
-            let previous_rows = self.total_rows;
-            let full = new_session
-                || width_changed
-                || self.dirty
-                || self.run_count > view.runs.len()
-                || self.last_run != previous_run(view, self.run_count);
-            if new_session {
-                self.follow_tail = true;
-                self.unseen_new_content = false;
-                self.selection = None;
-                self.find = None;
-                self.last_find = None;
-                self.matched_row = None;
-                self.matched_source = None;
-                self.notices.clear();
-                self.preview = None;
-            }
-            let first = if full {
-                0
+            let anchor = if !new_session && !self.follow_tail {
+                self.reading_anchor(view)
             } else {
-                self.run_count.saturating_sub(1)
+                None
             };
-            let retain = self
-                .messages
-                .iter()
-                .position(|message| match message.source {
-                    MessageSource::User(run)
-                    | MessageSource::Assistant(run)
-                    | MessageSource::Supervisor(run, _)
-                    | MessageSource::Steering(run, _)
-                    | MessageSource::Tool(run, _)
-                    | MessageSource::Commentary(run, _, _) => run >= first,
-                    MessageSource::Notice(_) => false,
-                })
-                .unwrap_or(self.messages.len());
-            if full {
-                self.messages.clear();
-                self.total_rows = 0;
-                self.push_notices_after(None, width);
-            } else {
-                self.messages.truncate(retain);
-                self.total_rows = self.messages.last().map_or(0, |m| m.start + m.rows);
-            }
-            let counts = full.then(|| run_row_counts(&view.runs, width));
-            for (index, run) in view.runs.iter().enumerate().skip(first) {
-                let (user, assistant) = if self.agent {
-                    (MessageKind::Assignment, MessageKind::AgentResult)
-                } else {
-                    (MessageKind::User, MessageKind::Assistant)
-                };
-                if let Some(counts) = &counts {
-                    self.push_count(MessageSource::User(index), user, counts[index].0);
-                } else {
-                    self.push(
-                        MessageSource::User(index),
-                        user,
-                        &image_message_text(&run.objective, &run.images),
-                        width,
-                    );
-                }
-                self.push_notices_after(Some(MessageSource::User(index)), width);
-                let groups = if self.details {
-                    run.tools
-                        .iter()
-                        .enumerate()
-                        .map(|(index, tool)| {
-                            (
-                                index..index + 1,
-                                crate::presentation::tool_detail_text(tool),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    crate::presentation::tool_groups(&run.tools).collect()
-                };
-                for (range, text) in groups {
-                    self.push(
-                        MessageSource::Tool(index, range.start),
-                        if self.details {
-                            MessageKind::ToolDetails
-                        } else {
-                            MessageKind::Tool
-                        },
-                        &text,
-                        width,
-                    );
-                    for tool_index in range {
-                        self.push_notices_after(
-                            Some(MessageSource::Tool(index, tool_index)),
-                            width,
-                        );
-                    }
-                }
-                if self.agent {
-                    for (note, text) in run.steering_notes.iter().enumerate() {
-                        self.push_owned(
-                            MessageSource::Steering(index, note),
-                            MessageKind::SteeringNote,
-                            text.clone(),
-                            width,
-                        );
-                        self.push_notices_after(Some(MessageSource::Steering(index, note)), width);
-                    }
-                }
-                for (verdict_index, (_, verdict)) in run.supervisor.verdicts().iter().enumerate() {
-                    let source = MessageSource::Supervisor(index, verdict_index);
-                    if self.details {
-                        self.push_owned(
-                            source,
-                            MessageKind::Supervisor,
-                            crate::presentation::supervisor_line(verdict),
-                            width,
-                        );
-                    }
-                    self.push_notices_after(Some(source), width);
-                }
-                if self.details {
-                    for (call, item, text) in crate::presentation::display_commentary(run) {
-                        self.push(
-                            MessageSource::Commentary(index, call, item),
-                            MessageKind::Commentary,
-                            &text,
-                            width,
-                        );
-                    }
-                }
-                if self.details
-                    && run
-                        .display
-                        .iter()
-                        .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
-                {
-                    self.push_owned(
-                        MessageSource::Commentary(index, u32::MAX, 0),
-                        MessageKind::Notice,
-                        arany::DISPLAY_LIMIT_TEXT.to_owned(),
-                        width,
-                    );
-                }
-                if let Some(answer) = &run.assistant_message {
-                    if let Some(counts) = &counts {
-                        self.push_count(
-                            MessageSource::Assistant(index),
-                            assistant,
-                            counts[index].1.expect("accepted answer"),
-                        );
-                    } else {
-                        self.push(MessageSource::Assistant(index), assistant, answer, width);
-                    }
-                } else {
-                    let live = self
-                        .preview
-                        .as_ref()
-                        .filter(|preview| {
-                            preview.run_id == run.id
-                                && run.status == arany::RunStatus::Active
-                                && crate::presentation::display_call_visible(
-                                    run,
-                                    preview.call_index,
-                                )
-                        })
-                        .cloned();
-                    let text = live
-                        .as_ref()
-                        .map(|preview| preview.text.answer.clone())
-                        .filter(|text| !text.is_empty())
-                        .or_else(|| crate::presentation::display_answer(run));
-                    if let Some(text) = text {
-                        let kind = if run.status == arany::RunStatus::Active {
-                            MessageKind::Preview
-                        } else {
-                            MessageKind::Incomplete
-                        };
-                        if live.is_some() {
-                            self.push_owned(MessageSource::Assistant(index), kind, text, width);
-                        } else {
-                            self.push(MessageSource::Assistant(index), kind, &text, width);
-                        }
-                    }
-                    if self.details
-                        && let Some(preview) = live
-                    {
-                        for (item, text) in preview.text.commentary.iter().enumerate() {
-                            let source =
-                                MessageSource::Commentary(index, preview.call_index, item as u8);
-                            if !self.messages.iter().any(|message| message.source == source) {
-                                self.push_owned(
-                                    source,
-                                    MessageKind::Commentary,
-                                    text.clone(),
-                                    width,
-                                );
-                            }
-                        }
-                    }
-                }
-                self.push_notices_after(Some(MessageSource::Assistant(index)), width);
-            }
+            let previous_rows = self.rebuild(view, width, new_session);
             self.session = Some(view.id);
             self.width = width;
             self.last_run = last_run;
@@ -394,32 +187,12 @@ impl History {
             if !self.follow_tail && self.total_rows > previous_rows {
                 self.unseen_new_content = true;
             }
-            if let Some((source, coordinate, heading)) = anchor
-                && let Some(message) = self
-                    .messages
-                    .iter()
-                    .find(|message| message.source == source)
-            {
-                let rows = message_rows(
-                    message.kind,
-                    &message_text(view, message, &self.notices),
-                    width,
-                );
-                let offset = if heading {
-                    0
-                } else {
-                    row_of_coordinate(&rows, coordinate)
-                };
-                self.top = message.start + offset;
+            if let Some(anchor) = anchor {
+                self.restore_anchor(view, anchor, width);
             }
-        }
-        if rebuild && self.matched_row.is_some() {
-            self.matched_row = self.matched_source.and_then(|(source, coordinate)| {
-                let message = self.messages.iter().find(|entry| entry.source == source)?;
-                let text = message_text(view, message, &self.notices);
-                let rows = message_rows(message.kind, &text, width);
-                Some(message.start + row_of_coordinate(&rows, coordinate))
-            });
+            if self.matched_row.is_some() {
+                self.refresh_match(view, width);
+            }
         }
         self.height = height;
         self.top = if self.follow_tail {
@@ -427,6 +200,281 @@ impl History {
         } else {
             self.top.min(self.tail())
         };
+    }
+
+    // The message and row under the top of the reading window, so a rebuild can keep it in place.
+    fn reading_anchor(&self, view: &SessionView) -> Option<(MessageSource, Coordinate, bool)> {
+        self.messages.iter().find_map(|message| {
+            (message.start <= self.top && self.top < message.start + message.rows).then(|| {
+                let offset = self.top - message.start;
+                let rows = message_rows(
+                    message.kind,
+                    &message_text(view, message, &self.notices),
+                    self.width,
+                );
+                (message.source, row_coordinate(&rows[offset]), offset == 0)
+            })
+        })
+    }
+
+    // Rebuilds from the first changed Run, or from scratch; returns the row count before it.
+    fn rebuild(&mut self, view: &SessionView, width: usize, new_session: bool) -> usize {
+        let previous_rows = self.total_rows;
+        let full = new_session
+            || self.width != width
+            || self.dirty
+            || self.run_count > view.runs.len()
+            || self.last_run != previous_run(view, self.run_count);
+        if new_session {
+            self.reset_session();
+        }
+        let first = if full {
+            0
+        } else {
+            self.run_count.saturating_sub(1)
+        };
+        self.drop_runs_from(first, full, width);
+        let counts = full.then(|| run_row_counts(&view.runs, width));
+        for (index, run) in view.runs.iter().enumerate().skip(first) {
+            self.push_run(index, run, counts.as_deref(), width);
+        }
+        previous_rows
+    }
+
+    fn reset_session(&mut self) {
+        self.follow_tail = true;
+        self.unseen_new_content = false;
+        self.selection = None;
+        self.find = None;
+        self.last_find = None;
+        self.matched_row = None;
+        self.matched_source = None;
+        self.notices.clear();
+        self.preview = None;
+    }
+
+    // Keeps the messages of Runs before `first`; a full rebuild starts over with leading notices.
+    fn drop_runs_from(&mut self, first: usize, full: bool, width: usize) {
+        let retain = self
+            .messages
+            .iter()
+            .position(|message| match message.source {
+                MessageSource::User(run)
+                | MessageSource::Assistant(run)
+                | MessageSource::Supervisor(run, _)
+                | MessageSource::Steering(run, _)
+                | MessageSource::Tool(run, _)
+                | MessageSource::Commentary(run, _, _) => run >= first,
+                MessageSource::Notice(_) => false,
+            })
+            .unwrap_or(self.messages.len());
+        if full {
+            self.messages.clear();
+            self.total_rows = 0;
+            self.push_notices_after(None, width);
+        } else {
+            self.messages.truncate(retain);
+            self.total_rows = self.messages.last().map_or(0, |m| m.start + m.rows);
+        }
+    }
+
+    fn push_run(
+        &mut self,
+        index: usize,
+        run: &RunView,
+        counts: Option<&[(usize, Option<usize>)]>,
+        width: usize,
+    ) {
+        let (user, assistant) = if self.agent {
+            (MessageKind::Assignment, MessageKind::AgentResult)
+        } else {
+            (MessageKind::User, MessageKind::Assistant)
+        };
+        if let Some(counts) = counts {
+            self.push_count(MessageSource::User(index), user, counts[index].0);
+        } else {
+            self.push(
+                MessageSource::User(index),
+                user,
+                &image_message_text(&run.objective, &run.images),
+                width,
+            );
+        }
+        self.push_notices_after(Some(MessageSource::User(index)), width);
+        self.push_run_tools(index, run, width);
+        self.push_run_notes(index, run, width);
+        if let Some(answer) = &run.assistant_message {
+            if let Some(counts) = counts {
+                self.push_count(
+                    MessageSource::Assistant(index),
+                    assistant,
+                    counts[index].1.expect("accepted answer"),
+                );
+            } else {
+                self.push(MessageSource::Assistant(index), assistant, answer, width);
+            }
+        } else {
+            self.push_unanswered(index, run, width);
+        }
+        self.push_notices_after(Some(MessageSource::Assistant(index)), width);
+    }
+
+    // Tool groups, or one row per Tool in details, each followed by its notices.
+    fn push_run_tools(&mut self, index: usize, run: &RunView, width: usize) {
+        let groups = if self.details {
+            run.tools
+                .iter()
+                .enumerate()
+                .map(|(index, tool)| {
+                    (
+                        index..index + 1,
+                        crate::presentation::tool_detail_text(tool),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            crate::presentation::tool_groups(&run.tools).collect()
+        };
+        for (range, text) in groups {
+            self.push(
+                MessageSource::Tool(index, range.start),
+                if self.details {
+                    MessageKind::ToolDetails
+                } else {
+                    MessageKind::Tool
+                },
+                &text,
+                width,
+            );
+            for tool_index in range {
+                self.push_notices_after(Some(MessageSource::Tool(index, tool_index)), width);
+            }
+        }
+    }
+
+    // Agent steering notes, supervisor verdicts and, in details, commentary and the display limit.
+    fn push_run_notes(&mut self, index: usize, run: &RunView, width: usize) {
+        if self.agent {
+            for (note, text) in run.steering_notes.iter().enumerate() {
+                self.push_owned(
+                    MessageSource::Steering(index, note),
+                    MessageKind::SteeringNote,
+                    text.clone(),
+                    width,
+                );
+                self.push_notices_after(Some(MessageSource::Steering(index, note)), width);
+            }
+        }
+        for (verdict_index, (_, verdict)) in run.supervisor.verdicts().iter().enumerate() {
+            let source = MessageSource::Supervisor(index, verdict_index);
+            if self.details {
+                self.push_owned(
+                    source,
+                    MessageKind::Supervisor,
+                    crate::presentation::supervisor_line(verdict),
+                    width,
+                );
+            }
+            self.push_notices_after(Some(source), width);
+        }
+        if self.details {
+            for (call, item, text) in crate::presentation::display_commentary(run) {
+                self.push(
+                    MessageSource::Commentary(index, call, item),
+                    MessageKind::Commentary,
+                    &text,
+                    width,
+                );
+            }
+        }
+        if self.details
+            && run
+                .display
+                .iter()
+                .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
+        {
+            self.push_owned(
+                MessageSource::Commentary(index, u32::MAX, 0),
+                MessageKind::Notice,
+                arany::DISPLAY_LIMIT_TEXT.to_owned(),
+                width,
+            );
+        }
+    }
+
+    // An unanswered Run shows its live preview, or the last displayed answer, as provisional.
+    fn push_unanswered(&mut self, index: usize, run: &RunView, width: usize) {
+        let live = self
+            .preview
+            .as_ref()
+            .filter(|preview| {
+                preview.run_id == run.id
+                    && run.status == arany::RunStatus::Active
+                    && crate::presentation::display_call_visible(run, preview.call_index)
+            })
+            .cloned();
+        let text = live
+            .as_ref()
+            .map(|preview| preview.text.answer.clone())
+            .filter(|text| !text.is_empty())
+            .or_else(|| crate::presentation::display_answer(run));
+        if let Some(text) = text {
+            let kind = if run.status == arany::RunStatus::Active {
+                MessageKind::Preview
+            } else {
+                MessageKind::Incomplete
+            };
+            if live.is_some() {
+                self.push_owned(MessageSource::Assistant(index), kind, text, width);
+            } else {
+                self.push(MessageSource::Assistant(index), kind, &text, width);
+            }
+        }
+        if self.details
+            && let Some(preview) = live
+        {
+            for (item, text) in preview.text.commentary.iter().enumerate() {
+                let source = MessageSource::Commentary(index, preview.call_index, item as u8);
+                if !self.messages.iter().any(|message| message.source == source) {
+                    self.push_owned(source, MessageKind::Commentary, text.clone(), width);
+                }
+            }
+        }
+    }
+
+    fn restore_anchor(
+        &mut self,
+        view: &SessionView,
+        (source, coordinate, heading): (MessageSource, Coordinate, bool),
+        width: usize,
+    ) {
+        let Some(message) = self
+            .messages
+            .iter()
+            .find(|message| message.source == source)
+        else {
+            return;
+        };
+        let rows = message_rows(
+            message.kind,
+            &message_text(view, message, &self.notices),
+            width,
+        );
+        let offset = if heading {
+            0
+        } else {
+            row_of_coordinate(&rows, coordinate)
+        };
+        self.top = message.start + offset;
+    }
+
+    fn refresh_match(&mut self, view: &SessionView, width: usize) {
+        self.matched_row = self.matched_source.and_then(|(source, coordinate)| {
+            let message = self.messages.iter().find(|entry| entry.source == source)?;
+            let text = message_text(view, message, &self.notices);
+            let rows = message_rows(message.kind, &text, width);
+            Some(message.start + row_of_coordinate(&rows, coordinate))
+        });
     }
 
     fn push(&mut self, source: MessageSource, kind: MessageKind, text: &str, width: usize) {
