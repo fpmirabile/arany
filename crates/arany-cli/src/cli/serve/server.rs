@@ -428,30 +428,7 @@ async fn complete(
         .await
         .map_err(|e| e.message)?;
     if finalizing && let Some(id) = turn.pending_start.take() {
-        let run = view
-            .runs
-            .iter()
-            .find(|run| {
-                turn.state
-                    .first_sequence
-                    .is_some_and(|first| run.accepted_sequence >= first)
-            })
-            .ok_or("submission has no accepted Run")?;
-        let goal = view
-            .goals
-            .iter()
-            .find(|goal| goal.run_ids.contains(&run.id))
-            .ok_or("Run has no Goal")?;
-        send(
-            outbound,
-            response(
-                id,
-                TurnResult {
-                    turn: items::turn_summary(&view, run, goal, false),
-                },
-            ),
-        )
-        .await?;
+        answer_turn_start(turn, &view, outbound, id).await?;
     }
     for run in &view.runs {
         if !finalizing && Some(run.id) != turn.state.run_id {
@@ -471,37 +448,7 @@ async fn complete(
         {
             continue;
         }
-        let goal = view
-            .goals
-            .iter()
-            .find(|goal| goal.run_ids.contains(&run.id))
-            .ok_or("Run has no Goal")?;
-        let mut summary = items::turn_summary(&view, run, goal, false);
-        if let Some(refused) = refused.filter(|refused| refused.run == run.id)
-            && let Some(goal) = &mut summary.goal
-        {
-            goal.stopped = Some(GoalStop::NotAdmitted {
-                refusal: refused.reason.clone(),
-            });
-            summary.error = Some(TurnError {
-                message: refused.message.clone(),
-            });
-        }
-        if !finalizing {
-            summary.stop_reason = None;
-            summary.goal = Some(GoalSummary {
-                status: if matches!(
-                    run.status,
-                    arany::RunStatus::Cancelled | arany::RunStatus::StoppedByHook
-                ) {
-                    GoalStatus::Interrupted
-                } else {
-                    GoalStatus::Running
-                },
-                stopped: None,
-                budget_refusal: None,
-            });
-        }
+        let summary = completed_turn(&view, run, refused, finalizing)?;
         emit(
             outbound,
             opt_out,
@@ -518,6 +465,79 @@ async fn complete(
     }
     turn.state.pending_completion = false;
     Ok(())
+}
+
+async fn answer_turn_start(
+    turn: &ActiveTurn,
+    view: &arany::SessionView,
+    outbound: &mpsc::Sender<Message>,
+    id: RequestId,
+) -> Result<(), String> {
+    let run = view
+        .runs
+        .iter()
+        .find(|run| {
+            turn.state
+                .first_sequence
+                .is_some_and(|first| run.accepted_sequence >= first)
+        })
+        .ok_or("submission has no accepted Run")?;
+    let goal = view
+        .goals
+        .iter()
+        .find(|goal| goal.run_ids.contains(&run.id))
+        .ok_or("Run has no Goal")?;
+    send(
+        outbound,
+        response(
+            id,
+            TurnResult {
+                turn: items::turn_summary(view, run, goal, false),
+            },
+        ),
+    )
+    .await
+}
+
+// A refused Run reports its admission refusal; a Run completed mid-submission keeps its Goal open.
+fn completed_turn(
+    view: &arany::SessionView,
+    run: &arany::RunView,
+    refused: Option<&Refused>,
+    finalizing: bool,
+) -> Result<Turn, String> {
+    let goal = view
+        .goals
+        .iter()
+        .find(|goal| goal.run_ids.contains(&run.id))
+        .ok_or("Run has no Goal")?;
+    let mut summary = items::turn_summary(view, run, goal, false);
+    if let Some(refused) = refused.filter(|refused| refused.run == run.id)
+        && let Some(goal) = &mut summary.goal
+    {
+        goal.stopped = Some(GoalStop::NotAdmitted {
+            refusal: refused.reason.clone(),
+        });
+        summary.error = Some(TurnError {
+            message: refused.message.clone(),
+        });
+    }
+    if !finalizing {
+        summary.stop_reason = None;
+        summary.goal = Some(GoalSummary {
+            status: if matches!(
+                run.status,
+                arany::RunStatus::Cancelled | arany::RunStatus::StoppedByHook
+            ) {
+                GoalStatus::Interrupted
+            } else {
+                GoalStatus::Running
+            },
+            stopped: None,
+            budget_refusal: None,
+        });
+    }
+    Ok(summary)
 }
 
 pub(super) fn params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, Fault> {

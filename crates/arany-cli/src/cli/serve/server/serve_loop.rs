@@ -242,8 +242,10 @@ impl ServerLoop {
         }
         self.rewind_preview = None;
         let (result, pending) = rewind::preview(
-            &self.engine,
-            &self.state,
+            rewind::Context {
+                engine: &self.engine,
+                state: &self.state,
+            },
             &self.threads,
             params(request.params)?,
         )
@@ -273,8 +275,10 @@ impl ServerLoop {
             .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
         let cancellation = RunCancellation::new();
         let mut restoration = Box::pin(rewind::restore(
-            &self.engine,
-            &self.state,
+            rewind::Context {
+                engine: &self.engine,
+                state: &self.state,
+            },
             &mut self.threads,
             &mut self.rewind_preview,
             params(request.params)?,
@@ -555,38 +559,11 @@ impl ServerLoop {
         &mut self,
         method: &str,
         params: Option<Value>,
-    ) -> Result<
-        (
-            arany::AdmittedProviders,
-            RunRequest,
-            RunControls,
-            arany::ApprovalInbox,
-            u64,
-        ),
-        Fault,
-    > {
+    ) -> Result<PreparedTurn, Fault> {
         if let Some(native) = &mut self.native
             && let Some(submission) = native.pending.take()
         {
-            let first = match submission
-                .request
-                .session_id
-                .filter(|_| submission.controls.approvals.is_some())
-            {
-                Some(id) => threads::load_view(&self.state, id)
-                    .await?
-                    .last_sequence
-                    .checked_add(1)
-                    .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?,
-                None => 1,
-            };
-            return Ok((
-                submission.providers,
-                submission.request,
-                submission.controls,
-                submission.inbox,
-                first,
-            ));
+            return self.native_turn(submission).await;
         }
         let mut input = controls::Submission::parse(method, params)?;
         if self.active.is_some() {
@@ -604,19 +581,7 @@ impl ServerLoop {
             return Err(Fault::engine(EngineError::ProviderSetupBlocked));
         }
         let goal = input.goal(loaded, &view)?;
-        let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
-        let approvals = if self.threads.approval_channel == ApprovalChannel::Terminal {
-            approvals
-        } else if self.host_session_approval {
-            approvals.without_prefix_rules()
-        } else {
-            approvals.once_only()
-        };
-        let approvals = if self.threads.approval_channel == ApprovalChannel::Restricted {
-            approvals.without_human_only()
-        } else {
-            approvals
-        };
+        let (approvals, inbox) = self.turn_approvals(loaded.approval_mode);
         let first_sequence = view
             .last_sequence
             .checked_add(1)
@@ -652,6 +617,48 @@ impl ServerLoop {
             inbox,
             first_sequence,
         ))
+    }
+
+    // An attached submission carries its own Run; its Events start after the Session's head.
+    async fn native_turn(&self, submission: embedded::Submission) -> Result<PreparedTurn, Fault> {
+        let first = match submission
+            .request
+            .session_id
+            .filter(|_| submission.controls.approvals.is_some())
+        {
+            Some(id) => threads::load_view(&self.state, id)
+                .await?
+                .last_sequence
+                .checked_add(1)
+                .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?,
+            None => 1,
+        };
+        Ok((
+            submission.providers,
+            submission.request,
+            submission.controls,
+            submission.inbox,
+            first,
+        ))
+    }
+
+    // The terminal keeps every approval scope; Serve clients get session or once-only scopes, and a
+    // restricted client never sees human-only approvals.
+    fn turn_approvals(&self, mode: arany::ApprovalMode) -> (ToolApprovals, arany::ApprovalInbox) {
+        let (approvals, inbox) = ToolApprovals::new(mode);
+        let approvals = if self.threads.approval_channel == ApprovalChannel::Terminal {
+            approvals
+        } else if self.host_session_approval {
+            approvals.without_prefix_rules()
+        } else {
+            approvals.once_only()
+        };
+        let approvals = if self.threads.approval_channel == ApprovalChannel::Restricted {
+            approvals.without_human_only()
+        } else {
+            approvals
+        };
+        (approvals, inbox)
     }
 
     async fn submit_run(
@@ -1095,6 +1102,14 @@ impl ServerLoop {
         }
     }
 }
+
+type PreparedTurn = (
+    arany::AdmittedProviders,
+    RunRequest,
+    RunControls,
+    arany::ApprovalInbox,
+    u64,
+);
 
 #[cfg(test)]
 mod tests;

@@ -116,13 +116,8 @@ pub(in crate::cli) async fn serve_transport<T>(
     stop: impl std::future::Future<Output = ()>,
     transport: Transport<T>,
 ) -> Result<(), String> {
-    let Transport {
-        inbound,
-        outbound,
-        reader: mut reader_task,
-        writer: mut writer_task,
-        shutdown,
-    } = transport;
+    let (inbound, outbound, shutdown) = (transport.inbound, transport.outbound, transport.shutdown);
+    let (mut reader_task, mut writer_task) = (transport.reader, transport.writer);
     let mut reader_done = false;
     let mut writer_done = false;
     let shutdown_rx = shutdown.subscribe();

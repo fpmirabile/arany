@@ -73,49 +73,8 @@ impl Threads {
     ) -> Result<LoadedThread, Fault> {
         let provider = ProviderArg::from_str(&params.provider)
             .map_err(|_| Fault::selection("invalid Provider", Reason::InvalidSelection))?;
-        if params.model.is_empty()
-            || params.model.len() > arany::MAX_MODEL_ID_BYTES
-            || params.model.chars().any(char::is_control)
-        {
-            return Err(Fault::params());
-        }
-        match provider {
-            ProviderArg::Openai | ProviderArg::Anthropic => {
-                arany::resolve_native_effort_for_run(
-                    &params.provider,
-                    &params.model,
-                    params.effort,
-                )
-                .map_err(|_| {
-                    Fault::selection("invalid native model/effort", Reason::InvalidSelection)
-                })?;
-            }
-            ProviderArg::Chatgpt => {
-                arany::validate_native_model_id(&params.model).map_err(|_| Fault::params())?;
-                if params.effort.is_none() {
-                    return Err(Fault::params());
-                }
-            }
-            ProviderArg::Custom(_) => {}
-        }
-        let policy = match (
-            params
-                .collaboration
-                .as_ref()
-                .unwrap_or(&Collaboration::Single),
-            params.max_active_children,
-        ) {
-            (Collaboration::Single, None) => CollaborationPolicy::Single,
-            (Collaboration::Auto, count) if count.unwrap_or(3) <= 8 => CollaborationPolicy::Auto {
-                max_active_children: count.unwrap_or(3),
-            },
-            (Collaboration::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
-                CollaborationPolicy::Team {
-                    max_active_children: count.unwrap_or(3),
-                }
-            }
-            _ => return Err(Fault::params()),
-        };
+        check_selection(&provider, params)?;
+        let policy = thread_policy(params)?;
         let (workspace, _) =
             crate::cli::admit_workspace(Some(PathBuf::from(&params.cwd)), Some(state_dir.into()))
                 .map_err(|_| Fault::params())?;
@@ -136,28 +95,9 @@ impl Threads {
                     .map_err(|_| Fault::params())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let providers = if let Some(roster) = &self.roster {
-            roster.admit(state_dir, &workspace).await.map_err(|_| {
-                Fault::selection("Provider unavailable", Reason::ProviderUnavailable)
-            })?
-        } else {
-            let primary = self
-                .select(&provider, params, workspace.clone(), state_dir)
-                .await?;
-            if primary.identity().profile != params.provider
-                || primary.identity().model != params.model
-            {
-                return Err(Fault::selection(
-                    "selected Provider changed before Workspace admission",
-                    Reason::ProviderRejected,
-                ));
-            }
-            configured_providers(state_dir, &workspace, primary)
-                .await
-                .map_err(|_| {
-                    Fault::selection("Provider routing unavailable", Reason::ProviderUnavailable)
-                })?
-        };
+        let providers = self
+            .thread_providers(state_dir, &provider, params, &workspace)
+            .await?;
         let (goal_budget, resource_settings, context_window) = execution_limits(state_dir)
             .await
             .map_err(|_| Fault::engine(arany::EngineError::InvalidRequest))?;
@@ -176,6 +116,38 @@ impl Threads {
             goal_budget,
             resource_settings,
             context_window,
+        })
+    }
+
+    // A roster admits its own routes; otherwise the selected primary must still be the requested one.
+    async fn thread_providers(
+        &self,
+        state_dir: &Path,
+        provider: &ProviderArg,
+        params: &ThreadStartParams,
+        workspace: &Path,
+    ) -> Result<AdmittedProviders, Fault> {
+        Ok(if let Some(roster) = &self.roster {
+            roster.admit(state_dir, workspace).await.map_err(|_| {
+                Fault::selection("Provider unavailable", Reason::ProviderUnavailable)
+            })?
+        } else {
+            let primary = self
+                .select(provider, params, workspace.to_path_buf(), state_dir)
+                .await?;
+            if primary.identity().profile != params.provider
+                || primary.identity().model != params.model
+            {
+                return Err(Fault::selection(
+                    "selected Provider changed before Workspace admission",
+                    Reason::ProviderRejected,
+                ));
+            }
+            configured_providers(state_dir, workspace, primary)
+                .await
+                .map_err(|_| {
+                    Fault::selection("Provider routing unavailable", Reason::ProviderUnavailable)
+                })?
         })
     }
 
@@ -408,4 +380,52 @@ pub(super) async fn list(
             .collect(),
         next_cursor,
     })
+}
+
+fn check_selection(provider: &ProviderArg, params: &ThreadStartParams) -> Result<(), Fault> {
+    if params.model.is_empty()
+        || params.model.len() > arany::MAX_MODEL_ID_BYTES
+        || params.model.chars().any(char::is_control)
+    {
+        return Err(Fault::params());
+    }
+    match provider {
+        ProviderArg::Openai | ProviderArg::Anthropic => {
+            arany::resolve_native_effort_for_run(&params.provider, &params.model, params.effort)
+                .map_err(|_| {
+                    Fault::selection("invalid native model/effort", Reason::InvalidSelection)
+                })?;
+        }
+        ProviderArg::Chatgpt => {
+            arany::validate_native_model_id(&params.model).map_err(|_| Fault::params())?;
+            if params.effort.is_none() {
+                return Err(Fault::params());
+            }
+        }
+        ProviderArg::Custom(_) => {}
+    }
+    Ok(())
+}
+
+fn thread_policy(params: &ThreadStartParams) -> Result<CollaborationPolicy, Fault> {
+    Ok(
+        match (
+            params
+                .collaboration
+                .as_ref()
+                .unwrap_or(&Collaboration::Single),
+            params.max_active_children,
+        ) {
+            (Collaboration::Single, None) => CollaborationPolicy::Single,
+            (Collaboration::Auto, count) if count.unwrap_or(3) <= 8 => CollaborationPolicy::Auto {
+                max_active_children: count.unwrap_or(3),
+            },
+            (Collaboration::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
+                CollaborationPolicy::Team {
+                    max_active_children: count.unwrap_or(3),
+                }
+            }
+            _ => return Err(Fault::params()),
+        },
+    )
 }
