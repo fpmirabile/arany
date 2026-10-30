@@ -12,10 +12,12 @@ use tokio::io::AsyncReadExt;
 pub(super) const GIT_CAPTURE_BYTES: usize = 256 * 1024;
 pub(super) const STDERR_BYTES: usize = 4 * 1024;
 // The cage: forced on every invocation, after the user's configuration so it wins.
-const CAGE: [&str; 3] = [
+const CAGE: [&str; 4] = [
     "core.fsmonitor=false",
     "core.pager=cat",
     "core.editor=false",
+    // Unquoted names keep path filters exact; only names Git must escape stay quoted and hidden.
+    "core.quotePath=false",
 ];
 const NO_HOOKS: &str = "/dev/null";
 const NO_NETWORK: &str = "protocol.allow=never";

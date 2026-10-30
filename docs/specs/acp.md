@@ -16,7 +16,7 @@ a conflicting explicit tuple. Collaboration and maximum children use `exec`
 defaults and bounds. `--state-dir` selects State. Tools stay off unless `--tools`
 opts into the existing private Tool grant and serve admission, including native
 Guard availability. No client capability or `_meta` supplies authority. Human-only
-approvals are unavailable under the [Tools contract](./tools.md#modes-and-approval-decisions): a human-only Ask sends no permission request, dispatches nothing and records `unavailable_approval`. Host commands run only through an eligible admitted user-owned host-prefix allow rule in default or dontAsk, without a permission request. Every other host ask, including all of auto and acceptEdits, is denied immediately, and client approvals add no host authority.
+approvals are unavailable under the [Tools contract](./tools.md#modes-and-approval-decisions): a human-only Ask sends no permission request, dispatches nothing and records `unavailable_approval`. Host commands run only through an eligible admitted user-owned host-prefix allow rule in default or dontAsk, without a permission request. Every other host ask, including all of auto and acceptEdits, is denied immediately, and client approvals add no host authority. [Git hooks](./tools.md#git-hooks) follow a trusted folder's saved answer; ACP never asks for it, so with no saved answer hooks stay off and Git write results carry the notice to accept them in the terminal.
 
 TTY stdin or stdout is refused before State admission, exit 2 with
 `error: acp requires piped stdin and stdout`. Authority configuration, State,

@@ -168,10 +168,11 @@ grant than their parent.
 
 Exact Read, typed discovery (List, Glob, Search) and Skill text use the admitted
 directory capability in process.
-Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
+Observations carry `Attestation::{InProcess, Guard, Git, Host, Unguarded}`; the reducer validates the
 execution site. Typed Workspace mutations and changeset publication use the same admitted handle
-in process, with digest preconditions and journaled File receipts. Typed Git reads,
-Skill loading, programs and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-file-operations) owns
+in process, with digest preconditions and journaled File receipts. Typed Git runs
+natively under a minimal cage with its own `Git` attestation; Skill loading, programs
+and MCP stay behind the separate Guard. The [Tool contract](../specs/tools.md#in-process-file-operations) owns
 path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforcement-and-compatibility)
 and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
 native launch, supervision and recovery. Short-lived same-binary Guard and
