@@ -4,7 +4,7 @@ mod git_hooks;
 pub(super) use git_hooks::ask as ask_git_hooks;
 
 use super::setup::SetupError;
-use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput};
+use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput, TrustDialog};
 use arany::permissions::{
     Decision, NetworkDomainEdit, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
 };
@@ -1031,10 +1031,10 @@ pub(super) async fn choose(
     let mut focused_profile = None;
     let mut explanation_pages_seen = false;
     loop {
-        let (more, visible_page) = terminal.draw_workspace_permissions(
+        let (more, visible_page) = terminal.draw_workspace_permissions(TrustDialog {
             id,
-            permissions.path(),
-            ProfileSelection {
+            workspace: permissions.path(),
+            profiles: ProfileSelection {
                 options: &options,
                 selected: &selected_profiles,
                 focused: focused_profile,
@@ -1042,9 +1042,9 @@ pub(super) async fn choose(
                 discovery_error: permissions.discovery_error(),
             },
             page,
-            selected == 1,
+            trust: selected == 1,
             configured,
-        )?;
+        })?;
         page = visible_page;
         if focused_profile.is_none() && !more {
             explanation_pages_seen = true;

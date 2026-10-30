@@ -3,76 +3,25 @@ use super::*;
 impl AttachedTerminal {
     pub fn draw_workspace_permissions(
         &mut self,
-        id: uuid::Uuid,
-        workspace: &std::path::Path,
-        profile_selection: ProfileSelection<'_>,
-        page: usize,
-        trust: bool,
-        configured: bool,
+        dialog: TrustDialog<'_>,
     ) -> Result<(bool, usize), TerminalError> {
+        let TrustDialog {
+            id,
+            workspace,
+            profiles,
+            page,
+            trust,
+            configured,
+        } = dialog;
+        self.cancel_clipboard_paste();
+        let (lines, profile_start) =
+            trust_dialog_lines(workspace, &profiles, configured, self.linear.is_some());
         let ProfileSelection {
             options,
-            selected: selected_profiles,
             focused: focused_profile,
             enabled: profile_selection_enabled,
-            discovery_error,
-        } = profile_selection;
-        self.cancel_clipboard_paste();
-        let mut lines = crate::presentation::workspace_permission_lines(workspace);
-        if configured {
-            lines.push(
-                "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
-            );
-        }
-        if let Some(error) = discovery_error {
-            lines.push(format!(
-                "Runtime profile discovery failed: {}; saved profiles stay listed.",
-                crate::presentation::escape_terminal(error)
-            ));
-        }
-        let profile_start;
-        if options.is_empty() {
-            lines.push("No supported runtime profiles were detected.".into());
-            profile_start = None;
-        } else {
-            lines.extend(crate::presentation::RUNTIME_PROFILE_LINES.map(String::from));
-            profile_start = Some(lines.len());
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-            let linear = self.linear.is_some();
-            lines.extend(options.iter().enumerate().map(|(index, option)| {
-                let marker = view::focus_marker(focused_profile == Some(index));
-                let checked = selected_profiles
-                    .get(index)
-                    .copied()
-                    .unwrap_or(option.selected);
-                let number = index + 3;
-                let body = if linear {
-                    option.label.clone()
-                } else {
-                    let head = match &option.version {
-                        Some(version) => format!("{} {version}", option.group),
-                        None => option.group.to_owned(),
-                    };
-                    let path = crate::presentation::abbreviate_home(&option.path, home.as_deref());
-                    let suffix = if option.detected {
-                        ""
-                    } else {
-                        " · no longer detected"
-                    };
-                    let warning = if option.exclusive {
-                        ""
-                    } else {
-                        " · runs whatever the directory currently holds"
-                    };
-                    format!("{head} · {path}{warning}{suffix}")
-                };
-                format!(
-                    "{marker} [{}] {number}. {}",
-                    if checked { "x" } else { " " },
-                    crate::presentation::escape_terminal(&body)
-                )
-            }));
-        }
+            ..
+        } = profiles;
         if let Some(linear) = &mut self.linear {
             linear
                 .draw_permission_prompt(
@@ -98,15 +47,7 @@ impl AttachedTerminal {
                     area,
                     &lines,
                     view::PermissionFrameState {
-                        choices: if configured && area.width < 24 {
-                            &["Use config", "Trust folder"]
-                        } else if configured {
-                            &["Use explicit config", "Trust this folder"]
-                        } else if area.width < 24 {
-                            &["Read only", "Trust folder"]
-                        } else {
-                            &["Continue read only", "Trust this folder"]
-                        },
+                        choices: trust_choices(configured, area.width),
                         page,
                         focus: usize::from(trust),
                         profile_start,
@@ -394,4 +335,92 @@ pub fn setup_choices_need_paging(instruction: &str, choices: &[(u8, &str)]) -> b
             .chars()
             .count()
             > crate::presentation::MAX_ROW_WIDTH
+}
+
+fn trust_dialog_lines(
+    workspace: &std::path::Path,
+    profiles: &ProfileSelection<'_>,
+    configured: bool,
+    linear: bool,
+) -> (Vec<String>, Option<usize>) {
+    let mut lines = crate::presentation::workspace_permission_lines(workspace);
+    if configured {
+        lines.push(
+            "--tools is selected. Continue with its private configuration or remember folder trust; the explicit configuration keeps precedence.".into(),
+        );
+    }
+    if let Some(error) = profiles.discovery_error {
+        lines.push(format!(
+            "Runtime profile discovery failed: {}; saved profiles stay listed.",
+            crate::presentation::escape_terminal(error)
+        ));
+    }
+    if profiles.options.is_empty() {
+        lines.push("No supported runtime profiles were detected.".into());
+        return (lines, None);
+    }
+    lines.extend(crate::presentation::RUNTIME_PROFILE_LINES.map(String::from));
+    let profile_start = lines.len();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    lines.extend(profiles.options.iter().enumerate().map(|(index, option)| {
+        profile_choice_line(index, option, profiles, linear, home.as_deref())
+    }));
+    (lines, Some(profile_start))
+}
+
+fn profile_choice_line(
+    index: usize,
+    option: &arany::RuntimeProfileOption,
+    profiles: &ProfileSelection<'_>,
+    linear: bool,
+    home: Option<&std::path::Path>,
+) -> String {
+    let marker = view::focus_marker(profiles.focused == Some(index));
+    let checked = profiles
+        .selected
+        .get(index)
+        .copied()
+        .unwrap_or(option.selected);
+    let number = index + 3;
+    let body = if linear {
+        option.label.clone()
+    } else {
+        profile_summary(option, home)
+    };
+    format!(
+        "{marker} [{}] {number}. {}",
+        if checked { "x" } else { " " },
+        crate::presentation::escape_terminal(&body)
+    )
+}
+
+fn profile_summary(option: &arany::RuntimeProfileOption, home: Option<&std::path::Path>) -> String {
+    let head = match &option.version {
+        Some(version) => format!("{} {version}", option.group),
+        None => option.group.to_owned(),
+    };
+    let path = crate::presentation::abbreviate_home(&option.path, home);
+    let suffix = if option.detected {
+        ""
+    } else {
+        " · no longer detected"
+    };
+    let warning = if option.exclusive {
+        ""
+    } else {
+        " · runs whatever the directory currently holds"
+    };
+    format!("{head} · {path}{warning}{suffix}")
+}
+
+fn trust_choices(configured: bool, width: u16) -> &'static [&'static str] {
+    if configured && width < 24 {
+        &["Use config", "Trust folder"]
+    } else if configured {
+        &["Use explicit config", "Trust this folder"]
+    } else if width < 24 {
+        &["Read only", "Trust folder"]
+    } else {
+        &["Continue read only", "Trust this folder"]
+    }
 }

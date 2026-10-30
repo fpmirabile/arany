@@ -537,6 +537,15 @@ struct AttachedSettings {
     screen_reader: bool,
 }
 
+pub struct TrustDialog<'a> {
+    pub id: uuid::Uuid,
+    pub workspace: &'a std::path::Path,
+    pub profiles: ProfileSelection<'a>,
+    pub page: usize,
+    pub trust: bool,
+    pub configured: bool,
+}
+
 pub struct ProfileSelection<'a> {
     pub options: &'a [arany::RuntimeProfileOption],
     pub selected: &'a [bool],
