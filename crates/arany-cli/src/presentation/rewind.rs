@@ -175,21 +175,34 @@ pub fn preview_lines(preview: &RewindPreview) -> Vec<String> {
     lines
 }
 
+pub const GIT_AND_HOST_NOT_UNDONE: &str = "Git and host command changes are not undone";
+
+// Git and host effects collapse into one fixed line; other non-rewindable effects stay listed.
 pub fn non_rewindable_lines(plan: &arany::rewind::RewindPlan) -> Vec<String> {
-    plan.non_rewindable
+    let mut lines: Vec<String> = plan
+        .non_rewindable
         .iter()
-        .map(|(sequence, effect)| {
+        .filter_map(|(sequence, effect)| {
             let label = match effect {
-                NonRewindable::Host => "host Git remote effect",
-                NonRewindable::Git => "Git write",
-                NonRewindable::UnguardedCommand => "unguarded command",
+                NonRewindable::Host | NonRewindable::Git | NonRewindable::UnguardedCommand => {
+                    return None;
+                }
                 NonRewindable::Mcp => "MCP external effect",
                 NonRewindable::Cache => "build cache publication",
                 NonRewindable::Directory => "empty directory",
             };
-            format!("Not rewindable: {label} at Event {sequence}")
+            Some(format!("Not rewindable: {label} at Event {sequence}"))
         })
-        .collect()
+        .collect();
+    if plan.non_rewindable.iter().any(|(_, effect)| {
+        matches!(
+            effect,
+            NonRewindable::Host | NonRewindable::Git | NonRewindable::UnguardedCommand
+        )
+    }) {
+        lines.insert(0, GIT_AND_HOST_NOT_UNDONE.into());
+    }
+    lines
 }
 
 pub fn receipt(finished: &RewindFinished, count: usize, label: &str) -> String {
@@ -312,5 +325,35 @@ mod tests {
                     .starts_with(&format!("Restored {count} {noun} to before Run 2"))
             );
         }
+    }
+
+    #[test]
+    fn git_and_host_effects_share_one_fixed_line() {
+        let plan = |effects: &[NonRewindable]| arany::rewind::RewindPlan {
+            files: Vec::new(),
+            blockers: Vec::new(),
+            non_rewindable: effects
+                .iter()
+                .enumerate()
+                .map(|(index, effect)| (index as u64 + 1, *effect))
+                .collect(),
+        };
+        assert_eq!(
+            non_rewindable_lines(&plan(&[
+                NonRewindable::Git,
+                NonRewindable::Host,
+                NonRewindable::Mcp,
+                NonRewindable::UnguardedCommand,
+            ])),
+            [
+                GIT_AND_HOST_NOT_UNDONE,
+                "Not rewindable: MCP external effect at Event 3"
+            ]
+        );
+        assert_eq!(
+            non_rewindable_lines(&plan(&[NonRewindable::Cache])),
+            ["Not rewindable: build cache publication at Event 1"]
+        );
+        assert!(non_rewindable_lines(&plan(&[])).is_empty());
     }
 }
