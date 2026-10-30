@@ -615,12 +615,42 @@ impl AttachedTerminal {
         if let Some(input) = self.deferred_input.take() {
             return Ok(input);
         }
+        let input = match self.next_read().await? {
+            InputRead::Input(input) => input,
+            InputRead::GraphicsReady => return Ok(TerminalInput::PanelSelectionChanged),
+            InputRead::PanelCopy(result) => {
+                let mut stderr = io::stderr();
+                let terminal_output = self
+                    .owned
+                    .input
+                    .is_some()
+                    .then_some(&mut stderr as &mut dyn Write);
+                self.finish_panel_copy(result, terminal_output);
+                return Ok(TerminalInput::PanelSelectionChanged);
+            }
+        };
+        if chat {
+            self.track_pointer_hover(input);
+        }
+        if let Some(result) = self
+            .panel_pointer_input(input, mouse_capture_enabled())
+            .await
+        {
+            return Ok(result);
+        }
+        if let Some(linear) = &mut self.linear {
+            linear.note_input(input);
+        }
+        Ok(input)
+    }
+
+    async fn next_read(&mut self) -> Result<InputRead, TerminalError> {
         let clipboard_ready = self
             .owned
             .input
             .as_ref()
             .is_some_and(TerminalReader::paste_ready);
-        let input = tokio::select! {
+        Ok(tokio::select! {
             input = self.owned.reader().recv() => InputRead::Input(input?),
             signal = self.interrupt.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
@@ -652,23 +682,12 @@ impl AttachedTerminal {
             result = wait_panel_copy(&mut self.panels.panel_copy) => {
                 InputRead::PanelCopy(result)
             },
-        };
-        let input = match input {
-            InputRead::Input(input) => input,
-            InputRead::GraphicsReady => return Ok(TerminalInput::PanelSelectionChanged),
-            InputRead::PanelCopy(result) => {
-                let mut stderr = io::stderr();
-                let terminal_output = self
-                    .owned
-                    .input
-                    .is_some()
-                    .then_some(&mut stderr as &mut dyn Write);
-                self.finish_panel_copy(result, terminal_output);
-                return Ok(TerminalInput::PanelSelectionChanged);
-            }
-        };
-        if chat
-            && self.owned.graphics_protocol.is_some()
+        })
+    }
+
+    // Chat pointer motion over an image chip moves the hover and resets its preview.
+    fn track_pointer_hover(&mut self, input: TerminalInput) {
+        if self.owned.graphics_protocol.is_some()
             && mouse_capture_enabled()
             && let Some((column, row)) = pointer_position(input)
         {
@@ -682,32 +701,6 @@ impl AttachedTerminal {
                 self.graphics_hover_changed = false;
             }
         }
-        if let Some(result) = self
-            .panel_pointer_input(input, mouse_capture_enabled())
-            .await
-        {
-            return Ok(result);
-        }
-        if let Some(linear) = &mut self.linear {
-            match input {
-                TerminalInput::Submit => {
-                    linear.prompt_needed = true;
-                    linear.line_open = false;
-                }
-                TerminalInput::Interrupt
-                | TerminalInput::EndOfInput
-                | TerminalInput::Suspend
-                | TerminalInput::Shutdown(_)
-                | TerminalInput::LineRejected
-                | TerminalInput::LineContinued
-                | TerminalInput::Paste => {
-                    linear.prompt_needed = true;
-                    linear.newline_pending = linear.line_open;
-                }
-                _ => {}
-            }
-        }
-        Ok(input)
     }
 
     #[must_use]

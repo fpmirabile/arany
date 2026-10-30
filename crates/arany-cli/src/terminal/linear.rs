@@ -8,8 +8,8 @@ use arany::ModelEntry;
 use arany::{SessionDefaults, SessionId, SessionListItem, SessionView};
 use std::io::{self, Write};
 
-use super::CommandAvailability;
 use super::commands::{help_entry, help_len};
+use super::{CommandAvailability, TerminalInput};
 
 pub(super) struct LinearState {
     mode_label: &'static str,
@@ -67,6 +67,27 @@ pub(super) fn transcript_details(run: &arany::RunView) -> Vec<String> {
 }
 
 impl LinearState {
+    // A submitted, interrupted or rejected line needs a fresh prompt.
+    pub(super) fn note_input(&mut self, input: TerminalInput) {
+        match input {
+            TerminalInput::Submit => {
+                self.prompt_needed = true;
+                self.line_open = false;
+            }
+            TerminalInput::Interrupt
+            | TerminalInput::EndOfInput
+            | TerminalInput::Suspend
+            | TerminalInput::Shutdown(_)
+            | TerminalInput::LineRejected
+            | TerminalInput::LineContinued
+            | TerminalInput::Paste => {
+                self.prompt_needed = true;
+                self.newline_pending = self.line_open;
+            }
+            _ => {}
+        }
+    }
+
     // An unarmed selector prints its rows and holds the prompt until input is admitted.
     pub(super) fn disarm(&mut self) {
         self.unarmed = true;
