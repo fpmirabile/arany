@@ -186,6 +186,20 @@ fn permission_frame_fills_the_terminal_like_chat() {
 }
 
 #[test]
+fn permission_height_indents_only_the_profile_rows_the_draw_indents() {
+    let lines = vec![
+        "Do you trust this folder?".to_owned(),
+        "› [ ] 3. Node v20.19.2".to_owned(),
+        "x".repeat(152),
+    ];
+
+    let height = permission_height(&lines, 80, false, Some(1), 1);
+
+    // One heading row, one profile row, the trailing note's two unindented rows and five control rows.
+    assert_eq!(height, 1 + 1 + 2 + 5);
+}
+
+#[test]
 fn trust_dialog_takes_its_content_height_and_pages_beyond_the_screen() {
     let state = |profile_start| PermissionFrameState {
         choices: &["Continue read only", "Trust this folder"],
@@ -208,11 +222,12 @@ fn trust_dialog_takes_its_content_height_and_pages_beyond_the_screen() {
             "    [ ] {index}. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation"
         )
     }));
+    let profile_count = long.len() - profile_start;
     for (lines, profile_start, pages) in
         [(&fitting, None, false), (&long, Some(profile_start), true)]
     {
         // As in Codex, the Classic viewport is min(screen, the dialog's content height).
-        let content = permission_height(lines, 80, false, profile_start);
+        let content = permission_height(lines, 80, false, profile_start, profile_count);
         let height = content.min(24);
         assert_eq!(content > 24, pages, "content of {} rows", content);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

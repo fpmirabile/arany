@@ -103,24 +103,7 @@ pub(super) fn draw_permission_frame(
         palette,
         boxed,
     } = state;
-    let gutter = if boxed {
-        0
-    } else if full.width >= FULL_LAYOUT_WIDTH {
-        2
-    } else {
-        0
-    };
-    let width = if boxed {
-        full.width
-            .saturating_sub(if full.width >= FULL_LAYOUT_WIDTH {
-                4
-            } else {
-                0
-            })
-            .min(76)
-    } else {
-        full.width.saturating_sub(gutter * 2)
-    };
+    let (gutter, width) = permission_layout(full.width, boxed);
     if width == 0 || full.height < MIN_DIALOG_HEIGHT {
         return PermissionFrameProgress { more: true, page };
     }
@@ -131,8 +114,7 @@ pub(super) fn draw_permission_frame(
         let focused = profile_start
             .zip(focused_profile)
             .is_some_and(|(start, selected)| index == start + selected);
-        let profile_row =
-            profile_start.is_some_and(|start| (start..start + profile_count).contains(&index));
+        let profile_row = profile_line(index, profile_start, profile_count);
         let indent = if profile_row {
             PROFILE_HANGING_INDENT
         } else {
@@ -376,14 +358,43 @@ pub(super) fn composer_height(composer: &Composer, area: Rect) -> u16 {
         .min(area.height.saturating_sub(1))
 }
 
+// Rows of the composer frame from the bottom: status, composer, completion menu, activity and history.
+pub(super) struct FrameLayout {
+    pub composer: u16,
+    pub menu: u16,
+    pub activity: u16,
+    pub history_padding: u16,
+    pub history: u16,
+}
+
+pub(super) fn frame_layout(composer: &Composer, area: Rect, activity_lines: usize) -> FrameLayout {
+    let composer_rows = composer_height(composer, area);
+    let above_composer = area.height.saturating_sub(1 + composer_rows);
+    let menu = completion_height(composer, above_composer);
+    let above_menu = above_composer - menu;
+    let activity = above_menu.min(u16::try_from(activity_lines).unwrap_or(u16::MAX));
+    let available_history = above_menu - activity;
+    let history_padding = history_top_padding(available_history);
+    FrameLayout {
+        composer: composer_rows,
+        menu,
+        activity,
+        history_padding,
+        history: available_history - history_padding,
+    }
+}
+
 pub(super) fn classic_height(
     model: &PresentationModel,
     composer: &Composer,
     screen: Rect,
     live_rows: usize,
 ) -> u16 {
-    let draft = composer_height(composer, screen);
-    let menu = completion_height(composer, screen.height);
+    let FrameLayout {
+        composer: draft,
+        menu,
+        ..
+    } = frame_layout(composer, screen, 0);
     let history = if live_rows > 0 {
         let rows = u16::try_from(live_rows).unwrap_or(u16::MAX);
         rows.saturating_add(history_top_padding(rows))
@@ -582,24 +593,34 @@ pub(super) fn draw_tool_approval_frame(
     more
 }
 
+// The side gutter and text width of a permission dialog drawn across `width` columns.
+fn permission_layout(width: u16, boxed: bool) -> (u16, u16) {
+    let gutter = if width >= FULL_LAYOUT_WIDTH { 2 } else { 0 };
+    let text_width = width.saturating_sub(gutter * 2);
+    if boxed {
+        (0, text_width.min(76))
+    } else {
+        (gutter, text_width)
+    }
+}
+
+fn profile_line(index: usize, profile_start: Option<usize>, profile_count: usize) -> bool {
+    profile_start.is_some_and(|start| (start..start + profile_count).contains(&index))
+}
+
 pub(super) fn permission_height(
     lines: &[String],
     width: u16,
     boxed: bool,
     profile_start: Option<usize>,
+    profile_count: usize,
 ) -> u16 {
-    let width = if boxed {
-        width
-            .saturating_sub(if width >= FULL_LAYOUT_WIDTH { 4 } else { 0 })
-            .min(76)
-    } else {
-        width.saturating_sub(if width >= FULL_LAYOUT_WIDTH { 4 } else { 0 })
-    };
+    let (_, width) = permission_layout(width, boxed);
     let rows = lines
         .iter()
         .enumerate()
         .fold(0usize, |rows, (index, line)| {
-            let indent = if profile_start.is_some_and(|start| index >= start) {
+            let indent = if profile_line(index, profile_start, profile_count) {
                 PROFILE_HANGING_INDENT
             } else {
                 0
@@ -1291,20 +1312,16 @@ pub(super) fn draw_frame_with_history_and_chips(
             image_chips: Vec::new(),
         };
     }
-    let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
-    let composer_height = (draft_rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
-        .saturating_add(2)
-        .min(area.height.saturating_sub(1));
-    let menu_height = completion_height(composer, area.height.saturating_sub(1 + composer_height));
+    let FrameLayout {
+        composer: composer_height,
+        menu: menu_height,
+        activity: activity_rows,
+        history_padding,
+        history: history_height,
+    } = frame_layout(composer, area, model.activity_lines.len());
     let menu_y = area.bottom().saturating_sub(1 + menu_height);
     let composer_y = menu_y.saturating_sub(composer_height);
-    let activity_rows = composer_y
-        .saturating_sub(area.y)
-        .min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
-    let available_history = composer_y.saturating_sub(area.y + activity_rows);
-    let padding = history_top_padding(available_history);
-    let history_top = area.y + padding;
-    let history_height = available_history - padding;
+    let history_top = area.y + history_padding;
     let history_area = Rect::new(area.x, history_top, area.width, history_height);
     draw_history_rows(frame, history_area, history_rows, palette);
     if history_rows.is_empty()

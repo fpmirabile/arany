@@ -406,7 +406,7 @@ pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
 use view::{
     AGENT_PICKER_ROWS, Palette, agent_detail_lines, agent_detail_rows, agent_picker_index,
-    bottom_area, completion_height, composer_height, draw_agent_inspector_frame, draw_help_frame,
+    bottom_area, composer_height, draw_agent_inspector_frame, draw_help_frame,
     draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
     draw_settings_frame, draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame,
     draw_setup_warning_frame, history_top_padding, screen_terminal, session_picker_index,
@@ -1632,7 +1632,7 @@ impl AttachedTerminal {
         let palette = self.palette();
         let mut progress = view::PermissionFrameProgress { more: true, page };
         let width = self.owned().size()?.width;
-        let height = view::permission_height(&lines, width, false, profile_start);
+        let height = view::permission_height(&lines, width, false, profile_start, options.len());
         self.draw_frame(height, |frame, area| {
             if view::dialog_fits(area) {
                 progress = view::draw_permission_frame(
@@ -3018,7 +3018,7 @@ impl AttachedTerminal {
                         .unwrap_or(u16::MAX)
                         .min(12),
                 )
-                .max(8)
+                .max(view::MIN_DIALOG_HEIGHT)
                 .min(screen.height)
         } else if self.mode == TerminalMode::Classic {
             self.transcript.classic_history.sync(
@@ -3076,13 +3076,7 @@ impl AttachedTerminal {
                 usize::from(area.width),
             );
         }
-        let composer_height = composer_height(composer, area);
-        let above_composer = area.height.saturating_sub(1 + composer_height);
-        let above_composer = above_composer - completion_height(composer, above_composer);
-        let activity_height =
-            above_composer.min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
-        let history_height = above_composer - activity_height;
-        let history_height = history_height - history_top_padding(history_height);
+        let history_height = view::frame_layout(composer, area, model.activity_lines.len()).history;
         self.history_mut()
             .sync(view, usize::from(area.width), usize::from(history_height));
         if let Some(notice) = notice {

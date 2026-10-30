@@ -391,6 +391,31 @@ fn classic_content_height_keeps_bottom_controls_and_completion_visible() {
 }
 
 #[test]
+fn classic_height_sizes_the_completion_menu_from_the_rows_the_draft_leaves() {
+    let screen = ratatui::layout::Rect::new(0, 0, 80, 5);
+    let model = PresentationModel {
+        status_line: "idle".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+        agent_switch: false,
+    };
+    let mut composer = Composer::default();
+    composer.insert_paste("/").unwrap();
+    let draft = composer_height(&composer, screen);
+    assert_eq!(completion_height(&composer, screen.height - 1 - draft), 0);
+
+    let height = classic_height(&model, &composer, screen, 0);
+
+    assert_eq!(
+        height,
+        draft + 1,
+        "no row is reserved for a menu the draw cannot show"
+    );
+}
+
+#[test]
 fn inline_frame_keeps_composer_and_status_in_the_viewport() {
     for width in [40, 50, 79, 80, 120] {
         let backend = TestBackend::new(width, 5);
