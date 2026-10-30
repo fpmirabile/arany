@@ -227,6 +227,24 @@ impl AgentChat {
     }
 
     // The whole view on its first print, then only a child's new records; a listing prints once.
+    // Agent choices are short ASCII; a `/message` line may carry a whole child draft.
+    fn type_choice(&mut self, character: char) {
+        let message = self.choice.starts_with("/message ");
+        if !character.is_control()
+            && (message || character.is_ascii())
+            && self.choice.len() + character.len_utf8()
+                <= if message {
+                    super::composer::MAX_DRAFT_BYTES + 9
+                } else {
+                    MAX_CHOICE_BYTES
+                }
+        {
+            self.choice.push(character);
+        } else {
+            self.invalid = true;
+        }
+    }
+
     // Notices follow the rows they describe, so History takes the new records first.
     fn sync_history(&mut self, screen: ratatui::layout::Size) {
         let Some(transcript) = &self.transcript else {
@@ -328,18 +346,7 @@ impl AttachedTerminal {
     ) -> Result<AgentChatInput, TerminalError> {
         self.primary_input_capacity = composer.input_capacity();
         if self.agent_chat.is_none() {
-            if !matches!(
-                input,
-                TerminalInput::AgentNext | TerminalInput::AgentPrevious
-            ) {
-                return Ok(AgentChatInput::Pass);
-            }
-            let admitted = composer.is_empty()
-                && !composer.has_open_menu()
-                && self.clipboard.is_none()
-                && !self.transcript.transcript_open
-                && !self.transcript.scrollback_dump;
-            return self.navigate(view, input, admitted).await;
+            return self.open_agent_chat_input(view, input, composer).await;
         }
         if let Some(draft) = self.selected_child_draft_mut() {
             draft.composer.observe_input(input);
@@ -347,7 +354,6 @@ impl AttachedTerminal {
         if self.linear.is_some() {
             return self.linear_agent_input(view, input).await;
         }
-        let fullscreen = self.mode == TerminalMode::Fullscreen;
         match input {
             TerminalInput::Interrupt | TerminalInput::Shutdown(_) => Ok(AgentChatInput::Pass),
             TerminalInput::EndOfInput => {
@@ -364,13 +370,7 @@ impl AttachedTerminal {
             | TerminalInput::Submit
             | TerminalInput::ModifiedEnter(_) => self.edit_child(view, input).await,
             TerminalInput::AgentNext | TerminalInput::AgentPrevious | TerminalInput::Escape => {
-                let empty = self
-                    .selected_child_draft()
-                    .is_none_or(|draft| draft.composer.is_empty());
-                if input != TerminalInput::Escape && (!empty || self.clipboard.is_some()) {
-                    return Ok(AgentChatInput::Handled);
-                }
-                self.navigate(view, input, true).await
+                self.leave_agent_chat_input(view, input).await
             }
             TerminalInput::PageUp
             | TerminalInput::PageDown
@@ -378,18 +378,9 @@ impl AttachedTerminal {
             | TerminalInput::End
             | TerminalInput::PointerScrollUp { .. }
             | TerminalInput::PointerScrollDown { .. }
-                if fullscreen =>
+                if self.mode == TerminalMode::Fullscreen =>
             {
-                let chat = self.agent_chat.as_mut().expect("open agent chat");
-                if let Some(transcript) = &chat.transcript {
-                    match input {
-                        TerminalInput::Home => chat.history.scroll(true, usize::MAX),
-                        TerminalInput::End => chat.history.scroll(false, usize::MAX),
-                        _ => chat.history.handle(input, &transcript.view),
-                    };
-                }
-                self.draw_agent_chat(view, None)?;
-                Ok(AgentChatInput::Handled)
+                self.scroll_agent_chat(view, input)
             }
             TerminalInput::Character(_)
             | TerminalInput::Newline
@@ -426,6 +417,59 @@ impl AttachedTerminal {
             | TerminalInput::LineRejected
             | TerminalInput::LineContinued => Ok(AgentChatInput::Handled),
         }
+    }
+
+    // Without an open chat only agent switching opens one, and only over an idle, empty composer.
+    async fn open_agent_chat_input(
+        &mut self,
+        view: &SessionView,
+        input: TerminalInput,
+        composer: &Composer,
+    ) -> Result<AgentChatInput, TerminalError> {
+        if !matches!(
+            input,
+            TerminalInput::AgentNext | TerminalInput::AgentPrevious
+        ) {
+            return Ok(AgentChatInput::Pass);
+        }
+        let admitted = composer.is_empty()
+            && !composer.has_open_menu()
+            && self.clipboard.is_none()
+            && !self.transcript.transcript_open
+            && !self.transcript.scrollback_dump;
+        self.navigate(view, input, admitted).await
+    }
+
+    // A child draft or a pending clipboard read keeps the chat on agent switches; Escape leaves.
+    async fn leave_agent_chat_input(
+        &mut self,
+        view: &SessionView,
+        input: TerminalInput,
+    ) -> Result<AgentChatInput, TerminalError> {
+        let empty = self
+            .selected_child_draft()
+            .is_none_or(|draft| draft.composer.is_empty());
+        if input != TerminalInput::Escape && (!empty || self.clipboard.is_some()) {
+            return Ok(AgentChatInput::Handled);
+        }
+        self.navigate(view, input, true).await
+    }
+
+    fn scroll_agent_chat(
+        &mut self,
+        view: &SessionView,
+        input: TerminalInput,
+    ) -> Result<AgentChatInput, TerminalError> {
+        let chat = self.agent_chat.as_mut().expect("open agent chat");
+        if let Some(transcript) = &chat.transcript {
+            match input {
+                TerminalInput::Home => chat.history.scroll(true, usize::MAX),
+                TerminalInput::End => chat.history.scroll(false, usize::MAX),
+                _ => chat.history.handle(input, &transcript.view),
+            };
+        }
+        self.draw_agent_chat(view, None)?;
+        Ok(AgentChatInput::Handled)
     }
 
     // `/transcript agents [N]`: N selects from the current or last Run's numbered agents.
@@ -769,20 +813,8 @@ impl AttachedTerminal {
         let Some(target) = self.agent_chat.as_ref().and_then(AgentChat::target) else {
             return Ok(AgentChatInput::Handled);
         };
-        let editable = editable_child(view, target);
-        if !editable {
-            if matches!(input, TerminalInput::Backspace | TerminalInput::Delete)
-                && let Some(draft) = self.selected_child_draft_mut()
-            {
-                draft.clear(false);
-                return Ok(AgentChatInput::ChildEdited(target));
-            }
-            if input == TerminalInput::Paste {
-                let _ = self.take_paste();
-            }
-            return Ok(AgentChatInput::Notice(
-                "This child is read-only; draft retained",
-            ));
+        if !editable_child(view, target) {
+            return Ok(self.read_only_child_input(input, target));
         }
         if !self.open_child_draft(view, target) {
             return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
@@ -811,25 +843,37 @@ impl AttachedTerminal {
             return Ok(AgentChatInput::ChildEdited(target));
         }
         if input == TerminalInput::Submit {
-            let Some(draft) = self.selected_child_draft() else {
-                return Ok(AgentChatInput::Handled);
-            };
-            return Ok(if let Some(offer) = &draft.offered {
-                AgentChatInput::Notice(match offer.state {
-                    ChildOfferState::Waiting => "Note waiting for this child's next step",
-                    ChildOfferState::Unknown => {
-                        "Steering note outcome unknown; check child history; draft retained"
-                    }
-                })
-            } else if draft.composer.text().trim().is_empty() {
-                AgentChatInput::Notice("Child message is empty; message not offered")
-            } else {
-                AgentChatInput::ChildMessage {
-                    target,
-                    text: draft.composer.text().to_owned(),
-                }
-            });
+            return Ok(self
+                .selected_child_draft()
+                .map_or(AgentChatInput::Handled, |draft| child_offer(draft, target)));
         }
+        self.apply_child_edit(view, input, target)
+    }
+
+    // A read-only child only lets its retained draft be cleared.
+    fn read_only_child_input(
+        &mut self,
+        input: TerminalInput,
+        target: ChildSteeringTarget,
+    ) -> AgentChatInput {
+        if matches!(input, TerminalInput::Backspace | TerminalInput::Delete)
+            && let Some(draft) = self.selected_child_draft_mut()
+        {
+            draft.clear(false);
+            return AgentChatInput::ChildEdited(target);
+        }
+        if input == TerminalInput::Paste {
+            let _ = self.take_paste();
+        }
+        AgentChatInput::Notice("This child is read-only; draft retained")
+    }
+
+    fn apply_child_edit(
+        &mut self,
+        view: &SessionView,
+        input: TerminalInput,
+        target: ChildSteeringTarget,
+    ) -> Result<AgentChatInput, TerminalError> {
         let paste = if input == TerminalInput::Paste {
             match self.take_paste() {
                 Ok(text) => Some(text),
@@ -873,20 +917,7 @@ impl AttachedTerminal {
         let chat = self.agent_chat.as_mut().expect("open agent chat");
         match input {
             TerminalInput::Character(character) => {
-                let message = chat.choice.starts_with("/message ");
-                if !character.is_control()
-                    && (message || character.is_ascii())
-                    && chat.choice.len() + character.len_utf8()
-                        <= if message {
-                            super::composer::MAX_DRAFT_BYTES + 9
-                        } else {
-                            MAX_CHOICE_BYTES
-                        }
-                {
-                    chat.choice.push(character);
-                } else {
-                    chat.invalid = true;
-                }
+                chat.type_choice(character);
                 Ok(AgentChatInput::Handled)
             }
             TerminalInput::Newline if chat.choice.starts_with("/message ") => {
@@ -904,81 +935,7 @@ impl AttachedTerminal {
             TerminalInput::Submit => {
                 let choice = std::mem::take(&mut chat.choice);
                 let invalid = std::mem::take(&mut chat.invalid);
-                if let Some(text) = choice.strip_prefix("/message ") {
-                    if invalid
-                        || text.trim().is_empty()
-                        || text.len() > super::composer::MAX_DRAFT_BYTES
-                    {
-                        return Ok(AgentChatInput::Notice(
-                            "Child message is empty or exceeds 8.0 KB; message not offered",
-                        ));
-                    }
-                    let target = chat.target();
-                    let Some(target) = target.filter(|target| editable_child(view, *target)) else {
-                        return Ok(AgentChatInput::Notice(
-                            "This child is read-only; message not offered",
-                        ));
-                    };
-                    if !self.open_child_draft(view, target) {
-                        return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
-                    }
-                    let Some(draft) = self
-                        .child_drafts
-                        .iter_mut()
-                        .find(|draft| draft.target == target)
-                    else {
-                        return Ok(AgentChatInput::Handled);
-                    };
-                    if draft.offered.is_some()
-                        || (!draft.composer.is_empty() && draft.composer.text() != text)
-                    {
-                        return Ok(AgentChatInput::Notice(
-                            "Message not offered; /clear clears the child draft before a different message",
-                        ));
-                    }
-                    if draft.composer.is_empty() {
-                        draft.composer.insert_paste(text).expect("validated line");
-                    }
-                    return Ok(AgentChatInput::ChildMessage {
-                        target,
-                        text: text.to_owned(),
-                    });
-                }
-                if choice == "/clear" && !invalid {
-                    let editable = self
-                        .agent_chat
-                        .as_ref()
-                        .and_then(AgentChat::target)
-                        .is_some_and(|target| editable_child(view, target));
-                    if let Some(draft) = self.selected_child_draft_mut() {
-                        draft.clear(editable);
-                        return Ok(AgentChatInput::ChildEdited(draft.target));
-                    }
-                    return Ok(AgentChatInput::Handled);
-                }
-                let chat = self.agent_chat.as_mut().expect("open agent chat");
-                let count = chat.targets.len();
-                let selected = chat.selected;
-                let next = if invalid {
-                    None
-                } else {
-                    match choice.as_str() {
-                        "q" => return self.leave_agent_chat().await,
-                        "n" => Some((selected + 1) % count),
-                        "p" => Some((selected + count - 1) % count),
-                        number => number
-                            .parse::<usize>()
-                            .ok()
-                            .filter(|number| (1..=count).contains(number))
-                            .map(|number| number - 1),
-                    }
-                };
-                let Some(index) = next else {
-                    return self.invalid_agent_choice();
-                };
-                let run = chat.run;
-                let targets = chat.targets.clone();
-                self.show_agent(view, run, targets, index, false).await
+                self.submit_linear_choice(view, &choice, invalid).await
             }
             TerminalInput::LineContinued if chat.choice.starts_with("/message ") => {
                 Ok(AgentChatInput::Handled)
@@ -1008,6 +965,98 @@ impl AttachedTerminal {
             }
             _ => Ok(AgentChatInput::Handled),
         }
+    }
+
+    async fn submit_linear_choice(
+        &mut self,
+        view: &SessionView,
+        choice: &str,
+        invalid: bool,
+    ) -> Result<AgentChatInput, TerminalError> {
+        if let Some(text) = choice.strip_prefix("/message ") {
+            return Ok(self.offer_linear_message(view, text, invalid));
+        }
+        if choice == "/clear" && !invalid {
+            return Ok(self.clear_linear_draft(view));
+        }
+        let chat = self.agent_chat.as_mut().expect("open agent chat");
+        let count = chat.targets.len();
+        let selected = chat.selected;
+        let next = if invalid {
+            None
+        } else {
+            match choice {
+                "q" => return self.leave_agent_chat().await,
+                "n" => Some((selected + 1) % count),
+                "p" => Some((selected + count - 1) % count),
+                number => number
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|number| (1..=count).contains(number))
+                    .map(|number| number - 1),
+            }
+        };
+        let Some(index) = next else {
+            return self.invalid_agent_choice();
+        };
+        let run = chat.run;
+        let targets = chat.targets.clone();
+        self.show_agent(view, run, targets, index, false).await
+    }
+
+    // `/message TEXT` offers the child's draft, filling an empty one, but never replaces a
+    // different retained draft.
+    fn offer_linear_message(
+        &mut self,
+        view: &SessionView,
+        text: &str,
+        invalid: bool,
+    ) -> AgentChatInput {
+        if invalid || text.trim().is_empty() || text.len() > super::composer::MAX_DRAFT_BYTES {
+            return AgentChatInput::Notice(
+                "Child message is empty or exceeds 8.0 KB; message not offered",
+            );
+        }
+        let target = self.agent_chat.as_ref().expect("open agent chat").target();
+        let Some(target) = target.filter(|target| editable_child(view, *target)) else {
+            return AgentChatInput::Notice("This child is read-only; message not offered");
+        };
+        if !self.open_child_draft(view, target) {
+            return AgentChatInput::Notice(DRAFT_CAP_NOTICE);
+        }
+        let Some(draft) = self
+            .child_drafts
+            .iter_mut()
+            .find(|draft| draft.target == target)
+        else {
+            return AgentChatInput::Handled;
+        };
+        if draft.offered.is_some() || (!draft.composer.is_empty() && draft.composer.text() != text)
+        {
+            return AgentChatInput::Notice(
+                "Message not offered; /clear clears the child draft before a different message",
+            );
+        }
+        if draft.composer.is_empty() {
+            draft.composer.insert_paste(text).expect("validated line");
+        }
+        AgentChatInput::ChildMessage {
+            target,
+            text: text.to_owned(),
+        }
+    }
+
+    fn clear_linear_draft(&mut self, view: &SessionView) -> AgentChatInput {
+        let editable = self
+            .agent_chat
+            .as_ref()
+            .and_then(AgentChat::target)
+            .is_some_and(|target| editable_child(view, target));
+        if let Some(draft) = self.selected_child_draft_mut() {
+            draft.clear(editable);
+            return AgentChatInput::ChildEdited(draft.target);
+        }
+        AgentChatInput::Handled
     }
 
     fn invalid_agent_choice(&mut self) -> Result<AgentChatInput, TerminalError> {
@@ -1228,6 +1277,25 @@ impl AttachedTerminal {
             self.insert_native(kind, &text, None)?;
         }
         Ok(())
+    }
+}
+
+// Submitting offers the draft unless a note is already pending or the draft is blank.
+fn child_offer(draft: &ChildDraft, target: ChildSteeringTarget) -> AgentChatInput {
+    if let Some(offer) = &draft.offered {
+        AgentChatInput::Notice(match offer.state {
+            ChildOfferState::Waiting => "Note waiting for this child's next step",
+            ChildOfferState::Unknown => {
+                "Steering note outcome unknown; check child history; draft retained"
+            }
+        })
+    } else if draft.composer.text().trim().is_empty() {
+        AgentChatInput::Notice("Child message is empty; message not offered")
+    } else {
+        AgentChatInput::ChildMessage {
+            target,
+            text: draft.composer.text().to_owned(),
+        }
     }
 }
 
