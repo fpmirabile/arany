@@ -1726,6 +1726,7 @@
     "RewindEffect": {
       "enum": [
         "host",
+        "git",
         "unguardedCommand",
         "mcp",
         "cache",

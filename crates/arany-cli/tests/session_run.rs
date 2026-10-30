@@ -12,6 +12,7 @@ use arany::{
     StoreError, continue_session, create_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
+#[cfg(target_os = "linux")]
 fn assert_git_range_outputs(
     run: &arany::RunView,
     workspace: &std::path::Path,
@@ -66,6 +67,7 @@ fn assert_git_range_outputs(
     assert!(diff["patch"].as_str().unwrap().contains("+bravo"));
 }
 
+#[cfg(target_os = "linux")]
 fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::ProviderRequest]) {
     for (request_index, tool_index) in [(6, 5), (7, 6), (8, 7), (9, 8)] {
         assert_eq!(
@@ -83,6 +85,7 @@ fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::Provid
     }
 }
 
+#[cfg(target_os = "linux")]
 fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
     for index in [5, 6, 7, 8] {
         assert_eq!(
@@ -92,6 +95,7 @@ fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
     let timed_out = branches["timed_out"].as_bool().unwrap();
     let rows = branches["branches"].as_array().unwrap();
@@ -127,6 +131,7 @@ fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace:
     }
 }
 
+#[cfg(target_os = "linux")]
 fn assert_closed_git_views(
     state: &std::path::Path,
     home: &std::path::Path,
@@ -602,20 +607,13 @@ mod tools;
 mod tools;
 
 #[cfg(target_os = "macos")]
-#[path = "session_run/tools_macos_git.rs"]
-mod tools_git;
-
-#[cfg(target_os = "macos")]
 #[path = "session_run/tools_macos_researcher.rs"]
 mod tools_researcher;
 
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
 
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
+#[cfg(target_os = "linux")]
 #[path = "session_run/tools/git_journey.rs"]
 mod git_journey;
 

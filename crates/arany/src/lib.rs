@@ -46,10 +46,8 @@ pub use engine::{
     list_sessions_page, rename_session, resume_session, set_session_defaults,
     start_provider_setup_edit, validate_workspace_inputs,
 };
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub use fault::git_write::GitWriteStage;
 #[cfg(feature = "test-support")]
-pub use fault::{FaultPlan, GitStorageFault};
+pub use fault::FaultPlan;
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]
 pub use provider::semantic;

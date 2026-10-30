@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 mod tests;
 
-const EDITORS: &str = "editors";
+pub(super) const EDITORS: &str = "editors";
 // Populating an editor workspace, or diffing it at integration, walks the project once within this time.
 pub(crate) const EDITOR_WORKSPACE_TIME: Duration = Duration::from_secs(120);
 

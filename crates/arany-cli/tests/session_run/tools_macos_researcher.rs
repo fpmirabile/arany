@@ -98,10 +98,39 @@ done
 
     #[cfg(all(not(debug_assertions), arany_ci))]
     pub(super) fn release_researcher_journey() {
-        crate::tools_git::release_native_journey(
-            "tools_researcher::journey::native_researcher_journey_helper",
-            "native researcher journey",
+        use crate::process::BoundedOutput;
+
+        const HELPER: &str = "tools_researcher::journey::native_researcher_journey_helper";
+        const LABEL: &str = "native researcher journey";
+        let _gate = crate::process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["home", "environment-state", "environment-data"] {
+            std::fs::create_dir(temp.path().join(directory)).unwrap();
+        }
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", HELPER, "--ignored", "--nocapture"])
+            .env_clear()
+            .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
+            .env("HOME", temp.path().join("home"))
+            .env("XDG_STATE_HOME", temp.path().join("environment-state"))
+            .env("XDG_DATA_HOME", temp.path().join("environment-data"))
+            .current_dir(temp.path());
+        crate::process::isolate_host_authentication(&mut command, &temp.path().join("home"));
+        let output = command
+            .bounded_output_for(Duration::from_secs(360), 32 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{LABEL}: {:?}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
+        crate::process::assert_single_test_completed(&output.stdout, LABEL);
+        assert!(output.stderr.is_empty());
     }
 
     #[tokio::test]
@@ -123,15 +152,13 @@ done
         let peer = root.join("mcp.sh");
         private_file(&peer, MCP_SCRIPT.as_bytes());
         let shell_digest = hash(&std::fs::read("/bin/sh").unwrap());
-        let git = std::fs::canonicalize("/Library/Developer/CommandLineTools/usr/bin/git").unwrap();
         let config = json!({
             "workspace_paths": ["."], "write": true,
             "commands": [{"name":"shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,"inputs":[]}],
             "skills": [],
             "mcp": [{"name":"synthetic","program":{"name":"mcp-shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,
                 "inputs":[{"path":peer,"destination":"mcp.sh","sha256":hash(MCP_SCRIPT.as_bytes())}]},
-                "args":["/inputs/mcp-shell/mcp.sh"],"tools":["echo"]}],
-            "git": {"name":"git","executable":git,"sha256":hash(&std::fs::read(&git).unwrap()),"interpreter":false,"inputs":[]}
+                "args":["/inputs/mcp-shell/mcp.sh"],"tools":["echo"]}]
         });
         let reads = vec![
             ToolCall::List { path: "src".into() },
@@ -485,6 +512,7 @@ done
                 }
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
                 Attestation::Host(_) => panic!("researchers never run host Tools"),
+                Attestation::Git(_) => panic!("researchers never run Git"),
             }
         }
         let output =

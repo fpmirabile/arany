@@ -7,7 +7,6 @@ use cap_std::fs::MetadataExt as _;
 use std::path::Path;
 
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
-pub(super) const GIT_VOLUME: &str = "scratch";
 
 pub(super) use super::super::admission::{read_record, write_record};
 
@@ -38,16 +37,12 @@ fn reserve_refusal(free: u64) -> Result<(), ToolError> {
 
 #[cfg(test)]
 pub(super) fn prepare_storage(root: &Path) -> Result<[cap_std::fs::Dir; 2], ToolError> {
-    prepare_volumes(root, &["workspace", "scratch"])?
+    prepare_volumes_with(root, &["workspace", "scratch"], None)?
         .try_into()
         .map_err(|_| ToolError::ProtectionUnavailable)
 }
 
 // Unit storage is owner-only directories beside the unit root; Seatbelt confines writes and the disk floor bounds growth.
-fn prepare_volumes(root: &Path, names: &[&str]) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
-    prepare_volumes_with(root, names, None)
-}
-
 // A cloned cache view already exists: the controller made it before launch, so it is verified, not created.
 fn prepare_volumes_with(
     root: &Path,
@@ -111,10 +106,6 @@ pub(super) fn verify_storage(
     verify_volumes(root, command_volume_names(limits))
 }
 
-pub(super) fn verify_git_storage(root: &Path) -> Result<(), ToolError> {
-    verify_volumes(root, &[GIT_VOLUME])
-}
-
 fn verify_volumes(root: &Path, names: &[&str]) -> Result<(), ToolError> {
     use cap_fs_ext::DirExt;
 
@@ -127,10 +118,6 @@ fn verify_volumes(root: &Path, names: &[&str]) -> Result<(), ToolError> {
         verify_volume(&volume, parent.0)?;
     }
     Ok(())
-}
-
-pub(super) fn prepare_git_storage(root: &Path) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
-    prepare_volumes(root, &[GIT_VOLUME])
 }
 
 pub(super) fn prepare_command_storage(

@@ -1148,7 +1148,6 @@ mod tests {
             mcp: Vec::new(),
             runtime_grants: Vec::new(),
             git: None,
-            git_identity: None,
             locale: Default::default(),
             environment_sha256: None,
             network: None,

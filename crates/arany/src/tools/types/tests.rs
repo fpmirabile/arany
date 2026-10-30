@@ -157,7 +157,9 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         enforcement_digest: [2; 32],
         workspace_device: 1,
         workspace_inode: 2,
-        call: ToolCall::GitStatus { path: "src".into() },
+        call: ToolCall::WebSearch {
+            query: "receipts".into(),
+        },
         limits: ToolLimits::default(),
         use_count: 1,
     };

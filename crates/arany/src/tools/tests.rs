@@ -214,7 +214,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         host_settings_admitted: true,
         host_settings_saved: Default::default(),
         guard_available: true,
-        git_writes_available: false,
+        git_environment: None,
         host_authentication: Default::default(),
         handover: None,
         definitions: Default::default(),
@@ -685,6 +685,9 @@ fn compaction_readmission_accepts_a_recorded_locale() {
     let mut config = Config::load(&state).unwrap();
     config.discover_skills(&workspace).unwrap();
     config.bind_environment(&super::CommandEnvironment::load(&state).unwrap());
+    config.git = super::git::Environment::capture(&workspace, &state.path().join("editors"))
+        .as_ref()
+        .and_then(super::git::resolve);
     assert_eq!(config.locale.len(), 1);
     let mut pin = config.receipt();
     pin.permissions_digest = Some(snapshot.digest);

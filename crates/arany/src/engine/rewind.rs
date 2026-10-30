@@ -809,7 +809,7 @@ fn rewind_attestation(
     let receipt = match attestation {
         Attestation::Guard(receipt) => serde_json::to_vec(receipt),
         Attestation::InProcess { .. } => serde_json::to_vec(&(intent.digest(), attestation)),
-        Attestation::Host(_) | Attestation::Unguarded(_) => return None,
+        Attestation::Host(_) | Attestation::Unguarded(_) | Attestation::Git(_) => return None,
     }
     .ok()?;
     Some(RewindAttestation {

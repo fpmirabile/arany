@@ -6,13 +6,10 @@ use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use injection::FaultPlan;
 #[cfg(test)]
 pub(crate) use injection::PRIVATE_RECORD_GATE_DEADLINE;
-#[cfg(any(test, feature = "test-support"))]
-pub use injection::{FaultPlan, GitStorageFault};
-
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub(crate) mod git_write;
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
@@ -279,14 +276,6 @@ pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     FaultPlan::guard_cache_report_gate(observation).await;
 }
 
-#[cfg(target_os = "macos")]
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-pub(crate) fn git_storage(root: &std::path::Path, call: &crate::tools::ToolCall) -> io::Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
-    FaultPlan::git_storage(root, call)?;
-    Ok(())
-}
-
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) async fn guard_cache_publication(intent: uuid::Uuid) {
     #[cfg(any(test, feature = "test-support"))]
@@ -391,8 +380,6 @@ pub(crate) fn commit_latency(recorder: &LatencyRecorder, envelope: &EventEnvelop
 #[cfg(any(test, feature = "test-support"))]
 mod injection {
     use crate::session::{Event, SessionId};
-    #[cfg(target_os = "macos")]
-    use std::io;
     use std::sync::Mutex;
     #[cfg(target_os = "linux")]
     use std::time::Duration;
@@ -430,8 +417,6 @@ mod injection {
             oneshot::Sender<()>,
             oneshot::Receiver<()>,
         ),
-        #[cfg(target_os = "macos")]
-        GitStorage(crate::tools::ToolCall, GitStorageFault, std::path::PathBuf),
         GuardCacheReport(
             uuid::Uuid,
             oneshot::Sender<crate::tools::ToolObservation>,
@@ -490,11 +475,6 @@ mod injection {
             matches!(fault, Fault::PrivateRecordAdmission(path, name, ..)
                 if path == state && *name == record)
         })
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub enum GitStorageFault {
-        Refuse,
     }
 
     pub struct FaultPlan;
@@ -799,34 +779,6 @@ mod injection {
             } else {
                 false
             }
-        }
-
-        /// Makes the macOS Git unit for `call` refuse after its volume attaches, or fill that volume.
-        pub fn fail_git_storage(
-            call: crate::tools::ToolCall,
-            fault: GitStorageFault,
-            refusal_evidence: std::path::PathBuf,
-        ) {
-            #[cfg(target_os = "macos")]
-            plan().push(Fault::GitStorage(call, fault, refusal_evidence));
-            #[cfg(not(target_os = "macos"))]
-            let _ = (call, fault, refusal_evidence);
-        }
-
-        #[cfg(target_os = "macos")]
-        pub(crate) fn git_storage(
-            root: &std::path::Path,
-            call: &crate::tools::ToolCall,
-        ) -> io::Result<()> {
-            let Some(Fault::GitStorage(_, fault, refusal_evidence)) = take(
-                |fault| matches!(fault, Fault::GitStorage(candidate, ..) if candidate == call),
-            ) else {
-                return Ok(());
-            };
-            let injection =
-                serde_json::to_vec(&(fault, refusal_evidence)).map_err(io::Error::other)?;
-            std::fs::write(root.join(crate::tools::GIT_STORAGE_CANARY), b"control")?;
-            std::fs::write(root.join(crate::tools::GIT_STORAGE_FAULT), injection)
         }
 
         // The returned sender arms the real deadline after the test observes the intended phase.

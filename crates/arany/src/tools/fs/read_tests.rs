@@ -44,8 +44,9 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         std::time::Duration::ZERO
     );
     assert!(
-        runtime.reservation_overhead(&ToolCall::GitStatus { path: "src".into() })
-            > std::time::Duration::ZERO
+        runtime.reservation_overhead(&ToolCall::McpList {
+            server: "local".into()
+        }) > std::time::Duration::ZERO
     );
 
     assert_eq!(

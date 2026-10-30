@@ -168,6 +168,7 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
             unguarded: crate::tools::UnguardedGrant::HumanOnly,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
+            git: None,
         })),
         ..crate::test_support::run_config()
     }

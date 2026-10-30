@@ -908,6 +908,7 @@ fn goal_report_evidence(
     let attester = match attestation {
         Some(crate::tools::Attestation::InProcess { .. }) => "The Engine",
         Some(crate::tools::Attestation::Host(_)) => "A human-approved host run",
+        Some(crate::tools::Attestation::Git(_)) => "Native Git",
         Some(crate::tools::Attestation::Unguarded(_)) => "An unguarded host run",
         _ => "Guard",
     };

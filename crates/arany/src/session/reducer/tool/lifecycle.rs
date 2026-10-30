@@ -32,11 +32,18 @@ pub(super) fn validate_finished(
     if declared_intents_pending(run, *agent_run_id, &observation.intent.call) {
         return Err(ReplayError::InvalidTransition);
     }
-    let configured = run
+    let policy = run
         .config
         .as_ref()
-        .and_then(|config| config.tool_policy.as_ref())
-        .is_some_and(|policy| policy.permissions_digest.is_some());
+        .and_then(|config| config.tool_policy.as_ref());
+    if let Some(crate::tools::Attestation::Git(receipt)) = &observation.attestation
+        && policy
+            .and_then(|policy| policy.git.as_ref())
+            .is_none_or(|git| git.sha256 != receipt.executable_sha256)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let configured = policy.is_some_and(|policy| policy.permissions_digest.is_some());
     let definition_mode = super::definition_mode(run, *agent_run_id)?;
     let restrictions = super::super::mode_restrictions(run, *agent_run_id)?;
     let unguarded = observation.intent.call.is_unguarded();

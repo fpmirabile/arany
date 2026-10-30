@@ -1779,6 +1779,7 @@ pub(super) fn apply_worker_changeset(
     apply_files_controlled(workspace, &changeset.files, control)
 }
 
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
     apply_files_controlled(root, files, &MutationControl::default())
 }

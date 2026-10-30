@@ -630,6 +630,21 @@ impl ToolView {
             }
     }
 
+    /// A native Git write that may have changed the repository: attested, uncertain or started without an outcome.
+    pub fn ran_git_write(&self) -> bool {
+        self.intent.call.facts().site == crate::tools::catalog::Site::Git
+            && self.intent.call.mutates()
+            && match &self.observation {
+                Some(observation) => {
+                    matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Git(_))
+                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
+                }
+                None => self.started_sequence.is_some(),
+            }
+    }
+
     /// A host run that may have had effects: attested or uncertain, or approved without a recorded outcome.
     pub fn ran_unguarded(&self) -> bool {
         self.intent.call.is_unguarded()

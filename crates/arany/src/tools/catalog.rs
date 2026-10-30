@@ -14,13 +14,13 @@ pub enum Family {
     Preparation,
 }
 
-/// Where an operation may execute: in the Engine under the admitted Workspace handle, or in the Guard.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Site {
     InProcess,
     Guard,
     Unguarded,
     Host,
+    Git,
 }
 
 #[derive(Debug)]
@@ -66,10 +66,10 @@ const fn read_row(
     description: &'static str,
 ) -> OperationFacts {
     OperationFacts {
-        site: if matches!(family, Family::File | Family::Skill) {
-            Site::InProcess
-        } else {
-            Site::Guard
+        site: match family {
+            Family::File | Family::Skill => Site::InProcess,
+            Family::Git => Site::Git,
+            _ => Site::Guard,
         },
         prelude: true,
         researcher: !matches!(family, Family::Git),
@@ -89,6 +89,7 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
 
 const fn git_write_row(name: &'static str, order: u8, description: &'static str) -> OperationFacts {
     OperationFacts {
+        site: Site::Git,
         mutates: true,
         asks_approval: true,
         ..facts_row(name, Family::Git, order, description)
@@ -218,17 +219,17 @@ pub(crate) static ALL: [OperationFacts; 29] = [
     git_write_row(
         "git_commit",
         17,
-        "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
+        "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Runs Git with the user's configuration; repository hooks never run; asks approval.",
     ),
     git_write_row(
         "git_branch",
         18,
-        "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
+        "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and upstream status; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
     ),
     git_write_row(
         "git_switch",
         19,
-        "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
+        "Switch to an existing local branch, updating the changed Workspace files. Refuses from a detached HEAD and whenever Git refuses, such as when it would overwrite local changes or untracked files. Asks approval.",
     ),
     write_row(
         "multiedit",
@@ -406,7 +407,7 @@ pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp
 pub(crate) const REMOTE_MCP_PROTOCOL: &str = "2025-11-25 streamable HTTPS; use mcp_list before mcp_call; authorize with `arany mcp login` when a call reports unauthorized";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =
     "2025-11-25 stdio; catalog listing with mcp_list only";
-pub(crate) const GIT_SCOPE: &str = "Status, diff, log, branches, commits and switches of the Workspace-root repository, plus separately human-approved host push and PR creation. Git uses inert private configuration, never repository configuration or hooks; paths are Workspace-relative and \".\" is the whole repository.";
+pub(crate) const GIT_SCOPE: &str = "Status, diff, log, branches, commits and switches of the Workspace-root repository, plus separately human-approved host push and PR creation. Git runs natively with the user's configuration; repository hooks never run and configuration that would run or include a Workspace file refuses; paths are Workspace-relative and \".\" is the whole repository.";
 
 impl OperationFacts {
     // Approval modes may pre-approve typed file edits; process and Git writes keep asking.

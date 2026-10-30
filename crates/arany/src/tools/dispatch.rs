@@ -3,7 +3,7 @@ use super::guard::GuardContext;
 use super::types::{
     EffectIntent, EnforcementCause, LimitCause, NetworkGrant, ToolCall, ToolDisposition,
 };
-use super::{ToolError, git, mcp, process};
+use super::{ToolError, mcp, process};
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let call = &site.intent.call;
@@ -39,7 +39,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                 .await
             }
         },
-        Family::Git => git::run(site).await,
+        Family::Git => Err(ToolError::Configuration),
         Family::Web => super::web::run(site, site.secret.as_deref()).await,
         Family::Preparation => {
             super::definitions::parse(site.definition.as_deref().ok_or(ToolError::Configuration)?)

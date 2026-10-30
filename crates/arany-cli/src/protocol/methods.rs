@@ -114,6 +114,7 @@ pub struct RewindNonRewindable {
 #[serde(rename_all = "camelCase")]
 pub enum RewindEffect {
     Host,
+    Git,
     UnguardedCommand,
     Mcp,
     Cache,

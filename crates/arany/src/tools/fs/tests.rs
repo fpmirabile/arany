@@ -359,7 +359,6 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
-        git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
         network: None,

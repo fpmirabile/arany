@@ -146,6 +146,7 @@ pub(super) async fn preview(
                     sequence: *sequence,
                     effect: match effect {
                         NonRewindable::Host => RewindEffect::Host,
+                        NonRewindable::Git => RewindEffect::Git,
                         NonRewindable::UnguardedCommand => RewindEffect::UnguardedCommand,
                         NonRewindable::Mcp => RewindEffect::Mcp,
                         NonRewindable::Cache => RewindEffect::Cache,

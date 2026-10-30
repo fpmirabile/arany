@@ -31,9 +31,9 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
             ) STRICT;
             CREATE INDEX events_by_session ON events (session_id, sequence);
             CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
-            PRAGMA user_version=12;
+            PRAGMA user_version=13;
             COMMIT;";
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;
 
 pub(super) struct HotSession {
     session_id: SessionId,

@@ -816,8 +816,8 @@ fn goal_context_metadata_reservation(
         .ok_or(EngineError::ContextTooLarge)
 }
 
-// Locks a dead Guard's Git write left are reported, with their paths, before admission refuses
-// to resume past its unsettled effect; nothing is moved or retried.
+// Locks an interrupted Git write may have left are reported, with their paths, before admission
+// refuses to resume past its unsettled effect; nothing is moved or retried.
 async fn report_stale_git_locks(
     view: &crate::SessionView,
     goal: crate::session::GoalId,
@@ -827,28 +827,26 @@ async fn report_stale_git_locks(
     let Some(goal) = view.goal(goal) else {
         return Ok(());
     };
-    let git_writes: Vec<_> = view
+    let unsettled = view
         .runs
         .iter()
         .filter(|r| goal.run_ids.contains(&r.id))
         .flat_map(|r| &r.tools)
-        .filter(|t| t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop())
-        .map(|t| t.intent.id)
-        .collect();
-    if git_writes.is_empty() {
+        .any(|t| t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop());
+    if !unsettled {
         return Ok(());
     }
     if !tools {
         return Err(EngineError::GoalUnavailable);
     }
-    crate::tools::recover_private(&git_writes).await?;
-    for id in git_writes {
-        let workspace = workspace.to_owned();
-        tokio::task::spawn_blocking(move || crate::tools::report_git_locks(&workspace, id))
-            .await
-            .map_err(|_| crate::tools::ToolError::Operation)??;
+    let workspace = workspace.to_owned();
+    let locks = tokio::task::spawn_blocking(move || crate::tools::stale_locks(&workspace))
+        .await
+        .map_err(|_| crate::tools::ToolError::Operation)?;
+    if locks.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    Err(crate::tools::ToolError::StaleGitLocks(locks.join(", ")).into())
 }
 
 fn resolve_goal_admission(

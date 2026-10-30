@@ -316,7 +316,9 @@ fn tool_item_with_denial_output(
                 .and_then(|a| match a {
                     arany::Attestation::Guard(_) => Some(Attestation::Guard),
                     arany::Attestation::InProcess { .. } => Some(Attestation::InProcess),
-                    arany::Attestation::Host(_) | arany::Attestation::Unguarded(_) => None,
+                    arany::Attestation::Host(_)
+                    | arany::Attestation::Unguarded(_)
+                    | arany::Attestation::Git(_) => None,
                 }),
         },
         ToolCall::McpList { server } => Item::McpToolCall {

@@ -1,7 +1,6 @@
 use super::super::selection_phase::{primary_command, selection_limits};
-use super::super::{BootstrapFailure, GitStage, GuardStage, Task, read_line_capped};
+use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
-use super::git_write::GitLink;
 use super::storage::{
     cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
 };
@@ -234,15 +233,6 @@ impl Scope {
             }
         }
         Ok(members)
-    }
-
-    pub(super) fn holds_only(&mut self, member: Identity) -> Result<bool, ToolError> {
-        let members = self.members()?;
-        Ok(matches!(members.as_slice(), [only] if only.same_process(member)))
-    }
-
-    pub(super) fn is_empty(&mut self) -> Result<bool, ToolError> {
-        Ok(self.members()?.is_empty())
     }
 
     fn begin_capture(&mut self, limits: &ToolLimits) -> Result<(), ToolError> {
@@ -582,21 +572,6 @@ async fn manager(
 }
 
 impl Unit {
-    pub(super) fn take_capacity(&mut self) -> Result<super::super::admission::Permit, ToolError> {
-        self._permit.take().ok_or(ToolError::Configuration)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn fixture_witness(&self) -> Result<(PathBuf, u32), ToolError> {
-        Ok((self.root.clone(), self.supervisor()?.pid))
-    }
-
-    pub(super) fn supervisor(&self) -> Result<Identity, ToolError> {
-        recovery(&self._directory)?
-            .supervisor
-            .ok_or(ToolError::ProtectionUnavailable)
-    }
-
     #[cfg(test)]
     async fn new(fixture: &Path) -> Result<Self, ToolError> {
         let directory =
@@ -932,45 +907,6 @@ fn action_deadlines(
     (preparation_deadline, go_deadline, completion_deadline)
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn git_storage_fault(root: &Path, intent: &EffectIntent) -> Result<(), ToolError> {
-    use crate::fault::GitStorageFault;
-    use std::io::Write as _;
-    let Ok(injection) = std::fs::read(root.join(crate::tools::GIT_STORAGE_FAULT)) else {
-        return Ok(());
-    };
-    let (fault, refusal_evidence): (GitStorageFault, PathBuf) =
-        serde_json::from_slice(&injection).map_err(|_| ToolError::Configuration)?;
-    let canary = || {
-        (std::fs::read(root.join(crate::tools::GIT_STORAGE_CANARY))
-            .ok()
-            .as_deref()
-            == Some(b"control".as_slice()))
-        .then_some(())
-        .ok_or(ToolError::Configuration)
-    };
-    match fault {
-        GitStorageFault::Refuse => {
-            super::storage::verify_git_storage(root)?;
-            canary()?;
-            let evidence =
-                serde_json::to_vec(&(intent.id, root)).map_err(|_| ToolError::Configuration)?;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(refusal_evidence)
-                .and_then(|mut file| file.write_all(&evidence))
-                .map_err(|_| ToolError::Operation)?;
-            Err(ToolError::ProtectionUnavailable)
-        }
-    }
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn git_storage_fault(_root: &Path, _intent: &EffectIntent) -> Result<(), ToolError> {
-    Ok(())
-}
-
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -982,15 +918,7 @@ pub(super) async fn execute(
         () = cancellation.cancelled() => return Err(ToolError::Operation),
         unit = Unit::admit(runtime, intent) => unit?,
     };
-    run_unit(
-        runtime,
-        intent,
-        cancellation,
-        dispatched,
-        admitted,
-        &mut GitLink::default(),
-    )
-    .await
+    run_unit(runtime, intent, cancellation, dispatched, admitted).await
 }
 
 #[expect(clippy::too_many_lines, reason = "frozen until C2")]
@@ -1000,15 +928,10 @@ pub(super) async fn run_unit(
     mut cancellation: Cancellation,
     dispatched: &AtomicBool,
     admitted: (Unit, Option<crate::tools::ActiveToolWindow>),
-    link: &mut GitLink,
 ) -> Result<ToolObservation, ToolError> {
     let (mut unit, active_window) = admitted;
-    let git_stage = link.stage;
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     super::storage::require_disk_reserve(&unit._directory.dir)?;
-    if git_stage != Some(GitStage::Publish) {
-        crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
-    }
     let active_window = super::super::selection_phase::command_window(intent, active_window);
     let proxy = proxy_for(runtime, intent)?;
     let (preparation_deadline, go_deadline, completion_deadline) =
@@ -1046,15 +969,7 @@ pub(super) async fn run_unit(
         )?);
         let phases = async {
             let mut task = Task::new(runtime, intent, cache_transfer)?;
-            task.git_stage = git_stage;
             task.proxy_port = proxy.as_ref().map(crate::tools::network::Proxy::port);
-            #[cfg(any(test, feature = "test-support"))]
-            {
-                task.git_fault = crate::fault::git_write::take_mode(
-                    &intent.call,
-                    git_stage == Some(GitStage::Plan),
-                );
-            }
             let task = super::super::encode_task(&task)?;
             let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
                 stream
@@ -1139,42 +1054,24 @@ pub(super) async fn run_unit(
             capture.complete();
             timings.mark("ready");
             let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
-            if git_stage == Some(GitStage::Publish) {
-                link.feed_publisher(stream.get_mut()).await?;
-            }
-            if git_stage == Some(GitStage::Plan) {
-                if go_cancellation.is_cancelled() {
-                    return Err(ToolError::Operation);
-                }
-            } else {
-                super::super::selection_phase::before_dispatch(
-                    runtime,
-                    intent,
-                    active_window,
-                    command_deadline,
-                    &go_cancellation,
-                )
-                .await?;
-            }
-            #[cfg(any(test, feature = "test-support"))]
-            if git_stage == Some(GitStage::Publish) {
-                super::git_write::fixture_gate(
-                    intent,
-                    crate::fault::git_write::GitWriteStage::BeforeGo,
-                    &unit,
-                )
-                .await?;
-            }
+            super::super::selection_phase::before_dispatch(
+                runtime,
+                intent,
+                active_window,
+                command_deadline,
+                &go_cancellation,
+            )
+            .await?;
             payload_phase.store(true, Ordering::Release);
-            if git_stage != Some(GitStage::Plan) {
-                dispatched.store(true, Ordering::Release);
-            }
+            dispatched.store(true, Ordering::Release);
             let observation = async {
-                super::git_write::send_go(stream.get_mut(), intent, &unit, git_stage).await?;
-                if git_stage != Some(GitStage::Plan) {
-                    crate::fault::guard_dispatched(intent);
-                    crate::fault::guard_dispatch_gate(intent).await;
-                }
+                stream
+                    .get_mut()
+                    .write_all(b"GO\n")
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                crate::fault::guard_dispatched(intent);
+                crate::fault::guard_dispatch_gate(intent).await;
                 if primary_command {
                     use tokio::io::AsyncBufReadExt;
                     if stream
@@ -1251,12 +1148,6 @@ pub(super) async fn run_unit(
                             _ => return Err(ToolError::Operation),
                         }
                         Ok((observation, candidate))
-                    } else if git_stage == Some(GitStage::Plan) {
-                        super::git_write::relay_plan(&mut stream, intent, &mut unit, link)
-                            .await
-                            .map(|observation| {
-                                (observation, super::super::CacheCandidate::Received)
-                            })
                     } else {
                         super::super::read_worker_report(&mut stream, intent)
                             .await
@@ -1332,9 +1223,6 @@ pub(super) async fn run_unit(
     }
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
-    if result.is_ok() {
-        link.release_publisher(&mut unit)?;
-    }
     let result = match result {
         Ok((mut observation, candidate)) => {
             crate::tools::network::annotate(&mut observation, refusals)?;
@@ -1512,9 +1400,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         if let Some(cache) = &task.cache {
             cache.validate(&task.intent, &task.config)?;
         }
-        let git_stage = task.git_stage;
-        #[cfg(any(test, feature = "test-support"))]
-        let git_fault = task.git_fault;
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
@@ -1561,19 +1446,10 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
             let mut command_before = None;
             let (capture_go, mut receive_capture) = tokio::sync::oneshot::channel();
-            let (plan_sender, plan_receiver) = tokio::sync::oneshot::channel();
-            let (relayed_sender, relayed_receiver) = tokio::sync::oneshot::channel();
-            let publishing = git_stage == Some(GitStage::Publish);
-            let result_cap = intent.limits.result_bytes as usize;
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if intent.call.is_git() && git_stage != Some(GitStage::Publish) {
-                    let root = path.parent().ok_or(ToolError::Path)?;
-                    let volumes = super::storage::prepare_git_storage(root)?;
-                    git_storage_fault(root, &intent)?;
-                    Some(volumes)
-                } else if intent.call.is_process() {
+                storage = if intent.call.is_process() {
                     Some(prepare_command_storage(
                         path.parent().ok_or(ToolError::Path)?,
                         &runtime,
@@ -1636,17 +1512,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 let (go, receive_go) = tokio::sync::oneshot::channel();
                 let watched = cancellation.clone();
                 reader = Some(tokio::spawn(async move {
-                    if publishing {
-                        match super::git_write::receive_plan(&mut input, result_cap).await {
-                            Ok(plan) => {
-                                let _ = plan_sender.send(plan);
-                            }
-                            Err(_) => {
-                                watched.cancel();
-                                return;
-                            }
-                        }
-                    }
                     let mut bytes = [0; 3];
                     if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
                         let _ = go.send(());
@@ -1660,8 +1525,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                                 {
                                     let _ = capture_go.send(deadline);
                                 }
-                            } else if capture == *super::git_write::RELAYED {
-                                let _ = relayed_sender.send(());
                             }
                             let _ = input.read(&mut [0; 1]).await;
                         }
@@ -1692,13 +1555,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     cancellation,
                     &mut scope,
                     &mut output,
-                    super::GoGate {
-                        receive_go,
-                        git_stage,
-                        git_input: publishing.then_some(plan_receiver),
-                        #[cfg(any(test, feature = "test-support"))]
-                        git_fault,
-                    },
+                    receive_go,
                     (
                         path.parent().ok_or(ToolError::Path)?,
                         command_deadline,
@@ -1737,9 +1594,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 Ok(())
             }
             .await;
-            let mut git_frame = None;
             let result = result.map(|mut worker| {
-                git_frame = worker.frame.take();
                 if let Err(error) = capture_handshake {
                     let (disposition, output, cause, limit_cause) =
                         crate::tools::dispatch::outcome(&intent, Err(error));
@@ -1933,12 +1788,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     .await
                     .map_err(|_| ToolError::Operation)?;
             }
-            if result.is_ok()
-                && let Some(frame) = &git_frame
-            {
-                super::git_write::send_plan(&mut output, frame, relayed_receiver).await?;
-            }
-            // The reader owns the relay acknowledgement, so it outlives the frame send.
             if let Some(reader) = reader {
                 reader.abort();
                 let _ = reader.await;
@@ -2576,10 +2425,10 @@ done
             });
         }
         ToolRuntime {
+            git_environment: None,
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available: true,
-            git_writes_available: false,
             host_authentication: Default::default(),
             handover: None,
             definitions: Default::default(),
@@ -2626,7 +2475,6 @@ done
                 }],
                 runtime_grants: runtime_grants.clone(),
                 git: None,
-                git_identity: None,
                 locale: Default::default(),
                 environment_sha256: None,
                 network: None,
@@ -3023,59 +2871,6 @@ int main(int argc, char **argv) {
         assert!(!partial_root.exists());
     }
 
-    async fn verify_git_storage_exits(fixture: &Path) {
-        use super::super::storage::{GIT_VOLUME, prepare_git_storage, verify_git_storage};
-        for exit in ["success", "cancellation", "refusal"] {
-            let mut unit = Unit::new(fixture).await.unwrap();
-            std::fs::write(unit.root.join("canary"), b"control").unwrap();
-            let outside = tempfile::tempdir().unwrap();
-            let volume = if exit == "refusal" {
-                assert!(verify_git_storage(&unit.root).is_err());
-                std::os::unix::fs::symlink(outside.path(), unit.root.join(GIT_VOLUME)).unwrap();
-                let refused = prepare_git_storage(&unit.root);
-                assert!(
-                    matches!(refused, Err(ToolError::ChangedInput)),
-                    "{:?}",
-                    refused.err()
-                );
-                std::fs::remove_file(unit.root.join(GIT_VOLUME)).unwrap();
-                None
-            } else {
-                let volume = prepare_git_storage(&unit.root).unwrap();
-                verify_git_storage(&unit.root).unwrap();
-                Some(volume)
-            };
-            let names = |root: &Path| {
-                let mut names: Vec<_> = std::fs::read_dir(root)
-                    .unwrap()
-                    .map(|entry| entry.unwrap().file_name())
-                    .collect();
-                names.sort();
-                names
-            };
-            let before = names(&unit.root);
-            let view = unit.root.join(GIT_VOLUME);
-            if exit == "success" {
-                std::fs::write(view.join("probe"), b"view").unwrap();
-            }
-            assert_eq!(names(&unit.root), before, "{exit}: control root changed");
-            assert_eq!(
-                std::fs::read(unit.root.join("canary")).unwrap(),
-                b"control",
-                "{exit}"
-            );
-            // Production teardown runs with the volume handles still open, as on a cancelled effect.
-            unit.stop().await.unwrap();
-            assert!(!storage_mounted(&unit.root).unwrap(), "{exit}");
-            assert_eq!(
-                std::fs::read_dir(outside.path()).unwrap().count(),
-                0,
-                "{exit}"
-            );
-            drop(volume);
-        }
-    }
-
     async fn verify_previous_boot_never_signals() {
         let parent = tempfile::tempdir().unwrap();
         let own = identity(std::process::id()).unwrap();
@@ -3383,7 +3178,6 @@ int main(int argc, char **argv) {
         let (actor, plain, sysctl_probe, rust_probe) = native_actors(generated.path());
         verify_uncertain_storage_is_retained(generated.path()).await;
         verify_partial_storage_is_cleaned(generated.path()).await;
-        verify_git_storage_exits(generated.path()).await;
         verify_previous_boot_never_signals().await;
         verify_controller_crash_recovery(&plain).await;
 
@@ -3885,9 +3679,7 @@ int main(int argc, char **argv) {
                     editor_tree: None,
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
-                    git_stage: None,
                     proxy_port: None,
-                    git_fault: None,
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();

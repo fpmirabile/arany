@@ -70,7 +70,7 @@ const LINUX_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-no-host-worksp
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v26:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v26:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(cpu::contract().as_bytes());
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&overlay::cache::HANDOFF_BYTES.to_le_bytes());
@@ -80,7 +80,6 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
-    bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
     bytes.extend_from_slice(&profile::profile_digest(profile::Routing::Offline)?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -726,7 +725,6 @@ fn unit_command(
         );
     command.arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms));
     launch.append(&mut command, &executable_path)?;
-    let native = intent.call.is_git();
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
@@ -734,10 +732,8 @@ fn unit_command(
     // An editor command runs directly in its editor's private workspace.
     let workspace_mount = if let Some(overlay) = &launch.overlay {
         Some(overlay.workspace_mount(seed_path))
-    } else if let Some(tree) = runtime.editor_tree(intent) {
-        Some((tree, true))
     } else {
-        native.then(|| (runtime.workspace.clone(), intent.call.mutates()))
+        runtime.editor_tree(intent).map(|tree| (tree, true))
     };
     profile_arguments(
         &mut command,
@@ -2097,14 +2093,6 @@ mod tests {
                 None,
             ),
             (
-                serde_json::json!({"operation":"git_status","path":"."}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"git_commit","message":"synthetic","paths":["selected.txt"],"staged":false}),
-                Some("--bind"),
-            ),
-            (
                 serde_json::json!({"operation":"mkdir","path":"synthetic"}),
                 None,
             ),
@@ -2275,157 +2263,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    #[cfg_attr(not(arany_ci), ignore = "native Linux Git namespace isolation")]
-    fn native_git_launch_keeps_workspace_read_only_and_host_home_absent() {
-        use crate::test_process::BoundedOutput;
-
-        let _native_gate = crate::test_process::NATIVE_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let fixture = tempfile::tempdir().unwrap();
-        let workspace = fixture.path().join("workspace");
-        let home = fixture.path().join("home");
-        let seed = fixture.path().join("seed");
-        for directory in [&workspace, &home, &seed, &seed.join("workspace")] {
-            std::fs::create_dir(directory).unwrap();
-        }
-        let host_config = home.join(".gitconfig");
-        let config_bytes = b"[user]\n\tname = Synthetic Host\n";
-        std::fs::write(&host_config, config_bytes).unwrap();
-        assert_eq!(std::fs::read(&host_config).unwrap(), config_bytes);
-        let git = crate::tools::git::discover().expect("pinned Git");
-        let initialized = std::process::Command::new(&git.executable)
-            .args(["init", "--quiet", "--initial-branch=main"])
-            .current_dir(&workspace)
-            .env_clear()
-            .env("HOME", &home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
-            .unwrap();
-        assert!(initialized.status.success(), "pinned Git baseline");
-        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
-            std::fs::write(&path, b"allowed\n").unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"allowed\n");
-        }
-
-        let mut command = Command::new(BWRAP_TEST_LAUNCH[0]);
-        command.args(&BWRAP_TEST_LAUNCH[1..]);
-        profile_arguments(
-            &mut command,
-            "/usr/bin:/bin",
-            &seed,
-            &[],
-            Some((&workspace, false)),
-            &ToolLimits::default(),
-            None,
-        );
-        command
-            .args(["--ro-bind"])
-            .arg(std::env::current_exe().unwrap())
-            .arg("/arany");
-        command
-            .args(["--setenv", "ARANY_TEST_GIT_HOST_CONFIG"])
-            .arg(&host_config)
-            .args(["--setenv", "ARANY_TEST_GIT_PIN"])
-            .arg(serde_json::to_string(&git).unwrap())
-            .args(["--setenv", "ARANY_TEST_GIT_PARENT_NAMESPACES"])
-            .arg(serde_json::to_string(&profile::Namespaces::read().unwrap()).unwrap())
-            .args([
-                "--chdir",
-                "/",
-                "--",
-                "/arany",
-                "--exact",
-                "tools::guard::linux::tests::native_git_launch_probe",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env_clear();
-        let output = command
-            .into_std()
-            .bounded_output_for(Duration::from_secs(40), 32 * 1024)
-            .expect("native Git namespace probe");
-        assert!(
-            output.status.success(),
-            "Git namespace probe: {:?}; stdout={:?}; stderr={:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        crate::test_process::assert_single_test_completed(&output.stdout, "Git namespace probe");
-        assert!(output.stderr.is_empty());
-        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
-            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
-        }
-        assert_eq!(std::fs::read(host_config).unwrap(), config_bytes);
-    }
-
-    #[test]
-    #[ignore = "isolated Linux Git namespace probe"]
-    fn native_git_launch_probe() {
-        let host_config =
-            std::env::var_os("ARANY_TEST_GIT_HOST_CONFIG").expect("private synthetic host config");
-        let git = serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PIN").unwrap()).unwrap();
-        let parent =
-            serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
-                .unwrap();
-        assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        harden(profile::Routing::Offline).expect("production Guard hardening");
-        let own = thread_status(Path::new("/proc/thread-self/status"))
-            .unwrap()
-            .expect("the caller's own status");
-        verify_hardened_status(&own).unwrap();
-        for path in ["/workspace/a.txt", "/workspace/.git/write-probe"] {
-            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
-            assert_eq!(
-                std::fs::write(path, b"forbidden")
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(nix::libc::EROFS),
-                "Git Workspace bind must be read-only: {path}"
-            );
-        }
-        assert_eq!(
-            std::fs::File::open(host_config).unwrap_err().raw_os_error(),
-            Some(nix::libc::ENOENT),
-            "synthetic host HOME/.gitconfig must be absent from the Git namespace"
-        );
-        let view = Path::new("/scratch").join(crate::tools::git::VIEW);
-        std::fs::create_dir(&view).unwrap();
-        std::fs::write(view.join("write-probe"), b"allowed\n").unwrap();
-        assert_eq!(
-            std::fs::read(view.join("write-probe")).unwrap(),
-            b"allowed\n"
-        );
-        std::fs::remove_dir_all(view).unwrap();
-        let output = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(crate::tools::git::execute(
-                crate::tools::git::GitReadRequest {
-                    workspace: Path::new("/workspace"),
-                    scratch: Path::new("/scratch"),
-                    git: &git,
-                    call: &ToolCall::GitStatus { path: ".".into() },
-                    hidden: &Default::default(),
-                    max_bytes: 16 * 1024,
-                    runtime: Duration::from_secs(20),
-                },
-            ))
-            .unwrap();
-        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert!(output.get("failed").is_none(), "{output}");
-        assert!(
-            output["entries"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!({"path": "a.txt", "state": "??"}))
-        );
     }
 
     #[test]

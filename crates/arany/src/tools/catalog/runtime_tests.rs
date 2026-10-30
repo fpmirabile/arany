@@ -419,11 +419,11 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     use super::ToolRuntime;
     use std::path::PathBuf;
 
-    let runtime = |config: Config, git_writes_available: bool| ToolRuntime {
+    let runtime = |config: Config| ToolRuntime {
         host_settings_admitted: true,
         host_settings_saved: Default::default(),
         guard_available: true,
-        git_writes_available,
+        git_environment: None,
         host_authentication: Default::default(),
         handover: None,
         definitions: Default::default(),
@@ -457,45 +457,17 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     let mut value = config_value();
     value["workspace_paths"] = json!(["."]);
     let mut config: Config = serde_json::from_value(value).unwrap();
-    let catalog = |config: Config, git_writes_available: bool| {
-        let context = runtime(config, git_writes_available).context().unwrap();
+    let catalog = |config: Config| {
+        let context = runtime(config).context().unwrap();
         parse_json(context.catalog().as_bytes(), MAX_TOOL_CATALOG_BYTES).unwrap()
     };
-    assert_eq!(catalog(config.clone(), true)["git"], "unavailable");
+    assert_eq!(catalog(config.clone())["git"], "unavailable");
     config.git = Some(
         serde_json::from_value(json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]})).unwrap(),
     );
-    assert_eq!(
-        catalog(config.clone(), true)["git"]["operations"],
-        json!(["git_status", "git_diff", "git_log", "git_branch"])
-    );
-    config.write = true;
-    assert_eq!(
-        config.allows(&ToolCall::GitBranch {
-            name: Some("topic".into()),
-            start_point: None,
-            scope: None,
-            base: None,
-            max_count: None,
-        }),
-        super::guard::git_writes_available()
-    );
-    assert_eq!(
-        config.allows(&ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec![".".into()],
-            staged: false,
-        }),
-        super::guard::git_writes_available()
-    );
-    assert_eq!(
-        config.allows(&ToolCall::GitSwitch {
-            branch: "topic".into()
-        }),
-        super::guard::git_writes_available()
-    );
-    for git_writes in [false, true] {
-        let operations = if git_writes {
+    for write in [false, true] {
+        config.write = write;
+        let operations = if write {
             vec![
                 "git_status",
                 "git_diff",
@@ -507,14 +479,14 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         } else {
             vec!["git_status", "git_diff", "git_log", "git_branch"]
         };
-        let catalog = catalog(config.clone(), git_writes);
-        assert_eq!(catalog["git"]["write"], git_writes);
+        let catalog = catalog(config.clone());
+        assert_eq!(catalog["git"]["write"], write);
         assert_eq!(catalog["git"]["operations"], json!(operations));
         let branch = catalog_call_schemas(&catalog)
             .into_iter()
             .find(|call| call["properties"]["operation"]["enum"][0] == "git_branch")
             .unwrap();
-        let expected = if git_writes {
+        let expected = if write {
             json!(["string", "null"])
         } else {
             json!("null")
@@ -522,6 +494,12 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         for field in ["name", "start_point"] {
             assert_eq!(branch["properties"][field]["type"], expected);
         }
+        assert_eq!(
+            config.allows(&ToolCall::GitSwitch {
+                branch: "topic".into()
+            }),
+            write
+        );
     }
 }
 
@@ -542,7 +520,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         host_settings_admitted: true,
         host_settings_saved: Default::default(),
         guard_available: true,
-        git_writes_available: true,
+        git_environment: None,
         host_authentication: Default::default(),
         handover: None,
         definitions: Default::default(),

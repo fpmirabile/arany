@@ -69,6 +69,7 @@ pub struct RewindPlan {
 #[serde(rename_all = "snake_case")]
 pub enum NonRewindable {
     Host,
+    Git,
     UnguardedCommand,
     Mcp,
     Cache,
@@ -562,6 +563,9 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
             }
             if t.ran_unguarded() {
                 non_rewindable.push((seq, NonRewindable::UnguardedCommand));
+            }
+            if t.ran_git_write() {
+                non_rewindable.push((seq, NonRewindable::Git));
             }
             let Some(o) = &t.observation else {
                 continue;

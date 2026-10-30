@@ -28,8 +28,6 @@ pub(crate) struct Config {
     pub runtime_grants: Vec<RuntimeGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Program>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_identity: Option<GitIdentity>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub locale: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,38 +70,6 @@ impl WebSearch {
                         byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
                     })
             })
-    }
-}
-
-// Author and committer of typed Git commits; never read from repository configuration.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct GitIdentity {
-    pub name: String,
-    pub email: String,
-}
-
-impl Default for GitIdentity {
-    fn default() -> Self {
-        Self {
-            name: "Arany".into(),
-            email: "arany@localhost.invalid".into(),
-        }
-    }
-}
-
-impl GitIdentity {
-    pub(crate) fn valid(&self) -> bool {
-        let field = |value: &str, limit: usize| {
-            !value.trim().is_empty()
-                && value.len() <= limit
-                && !value
-                    .chars()
-                    .any(|character| character.is_control() || matches!(character, '<' | '>'))
-        };
-        field(&self.name, 256)
-            && field(&self.email, 256)
-            && !self.email.contains(char::is_whitespace)
     }
 }
 
@@ -249,13 +215,6 @@ impl Config {
         {
             return Err(ToolError::Configuration);
         }
-        if self
-            .git_identity
-            .as_ref()
-            .is_some_and(|identity| !identity.valid())
-        {
-            return Err(ToolError::Configuration);
-        }
         if self.child_web && cfg!(not(target_os = "linux")) {
             return Err(ToolError::Configuration);
         }
@@ -301,11 +260,7 @@ impl Config {
         }
         if let Some(git) = &self.git {
             git.validate()?;
-            if git.name != "git"
-                || git.interpreter
-                || !git.inputs.is_empty()
-                || !super::executable::git_root(std::path::Path::new(&git.executable))
-            {
+            if git.name != "git" || git.interpreter || !git.inputs.is_empty() {
                 return Err(ToolError::Configuration);
             }
         }
@@ -419,6 +374,11 @@ impl Config {
             unguarded: UnguardedGrant::HumanOnly,
             child_unguarded: UnguardedGrant::Denied,
             child_web: self.child_web && cfg!(target_os = "linux"),
+            git: self.git.as_ref().map(|git| GitRunPin {
+                executable: git.executable.clone(),
+                sha256: git.sha256.clone(),
+                hooks: None,
+            }),
         }
     }
 
@@ -497,8 +457,7 @@ impl Config {
             | ToolCall::GitCommit { .. }
             | ToolCall::GitBranch { .. }
             | ToolCall::GitSwitch { .. } => {
-                return self.git_available()
-                    && (!call.mutates() || super::guard::git_writes_available());
+                return self.git_available();
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self

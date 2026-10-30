@@ -789,6 +789,18 @@ pub struct ToolPolicyReceipt {
     pub child_unguarded: UnguardedGrant,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub child_web: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub git: Option<GitRunPin>,
+}
+
+// The Git a Run resolved from PATH, and the digest of its accepted hooks (null: hooks off).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRunPin {
+    pub executable: String,
+    pub sha256: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub hooks: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -836,6 +848,11 @@ impl ToolPolicyReceipt {
                 .is_none_or(|epoch| epoch.get_version() == Some(uuid::Version::SortRand))
             && (MIN_TOOL_CONTEXT_BYTES as u32..=crate::session::MAX_WINDOW_CONTENT_BYTES as u32)
                 .contains(&self.max_context_bytes)
+            && self.git.as_ref().is_none_or(|git| {
+                super::config::valid_absolute(&git.executable)
+                    && valid_digest(&git.sha256)
+                    && git.hooks != Some([0; 32])
+            })
     }
 }
 
@@ -1298,6 +1315,54 @@ impl UnguardedReceipt {
     }
 }
 
+// HEAD (a ref name or `detached`), its commit and the operation's target ref, read through Git.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHead {
+    pub head: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub oid: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub target: Option<GitRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRef {
+    pub name: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub oid: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRefs {
+    pub before: GitHead,
+    pub after: GitHead,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitReceipt {
+    pub contract_version: u32,
+    pub intent_digest: [u8; 32],
+    pub executable_sha256: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub exit_code: Option<i32>,
+    // Boxed to keep every observation small; most Git receipts are reads without refs.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub refs: Option<Box<GitRefs>>,
+}
+
+impl GitReceipt {
+    pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
+        self.contract_version == 1
+            && self.intent_digest == intent.digest()
+            && valid_digest(&self.executable_sha256)
+            && self.refs.is_some() == intent.call.mutates()
+    }
+}
+
 /// Who executed an operation: the Engine in process, the Guard with its receipt, or an approved host run.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1312,6 +1377,7 @@ pub enum Attestation {
     Guard(GuardReceipt),
     Unguarded(UnguardedReceipt),
     Host(UnguardedReceipt),
+    Git(GitReceipt),
 }
 
 impl Attestation {
@@ -1343,6 +1409,11 @@ impl Attestation {
                 intent.target == EffectTarget::Workspace
                     && intent.call.is_host()
                     && intent.host.is_some()
+                    && receipt.valid_for(intent)
+            }
+            Self::Git(receipt) => {
+                intent.target == EffectTarget::Workspace
+                    && intent.call.facts().site == Site::Git
                     && receipt.valid_for(intent)
             }
             Self::Unguarded(receipt) => {
@@ -1389,6 +1460,23 @@ impl Attestation {
                 exit_code: Some(0),
                 descendants_confirmed_stopped: true,
             }),
+            Site::Git => Self::Git(GitReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: "0".repeat(64),
+                exit_code: Some(0),
+                refs: intent.call.mutates().then(|| {
+                    let head = GitHead {
+                        head: "refs/heads/main".into(),
+                        oid: None,
+                        target: None,
+                    };
+                    Box::new(GitRefs {
+                        before: head.clone(),
+                        after: head,
+                    })
+                }),
+            }),
             Site::Unguarded => Self::Unguarded(UnguardedReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -1406,7 +1494,7 @@ impl Attestation {
     pub fn guard(&self) -> Option<&GuardReceipt> {
         match self {
             Self::Guard(receipt) => Some(receipt),
-            Self::InProcess { .. } | Self::Unguarded(_) | Self::Host(_) => None,
+            Self::InProcess { .. } | Self::Unguarded(_) | Self::Host(_) | Self::Git(_) => None,
         }
     }
 }
@@ -1816,6 +1904,19 @@ impl ToolObservation {
             && (!self.intent.call.is_unguarded()
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
+            && (self.intent.call.facts().site != Site::Git
+                || self.cache_update == CacheUpdate::NotApplicable
+                    && self.enforcement_cause.is_none()
+                    && match &self.attestation {
+                        Some(Attestation::Git(receipt)) => {
+                            self.disposition != ToolDisposition::Uncertain
+                                && (self.disposition != ToolDisposition::Succeeded
+                                    || !self.intent.call.mutates()
+                                    || receipt.exit_code == Some(0))
+                        }
+                        None => self.disposition != ToolDisposition::Succeeded,
+                        _ => false,
+                    })
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),

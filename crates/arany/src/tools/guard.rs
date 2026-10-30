@@ -37,38 +37,15 @@ pub(super) fn payload_report_deadline(
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-mod landlock;
-#[cfg(target_os = "linux")]
 mod linux;
 mod network;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
 pub(super) use network::set_environment as set_proxy_environment;
-#[cfg(target_os = "linux")]
-mod profile;
-#[cfg(target_os = "linux")]
-pub(super) use landlock::spawn_confined;
-
-pub(super) fn git_writes_available() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        landlock::available()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        true
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod git_stage;
-#[cfg(target_os = "macos")]
-pub(super) use git_stage::GitStage;
-#[cfg(target_os = "macos")]
-use git_stage::{GitWork, read_plan_report, receive_git_input};
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+mod profile;
 #[cfg(target_os = "macos")]
 pub(super) use macos::disk_floor_reached;
 #[cfg(target_os = "macos")]
@@ -153,13 +130,7 @@ struct Task {
     system_programs: Option<SystemPrograms>,
     #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    git_stage: Option<GitStage>,
-    #[cfg(target_os = "macos")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     proxy_port: Option<u16>,
-    #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -869,42 +840,15 @@ pub(super) async fn execute(
         &mut dispatched,
     ))
     .await;
-    // Unless cleanup failed the unit is stopped, so leftover Git locks are reported, never moved.
-    let stale = if dispatched
-        && intent.call.is_git()
-        && intent.call.mutates()
-        && !matches!(
-            result,
-            Err(ToolError::GuardRejected(GuardStage::ProcessCleanup))
-        ) {
-        match super::git::recover_locks(&runtime.workspace, intent.id) {
-            Ok(()) => None,
-            Err(error @ ToolError::StaleGitLocks(_)) => Some(error.to_string()),
-            Err(error) => {
-                crate::diagnostics::tool_failure("Guard", &error);
-                None
-            }
-        }
-    } else {
-        None
-    };
     let result = crate::fault::guard_result(intent.id, result);
     #[cfg(target_os = "linux")]
     let result = result
         .map_err(|error| linux::supervisor::namespace_failure(error, &runtime.guard_executable));
-    let result = if intent.call.is_web() {
+    if intent.call.is_web() {
         web_stop_result(intent, dispatched, stop.is_cancelled(), result)
     } else {
         dispatch_result(intent, dispatched, result)
-    };
-    let Some(report) = stale else {
-        return result;
-    };
-    let cache = super::guard_error_cache_update(&intent.call, runtime.cache_state.is_some());
-    Ok(report_stale_locks(
-        uncertain_after_stale(intent, result, cache),
-        &report,
-    ))
+    }
 }
 
 // Web calls publish nothing, so confirmed teardown after a stop is a known outcome.
@@ -941,30 +885,6 @@ fn web_stop_result(
         guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     })
-}
-
-fn uncertain_after_stale(
-    intent: &EffectIntent,
-    result: Result<ToolObservation, ToolError>,
-    cache: CacheUpdate,
-) -> ToolObservation {
-    match result {
-        Ok(observation) if observation.disposition == ToolDisposition::Uncertain => observation,
-        other => super::uncertain_observation(
-            intent.clone(),
-            other.err().unwrap_or(ToolError::Uncertain),
-            cache,
-        ),
-    }
-}
-
-// The owner removes these by hand, so the report leads the journaled observation.
-pub(super) fn report_stale_locks(
-    mut observation: ToolObservation,
-    report: &str,
-) -> ToolObservation {
-    observation.output = format!("{report}. {}", observation.output);
-    observation
 }
 
 pub(super) fn dispatch_result(
@@ -1414,11 +1334,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) workspace: &'a Path,
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) secret: Option<String>,
-    pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
-    pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
-    #[cfg(target_os = "macos")]
-    pub(super) git: GitWork,
     #[cfg(target_os = "macos")]
     proxy_port: Option<u16>,
     runtime_started: Option<std::time::Instant>,
@@ -1427,15 +1343,9 @@ pub(super) struct GuardContext<'a> {
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(
-        self,
-    ) -> (
-        (Result<String, ToolError>, Option<Vec<u8>>),
-        Option<Vec<u8>>,
-    ) {
+    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
         let result = super::dispatch::run(&self).await;
-        let plan = self.git_plan.into_inner().ok().flatten();
-        ((result, self.captured.into_inner().ok().flatten()), plan)
+        (result, self.captured.into_inner().ok().flatten())
     }
 
     pub(super) fn remaining_runtime(&self) -> Duration {
@@ -1493,9 +1403,8 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     }
     network::validate(task)?;
     #[cfg(target_os = "macos")]
-    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates())
-        || task.editor_tree.is_some()
-            != (task.intent.target.editor() && matches!(task.intent.call, ToolCall::Command { .. }))
+    if task.editor_tree.is_some()
+        != (task.intent.target.editor() && matches!(task.intent.call, ToolCall::Command { .. }))
         || task
             .editor_tree
             .as_ref()
@@ -1540,14 +1449,6 @@ fn receive_handover(
     let changeset = transfer::decode_handover(&task.intent, &bytes, &task.config)?;
     super::fs::worker_publication_paths(&super::fs::open_directory(workspace)?, &changeset.files)?;
     Ok(Some(changeset))
-}
-
-fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
-    if let Some(plan) = plan {
-        transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
-        stdout.flush().map_err(|_| ToolError::Operation)?;
-    }
-    Ok(())
 }
 
 fn send_result(
@@ -1632,12 +1533,6 @@ pub(super) fn helper_main() -> ExitCode {
         )?;
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
-        if task.intent.call.is_git()
-            && super::fs::identity(&super::fs::open_directory(workspace)?)?
-                != (task.intent.workspace_device, task.intent.workspace_inode)
-        {
-            return Err(ToolError::ChangedInput);
-        }
         let definition = definition_bytes(&task)?;
         let handover = receive_handover(&task, &mut stdin, workspace)?;
         #[cfg(target_os = "linux")]
@@ -1655,8 +1550,6 @@ pub(super) fn helper_main() -> ExitCode {
         };
         stage = BootstrapStage::Handshake;
         send_ready(&task)?;
-        #[cfg(target_os = "macos")]
-        let git = receive_git_input(&task, &mut stdin)?;
         let mut go = [0; 3];
         stdin
             .read_exact(&mut go)
@@ -1703,22 +1596,17 @@ pub(super) fn helper_main() -> ExitCode {
             workspace,
             hook_stdin: task.hook_stdin.as_deref(),
             secret: task.secret.clone(),
-            hidden: &task.hidden,
             definition,
-            git_plan: Default::default(),
-            #[cfg(target_os = "macos")]
-            git,
             #[cfg(target_os = "macos")]
             proxy_port: task.proxy_port,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
-        let (result, plan) = runtime.block_on(site.dispatch());
+        let result = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
         let mut stdout = std::io::stdout().lock();
         send_result(task, result, &mut stdout)?;
-        send_plan(plan, &mut stdout)?;
         Ok(())
     })();
     bootstrap_exit(stage, result)
@@ -1751,7 +1639,6 @@ fn parser_config(config: &Config) -> Config {
         skills: Vec::new(),
         mcp: Vec::new(),
         git: None,
-        git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
         network: None,
@@ -2232,11 +2119,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             system_programs: None,
             #[cfg(target_os = "macos")]
-            git_stage: None,
-            #[cfg(target_os = "macos")]
             proxy_port: None,
-            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-            git_fault: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2338,11 +2221,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             system_programs: None,
             #[cfg(target_os = "macos")]
-            git_stage: None,
-            #[cfg(target_os = "macos")]
             proxy_port: None,
-            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-            git_fault: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -2951,7 +2830,6 @@ mod tests {
             mcp: Vec::new(),
             runtime_grants,
             git: None,
-            git_identity: None,
             locale: Default::default(),
             environment_sha256: None,
             network: None,
@@ -3255,50 +3133,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_git_locks_lead_the_uncertain_observation_the_owner_sees() {
-        let commit = intent(ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec![".".into()],
-            staged: false,
-        });
-        let report = ToolError::StaleGitLocks(".git/index.lock, .git/refs/heads/main.lock".into());
-        let observation = report_stale_locks(
-            super::super::uncertain_observation(
-                commit,
-                ToolError::Uncertain,
-                CacheUpdate::NotApplicable,
-            ),
-            &report.to_string(),
-        );
-        assert_eq!(observation.disposition, ToolDisposition::Uncertain);
-        assert!(
-            observation.output.starts_with(
-                "Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/main.lock; remove them after checking that no git process is running. "
-            ),
-            "{}",
-            observation.output
-        );
-        assert!(observation.output.contains("Do not retry automatically"));
-    }
-
-    #[test]
-    fn stale_locks_turn_a_failed_observation_uncertain() {
-        let commit = intent(ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec![".".into()],
-            staged: false,
-        });
-        let mut failed = super::super::uncertain_observation(
-            commit.clone(),
-            ToolError::Uncertain,
-            CacheUpdate::NotApplicable,
-        );
-        failed.disposition = ToolDisposition::Failed;
-        let settled = uncertain_after_stale(&commit, Ok(failed), CacheUpdate::NotApplicable);
-        assert_eq!(settled.disposition, ToolDisposition::Uncertain);
-    }
-
-    #[test]
     fn guard_helper_refuses_host_and_primary_file_mutation_intents() {
         let dir = tempfile::tempdir().unwrap();
         let shell = dir.path().join("sh");
@@ -3355,11 +3189,7 @@ mod tests {
                 #[cfg(target_os = "macos")]
                 system_programs: None,
                 #[cfg(target_os = "macos")]
-                git_stage: None,
-                #[cfg(target_os = "macos")]
                 proxy_port: None,
-                #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-                git_fault: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;

@@ -28,11 +28,10 @@ mod grant;
 pub use command_environment::{CommandEnvironment, CommandEnvironmentError};
 mod guard;
 pub use guard::recover_build_cache;
-pub(crate) use guard::transfer::{recover_private, transfer_time};
+pub(crate) use guard::transfer::transfer_time;
 mod mcp;
 mod network;
 mod web;
-pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
 pub(crate) use mcp::MAX_MCP_RESPONSE_BYTES;
 pub(crate) use mcp::oauth::{MAX_ACCESS_TOKEN_BYTES, MAX_METADATA_BYTES, MCP_OAUTH};
@@ -129,7 +128,7 @@ pub(crate) use approval::{ApprovalWaitReply, ApprovalWithdrawal};
 pub use cancel::Cancellation;
 use config::Config;
 pub(crate) use git::host::sweep_stale as sweep_host_scratch;
-pub(crate) use git::recover_locks as report_git_locks;
+pub(crate) use git::stale_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
 pub(crate) use workspace::WORKSPACE_PERMISSIONS;
@@ -171,10 +170,6 @@ pub(crate) fn workspace_identity(workspace: &Path) -> Result<WorkspaceIdentity, 
     fs::workspace_identity(&root)
 }
 use catalog::Site;
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub(crate) const GIT_STORAGE_FAULT: &str = "git-storage-fault";
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub(crate) const GIT_STORAGE_CANARY: &str = "git-storage-canary";
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
@@ -377,7 +372,7 @@ pub(crate) struct ToolRuntime {
     host_settings_saved: std::sync::Arc<std::sync::Mutex<Option<[u8; 32]>>>,
     guard_available: bool,
     config: Config,
-    git_writes_available: bool,
+    git_environment: Option<std::sync::Arc<git::Environment>>,
     host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
@@ -423,6 +418,7 @@ struct RuntimeState {
     guard_available: bool,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
+    git_environment: Option<std::sync::Arc<git::Environment>>,
     host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
     definitions: definitions::DefinitionSnapshots,
     #[cfg(target_os = "macos")]
@@ -450,6 +446,15 @@ fn admission_paths(
         grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
     }
     Ok(account)
+}
+
+// Each admission resolves Git from the user's PATH, so readmission pins the same Git or refuses.
+fn git_environment(
+    workspace: &Path,
+    state: &StateRoot,
+) -> Option<std::sync::Arc<git::Environment>> {
+    git::Environment::capture(workspace, &state.path().join(editors::EDITORS))
+        .map(std::sync::Arc::new)
 }
 
 fn skill_roots(
@@ -481,9 +486,6 @@ fn admission_resources(
             .filter_map(|server| server.program.as_ref()),
     ) {
         program.verify()?;
-    }
-    if let Some(git) = &config.git {
-        git::verify_host_executable(git)?;
     }
     for path in config.resource_paths() {
         fs::reject_overlap(Path::new(path), state.path())?;
@@ -1024,11 +1026,15 @@ impl ToolRuntime {
             return Ok(None);
         }
         let environment = CommandEnvironment::load(state)?;
+        let git = git_environment(workspace, state)
+            .as_deref()
+            .and_then(git::resolve);
         let mut config = match Config::load(state) {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
                 config.bind_environment(&environment);
                 merge_network(&mut config, Some(&snapshot))?;
+                config.git = git.clone();
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -1045,6 +1051,7 @@ impl ToolRuntime {
         config.discover_skills(workspace)?;
         config.bind_environment(&environment);
         merge_network(&mut config, Some(&snapshot))?;
+        config.git = git;
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1104,6 +1111,8 @@ impl ToolRuntime {
         let root = fs::open_directory(workspace)?;
         let account = admission_paths(workspace, state, &config, &root)?;
         let workspace_identity = fs::workspace_identity(&root)?;
+        let git_environment = git_environment(workspace, state);
+        config.git = git_environment.as_deref().and_then(git::resolve);
         let permissions = permissions
             .map(|mut snapshot| {
                 let mut scoped = (*snapshot.config).clone();
@@ -1152,6 +1161,7 @@ impl ToolRuntime {
                 guard_available,
                 enforcement_digest,
                 process_enforcement_digest,
+                git_environment,
                 host_authentication,
                 definitions,
                 #[cfg(target_os = "macos")]
@@ -1180,6 +1190,7 @@ impl ToolRuntime {
             guard_available,
             enforcement_digest,
             process_enforcement_digest,
+            git_environment,
             host_authentication,
             definitions,
             #[cfg(target_os = "macos")]
@@ -1192,7 +1203,7 @@ impl ToolRuntime {
             guard_available,
             definitions: std::sync::Arc::new(definitions),
             config,
-            git_writes_available: guard::git_writes_available(),
+            git_environment,
             host_authentication,
             handover: None,
             permissions,
@@ -1398,8 +1409,8 @@ impl ToolRuntime {
             "host_commands": true,
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| server.catalog_row(catalog::MCP_PROTOCOL)).collect::<Vec<_>>(),
-            "git": if self.guard_available && self.config.git_available() {
-                let write = self.config.write && self.git_writes_available;
+            "git": if self.config.git_available() {
+                let write = self.config.write;
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
                     .filter(|name| match *name {
@@ -1574,6 +1585,8 @@ impl ToolRuntime {
             FileReceipt::enforcement_digest()
         } else if call.is_process() {
             self.process_enforcement_digest
+        } else if call.facts().site == Site::Git {
+            git::enforcement_digest()
         } else {
             self.enforcement_digest
         };
@@ -1683,7 +1696,7 @@ impl ToolRuntime {
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         match call.facts().site {
-            Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
+            Site::InProcess | Site::Unguarded | Site::Host | Site::Git => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
@@ -1755,6 +1768,13 @@ impl ToolRuntime {
                     cancellation,
                 )
                 .await
+            }
+            Site::Git => {
+                if let Err(error) = self.pinned_root(&intent) {
+                    return unstarted_observation(intent, error);
+                }
+                // Boxed so Git's state machine stays off the dispatching task's stack.
+                Box::pin(git::run(self, intent, cancellation)).await
             }
             Site::Unguarded => self.run_unguarded(intent, cancellation).await,
             Site::Guard => {
@@ -1993,6 +2013,8 @@ impl ToolRuntime {
                     self.build_jobs_digest(intent)?
                 } else if intent.call.facts().family == catalog::Family::Web {
                     self.web_digest(intent)?
+                } else if intent.call.facts().site == Site::Git {
+                    git::enforcement_digest()
                 } else {
                     self.enforcement_digest
                 }
@@ -2358,6 +2380,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
         Site::Host => "host",
+        Site::Git => "Git",
     };
     record_failure(site, &intent, &error);
     let mut output = if resource_limit {

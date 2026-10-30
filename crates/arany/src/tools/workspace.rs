@@ -485,8 +485,7 @@ impl WorkspacePermissions {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants: self.runtime_grants.clone(),
-            git: super::git::discover(),
-            git_identity: super::git::user_identity(),
+            git: None,
             locale: Default::default(),
             environment_sha256: None,
             network: None,
@@ -1331,10 +1330,8 @@ channel = "stable"
             config.commands[0].verify().unwrap();
             assert!(config.mcp.is_empty());
         }
-        assert_eq!(
-            access.config(&path).unwrap().git.map(|git| git.sha256),
-            super::super::git::discover().map(|git| git.sha256)
-        );
+        // Run admission, not trust, resolves Git from PATH.
+        assert!(access.config(&path).unwrap().git.is_none());
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());
         assert_eq!(restored.mode(), ApprovalMode::AutoEdits);

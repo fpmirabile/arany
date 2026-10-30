@@ -95,7 +95,6 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                 if !matches!(
                     case,
                     "journey"
-                        | "git"
                         | "refusal"
                         | "denied"
                         | "headless"
@@ -451,6 +450,8 @@ fn native_journey_with_rust_sysroot(
         )
         .env("ARANY_TEST_FILE_JOURNEY_ROOT", &fixture_root)
         .env("HOME", fixture_root.join("home"))
+        // Runs resolve Git from PATH; the Command Line Tools Git is the only one on it here.
+        .env("PATH", "/Library/Developer/CommandLineTools/usr/bin")
         .env("XDG_STATE_HOME", fixture_root.join("environment-state"))
         .env("XDG_DATA_HOME", fixture_root.join("environment-data"))
         .current_dir(&fixture_root);
@@ -492,7 +493,6 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
-    super::tools_git::latency::forward(&output.stdout);
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if line.starts_with("offline Cargo ")
             || (registry.is_some() && line.starts_with("repository "))
@@ -944,6 +944,7 @@ async fn native_file_journey_helper() {
             }
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
             arany::Attestation::Host(_) => panic!("macOS journeys never run host Tools"),
+            arany::Attestation::Git(_) => panic!("macOS journeys never run Git"),
         }
     }
     let command: serde_json::Value =

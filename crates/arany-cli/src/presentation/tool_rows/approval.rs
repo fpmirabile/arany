@@ -10,8 +10,10 @@ pub(super) fn call_lines(call: &ToolCall) -> Vec<String> {
         Family::Mcp => mcp(call),
         Family::Git => match call.site() {
             Site::Host => host(call),
-            Site::Guard => git(call),
-            Site::InProcess | Site::Unguarded => unreachable!("Git family execution site"),
+            Site::Git => git(call),
+            Site::InProcess | Site::Guard | Site::Unguarded => {
+                unreachable!("Git family execution site")
+            }
         },
         Family::Preparation => fallback(call),
     }

@@ -1,6 +1,4 @@
-use super::{
-    GIT_CAPTURE_BYTES, STDERR_BYTES, VIEW_CONFIG, inspect_layout, read_optional, valid_branch,
-};
+use super::{GIT_CAPTURE_BYTES, STDERR_BYTES, git_directory, read_optional, valid_branch};
 use crate::tools::config::Config;
 use crate::tools::types::{
     DEFAULT_PR_LIMIT, DEFAULT_PR_STATE, EffectIntent, HostIntent, MAX_PR_LIST_LIMIT, PrState,
@@ -50,6 +48,7 @@ const PR_VIEW_QUERY_BYTES: usize = 8 * 1024;
 const MAX_PR_NUMBER: u32 = i32::MAX as u32;
 const MAX_PR_REPOSITORY_BYTES: usize = 256;
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
+const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n\tquotePath = false\n";
 
 #[derive(Clone, Copy)]
 enum PrViewConnection {
@@ -313,8 +312,7 @@ pub(crate) fn pin(workspace: &Path, call: &ToolCall) -> Result<HostIntent, ToolE
             .into(),
         });
     }
-    let repository = inspect_layout(workspace)?.map_err(|_| ToolError::Path)?;
-    pin_from_git(&repository.git_dir, call)
+    pin_from_git(&git_directory(workspace)?, call)
 }
 
 fn pin_from_git(git: &Dir, call: &ToolCall) -> Result<HostIntent, ToolError> {
@@ -398,18 +396,18 @@ fn private_view(
     root: &Path,
     intent: &EffectIntent,
 ) -> Result<PathBuf, ToolError> {
-    let repository = inspect_layout(workspace)?.map_err(|_| ToolError::Path)?;
-    if Some(&pin_from_git(&repository.git_dir, &intent.call)?) != intent.host.as_ref() {
+    let git_dir = git_directory(workspace)?;
+    if Some(&pin_from_git(&git_dir, &intent.call)?) != intent.host.as_ref() {
         return Err(ToolError::ChangedInput);
     }
     let view = root.join(".git");
     std::fs::create_dir(&view).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
     if matches!(intent.call, ToolCall::GitPush { .. }) {
-        objects_identity(&repository.git_dir)?;
+        objects_identity(&git_dir)?;
         std::os::unix::fs::symlink(workspace.join(".git/objects"), view.join("objects"))
             .map_err(|_| ToolError::Operation)?;
-        if let Some(bytes) = read_optional(&repository.git_dir, "shallow", MAX_PRIVATE_BYTES)? {
+        if let Some(bytes) = read_optional(&git_dir, "shallow", MAX_PRIVATE_BYTES)? {
             std::fs::write(view.join("shallow"), bytes).map_err(|_| ToolError::Operation)?;
         }
     } else {
@@ -909,7 +907,7 @@ fn prepare_command(
     root: &Path,
 ) -> Result<(Command, String, Option<PrViewEnvironment>), ToolError> {
     let git = config.git.as_ref().ok_or(ToolError::Configuration)?;
-    super::verify_host_executable(git)?;
+    super::runner::verify(git)?;
     if !authentication.allows(&intent.call) {
         return Err(ToolError::Configuration);
     }
@@ -2752,7 +2750,7 @@ mod tests {
     }
 
     fn config() -> Config {
-        let git = super::super::discover().unwrap();
+        let git = super::super::tests::git_program();
         let executable = std::fs::canonicalize("/usr/bin/true").unwrap();
         let gh = crate::tools::config::Program {
             name: "gh".into(),
@@ -2814,7 +2812,14 @@ mod tests {
             assert!(!catalog.to_string().contains("fixture-auth-canary"));
             catalog["git"]["operations"].clone()
         };
-        let local = vec!["git_status", "git_diff", "git_log", "git_branch"];
+        let local = vec![
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_commit",
+            "git_branch",
+            "git_switch",
+        ];
         let reads = json!(local);
         let with_push = json!([local.as_slice(), &["git_push"]].concat());
         runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
@@ -2904,7 +2909,7 @@ mod tests {
     #[tokio::test]
     async fn host_credentials_preserve_git_order_resets_scopes_and_includes_refuse() {
         use crate::test_support::process::BoundedOutput;
-        let git = super::super::discover().unwrap();
+        let git = super::super::tests::git_program();
         for (configuration, expected) in [
             (
                 "[credential \"https://github.com\"]\n helper = \"!f() { echo username=X; echo password=synthetic; }; f\"\n[credential]\n helper =\n",
@@ -2997,7 +3002,7 @@ mod tests {
         .unwrap();
         let scratch = parent.path().join("scratch");
         private_directory(&scratch).unwrap();
-        let git = super::super::discover().unwrap();
+        let git = super::super::tests::git_program();
         credential_config(
             &git,
             &[b"[credential]\nhelper=store\nuseHttpPath\n".to_vec()],
@@ -3086,7 +3091,7 @@ mod tests {
             }
             hash.update(&buffer[..n]);
         }
-        let mut program = super::super::discover().unwrap();
+        let mut program = super::super::tests::git_program();
         program.executable = source.to_str().unwrap().into();
         program.sha256 = hash
             .finalize()
@@ -3335,7 +3340,7 @@ mod tests {
             .open(workspace.join(".git/index"))
             .unwrap();
         index
-            .set_len((super::super::MAX_SNAPSHOT_BYTES + 1) as u64)
+            .set_len((crate::tools::types::MAX_SNAPSHOT_BYTES + 1) as u64)
             .unwrap();
         let intent = intent(&workspace, push());
         assert!(intent.host.is_some());
