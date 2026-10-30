@@ -250,4 +250,15 @@ fn a_configured_run_honors_only_a_trusted_folders_saved_answer() {
     let trusted = commit(&runtime, "src/new.txt");
     assert!(trusted.get("hooks_not_run").is_none(), "{trusted}");
     assert!(marker.exists(), "a saved accepted hook did not run");
+
+    std::fs::remove_file(&marker).unwrap();
+    hook(
+        &workspace.join(".git/hooks/pre-commit"),
+        &format!("touch {}; exit 0", marker.display()),
+    );
+    block_on(runtime.admit_git_hooks(WorkspacePermissions::saved_git_hooks(&workspace), false));
+    assert_eq!(runtime.receipt().git.unwrap().hooks, None);
+    let changed = commit(&runtime, "src/big.txt");
+    assert!(changed["hooks_not_run"].is_string(), "{changed}");
+    assert!(!marker.exists(), "a hook changed after acceptance ran");
 }
