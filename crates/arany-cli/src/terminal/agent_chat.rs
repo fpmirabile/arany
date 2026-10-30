@@ -227,6 +227,23 @@ impl AgentChat {
     }
 
     // The whole view on its first print, then only a child's new records; a listing prints once.
+    // Notices follow the rows they describe, so History takes the new records first.
+    fn sync_history(&mut self, screen: ratatui::layout::Size) {
+        let Some(transcript) = &self.transcript else {
+            return;
+        };
+        self.history.sync(
+            &transcript.view,
+            usize::from(screen.width),
+            usize::from(screen.height.saturating_sub(AGENT_CHAT_ROWS)),
+        );
+        for part in transcript.unappended(&mut self.appended) {
+            if let TranscriptPart::Notice(text) = part {
+                self.history.record_notice(TerminalNotice::History(text));
+            }
+        }
+    }
+
     fn linear_draw_lines(&mut self) -> Vec<String> {
         if !self.shown {
             return self.linear_lines();
@@ -1023,60 +1040,24 @@ impl AttachedTerminal {
         view: &SessionView,
         notice: Option<TerminalNotice<'_>>,
     ) -> Result<(), TerminalError> {
-        self.clear_graphics_hover();
-        self.delete_graphics_placement()?;
-        let mut acknowledged = false;
-        for draft in &mut self.child_drafts {
-            acknowledged |= draft.acknowledge(view);
-        }
-        if acknowledged {
-            self.restore_selected_draft_input(self.primary_input_capacity)?;
-        }
+        self.begin_agent_chat_draw(view)?;
         let (history_notice, transient) = match notice {
             Some(TerminalNotice::History(text)) => (Some(text), None),
             Some(TerminalNotice::Transient(text)) => (None, Some(text)),
             None => (None, None),
         };
-        // A missing child keeps its last validated transcript; following reports it.
-        self.agent_chat
-            .as_mut()
-            .expect("open agent chat")
-            .refresh(view);
         let child_notice = self
             .selected_child_draft()
             .and_then(|draft| draft.notice.clone());
         let retained = self
             .selected_child_draft()
             .is_some_and(|draft| !draft.composer.is_empty());
-        if let Some(linear) = &mut self.linear {
-            let chat = self.agent_chat.as_mut().expect("open agent chat");
-            let mut lines = chat.linear_draw_lines();
-            if !chat.shown && chat.editable {
-                lines.push(format!(
-                    "Message {} with /message TEXT; /clear clears its retained draft",
-                    chat.label()
-                ));
-            }
-            if !chat.shown && retained {
-                lines.push("Child draft retained; /clear clears it".into());
-            }
-            let fresh_notice = child_notice
-                .as_ref()
-                .filter(|notice| chat.last_child_notice.as_ref() != Some(notice));
-            if let Some(notice) = fresh_notice {
-                lines.push(format!("Notice: {notice}"));
-                chat.last_child_notice = Some(notice.clone());
-            }
-            if !chat.shown || !lines.is_empty() || history_notice.is_some() || transient.is_some() {
-                linear.write_agent_chat(
-                    &mut io::stderr(),
-                    &lines,
-                    history_notice.or(transient),
-                    true,
-                )?;
-                chat.shown = true;
-            }
-            return Ok(());
+        if self.linear.is_some() {
+            return self.write_linear_agent_chat(
+                history_notice.or(transient),
+                child_notice.as_ref(),
+                retained,
+            );
         }
         let classic = self.mode == TerminalMode::Classic;
         let screen = self.owned.terminal().size()?;
@@ -1087,25 +1068,9 @@ impl AttachedTerminal {
         })?;
         if classic {
             self.write_native_agent_chat()?;
-            if let Some(text) = history_notice
-                && self
-                    .transcript
-                    .native
-                    .last_notice
-                    .as_ref()
-                    .is_none_or(|(sequence, prior)| {
-                        *sequence != view.last_sequence || prior != text
-                    })
-            {
-                let (kind, body) = notice_kind(text);
-                self.insert_native(kind, body, None)?;
-                self.transcript.native.last_notice = Some((view.last_sequence, text.to_owned()));
-            }
-        } else if let Some(text) = history_notice {
-            // The primary keeps the notice for when it is shown again.
-            self.transcript
-                .history
-                .record_notice(TerminalNotice::History(text));
+        }
+        if let Some(text) = history_notice {
+            self.record_agent_chat_notice(view, classic, text)?;
         }
         let palette = self.palette();
         let armed = self.panels.dialog_armed;
@@ -1118,18 +1083,8 @@ impl AttachedTerminal {
             })
             .map(|draft| &draft.composer);
         let chat = self.agent_chat.as_mut().expect("open agent chat");
-        if !classic && let Some(transcript) = &chat.transcript {
-            // Notices follow the rows they describe, so History takes the new records first.
-            chat.history.sync(
-                &transcript.view,
-                usize::from(screen.width),
-                usize::from(screen.height.saturating_sub(AGENT_CHAT_ROWS)),
-            );
-            for part in transcript.unappended(&mut chat.appended) {
-                if let TranscriptPart::Notice(text) = part {
-                    chat.history.record_notice(TerminalNotice::History(text));
-                }
-            }
+        if !classic {
+            chat.sync_history(screen);
         }
         chat.shown = true;
         let label = chat.label().to_owned();
@@ -1157,6 +1112,85 @@ impl AttachedTerminal {
         terminal.backend_mut().set_area(area);
         // The child view offers no selection, so pointer gestures never reach the primary History.
         self.panels.history_area = None;
+        Ok(())
+    }
+
+    // Drops the image hover, acknowledges delivered child notes and refreshes the transcript.
+    fn begin_agent_chat_draw(&mut self, view: &SessionView) -> Result<(), TerminalError> {
+        self.clear_graphics_hover();
+        self.delete_graphics_placement()?;
+        let mut acknowledged = false;
+        for draft in &mut self.child_drafts {
+            acknowledged |= draft.acknowledge(view);
+        }
+        if acknowledged {
+            self.restore_selected_draft_input(self.primary_input_capacity)?;
+        }
+        // A missing child keeps its last validated transcript; following reports it.
+        self.agent_chat
+            .as_mut()
+            .expect("open agent chat")
+            .refresh(view);
+        Ok(())
+    }
+
+    // Linear output prints the chat's new lines and notices once, then marks it shown.
+    fn write_linear_agent_chat(
+        &mut self,
+        notice: Option<&str>,
+        child_notice: Option<&String>,
+        retained: bool,
+    ) -> Result<(), TerminalError> {
+        let linear = self.linear.as_mut().expect("linear terminal");
+        let chat = self.agent_chat.as_mut().expect("open agent chat");
+        let mut lines = chat.linear_draw_lines();
+        if !chat.shown && chat.editable {
+            lines.push(format!(
+                "Message {} with /message TEXT; /clear clears its retained draft",
+                chat.label()
+            ));
+        }
+        if !chat.shown && retained {
+            lines.push("Child draft retained; /clear clears it".into());
+        }
+        let fresh_notice =
+            child_notice.filter(|notice| chat.last_child_notice.as_ref() != Some(*notice));
+        if let Some(notice) = fresh_notice {
+            lines.push(format!("Notice: {notice}"));
+            chat.last_child_notice = Some(notice.clone());
+        }
+        if !chat.shown || !lines.is_empty() || notice.is_some() {
+            linear.write_agent_chat(&mut io::stderr(), &lines, notice, true)?;
+            chat.shown = true;
+        }
+        Ok(())
+    }
+
+    // Classic writes a History notice to native scrollback once per sequence; Fullscreen keeps it
+    // in the primary History for when that view is shown again.
+    fn record_agent_chat_notice(
+        &mut self,
+        view: &SessionView,
+        classic: bool,
+        text: &str,
+    ) -> Result<(), TerminalError> {
+        if !classic {
+            self.transcript
+                .history
+                .record_notice(TerminalNotice::History(text));
+            return Ok(());
+        }
+        if self
+            .transcript
+            .native
+            .last_notice
+            .as_ref()
+            .is_none_or(|(sequence, prior)| *sequence != view.last_sequence || prior != text)
+        {
+            let (kind, body) = notice_kind(text);
+            self.insert_native(kind, body, None)?;
+            self.transcript.native.last_notice = Some((view.last_sequence, text.to_owned()));
+        }
         Ok(())
     }
 

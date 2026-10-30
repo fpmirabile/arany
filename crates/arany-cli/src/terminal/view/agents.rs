@@ -128,36 +128,8 @@ pub(in crate::terminal) fn draw_agent_chat_frame(
     }
     frame.render_widget(Clear, area);
     let width = usize::from(area.width);
-    let label = state.label;
-    let mode = if state.editable {
-        "message"
-    } else {
-        "read-only"
-    };
-    let full = format!("viewing {label} ({mode})");
-    let short = format!("{label} ({mode})");
-    let title = [full.as_str(), short.as_str()]
-        .into_iter()
-        .find(|title| UnicodeWidthStr::width(*title) <= width)
-        .map_or_else(
-            || safe_truncate(&format!("{label} {mode}"), width),
-            str::to_owned,
-        );
-    let composer = if state.editable {
-        "> Message · Enter offers guidance"
-    } else {
-        match area.width {
-            FULL_LAYOUT_WIDTH.. => "> Read-only · Esc returns to primary",
-            20.. => "> Read-only · Esc",
-            _ => "> Read-only",
-        }
-    };
-    let hint = match (area.width, fullscreen) {
-        (60.., true) => "Alt+Left/Right agents · Esc primary · PgUp/PgDn scroll",
-        (FULL_LAYOUT_WIDTH.., _) => "Alt+Left/Right agents · Esc primary",
-        (24.., _) => "Alt+←/→ agents · Esc",
-        _ => "Esc primary",
-    };
+    let title = agent_chat_title(state.label, state.editable, width);
+    let (composer, hint) = agent_chat_hints(state.editable, fullscreen, area.width);
     let draft_rows = state
         .draft
         .map(|draft| wrapped_composer(draft, width.saturating_sub(2)));
@@ -201,6 +173,39 @@ pub(in crate::terminal) fn draw_agent_chat_frame(
             y: area.y + 1,
         });
     }
+}
+
+// The longest title that fits: "viewing", then the bare label, then a truncated label.
+fn agent_chat_title(label: &str, editable: bool, width: usize) -> String {
+    let mode = if editable { "message" } else { "read-only" };
+    let full = format!("viewing {label} ({mode})");
+    let short = format!("{label} ({mode})");
+    [full.as_str(), short.as_str()]
+        .into_iter()
+        .find(|title| UnicodeWidthStr::width(*title) <= width)
+        .map_or_else(
+            || safe_truncate(&format!("{label} {mode}"), width),
+            str::to_owned,
+        )
+}
+
+fn agent_chat_hints(editable: bool, fullscreen: bool, width: u16) -> (&'static str, &'static str) {
+    let composer = if editable {
+        "> Message · Enter offers guidance"
+    } else {
+        match width {
+            FULL_LAYOUT_WIDTH.. => "> Read-only · Esc returns to primary",
+            20.. => "> Read-only · Esc",
+            _ => "> Read-only",
+        }
+    };
+    let hint = match (width, fullscreen) {
+        (60.., true) => "Alt+Left/Right agents · Esc primary · PgUp/PgDn scroll",
+        (FULL_LAYOUT_WIDTH.., _) => "Alt+Left/Right agents · Esc primary",
+        (24.., _) => "Alt+←/→ agents · Esc",
+        _ => "Esc primary",
+    };
+    (composer, hint)
 }
 
 pub(in crate::terminal) fn agent_choice_rows(height: u16, count: usize) -> usize {
