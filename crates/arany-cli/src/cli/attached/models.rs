@@ -3,7 +3,7 @@ use crate::accounts::{chatgpt, credentials};
 use crate::files::bounded_list;
 use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, SELECTOR_ROWS,
-    ShutdownSignal, TerminalInput,
+    ShutdownSignal, TerminalInput, TerminalNotice,
 };
 use arany::RecordKind;
 use arany::{
@@ -28,6 +28,8 @@ const MAX_PREFERENCE_BYTES: usize = RecordKind::ModelPreferences.limit();
 const MAX_PREFERENCE_SOURCES: usize = 8;
 // Model lists and windows rarely change, so startup reads a catalog at most once a day.
 const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_MODEL_FILTER_BYTES: usize = 64;
+const MAX_LINEAR_CHOICE_BYTES: usize = 32;
 
 // A tolerant preference and catalog cache: unknown fields are ignored and missing ones default.
 #[derive(Default, Deserialize, Serialize)]
@@ -553,13 +555,16 @@ fn catalog_entry(profile: &str, id: String, context_window_tokens: Option<u32>) 
 }
 
 pub(super) async fn browse(
-    terminal: &mut AttachedTerminal,
+    ui: super::run::RunUi<'_>,
     admission: &Admission,
     session_id: SessionId,
-    view: &mut SessionView,
-    composer: &mut Composer,
     open: ModelOpen,
 ) -> Result<ModelBrowse, LoopError> {
+    let super::run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok(ModelBrowse::Notice(super::Feedback::History(
             "Select /provider first".into(),
@@ -592,29 +597,21 @@ pub(super) async fn browse(
                 "No models available for the selected Provider".into(),
             )));
         }
-        if terminal.is_linear() {
-            terminal
+        let picker = Picker {
+            terminal: &mut *terminal,
+            view: shown,
+            composer: &mut *composer,
+            exact_custom,
+            refresh: &mut refresh,
+        };
+        if picker.terminal.is_linear() {
+            picker
+                .terminal
                 .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?;
-            browse_linear(
-                terminal,
-                &items,
-                shown,
-                composer,
-                exact_custom,
-                &mut refresh,
-            )
-            .await
+            browse_linear(picker, &items).await
         } else {
-            browse_inline(
-                terminal,
-                &mut items,
-                shown,
-                composer,
-                exact_custom,
-                &mut refresh,
-            )
-            .await
+            browse_inline(picker, &mut items).await
         }
     };
     terminal.close_models();
@@ -630,6 +627,48 @@ pub(super) async fn browse(
             let notice =
                 controls::select_model(admission, session_id, view, &model, effort).await?;
             Ok(ModelBrowse::Notice(super::Feedback::History(notice)))
+        }
+    }
+}
+
+struct Picker<'a, 'r> {
+    terminal: &'a mut AttachedTerminal,
+    view: &'a SessionView,
+    composer: &'a mut Composer,
+    exact_custom: bool,
+    refresh: &'a mut CatalogRefresh<'r>,
+}
+
+enum PickerKey {
+    Redraw,
+    Refreshed(Result<(Vec<ModelEntry>, bool), String>),
+    Input { input: TerminalInput, ready: bool },
+}
+
+impl Picker<'_, '_> {
+    // A catalog read lands only at an input boundary, so it never splits a typed line.
+    async fn next_key(&mut self, shown: &ModelPicker<'_>) -> Result<PickerKey, String> {
+        let ready = self
+            .terminal
+            .draw_models(self.view, self.composer, shown)
+            .map_err(|error| error.to_string())?;
+        if self
+            .terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(PickerKey::Redraw);
+        }
+        let at_input_boundary = self.terminal.input_boundary_ready();
+        tokio::select! {
+            result = self.refresh.finish(), if self.refresh.in_flight() && at_input_boundary => {
+                Ok(PickerKey::Refreshed(result))
+            }
+            input = self.terminal.next_input() => Ok(PickerKey::Input {
+                input: input.map_err(|error| error.to_string())?,
+                ready,
+            }),
         }
     }
 }
@@ -659,6 +698,14 @@ impl<'a> CatalogRefresh<'a> {
 
     fn in_flight(&self) -> bool {
         self.pending.is_some()
+    }
+
+    fn state(&self) -> ModelCatalogState {
+        if self.in_flight() {
+            ModelCatalogState::Refreshing
+        } else {
+            ModelCatalogState::Current
+        }
     }
 
     // Cancel-safe: the read stays pending until it completes.
@@ -804,7 +851,7 @@ async fn load_while_owned(
         .draw_busy_notice(
             view,
             composer,
-            Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING)),
+            Some(TerminalNotice::Transient(CATALOG_LOADING)),
         )
         .map_err(|error| error.to_string())?;
     let outcome = loop {
@@ -816,79 +863,8 @@ async fn load_while_owned(
             input = terminal.next_chat_input() => {
                 let input = input.map_err(|error| error.to_string())?;
                 composer.observe_input(input);
-                match input {
-                    TerminalInput::ClipboardPaste => {
-                        let notice = match terminal.request_clipboard_paste() {
-                            Ok(()) => super::Feedback::Transient("Reading clipboard... draft retained".into()),
-                            Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
-                        };
-                        terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Paste => {
-                        let notice = match terminal.paste_into_admitted_workspace(
-                            composer,
-                            &admission.workspace,
-                            admission.workspace_identity,
-                        ) {
-                            Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
-                            Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
-                        };
-                        terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
-                    }
-                    input @ (TerminalInput::Character(_)
-                    | TerminalInput::Newline
-                    | TerminalInput::ModifiedEnter(_)
-                    | TerminalInput::Backspace
-                    | TerminalInput::Delete
-                    | TerminalInput::Left
-                    | TerminalInput::Right
-                    | TerminalInput::WordLeft
-                    | TerminalInput::WordRight
-                    | TerminalInput::BackspaceWord
-                    | TerminalInput::Up
-                    | TerminalInput::Down
-                    | TerminalInput::Home
-                    | TerminalInput::End) => {
-                        let notice = if composer.apply(input) == ComposerEdit::AtCapacity {
-                            Some(crate::terminal::TerminalNotice::History("Error: message is too long; shorten it; draft unchanged; catalog loading"))
-                        } else if terminal.is_linear() {
-                            None
-                        } else {
-                            Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))
-                        };
-                        terminal.draw_busy_notice(view, composer, notice).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Interrupt | TerminalInput::EndOfInput | TerminalInput::Escape => {
-                        if !terminal.input_boundary_ready() {
-                            terminal.discard_draft_input();
-                        }
-                        break Err(ModelBrowse::Notice(super::Feedback::Transient("Model catalog cancelled".into())));
-                    }
-                    TerminalInput::Shutdown(signal) => break Err(ModelBrowse::Shutdown(signal)),
-                    TerminalInput::Suspend => {
-                        terminal.suspend_and_resume(composer.input_capacity()).map_err(|error| error.to_string())?;
-                        terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::LineRejected => {
-                        terminal.draw_busy(view, composer, Some("Error: invalid or overlong terminal line; draft unchanged; catalog loading")).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::LineContinued => {
-                        terminal.draw_busy(view, composer, Some(&format!(
-                            "Draft: {} characters; catalog loading; Ctrl+C cancels",
-                            composer.character_count()
-                        ))).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Submit => {
-                        if !terminal.is_linear() {
-                            composer.continue_line();
-                        }
-                        terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
-                        terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Resize => {
-                        terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
-                    }
-                    _ => {}
+                if let Some(outcome) = loading_input(terminal, admission, view, composer, input)? {
+                    break Err(outcome);
                 }
             }
         }
@@ -899,161 +875,336 @@ async fn load_while_owned(
     Ok(outcome)
 }
 
-async fn browse_inline(
+// Keys typed while the catalog loads edit the held draft; Some ends the wait.
+fn loading_input(
     terminal: &mut AttachedTerminal,
-    items: &mut Vec<ModelEntry>,
+    admission: &Admission,
     view: &SessionView,
     composer: &mut Composer,
-    exact_custom: bool,
-    refresh: &mut CatalogRefresh<'_>,
-) -> Result<Choice, String> {
-    let profile = view.defaults.provider.as_deref().unwrap_or("");
-    let mut anchor = view
-        .defaults
-        .model
-        .as_deref()
-        .filter(|id| items.iter().any(|item| item.id == *id))
-        .unwrap_or(&items[0].id)
-        .to_owned();
-    let mut efforts = initial_efforts(items, view, exact_custom);
-    let mut catalog_state = if refresh.in_flight() {
-        ModelCatalogState::Refreshing
-    } else {
-        ModelCatalogState::Current
-    };
-    let mut refresh_error = None::<String>;
-    let mut filter = String::new();
-    let (mut visible, mut selected) = matching_models(items, &filter, &anchor);
-    terminal.begin_dialog();
-    loop {
-        let rows = visible
-            .iter()
-            .map(|index| items[*index].clone())
-            .collect::<Vec<_>>();
-        let levels = visible
-            .iter()
-            .map(|index| efforts[*index])
-            .collect::<Vec<_>>();
-        let ready = terminal
-            .draw_models(
-                view,
-                composer,
-                &ModelPicker {
-                    items: &rows,
-                    efforts: &levels,
-                    selected,
-                    exact_custom,
-                    filter: &filter,
-                    invalid: false,
-                    catalog_state,
-                    refresh_error: refresh_error.as_deref(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        if terminal
-            .arm_dialog()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            continue;
+    input: TerminalInput,
+) -> Result<Option<ModelBrowse>, String> {
+    const LOADING: TerminalNotice<'static> = TerminalNotice::Transient(CATALOG_LOADING);
+    let pasted;
+    let notice = match input {
+        TerminalInput::ClipboardPaste | TerminalInput::Paste => {
+            pasted = loading_paste(terminal, admission, composer, input);
+            Some(pasted.notice())
         }
-        let at_input_boundary = terminal.input_boundary_ready();
-        let input = tokio::select! {
-            result = refresh.finish(), if refresh.in_flight() && at_input_boundary => {
-                match result {
-                    Ok((updated, false)) => {
-                        let mut updated_efforts = initial_efforts(&updated, view, false);
-                        let previous = items.iter().zip(&efforts).map(|(item, effort)| (item.id.as_str(), *effort)).collect::<HashMap<_, _>>();
-                        for (index, item) in updated.iter().enumerate() {
-                            if let Some(effort) = previous.get(item.id.as_str())
-                                && effort_choices(profile, item, false).contains(effort) {
-                                updated_efforts[index] = *effort;
-                            }
-                        }
-                        *items = updated;
-                        efforts = updated_efforts;
-                        composer.set_model_catalog(profile, items, false);
-                        (visible, selected) = matching_models(items, &filter, &anchor);
-                        catalog_state = ModelCatalogState::Updated;
-                    }
-                    failed => {
-                        refresh_error = failed.err();
-                        catalog_state = ModelCatalogState::RefreshFailed;
-                    }
-                }
+        input @ (TerminalInput::Character(_)
+        | TerminalInput::Newline
+        | TerminalInput::ModifiedEnter(_)
+        | TerminalInput::Backspace
+        | TerminalInput::Delete
+        | TerminalInput::Left
+        | TerminalInput::Right
+        | TerminalInput::WordLeft
+        | TerminalInput::WordRight
+        | TerminalInput::BackspaceWord
+        | TerminalInput::Up
+        | TerminalInput::Down
+        | TerminalInput::Home
+        | TerminalInput::End) => {
+            if composer.apply(input) == ComposerEdit::AtCapacity {
+                Some(TerminalNotice::History(
+                    "Error: message is too long; shorten it; draft unchanged; catalog loading",
+                ))
+            } else if terminal.is_linear() {
+                None
+            } else {
+                Some(LOADING)
+            }
+        }
+        TerminalInput::Interrupt | TerminalInput::EndOfInput | TerminalInput::Escape => {
+            if !terminal.input_boundary_ready() {
+                terminal.discard_draft_input();
+            }
+            return Ok(Some(ModelBrowse::Notice(super::Feedback::Transient(
+                "Model catalog cancelled".into(),
+            ))));
+        }
+        TerminalInput::Shutdown(signal) => return Ok(Some(ModelBrowse::Shutdown(signal))),
+        TerminalInput::Suspend => {
+            terminal
+                .suspend_and_resume(composer.input_capacity())
+                .map_err(|error| error.to_string())?;
+            Some(LOADING)
+        }
+        TerminalInput::LineRejected | TerminalInput::LineContinued => {
+            draw_loading_line(terminal, view, composer, input)?;
+            return Ok(None);
+        }
+        TerminalInput::Submit => {
+            if !terminal.is_linear() {
+                composer.continue_line();
+            }
+            terminal
+                .restore_draft_input(composer.input_capacity())
+                .map_err(|error| error.to_string())?;
+            Some(LOADING)
+        }
+        TerminalInput::Resize => Some(LOADING),
+        _ => return Ok(None),
+    };
+    terminal
+        .draw_busy_notice(view, composer, notice)
+        .map_err(|error| error.to_string())?;
+    Ok(None)
+}
+
+fn loading_paste(
+    terminal: &mut AttachedTerminal,
+    admission: &Admission,
+    composer: &mut Composer,
+    input: TerminalInput,
+) -> super::Feedback {
+    if input == TerminalInput::ClipboardPaste {
+        return match terminal.request_clipboard_paste() {
+            Ok(()) => super::Feedback::Transient("Reading clipboard... draft retained".into()),
+            Err(error) => super::Feedback::History(format!(
+                "Error: {error}; draft unchanged; catalog loading"
+            )),
+        };
+    }
+    match terminal.paste_into_admitted_workspace(
+        composer,
+        &admission.workspace,
+        admission.workspace_identity,
+    ) {
+        Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
+        Err(error) => {
+            super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading"))
+        }
+    }
+}
+
+fn draw_loading_line(
+    terminal: &mut AttachedTerminal,
+    view: &SessionView,
+    composer: &Composer,
+    input: TerminalInput,
+) -> Result<(), String> {
+    let status = if input == TerminalInput::LineRejected {
+        "Error: invalid or overlong terminal line; draft unchanged; catalog loading".to_owned()
+    } else {
+        format!(
+            "Draft: {} characters; catalog loading; Ctrl+C cancels",
+            composer.character_count()
+        )
+    };
+    terminal
+        .draw_busy(view, composer, Some(&status))
+        .map_err(|error| error.to_string())
+}
+
+async fn browse_inline(
+    mut picker: Picker<'_, '_>,
+    items: &mut Vec<ModelEntry>,
+) -> Result<Choice, String> {
+    let (view, exact_custom) = (picker.view, picker.exact_custom);
+    let profile = view.defaults.provider.as_deref().unwrap_or("");
+    let mut list = InlineList::new(items, view, exact_custom, picker.refresh.state());
+    picker.terminal.begin_dialog();
+    loop {
+        let (rows, levels) = list.shown();
+        let (input, ready) = match picker
+            .next_key(&ModelPicker {
+                items: &rows,
+                efforts: &levels,
+                selected: list.selected,
+                exact_custom,
+                filter: &list.filter,
+                invalid: false,
+                catalog_state: list.catalog_state,
+                refresh_error: list.refresh_error.as_deref(),
+            })
+            .await?
+        {
+            PickerKey::Redraw => continue,
+            PickerKey::Refreshed(result) => {
+                list.refreshed(result, view, picker.composer);
                 continue;
             }
-            input = terminal.next_input() => input.map_err(|error| error.to_string())?,
+            PickerKey::Input { input, ready } => (input, ready),
         };
-        if !ready
-            && !matches!(
-                input,
-                TerminalInput::Resize
-                    | TerminalInput::Escape
-                    | TerminalInput::Interrupt
-                    | TerminalInput::EndOfInput
-                    | TerminalInput::Shutdown(_)
-                    | TerminalInput::Suspend
-            )
-        {
+        if !ready && !unready_key(input) {
             continue;
         }
         match input {
             TerminalInput::Character(character)
-                if character.is_ascii_graphic() && filter.len() < 64 =>
+                if character.is_ascii_graphic() && list.filter.len() < MAX_MODEL_FILTER_BYTES =>
             {
-                filter.push(character);
-                (visible, selected) = matching_models(items, &filter, &anchor);
+                list.filter.push(character);
+                list.refilter();
             }
             TerminalInput::Backspace => {
-                if filter.pop().is_some() {
-                    (visible, selected) = matching_models(items, &filter, &anchor);
+                if list.filter.pop().is_some() {
+                    list.refilter();
                 }
             }
             TerminalInput::Refresh if !exact_custom => {
-                catalog_state = refresh.request();
-                refresh_error = None;
+                list.catalog_state = picker.refresh.request();
+                list.refresh_error = None;
             }
             direction @ (TerminalInput::Left | TerminalInput::Right) => {
-                if let Some(index) = visible.get(selected) {
-                    let choices = effort_choices(profile, &items[*index], exact_custom);
-                    let current = choices
-                        .iter()
-                        .position(|effort| *effort == efforts[*index])
-                        .unwrap_or(0);
-                    let next = if direction == TerminalInput::Left {
-                        current.saturating_sub(1)
-                    } else {
-                        (current + 1).min(choices.len() - 1)
-                    };
-                    efforts[*index] = choices[next];
-                }
+                list.cycle_effort(direction == TerminalInput::Left, profile, exact_custom);
             }
             TerminalInput::Submit => {
-                if let Some(index) = visible.get(selected) {
-                    return Ok(Choice::Selected {
-                        model: items[*index].id.clone(),
-                        effort: efforts[*index],
-                    });
+                if let Some(choice) = list.chosen() {
+                    return Ok(choice);
                 }
             }
-            TerminalInput::Suspend => terminal
-                .suspend_and_resume(composer.input_capacity())
+            TerminalInput::Suspend => picker
+                .terminal
+                .suspend_and_resume(picker.composer.input_capacity())
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(Choice::Closed);
             }
             TerminalInput::Shutdown(signal) => return Ok(Choice::Shutdown(signal)),
             input => {
-                if let Some(next) = input.step_selection(selected, visible.len().saturating_sub(1))
+                if let Some(next) =
+                    input.step_selection(list.selected, list.visible.len().saturating_sub(1))
                 {
-                    selected = next;
+                    list.selected = next;
                 }
             }
         }
-        if let Some(index) = visible.get(selected) {
-            anchor.clone_from(&items[*index].id);
+        if let Some(index) = list.visible.get(list.selected) {
+            list.anchor.clone_from(&list.items[*index].id);
         }
+    }
+}
+
+fn unready_key(input: TerminalInput) -> bool {
+    matches!(
+        input,
+        TerminalInput::Resize
+            | TerminalInput::Escape
+            | TerminalInput::Interrupt
+            | TerminalInput::EndOfInput
+            | TerminalInput::Shutdown(_)
+            | TerminalInput::Suspend
+    )
+}
+
+struct InlineList<'a> {
+    items: &'a mut Vec<ModelEntry>,
+    efforts: Vec<Option<Effort>>,
+    filter: String,
+    anchor: String,
+    visible: Vec<usize>,
+    selected: usize,
+    catalog_state: ModelCatalogState,
+    refresh_error: Option<String>,
+}
+
+impl<'a> InlineList<'a> {
+    // The selection starts on the Session's model when the catalog lists it.
+    fn new(
+        items: &'a mut Vec<ModelEntry>,
+        view: &SessionView,
+        exact_custom: bool,
+        catalog_state: ModelCatalogState,
+    ) -> Self {
+        let anchor = view
+            .defaults
+            .model
+            .as_deref()
+            .filter(|id| items.iter().any(|item| item.id == *id))
+            .unwrap_or(&items[0].id)
+            .to_owned();
+        let efforts = initial_efforts(items, view, exact_custom);
+        let mut list = Self {
+            items,
+            efforts,
+            filter: String::new(),
+            anchor,
+            visible: Vec::new(),
+            selected: 0,
+            catalog_state,
+            refresh_error: None,
+        };
+        list.refilter();
+        list
+    }
+
+    fn refilter(&mut self) {
+        (self.visible, self.selected) = matching_models(self.items, &self.filter, &self.anchor);
+    }
+
+    fn shown(&self) -> (Vec<ModelEntry>, Vec<Option<Effort>>) {
+        let rows = self
+            .visible
+            .iter()
+            .map(|index| self.items[*index].clone())
+            .collect();
+        let levels = self
+            .visible
+            .iter()
+            .map(|index| self.efforts[*index])
+            .collect();
+        (rows, levels)
+    }
+
+    // A refreshed catalog keeps each surviving model's effort while that model still offers it.
+    fn refreshed(
+        &mut self,
+        result: Result<(Vec<ModelEntry>, bool), String>,
+        view: &SessionView,
+        composer: &mut Composer,
+    ) {
+        let profile = view.defaults.provider.as_deref().unwrap_or("");
+        match result {
+            Ok((updated, false)) => {
+                let mut updated_efforts = initial_efforts(&updated, view, false);
+                let previous = self
+                    .items
+                    .iter()
+                    .zip(&self.efforts)
+                    .map(|(item, effort)| (item.id.as_str(), *effort))
+                    .collect::<HashMap<_, _>>();
+                for (index, item) in updated.iter().enumerate() {
+                    if let Some(effort) = previous.get(item.id.as_str())
+                        && effort_choices(profile, item, false).contains(effort)
+                    {
+                        updated_efforts[index] = *effort;
+                    }
+                }
+                *self.items = updated;
+                self.efforts = updated_efforts;
+                composer.set_model_catalog(profile, self.items, false);
+                self.refilter();
+                self.catalog_state = ModelCatalogState::Updated;
+            }
+            failed => {
+                self.refresh_error = failed.err();
+                self.catalog_state = ModelCatalogState::RefreshFailed;
+            }
+        }
+    }
+
+    fn cycle_effort(&mut self, left: bool, profile: &str, exact_custom: bool) {
+        if let Some(index) = self.visible.get(self.selected) {
+            let choices = effort_choices(profile, &self.items[*index], exact_custom);
+            let current = choices
+                .iter()
+                .position(|effort| *effort == self.efforts[*index])
+                .unwrap_or(0);
+            let next = if left {
+                current.saturating_sub(1)
+            } else {
+                (current + 1).min(choices.len() - 1)
+            };
+            self.efforts[*index] = choices[next];
+        }
+    }
+
+    fn chosen(&self) -> Option<Choice> {
+        let index = self.visible.get(self.selected)?;
+        Some(Choice::Selected {
+            model: self.items[*index].id.clone(),
+            effort: self.efforts[*index],
+        })
     }
 }
 
@@ -1078,142 +1229,180 @@ fn matching_models(items: &[ModelEntry], filter: &str, anchor: &str) -> (Vec<usi
     (visible, selected)
 }
 
-async fn browse_linear(
-    terminal: &mut AttachedTerminal,
-    items: &[ModelEntry],
-    view: &SessionView,
-    composer: &mut Composer,
-    exact_custom: bool,
-    refresh: &mut CatalogRefresh<'_>,
-) -> Result<Choice, String> {
+async fn browse_linear(mut picker: Picker<'_, '_>, items: &[ModelEntry]) -> Result<Choice, String> {
+    let (view, exact_custom) = (picker.view, picker.exact_custom);
     let profile = view.defaults.provider.as_deref().unwrap_or("");
-    let mut start = view
-        .defaults
-        .model
-        .as_deref()
-        .and_then(|id| items.iter().position(|item| item.id == id))
-        .unwrap_or(0)
-        / SELECTOR_ROWS
-        * SELECTOR_ROWS;
     let efforts = initial_efforts(items, view, exact_custom);
-    let mut input = String::new();
-    let mut invalid = false;
-    let mut too_long = false;
-    let mut catalog_state = if refresh.in_flight() {
-        ModelCatalogState::Refreshing
-    } else {
-        ModelCatalogState::Current
-    };
-    let mut refresh_error = None::<String>;
-    terminal.begin_dialog();
+    let mut page = LinearPage::new(items, view, picker.refresh.state());
+    picker.terminal.begin_dialog();
     loop {
-        terminal
-            .draw_models(
-                view,
-                composer,
-                &ModelPicker {
-                    items,
-                    efforts: &efforts,
-                    selected: start,
-                    exact_custom,
-                    filter: "",
-                    invalid,
-                    catalog_state,
-                    refresh_error: refresh_error.as_deref(),
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        if terminal
-            .arm_dialog()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            continue;
-        }
-        invalid = false;
-        let at_input_boundary = terminal.input_boundary_ready();
-        let next = tokio::select! {
-            result = refresh.finish(), if refresh.in_flight() && at_input_boundary => {
-                match result {
-                    Ok((updated, false)) => {
-                        composer.set_model_catalog(profile, &updated, false);
-                        catalog_state = ModelCatalogState::Updated;
-                    }
-                    failed => {
-                        refresh_error = failed.err();
-                        catalog_state = ModelCatalogState::RefreshFailed;
-                    }
-                }
+        let key = picker
+            .next_key(&ModelPicker {
+                items,
+                efforts: &efforts,
+                selected: page.start,
+                exact_custom,
+                filter: "",
+                invalid: page.invalid,
+                catalog_state: page.catalog_state,
+                refresh_error: page.refresh_error.as_deref(),
+            })
+            .await?;
+        let next = match key {
+            PickerKey::Redraw => continue,
+            PickerKey::Refreshed(result) => {
+                page.invalid = false;
+                page.refreshed(result, picker.composer, profile);
                 continue;
             }
-            input = terminal.next_input() => input.map_err(|error| error.to_string())?,
+            PickerKey::Input { input, .. } => {
+                page.invalid = false;
+                input
+            }
         };
         match next {
             TerminalInput::Character(character)
                 if (character.is_ascii_graphic() || character == ' ')
-                    && input.len() < 32
-                    && !too_long =>
+                    && page.line.len() < MAX_LINEAR_CHOICE_BYTES
+                    && !page.too_long =>
             {
-                input.push(character)
+                page.line.push(character)
             }
-            TerminalInput::Character(_) => too_long = true,
+            TerminalInput::Character(_) => page.too_long = true,
             TerminalInput::Backspace => {
-                input.pop();
+                page.line.pop();
             }
             TerminalInput::Submit => {
-                let choice = input.trim();
-                match choice {
-                    "q" if !too_long => return Ok(Choice::Closed),
-                    "n" if !too_long && start + SELECTOR_ROWS < items.len() => {
-                        start += SELECTOR_ROWS
-                    }
-                    "p" if !too_long && start > 0 => start = start.saturating_sub(SELECTOR_ROWS),
-                    _ => {
-                        let mut parts = choice.split_ascii_whitespace();
-                        if !too_long
-                            && let Some(number) =
-                                parts.next().and_then(|value| value.parse::<usize>().ok())
-                            && (1..=SELECTOR_ROWS).contains(&number)
-                            && let Some(item) = items.get(start + number - 1)
-                        {
-                            let level = match parts.next() {
-                                None => Some(efforts[start + number - 1]),
-                                Some("default") => Some(None),
-                                Some(value) => value.parse::<Effort>().ok().map(Some),
-                            };
-                            if parts.next().is_none()
-                                && let Some(effort) = level
-                                && effort_choices(profile, item, exact_custom).contains(&effort)
-                            {
-                                return Ok(Choice::Selected {
-                                    model: item.id.clone(),
-                                    effort,
-                                });
-                            }
-                        }
-                        invalid = true;
-                    }
+                if let Some(choice) = page.submit(items, &efforts, profile, exact_custom) {
+                    return Ok(choice);
                 }
-                input.clear();
-                too_long = false;
             }
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
-                invalid = true;
-                input.clear();
-                too_long = false;
-                terminal.discard_draft_input();
+                page.invalid = true;
+                page.line.clear();
+                page.too_long = false;
+                picker.terminal.discard_draft_input();
             }
-            TerminalInput::Suspend => terminal
+            TerminalInput::Suspend => picker
+                .terminal
                 .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
-                terminal.discard_draft_input();
+                picker.terminal.discard_draft_input();
                 return Ok(Choice::Closed);
             }
             TerminalInput::Shutdown(signal) => return Ok(Choice::Shutdown(signal)),
             _ => {}
         }
     }
+}
+
+struct LinearPage {
+    start: usize,
+    line: String,
+    invalid: bool,
+    too_long: bool,
+    catalog_state: ModelCatalogState,
+    refresh_error: Option<String>,
+}
+
+impl LinearPage {
+    // The first page shown is the one listing the Session's model.
+    fn new(items: &[ModelEntry], view: &SessionView, catalog_state: ModelCatalogState) -> Self {
+        Self {
+            start: view
+                .defaults
+                .model
+                .as_deref()
+                .and_then(|id| items.iter().position(|item| item.id == id))
+                .unwrap_or(0)
+                / SELECTOR_ROWS
+                * SELECTOR_ROWS,
+            line: String::new(),
+            invalid: false,
+            too_long: false,
+            catalog_state,
+            refresh_error: None,
+        }
+    }
+
+    fn refreshed(
+        &mut self,
+        result: Result<(Vec<ModelEntry>, bool), String>,
+        composer: &mut Composer,
+        profile: &str,
+    ) {
+        match result {
+            Ok((updated, false)) => {
+                composer.set_model_catalog(profile, &updated, false);
+                self.catalog_state = ModelCatalogState::Updated;
+            }
+            failed => {
+                self.refresh_error = failed.err();
+                self.catalog_state = ModelCatalogState::RefreshFailed;
+            }
+        }
+    }
+
+    fn submit(
+        &mut self,
+        items: &[ModelEntry],
+        efforts: &[Option<Effort>],
+        profile: &str,
+        exact_custom: bool,
+    ) -> Option<Choice> {
+        let (start, too_long) = (self.start, self.too_long);
+        let choice = self.line.trim();
+        match choice {
+            "q" if !too_long => return Some(Choice::Closed),
+            "n" if !too_long && start + SELECTOR_ROWS < items.len() => self.start += SELECTOR_ROWS,
+            "p" if !too_long && start > 0 => self.start = start.saturating_sub(SELECTOR_ROWS),
+            _ => {
+                if !too_long
+                    && let Some(choice) = linear_choice(
+                        choice,
+                        &items[start..],
+                        &efforts[start..],
+                        profile,
+                        exact_custom,
+                    )
+                {
+                    return Some(choice);
+                }
+                self.invalid = true;
+            }
+        }
+        self.line.clear();
+        self.too_long = false;
+        None
+    }
+}
+
+// A line names a row of the shown page, then optionally an effort or `default`.
+fn linear_choice(
+    choice: &str,
+    page: &[ModelEntry],
+    efforts: &[Option<Effort>],
+    profile: &str,
+    exact_custom: bool,
+) -> Option<Choice> {
+    let mut parts = choice.split_ascii_whitespace();
+    let number = parts.next()?.parse::<usize>().ok()?;
+    if !(1..=SELECTOR_ROWS).contains(&number) {
+        return None;
+    }
+    let item = page.get(number - 1)?;
+    let effort = match parts.next() {
+        None => efforts[number - 1],
+        Some("default") => None,
+        Some(value) => Some(value.parse::<Effort>().ok()?),
+    };
+    (parts.next().is_none() && effort_choices(profile, item, exact_custom).contains(&effort)).then(
+        || Choice::Selected {
+            model: item.id.clone(),
+            effort,
+        },
+    )
 }
 
 #[cfg(test)]

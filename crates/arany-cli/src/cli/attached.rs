@@ -382,7 +382,18 @@ async fn run_selector(
             configure_account(terminal, admission, session_id, view, composer).await?
         }
         Selector::Models(open) => {
-            match models::browse(terminal, admission, *session_id, view, composer, open).await? {
+            match models::browse(
+                run::RunUi {
+                    terminal: &mut *terminal,
+                    view: &mut *view,
+                    composer: &mut *composer,
+                },
+                admission,
+                *session_id,
+                open,
+            )
+            .await?
+            {
                 ModelBrowse::Notice(notice) => notice,
                 ModelBrowse::Shutdown(signal) => {
                     return Err(format!("terminated by {}", signal.name()).into());
