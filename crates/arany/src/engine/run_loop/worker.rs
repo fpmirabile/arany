@@ -585,10 +585,7 @@ impl RunLoop<'_> {
             Some(WorkerStopReason::Cancelled)
         } else if self.pause_requested() {
             Some(WorkerStopReason::Paused)
-        } else if !self.ledger().can_start_provider_call()
-            || self.ledger().remaining_calls() == Some(0)
-            || self.ledger().spent_active_time_exhausted()
-        {
+        } else if !self.ledger().calls_open() || self.ledger().spent_active_time_exhausted() {
             Some(WorkerStopReason::Budget)
         } else {
             None

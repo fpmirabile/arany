@@ -641,7 +641,7 @@ impl GoalLedger {
             | Action::Child { .. }
             | Action::Tool
             | Action::ToolStep { .. }
-            | Action::Worker => self.can_start_provider_call() && self.remaining_calls() != Some(0),
+            | Action::Worker => self.calls_open(),
             Action::Review | Action::Compaction => {
                 self.can_start_provider_call()
                     && self.remaining_calls().is_none_or(|remaining| remaining > 1)
@@ -662,7 +662,7 @@ impl GoalLedger {
         actor: AgentRunId,
     ) -> Result<Admission<Reservation<'_>>, EngineError> {
         let admission = self.admission.lock().await;
-        if !(self.can_start_provider_call() && self.remaining_calls() != Some(0)) {
+        if !self.calls_open() {
             self.capture_budget_refusal(
                 match action {
                     Action::Compaction | Action::BoundaryCompaction { .. } => {
@@ -995,6 +995,10 @@ impl GoalLedger {
             })
         })
         .unwrap_or(false)
+    }
+
+    pub(super) fn calls_open(&self) -> bool {
+        self.can_start_provider_call() && self.remaining_calls() != Some(0)
     }
 
     pub(super) fn can_start_provider_call(&self) -> bool {

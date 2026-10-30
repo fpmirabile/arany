@@ -645,9 +645,13 @@ impl ChildQueue {
             .inspect_err(crate::diagnostics::engine_failure);
     }
 
-    async fn try_abort_and_drain(&mut self) -> Result<(), EngineError> {
+    fn begin_drain(&mut self) -> Instant {
         self.calls.abort_all();
-        let deadline = Instant::now() + CANCELLATION_DRAIN;
+        Instant::now() + CANCELLATION_DRAIN
+    }
+
+    async fn try_abort_and_drain(&mut self) -> Result<(), EngineError> {
+        let deadline = self.begin_drain();
         while !self.calls.is_empty() {
             let _ = tokio::time::timeout_at(deadline, self.calls.join_next_with_id())
                 .await
@@ -1367,8 +1371,7 @@ impl RunLoop<'_> {
                 self.apply_wave_primary(&mut wave, decision, deferral, &mut abort)
                     .await?;
                 if abort.is_some() {
-                    wave.queue.calls.abort_all();
-                    drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
+                    drain_deadline = Some(wave.queue.begin_drain());
                 } else if let RunProgress::Stopped(cause) = self.refill_wave(&mut wave).await? {
                     return Ok(RunProgress::Stopped(cause));
                 }
@@ -1896,8 +1899,7 @@ impl RunLoop<'_> {
         if abort.is_some_and(|stop| stop != WaveStop::Boundary(StopCause::Paused))
             && drain_deadline.is_none()
         {
-            queue.calls.abort_all();
-            *drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
+            *drain_deadline = Some(queue.begin_drain());
         }
         let joined = match *drain_deadline {
             Some(limit) => tokio::time::timeout_at(limit, queue.calls.join_next_with_id())
@@ -2491,9 +2493,7 @@ impl RunLoop<'_> {
             Some(WaveStop::from_queue(cause))
         } else if queue.pending.is_empty() && queue.unspawned.is_empty() {
             None
-        } else if !self.ledger().can_start_provider_call()
-            || self.ledger().remaining_calls() == Some(0)
-        {
+        } else if !self.ledger().calls_open() {
             Some(WaveStop::BUDGET)
         } else {
             None
@@ -2512,8 +2512,7 @@ impl RunLoop<'_> {
         while wave.queue.active.len() < self.ledger().provider_concurrency(wave.queue.parallel)
             && !self.controls.cancellation.is_cancelled()
             && !self.pause_requested()
-            && self.ledger().can_start_provider_call()
-            && self.ledger().remaining_calls() != Some(0)
+            && self.ledger().calls_open()
             && wave.queue.stop.is_none()
             && !self.worker_stopped()?
         {

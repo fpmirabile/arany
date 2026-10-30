@@ -359,8 +359,7 @@ impl CallRouter<'_> {
         })?;
         // Without a running Goal only a between-Run compaction can retry, with nothing to charge.
         let admitted = if running {
-            self.ledger.can_start_provider_call()
-                && self.ledger.remaining_calls() != Some(0)
+            self.ledger.calls_open()
                 && self
                     .ledger
                     .effective_budget()
