@@ -272,3 +272,15 @@ async fn assert_burst_bound(controls: &Controls, view: &mut SessionView, state: 
         "repeated committed Events are ignored"
     );
 }
+
+#[test]
+fn engine_cancellation_before_admission_is_an_interrupted_attempt() {
+    assert!(matches!(
+        classify_run_error(arany::EngineError::CancelledBeforeStart),
+        RunAttemptError::InterruptedBeforeRun
+    ));
+    assert!(matches!(
+        classify_run_error(arany::EngineError::CoordinatorFailed),
+        RunAttemptError::Failed(_)
+    ));
+}
