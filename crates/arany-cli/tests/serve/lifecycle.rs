@@ -315,11 +315,13 @@ async fn waiting_turn(stop: TurnStop) {
             async {
                 let _ = signalled.await;
             },
-            transport_input,
-            transport_output,
-            reader,
-            writer,
-            shutdown,
+            Transport {
+                inbound: transport_input,
+                outbound: transport_output,
+                reader,
+                writer,
+                shutdown,
+            },
         )
         .await
     };

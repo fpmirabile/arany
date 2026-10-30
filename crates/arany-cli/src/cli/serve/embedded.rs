@@ -280,14 +280,16 @@ impl Connection {
                 super::server::run_embedded(
                     engine,
                     state,
-                    inbound,
-                    rpc,
+                    super::server::ServerIo {
+                        inbound,
+                        outbound: rpc,
+                        stopping,
+                    },
                     Native {
                         pending: Some(submission),
                         output,
                         start_error: None,
                     },
-                    stopping,
                 ),
             )
             .await

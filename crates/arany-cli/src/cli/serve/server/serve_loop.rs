@@ -6,8 +6,8 @@ use super::super::{
 };
 use super::{
     ActiveTurn, ApprovalChannel, ClientMessage, Completion, DisplayFollower, Fault, Inbound,
-    OutputControl, REWIND_BUSY_QUEUE, Refused, ServerMessage, complete, controls, emit, internal,
-    observe, params, response, send,
+    OutputControl, REWIND_BUSY_QUEUE, Refused, ServerIo, ServerMessage, complete, controls, emit,
+    internal, observe, params, response, send,
 };
 use arany::{
     Engine, EngineError, Event, RunCancellation, RunControls, RunRequest, RunSteering, SessionId,
@@ -965,41 +965,26 @@ impl ServerLoop {
 pub(in crate::cli) async fn run_configured(
     engine: Engine,
     state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    io: ServerIo,
     threads: Threads,
-    stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
-    run_shared(
-        Arc::new(engine),
-        state,
-        inbound,
-        outbound,
-        threads,
-        stopping,
-        None,
-    )
-    .await
+    run_shared(Arc::new(engine), state, io, threads, None).await
 }
 
 pub(in crate::cli) async fn run_embedded(
     engine: Arc<Engine>,
     state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    io: ServerIo,
     native: embedded::Native,
-    stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
     run_shared(
         engine,
         state,
-        inbound,
-        outbound,
+        io,
         Threads {
             approval_channel: ApprovalChannel::Terminal,
             ..Default::default()
         },
-        stopping,
         Some(native),
     )
     .await
@@ -1008,14 +993,11 @@ pub(in crate::cli) async fn run_embedded(
 async fn run_shared(
     engine: Arc<Engine>,
     state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    io: ServerIo,
     threads: Threads,
-    stopping: watch::Sender<bool>,
     native: Option<embedded::Native>,
 ) -> Result<(), String> {
-    let mut server =
-        ServerLoop::configured(engine, state, inbound, outbound, threads, stopping, native);
+    let mut server = ServerLoop::configured(engine, state, io, threads, native);
     server.start_embedded().await?;
     let result = server.run().await;
     server.on_stop(result).await
@@ -1066,12 +1048,15 @@ impl ServerLoop {
     fn configured(
         engine: Arc<Engine>,
         state: PathBuf,
-        inbound: mpsc::Receiver<ClientMessage>,
-        outbound: mpsc::Sender<ServerMessage>,
+        io: ServerIo,
         threads: Threads,
-        stopping: watch::Sender<bool>,
         native: Option<embedded::Native>,
     ) -> Self {
+        let ServerIo {
+            inbound,
+            outbound,
+            stopping,
+        } = io;
         let local = native
             .as_ref()
             .and_then(|native| native.pending.as_ref())

@@ -33,6 +33,12 @@ pub(in crate::cli) enum ClientMessage {
 }
 pub(in crate::cli) type ServerMessage = Message;
 
+pub(in crate::cli) struct ServerIo {
+    pub(in crate::cli) inbound: mpsc::Receiver<ClientMessage>,
+    pub(in crate::cli) outbound: mpsc::Sender<ServerMessage>,
+    pub(in crate::cli) stopping: watch::Sender<bool>,
+}
+
 #[derive(Debug)]
 pub(super) struct Fault {
     code: i64,
@@ -288,10 +294,12 @@ pub(in crate::cli) async fn run(
     run_configured(
         engine,
         state,
-        inbound,
-        outbound,
+        ServerIo {
+            inbound,
+            outbound,
+            stopping: shutdown,
+        },
         Threads::default(),
-        shutdown,
     )
     .await
 }
@@ -307,7 +315,16 @@ pub(in crate::cli) async fn run_with_threads(
     let (shutdown, receiver) = watch::channel(false);
     super::shutdown_grace(
         receiver,
-        run_configured(engine, state, inbound, outbound, threads, shutdown),
+        run_configured(
+            engine,
+            state,
+            ServerIo {
+                inbound,
+                outbound,
+                stopping: shutdown,
+            },
+            threads,
+        ),
     )
     .await
 }

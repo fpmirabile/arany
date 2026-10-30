@@ -191,16 +191,7 @@ pub(crate) async fn run(
     let (events, event_rx) = mpsc::channel(serve::OUTBOUND_CAPACITY);
     let (outbound, writer) = mpsc::channel(serve::OUTBOUND_CAPACITY);
     let shared = Arc::new(Mutex::new(translate::State::default()));
-    let input = std::fs::File::from(
-        std::os::fd::AsFd::as_fd(&std::io::stdin())
-            .try_clone_to_owned()
-            .map_err(|_| "protocol input unavailable")?,
-    );
-    let output = std::fs::File::from(
-        std::os::fd::AsFd::as_fd(&std::io::stdout())
-            .try_clone_to_owned()
-            .map_err(|_| "protocol output unavailable")?,
-    );
+    let (input, output) = serve::protocol_stdio()?;
     let (shutdown, _) = watch::channel(false);
     let reader_task = tokio::spawn(read_messages(
         tokio::fs::File::from_std(input),
@@ -222,9 +213,11 @@ pub(crate) async fn run(
         let server = run_server(
             engine,
             state_dir,
-            receiver,
-            events,
-            stopping.clone(),
+            serve::server::ServerIo {
+                inbound: receiver,
+                outbound: events,
+                stopping: stopping.clone(),
+            },
             serve::threads::Threads::with_roster(roster),
         );
         let translator = translate::output(
@@ -243,11 +236,13 @@ pub(crate) async fn run(
             signals.next().await;
             translate::cancel_active(&stop_state);
         },
-        inbound,
-        outbound,
-        reader_task,
-        writer_task,
-        shutdown,
+        serve::Transport {
+            inbound,
+            outbound,
+            reader: reader_task,
+            writer: writer_task,
+            shutdown,
+        },
     )
     .await?;
     Ok(super::CommandOutput {
@@ -260,13 +255,11 @@ pub(crate) async fn run(
 async fn run_server(
     engine: Engine,
     state: PathBuf,
-    inbound: mpsc::Receiver<serve::server::ClientMessage>,
-    outbound: mpsc::Sender<serve::server::ServerMessage>,
-    shutdown: watch::Sender<bool>,
+    io: serve::server::ServerIo,
     mut threads: serve::threads::Threads,
 ) -> Result<(), String> {
     threads.approval_channel = serve::server::ApprovalChannel::Restricted;
-    serve::server::run_configured(engine, state, inbound, outbound, threads, shutdown).await
+    serve::server::run_configured(engine, state, io, threads).await
 }
 
 async fn read_messages(

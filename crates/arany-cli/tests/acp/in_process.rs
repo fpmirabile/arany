@@ -187,9 +187,11 @@ fn start_with_config(
             let server = run_server(
                 engine,
                 state_dir,
-                receiver,
-                events,
-                stopping.clone(),
+                serve::server::ServerIo {
+                    inbound: receiver,
+                    outbound: events,
+                    stopping: stopping.clone(),
+                },
                 serve::threads::Threads::with_provider(provider),
             );
             let translator = translate::output(
@@ -207,11 +209,13 @@ fn start_with_config(
         serve::serve_transport(
             serving,
             std::future::pending(),
-            inbound,
-            outbound,
-            reader_task,
-            writer_task,
-            shutdown,
+            serve::Transport {
+                inbound,
+                outbound,
+                reader: reader_task,
+                writer: writer_task,
+                shutdown,
+            },
         )
         .await
     });
