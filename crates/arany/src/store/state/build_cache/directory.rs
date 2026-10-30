@@ -148,11 +148,27 @@ fn apply(lower: &Dir, upper: &Dir, changes: &[CacheChange]) -> Result<(), StoreE
                         0o700
                     }),
                 ))?;
+                // Cargo compares fingerprint mtimes, so a copy must keep the payload's times.
+                rustix::fs::futimens(
+                    &target,
+                    &rustix::fs::Timestamps {
+                        last_access: timespec(metadata.atime(), metadata.atime_nsec()),
+                        last_modification: timespec(metadata.mtime(), metadata.mtime_nsec()),
+                    },
+                )
+                .map_err(|error| StoreError::Io(error.into()))?;
                 rustix::fs::fsync(&target).map_err(|error| StoreError::Io(error.into()))?;
             }
         }
     }
     Ok(())
+}
+
+fn timespec(seconds: i64, nanoseconds: i64) -> rustix::fs::Timespec {
+    rustix::fs::Timespec {
+        tv_sec: seconds,
+        tv_nsec: nanoseconds,
+    }
 }
 
 // A macOS view shares the Store's volume, so a clone publishes without a second copy on disk.

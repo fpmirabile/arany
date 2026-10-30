@@ -36,6 +36,14 @@ fn directory_cache_reuses_identity_and_requires_clear_after_interruption() {
         &temp.path().join("upper"),
         &[("target/nested/old", b"old"), ("target/nested/new", b"new")],
     );
+    // Cargo fingerprints compare mtimes, so publication must keep the payload's.
+    let built = std::time::UNIX_EPOCH + std::time::Duration::new(1_000_000_000, 123_456_789);
+    std::fs::File::options()
+        .write(true)
+        .open(temp.path().join("upper/target/nested/new"))
+        .unwrap()
+        .set_modified(built)
+        .unwrap();
     let changes = [
         CacheChange::Directory("target".into()),
         CacheChange::Directory("target/nested".into()),
@@ -55,6 +63,15 @@ fn directory_cache_reuses_identity_and_requires_clear_after_interruption() {
         )
         .unwrap();
     assert_eq!(measure(&lower).unwrap(), 3);
+    assert_eq!(
+        lower
+            .metadata("target/nested/new")
+            .unwrap()
+            .modified()
+            .unwrap()
+            .into_std(),
+        built
+    );
     assert_eq!(state.build_cache_bytes().unwrap(), 3);
     let guard_id = uuid::Uuid::now_v7();
     lease.guard_started(guard_id).unwrap();
