@@ -209,3 +209,45 @@ fn without_a_human_hooked_writes_are_offered_only_under_user_allow_rules() {
     );
     assert_eq!(contract, super::super::WRITES_LEFT_TO_USER);
 }
+
+#[test]
+fn a_configured_run_honors_only_a_trusted_folders_saved_answer() {
+    use crate::tools::WorkspacePermissions;
+    crate::test_support::isolate_account_root();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = fixture(temp.path());
+    let home = temp.path().join("home");
+    let marker = temp.path().join("hook-ran");
+    hook(
+        &workspace.join(".git/hooks/pre-commit"),
+        &format!("touch {}", marker.display()),
+    );
+    host_git(&workspace, &home, &["config", "user.name", "Configured"]);
+    host_git(
+        &workspace,
+        &home,
+        &["config", "user.email", "configured@example.invalid"],
+    );
+    let accepted = detected(temp.path(), &workspace).unwrap().digest;
+    let mut runtime = hooked_runtime(temp.path(), &workspace);
+
+    assert_eq!(WorkspacePermissions::saved_git_hooks(&workspace), None);
+    block_on(runtime.admit_git_hooks(WorkspacePermissions::saved_git_hooks(&workspace), false));
+    let untrusted = commit(&runtime, "src/a.txt");
+    assert!(untrusted["hooks_not_run"].is_string(), "{untrusted}");
+    assert!(!marker.exists(), "a hook ran without a trust entry");
+
+    let mut trust = WorkspacePermissions::open(&workspace).unwrap();
+    trust
+        .remember_profiles(true, crate::tools::ApprovalMode::AutoEdits, &[])
+        .unwrap();
+    trust.remember_hooks_digest(accepted, true).unwrap();
+    assert_eq!(
+        WorkspacePermissions::saved_git_hooks(&workspace),
+        Some(accepted)
+    );
+    block_on(runtime.admit_git_hooks(WorkspacePermissions::saved_git_hooks(&workspace), false));
+    let trusted = commit(&runtime, "src/new.txt");
+    assert!(trusted.get("hooks_not_run").is_none(), "{trusted}");
+    assert!(marker.exists(), "a saved accepted hook did not run");
+}

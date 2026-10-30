@@ -247,3 +247,30 @@ fn push_destinations_follow_the_users_url_rewrites() {
         pushed
     );
 }
+
+#[test]
+fn each_resolution_pins_the_git_on_path_and_a_replaced_git_fails_the_old_pin() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::copy(git_program().executable, bin.join("git")).unwrap();
+    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let editors = temp.path().join("editors");
+    let environment = Environment::from_variables(&workspace, &editors, |name| match name {
+        "HOME" => Some(temp.path().into()),
+        "PATH" => Some(bin.clone().into()),
+        _ => None,
+    })
+    .unwrap();
+    let first = resolve(&environment).unwrap();
+    let mut bytes = std::fs::read(bin.join("git")).unwrap();
+    bytes.push(0);
+    std::fs::write(bin.join("git"), bytes).unwrap();
+    let second = resolve(&environment).unwrap();
+    assert_eq!(first.executable, second.executable);
+    assert_ne!(first.sha256, second.sha256);
+    assert!(matches!(verify(&first), Err(ToolError::ChangedInput)));
+    assert!(verify(&second).is_ok());
+}

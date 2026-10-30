@@ -2059,9 +2059,7 @@ impl Engine {
             let accepted = match (&submission.grant, submission.permissions()) {
                 (_, Some(permissions)) => permissions.accepted_git_hooks(),
                 (ToolGrant::Configured, None) => {
-                    crate::tools::WorkspacePermissions::open(&request.workspace)
-                        .ok()
-                        .and_then(|permissions| permissions.accepted_git_hooks())
+                    crate::tools::WorkspacePermissions::saved_git_hooks(&request.workspace)
                 }
                 _ => None,
             };

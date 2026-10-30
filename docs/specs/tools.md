@@ -727,7 +727,7 @@ Repository hooks run only when the user accepts them for the folder.
 - **No** keeps `core.hooksPath=/dev/null` for Arany's own invocations only; the user's configuration and terminal Git are untouched.
 - **Yes** pins the digest per Run in `RunStarted.config.tool_policy.git.hooks`. Each write detects the hooks again and runs them only while they match; a changed hook does not run, and the result says to accept the hooks again. A write that runs hooks gets the command runtime ceiling instead of the Git runtime bound. Internal worktree operations never run hooks.
 - **Approval.** While hooks are accepted, a Git write is approved only by a human approval at that moment or by an admitted user-owned allow rule: AI review never approves it, so Auto approval asks a human, and replay rejects any other approval source. With no human reachable (`exec`, serve without an approval channel), the catalog offers only the write verbs a user-owned allow rule covers, keeps branch creation read-only otherwise, and adds `Commits, branch creation and switches are left to the user; leave changes in the working tree`.
-- **Non-interactive surfaces.** `exec`, serve and ACP use the saved answer of a trusted folder, also for configured Runs; with none, hooks stay off and the write result carries the notice.
+- **Terminal-only consent.** Only the attached terminal asks. `exec`, serve and ACP use the answer saved for a trusted folder, also for configured Runs; with none, hooks stay off and the write result carries the notice. ACP never asks through `session/request_permission`, because a client may answer by policy and ACP client policy never authorizes host execution.
 
 ## In-process file operations
 

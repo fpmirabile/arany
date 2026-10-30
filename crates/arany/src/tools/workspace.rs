@@ -397,6 +397,14 @@ impl WorkspacePermissions {
         question: &GitHooksQuestion,
         accepted: bool,
     ) -> Result<(), ToolError> {
+        self.remember_hooks_digest(question.digest, accepted)
+    }
+
+    pub(crate) fn remember_hooks_digest(
+        &mut self,
+        digest: [u8; 32],
+        accepted: bool,
+    ) -> Result<(), ToolError> {
         if !self.trusted {
             return Err(ToolError::Configuration);
         }
@@ -404,13 +412,18 @@ impl WorkspacePermissions {
         let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
         let previous = self.git_hooks.replace(GitHooksAnswer {
             accepted,
-            sha256: question.digest,
+            sha256: digest,
         });
         let saved = self.save(&root, true, self.mode, self.runtime_grants.clone());
         if saved.is_err() {
             self.git_hooks = previous;
         }
         saved
+    }
+
+    // A configured Run (serve, ACP, exec) honors the answer saved with the folder's trust entry.
+    pub(crate) fn saved_git_hooks(workspace: &Path) -> Option<[u8; 32]> {
+        Self::open(workspace).ok()?.accepted_git_hooks()
     }
 
     pub(crate) fn accepted_git_hooks(&self) -> Option<[u8; 32]> {
