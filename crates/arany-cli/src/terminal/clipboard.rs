@@ -190,7 +190,15 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
         LocalDisplay::Wayland { .. } => {
             let mut command = display.command("wl-paste")?;
             command.arg("--list-types");
-            let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
+            let types = run_process(
+                &mut command,
+                ProcessDeadline {
+                    cancelled,
+                    at: deadline,
+                },
+                16 * 1024,
+                cleanup,
+            )?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
                 types,
@@ -204,7 +212,15 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
         LocalDisplay::X11 { .. } => {
             let mut command = display.command("xclip")?;
             command.args(["-selection", "clipboard", "-out", "-target", "TARGETS"]);
-            let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
+            let types = run_process(
+                &mut command,
+                ProcessDeadline {
+                    cancelled,
+                    at: deadline,
+                },
+                16 * 1024,
+                cleanup,
+            )?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
                 types,
@@ -221,7 +237,15 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
     } else {
         MAX_PASTE_BYTES
     };
-    let bytes = run_process(&mut command, cancelled, deadline, limit, cleanup)?;
+    let bytes = run_process(
+        &mut command,
+        ProcessDeadline {
+            cancelled,
+            at: deadline,
+        },
+        limit,
+        cleanup,
+    )?;
     if image {
         ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
     } else {
@@ -345,8 +369,10 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
     let mut command = native_command(None)?;
     let bytes = run_process(
         &mut command,
-        cancelled,
-        Instant::now() + Duration::from_secs(2),
+        ProcessDeadline {
+            cancelled,
+            at: Instant::now() + Duration::from_secs(2),
+        },
         super::composer::MAX_PASTE_BYTES.max(arany::MAX_IMAGE_BYTES) + 2,
         cleanup,
     )?;
@@ -545,17 +571,28 @@ fn set_nonblocking(pipe: &impl std::os::fd::AsFd) -> Result<(), &'static str> {
     .map_err(|_| "clipboard pipe unavailable")
 }
 
+// Cancellation and the overall deadline that every clipboard child must finish within.
+#[derive(Clone, Copy)]
+struct ProcessDeadline<'a> {
+    cancelled: &'a AtomicBool,
+    at: Instant,
+}
+
+impl ProcessDeadline<'_> {
+    fn passed(self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.at
+    }
+}
+
 fn run_process(
     command: &mut std::process::Command,
-    cancelled: &AtomicBool,
-    deadline: std::time::Instant,
+    deadline: ProcessDeadline<'_>,
     limit: usize,
     cleanup: &mut Cleanup,
 ) -> Result<Vec<u8>, &'static str> {
-    use std::io::{self, Read};
     use std::process::Stdio;
 
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+    if deadline.passed() {
         return Err("clipboard read cancelled or timed out");
     }
     let mut owner = OwnedChild::spawn(
@@ -565,75 +602,84 @@ fn run_process(
             .stderr(Stdio::piped()),
         cleanup,
     )?;
-    let result = (|| {
-        let child = owner.child.as_mut().expect("owned clipboard child");
-        let mut stdout = child.stdout.take().ok_or("clipboard pipe unavailable")?;
-        let mut stderr = child.stderr.take().ok_or("clipboard pipe unavailable")?;
-        set_nonblocking(&stdout)?;
-        set_nonblocking(&stderr)?;
-        let mut output = Vec::new();
-        let mut output_bytes = 0;
-        let mut error_bytes = 0;
-        let mut stdout_closed = false;
-        let mut stderr_closed = false;
-        loop {
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err("clipboard read cancelled or timed out");
-            }
-            let mut buffer = [0; 4096];
-            for (stream, closed, count, cap, collect) in [
-                (
-                    &mut stdout as &mut dyn Read,
-                    &mut stdout_closed,
-                    &mut output_bytes,
-                    limit,
-                    true,
-                ),
-                (
-                    &mut stderr as &mut dyn Read,
-                    &mut stderr_closed,
-                    &mut error_bytes,
-                    4096,
-                    false,
-                ),
-            ] {
-                if *closed {
-                    continue;
-                }
-                match stream.read(&mut buffer) {
-                    Ok(0) => *closed = true,
-                    Ok(length) => {
-                        if length > cap.saturating_sub(*count) {
-                            return Err("clipboard output exceeds its limit");
-                        }
-                        *count += length;
-                        if collect {
-                            output.extend_from_slice(&buffer[..length]);
-                        }
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(_) => return Err("clipboard read unavailable"),
-                }
-            }
-            if let Some(success) = owner.exited()?
-                && stdout_closed
-                && stderr_closed
-            {
-                return if success {
-                    Ok(output)
-                } else {
-                    Err("clipboard read unavailable")
-                };
-            }
-            std::thread::park_timeout(Duration::from_millis(5));
-        }
-    })();
+    let result = collect_output(&mut owner, deadline, limit);
     owner.finish()?;
     result
+}
+
+// Reads stdout up to `limit` and a bounded stderr until the child exits with both closed.
+fn collect_output(
+    owner: &mut OwnedChild,
+    deadline: ProcessDeadline<'_>,
+    limit: usize,
+) -> Result<Vec<u8>, &'static str> {
+    use std::io::{self, Read};
+
+    let child = owner.child.as_mut().expect("owned clipboard child");
+    let mut stdout = child.stdout.take().ok_or("clipboard pipe unavailable")?;
+    let mut stderr = child.stderr.take().ok_or("clipboard pipe unavailable")?;
+    set_nonblocking(&stdout)?;
+    set_nonblocking(&stderr)?;
+    let mut output = Vec::new();
+    let mut output_bytes = 0;
+    let mut error_bytes = 0;
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
+    loop {
+        if deadline.passed() {
+            return Err("clipboard read cancelled or timed out");
+        }
+        let mut buffer = [0; 4096];
+        for (stream, closed, count, cap, collect) in [
+            (
+                &mut stdout as &mut dyn Read,
+                &mut stdout_closed,
+                &mut output_bytes,
+                limit,
+                true,
+            ),
+            (
+                &mut stderr as &mut dyn Read,
+                &mut stderr_closed,
+                &mut error_bytes,
+                4096,
+                false,
+            ),
+        ] {
+            if *closed {
+                continue;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) => *closed = true,
+                Ok(length) => {
+                    if length > cap.saturating_sub(*count) {
+                        return Err("clipboard output exceeds its limit");
+                    }
+                    *count += length;
+                    if collect {
+                        output.extend_from_slice(&buffer[..length]);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err("clipboard read unavailable"),
+            }
+        }
+        if let Some(success) = owner.exited()?
+            && stdout_closed
+            && stderr_closed
+        {
+            return if success {
+                Ok(output)
+            } else {
+                Err("clipboard read unavailable")
+            };
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
 }
 
 pub(super) const MAX_COPY_BYTES: usize = 100_000;
@@ -828,15 +874,33 @@ fn copy_locally(
     for destination in destinations {
         let attempt = match destination {
             Destination::Native => native_writer(&var).and_then(|(mut command, label, serving)| {
-                write_process(&mut command, payload, cancelled, deadline, serving, cleanup)
-                    .map(|()| label)
+                write_process(
+                    &mut command,
+                    payload,
+                    ProcessDeadline {
+                        cancelled,
+                        at: deadline,
+                    },
+                    serving,
+                    cleanup,
+                )
+                .map(|()| label)
             }),
             Destination::Tmux => var("TMUX")
                 .ok_or("tmux unavailable")
                 .and_then(|value| tmux_writer(&value))
                 .and_then(|(mut command, socket)| {
                     socket.unchanged()?;
-                    write_process(&mut command, payload, cancelled, deadline, false, cleanup)?;
+                    write_process(
+                        &mut command,
+                        payload,
+                        ProcessDeadline {
+                            cancelled,
+                            at: deadline,
+                        },
+                        false,
+                        cleanup,
+                    )?;
                     socket.unchanged().map(|()| "tmux buffer")
                 }),
             Destination::Osc52 => continue,
@@ -956,15 +1020,14 @@ fn tmux_writer(
 fn write_process(
     command: &mut std::process::Command,
     payload: &[u8],
-    cancelled: &AtomicBool,
-    deadline: Instant,
+    deadline: ProcessDeadline<'_>,
     serving: bool,
     cleanup: &mut Cleanup,
 ) -> Result<(), &'static str> {
     use std::io::{ErrorKind, Write};
     use std::process::Stdio;
 
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+    if deadline.passed() {
         return Err("clipboard copy cancelled or timed out");
     }
     // A serving descendant inherits no pipe, so its lifetime never holds the copy open.
@@ -985,7 +1048,7 @@ fn write_process(
         set_nonblocking(stdin.as_ref().ok_or("clipboard pipe unavailable")?)?;
         let mut written = 0;
         loop {
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            if deadline.passed() {
                 return Err("clipboard copy cancelled or timed out");
             }
             if written == payload.len() {
@@ -1384,8 +1447,10 @@ pub(super) mod cleanup_tests {
                     ]);
                 let result = run_process(
                     &mut command,
-                    cancelled,
-                    Instant::now() + Duration::from_secs(5),
+                    ProcessDeadline {
+                        cancelled,
+                        at: Instant::now() + Duration::from_secs(5),
+                    },
                     16 * 1024,
                     cleanup,
                 );
@@ -1815,8 +1880,10 @@ mod copy_tests {
         let result = write_process(
             &mut command,
             &payload,
-            &AtomicBool::new(false),
-            deadline(),
+            ProcessDeadline {
+                cancelled: &AtomicBool::new(false),
+                at: deadline(),
+            },
             true,
             &mut cleanup,
         );
@@ -1845,10 +1912,12 @@ mod copy_tests {
             write_process(
                 &mut failing,
                 b"text",
-                &AtomicBool::new(false),
-                deadline(),
+                ProcessDeadline {
+                    cancelled: &AtomicBool::new(false),
+                    at: deadline()
+                },
                 true,
-                &mut cleanup,
+                &mut cleanup
             ),
             Err("clipboard copy unavailable")
         );
@@ -1889,8 +1958,10 @@ function run(args) {
                 .args(args);
             run_process(
                 &mut command,
-                &AtomicBool::new(false),
-                Instant::now() + Duration::from_secs(5),
+                ProcessDeadline {
+                    cancelled: &AtomicBool::new(false),
+                    at: Instant::now() + Duration::from_secs(5),
+                },
                 1024,
                 &mut Cleanup::default(),
             )
@@ -1991,8 +2062,10 @@ function run(args) {
             let mut command = native_command(Some(&board.0)).unwrap();
             let result = run_process(
                 &mut command,
-                &AtomicBool::new(false),
-                Instant::now() + Duration::from_secs(5),
+                ProcessDeadline {
+                    cancelled: &AtomicBool::new(false),
+                    at: Instant::now() + Duration::from_secs(5),
+                },
                 arany::MAX_IMAGE_BYTES + 2,
                 &mut Cleanup::default(),
             )
