@@ -211,7 +211,7 @@ fn stale_locks_are_listed_never_removed() {
 }
 
 #[test]
-fn push_url_rewrites_are_detected_before_dispatch() {
+fn push_destinations_follow_the_users_url_rewrites() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = fixture(temp.path());
     let home = temp.path().join("home");
@@ -219,15 +219,31 @@ fn push_url_rewrites_are_detected_before_dispatch() {
     let environment = environment(&workspace, &scratch(temp.path(), 703), &home);
     let git = Git::workspace(&program, &environment);
     let url = "https://github.com/example/project.git";
-    assert!(!block_on(git.rewrites(url, deadline())).unwrap());
-    for key in ["insteadOf", "pushInsteadOf"] {
-        let setting = format!("url.https://elsewhere.example/.{key}");
-        host_git(
-            &workspace,
-            &home,
-            &["config", &setting, "https://github.com/"],
-        );
-        assert!(block_on(git.rewrites(url, deadline())).unwrap(), "{key}");
-        host_git(&workspace, &home, &["config", "--unset", &setting]);
-    }
+    assert_eq!(git.push_destination_blocking(url).unwrap(), url);
+    host_git(
+        &workspace,
+        &home,
+        &[
+            "config",
+            "url.git@github.com:.insteadOf",
+            "https://github.com/",
+        ],
+    );
+    let rewritten = "git@github.com:example/project.git";
+    assert_eq!(git.push_destination_blocking(url).unwrap(), rewritten);
+    host_git(
+        &workspace,
+        &home,
+        &[
+            "config",
+            "url.ssh://push.example/.pushInsteadOf",
+            "https://github.com/",
+        ],
+    );
+    let pushed = "ssh://push.example/example/project.git";
+    assert_eq!(git.push_destination_blocking(url).unwrap(), pushed);
+    assert_eq!(
+        block_on(git.push_destination(url, deadline())).unwrap(),
+        pushed
+    );
 }

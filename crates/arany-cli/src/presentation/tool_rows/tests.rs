@@ -485,10 +485,16 @@ mod peer_row_tests {
                 arany::ToolCall::GhPrList { .. } => arany::HostIntent {
                     source_oid: "gh-pr-list-v1".into(),
                     refspec: "fixed-list".into(),
+                    destination: String::new(),
                 },
                 _ => arany::HostIntent {
                     source_oid: "1".repeat(40),
                     refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+                    destination: if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
+                        "https://github.com/example/project.git".into()
+                    } else {
+                        String::new()
+                    },
                 },
             });
             let lines = tool_approval_lines(&tool.intent).join("\n");

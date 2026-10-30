@@ -705,6 +705,7 @@ pub(crate) fn host_protocol_fixture() -> Fixture {
     intent.host = Some(crate::HostIntent {
         source_oid: "1".repeat(40),
         refspec: format!("{}:refs/heads/main", "1".repeat(40)),
+        destination: "https://github.com/example/project.git".into(),
     });
     intent.limits.network = crate::NetworkGrant::Host;
     f.started(&intent);

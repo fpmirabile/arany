@@ -1603,7 +1603,15 @@ impl ToolRuntime {
             ToolLimits::default()
         };
         EffectIntent {
-            host: git::host::pin(&self.workspace, &call).ok(),
+            host: git::host::pin(
+                &self.workspace,
+                &call,
+                self.config
+                    .git
+                    .as_ref()
+                    .zip(self.git_environment.as_deref()),
+            )
+            .ok(),
             wrap: None,
             rewrite: Vec::new(),
             host_command: match &call {

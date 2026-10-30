@@ -118,7 +118,14 @@ impl Environment {
 
     // A host process with the user's home, configuration and agent that never prompts.
     pub(super) fn command(&self, executable: &Path) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(executable);
+        let mut command = tokio::process::Command::from(self.std_command(executable));
+        command.kill_on_drop(true);
+        command
+    }
+
+    fn std_command(&self, executable: &Path) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(executable);
         command
             .env_clear()
             .envs(self.variables.iter().map(|(name, value)| (name, value)))
@@ -129,8 +136,7 @@ impl Environment {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_PAGER", "cat")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
-            .process_group(0)
-            .kill_on_drop(true);
+            .process_group(0);
         command
     }
 }
@@ -286,9 +292,15 @@ impl<'a> Git<'a> {
 
     // Only a push reaches the network; every other invocation refuses transports and lazy fetches.
     pub(super) fn command(&self, argv: &[String], network: bool) -> tokio::process::Command {
+        let mut command = tokio::process::Command::from(self.std_command(argv, network));
+        command.kill_on_drop(true);
+        command
+    }
+
+    fn std_command(&self, argv: &[String], network: bool) -> std::process::Command {
         let mut command = self
             .environment
-            .command(Path::new(&self.program.executable));
+            .std_command(Path::new(&self.program.executable));
         let hooks = self.hooks.as_deref().unwrap_or(Path::new(NO_HOOKS));
         let mut setting = OsString::from("core.hooksPath=");
         setting.push(hooks);
@@ -437,24 +449,69 @@ impl<'a> Git<'a> {
         None
     }
 
-    // A configured `insteadOf` or `pushInsteadOf` would send an approved push somewhere else.
-    pub(super) async fn rewrites(
+    // The URL Git pushes to for `url`, after the user's `insteadOf` and `pushInsteadOf` rewrites.
+    pub(super) async fn push_destination(
         &self,
         url: &str,
         deadline: tokio::time::Instant,
-    ) -> Result<bool, ToolError> {
-        let argv = ["config", "--get-regexp", r"^url\..*\.(push)?insteadof$"].map(String::from);
-        let captured = self.run(&argv, Io::default(), deadline).await?;
-        if captured.overflow || !matches!(captured.status, Some(0 | 1)) {
-            return Err(ToolError::Configuration);
+    ) -> Result<String, ToolError> {
+        let listing = self
+            .run(&push_rewrites_argv(), Io::default(), deadline)
+            .await?;
+        if let Some(pushed) = push_rewrite(&listing.stdout, listing.status, url)? {
+            return Ok(pushed);
         }
-        Ok(String::from_utf8_lossy(&captured.stdout)
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .any(|(_, prefix)| !prefix.is_empty() && url.starts_with(prefix)))
+        let fetched = self
+            .run(&get_url_argv(url), Io::default(), deadline)
+            .await?;
+        destination(&fetched.stdout, fetched.status, fetched.overflow)
     }
 
-    // ponytail: shell words are split on separators only; `$VAR` paths and bare programs reading folder files are not caught.
+    // The same resolution for intent construction, which is synchronous.
+    pub(super) fn push_destination_blocking(&self, url: &str) -> Result<String, ToolError> {
+        let (status, stdout, _) = self.output_blocking(&push_rewrites_argv())?;
+        if let Some(pushed) = push_rewrite(&stdout, status, url)? {
+            return Ok(pushed);
+        }
+        let (status, stdout, overflow) = self.output_blocking(&get_url_argv(url))?;
+        destination(&stdout, status, overflow)
+    }
+
+    // A short read-only Git query outside async code, killed by a watchdog at the config deadline.
+    fn output_blocking(&self, argv: &[String]) -> Result<(Option<i32>, Vec<u8>, bool), ToolError> {
+        use std::process::Stdio;
+        verify(self.program)?;
+        let mut child = self
+            .std_command(argv, false)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| ToolError::Operation)?;
+        let mut stdout = child.stdout.take().ok_or(ToolError::Operation)?;
+        let (done, finished) = std::sync::mpsc::channel();
+        let pid = child.id();
+        std::thread::spawn(move || {
+            if finished.recv_timeout(CONFIG_ADMISSION_TIME).is_err()
+                && let Some(pid) = i32::try_from(pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+            {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        });
+        let mut bytes = Vec::new();
+        let read = (&mut stdout)
+            .take(DESTINATION_BYTES as u64 + 1)
+            .read_to_end(&mut bytes);
+        let status = child.wait().map_err(|_| ToolError::Operation)?;
+        let _ = done.send(());
+        read.map_err(|_| ToolError::Operation)?;
+        let overflow = bytes.len() > DESTINATION_BYTES;
+        Ok((status.code(), bytes, overflow))
+    }
+
+    // Only path-shaped words are checked: a `$VAR` path or a system program that reads a folder file is not caught.
     fn names_writable(&self, value: &str) -> bool {
         value
             .trim_start_matches('!')
@@ -470,6 +527,50 @@ impl<'a> Git<'a> {
                 self.environment.writable(&canonical(&path))
             })
     }
+}
+
+const DESTINATION_BYTES: usize = 64 * 1024;
+
+fn push_rewrites_argv() -> Vec<String> {
+    ["config", "--get-regexp", r"^url\..*\.pushinsteadof$"]
+        .map(String::from)
+        .to_vec()
+}
+
+fn get_url_argv(url: &str) -> Vec<String> {
+    ["ls-remote", "--get-url", url].map(String::from).to_vec()
+}
+
+// Git pushes to the longest matching `pushInsteadOf` rewrite; without one, `insteadOf` applies.
+fn push_rewrite(
+    listing: &[u8],
+    status: Option<i32>,
+    url: &str,
+) -> Result<Option<String>, ToolError> {
+    match status {
+        Some(0) => {}
+        Some(1) => return Ok(None),
+        _ => return Err(ToolError::Configuration),
+    }
+    let text = std::str::from_utf8(listing).map_err(|_| ToolError::Path)?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let (key, prefix) = line.split_once(' ')?;
+            let base = key.strip_prefix("url.")?.strip_suffix(".pushinsteadof")?;
+            url.starts_with(prefix).then_some((prefix.len(), base))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(length, base)| format!("{base}{}", &url[length..])))
+}
+
+fn destination(stdout: &[u8], status: Option<i32>, overflow: bool) -> Result<String, ToolError> {
+    let text = std::str::from_utf8(stdout).map_err(|_| ToolError::Path)?;
+    let url = text.strip_suffix('\n').unwrap_or(text);
+    if overflow || status != Some(0) || url.is_empty() || url.chars().any(char::is_control) {
+        return Err(ToolError::Configuration);
+    }
+    Ok(url.to_owned())
 }
 
 // Lock files an interrupted Git left behind, for the user to remove; never deleted here.

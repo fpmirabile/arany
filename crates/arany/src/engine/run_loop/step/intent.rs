@@ -90,7 +90,8 @@ impl RunLoop<'_> {
         let timeout_limit = self.ledger().command_timeout_limit(&call)?;
         let (resource_class, requested_runtime_ms, resource_settings) =
             self.ledger().requested_command_resources(&call)?;
-        let mut intent = if call.is_unguarded() {
+        // Unguarded and host pins run blocking checks, such as Git resolving a push URL.
+        let mut intent = if call.is_unguarded() || call.is_host() {
             let runtime = runtime.clone();
             let run = self.run_id;
             tokio::task::spawn_blocking(move || runtime.intent(run, actor, call))

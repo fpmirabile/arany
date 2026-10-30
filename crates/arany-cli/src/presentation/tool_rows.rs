@@ -422,6 +422,10 @@ pub fn unguarded_approval_lines(
 pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
     let mut lines = approval_header(intent);
     lines.extend(approval_call_lines(&intent.call));
+    // Git pushes to the URL the user's insteadOf/pushInsteadOf rewrites produce, pinned at proposal.
+    if let (arany::ToolCall::GitPush { .. }, Some(host)) = (&intent.call, &intent.host) {
+        lines.push(format!("Pushes to: {}", escape_terminal(&host.destination)));
+    }
     lines.extend(approval_footer(intent));
     lines
 }

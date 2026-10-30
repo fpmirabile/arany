@@ -915,6 +915,8 @@ pub struct EffectIntent {
 pub struct HostIntent {
     pub source_oid: String,
     pub refspec: String,
+    // A push's effective URL after the user's `insteadOf`/`pushInsteadOf`; empty for other host calls.
+    pub destination: String,
 }
 
 impl EffectIntent {

@@ -1023,6 +1023,11 @@ fn host_git_reducer_requires_human_verdict_host_receipt_and_stops_unknown_remote
         intent.host = Some(crate::tools::types::HostIntent {
             source_oid: "1".repeat(40),
             refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            destination: if matches!(intent.call, ToolCall::GitPush { .. }) {
+                "https://github.com/example/project.git".into()
+            } else {
+                String::new()
+            },
         });
         intent.limits.network = crate::tools::types::NetworkGrant::Host;
         apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1133,6 +1138,7 @@ fn host_pr_list_accepts_only_a_pinned_typed_rule_or_human_verdict() {
     intent.host = Some(crate::tools::types::HostIntent {
         source_oid: "gh-pr-list-v1".into(),
         refspec: "fixed-list".into(),
+        destination: String::new(),
     });
     intent.limits.network = crate::tools::types::NetworkGrant::Host;
     apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1237,6 +1243,7 @@ fn pending_host_pr_view() -> (SessionView, RunId, AgentRunId, crate::tools::Effe
     intent.host = Some(crate::tools::types::HostIntent {
         source_oid: "gh-pr-view-v1".into(),
         refspec: "fixed-view-v1".into(),
+        destination: String::new(),
     });
     intent.limits.network = crate::tools::types::NetworkGrant::Host;
     apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1406,6 +1413,7 @@ fn host_pr_list_accepts_a_human_plan_verdict_through_tool_completion() {
     intent.host = Some(crate::tools::types::HostIntent {
         source_oid: "gh-pr-list-v1".into(),
         refspec: "fixed-list".into(),
+        destination: String::new(),
     });
     intent.limits.network = crate::tools::types::NetworkGrant::Host;
     apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1469,6 +1477,7 @@ fn narrowed_host_pr_list_result_replays_within_its_pinned_budget() {
                 intent.host = Some(crate::tools::types::HostIntent {
                     source_oid: "gh-pr-list-v1".into(),
                     refspec: "fixed-list".into(),
+                    destination: String::new(),
                 });
                 intent.limits.network = crate::tools::types::NetworkGrant::Host;
                 intent.limits.result_bytes = budget;
@@ -1579,6 +1588,7 @@ fn minimum_budget_host_pr_list_preparation_refusal_finishes_and_replays() {
                 intent.host = Some(crate::tools::types::HostIntent {
                     source_oid: "gh-pr-list-v1".into(),
                     refspec: "fixed-list".into(),
+                    destination: String::new(),
                 });
                 intent.limits.network = crate::tools::types::NetworkGrant::Host;
                 intent.limits.result_bytes = budget;

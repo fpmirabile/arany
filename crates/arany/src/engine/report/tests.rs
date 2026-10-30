@@ -1430,6 +1430,11 @@ fn host_git_goal_evidence_names_the_separate_host_class() {
         intent.host = Some(crate::HostIntent {
             source_oid: "1".repeat(40),
             refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            destination: if matches!(call, ToolCall::GitPush { .. }) {
+                "https://github.com/example/project.git".into()
+            } else {
+                String::new()
+            },
         });
         let receipt = Attestation::for_site(&intent);
         let evidence =

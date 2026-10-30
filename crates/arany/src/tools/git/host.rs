@@ -48,7 +48,9 @@ const PR_VIEW_QUERY_BYTES: usize = 8 * 1024;
 const MAX_PR_NUMBER: u32 = i32::MAX as u32;
 const MAX_PR_REPOSITORY_BYTES: usize = 256;
 const MAX_PACKED_REFS_BYTES: usize = 32 * 1024 * 1024;
-const REWRITTEN: &str = "host: Git configuration rewrites this push URL (insteadOf or pushInsteadOf), so it differs from the approved destination; nothing dispatched.";
+const MOVED: &str =
+    "host: the branch source or the push destination changed since approval; nothing dispatched.";
+const MAX_DESTINATION_BYTES: usize = 4096;
 const PREPARATION_LIMIT: &str = "host: PR query over its 8 KiB bound; nothing dispatched.";
 
 #[derive(Clone, Copy)]
@@ -278,14 +280,26 @@ pub(crate) fn valid_pin(call: &ToolCall, pin: &HostIntent) -> bool {
         ToolCall::GitPush { branch, .. } => branch,
         ToolCall::GhPrCreate { head, .. } => head,
         ToolCall::GhPrList { .. } => {
-            return pin.source_oid == "gh-pr-list-v1" && pin.refspec == "fixed-list";
+            return pin.source_oid == "gh-pr-list-v1"
+                && pin.refspec == "fixed-list"
+                && pin.destination.is_empty();
         }
         ToolCall::GhPrView { .. } => {
-            return pin.source_oid == "gh-pr-view-v1" && pin.refspec == "fixed-view-v1";
+            return pin.source_oid == "gh-pr-view-v1"
+                && pin.refspec == "fixed-view-v1"
+                && pin.destination.is_empty();
         }
         _ => return false,
     };
-    pin.source_oid.len() == 40
+    let destination = if matches!(call, ToolCall::GitPush { .. }) {
+        !pin.destination.is_empty()
+            && pin.destination.len() <= MAX_DESTINATION_BYTES
+            && !pin.destination.chars().any(char::is_control)
+    } else {
+        pin.destination.is_empty()
+    };
+    destination
+        && pin.source_oid.len() == 40
         && pin
             .source_oid
             .bytes()
@@ -293,7 +307,13 @@ pub(crate) fn valid_pin(call: &ToolCall, pin: &HostIntent) -> bool {
         && pin.refspec == format!("{}:refs/heads/{branch}", pin.source_oid)
 }
 
-pub(crate) fn pin(workspace: &Path, call: &ToolCall) -> Result<HostIntent, ToolError> {
+// A push pins its source commit and the URL Git will push to after the user's rewrites, so the
+// approval shows the real destination; `git` is the Run's pinned Git and environment.
+pub(crate) fn pin(
+    workspace: &Path,
+    call: &ToolCall,
+    git: Option<(&crate::tools::config::Program, &Environment)>,
+) -> Result<HostIntent, ToolError> {
     if !valid(call) {
         return Err(ToolError::Configuration);
     }
@@ -311,9 +331,15 @@ pub(crate) fn pin(workspace: &Path, call: &ToolCall) -> Result<HostIntent, ToolE
                 "fixed-view-v1"
             }
             .into(),
+            destination: String::new(),
         });
     }
-    pin_from_git(&git_directory(workspace)?, call)
+    let mut pin = pin_from_git(&git_directory(workspace)?, call)?;
+    if let ToolCall::GitPush { remote, .. } = call {
+        let (program, environment) = git.ok_or(ToolError::Configuration)?;
+        pin.destination = Git::workspace(program, environment).push_destination_blocking(remote)?;
+    }
+    valid_pin(call, &pin).then_some(pin).ok_or(ToolError::Path)
 }
 
 fn pin_from_git(git: &Dir, call: &ToolCall) -> Result<HostIntent, ToolError> {
@@ -345,11 +371,11 @@ fn pin_from_git(git: &Dir, call: &ToolCall) -> Result<HostIntent, ToolError> {
                 .ok_or(ToolError::Path)?
         }
     };
-    let pin = HostIntent {
+    Ok(HostIntent {
         refspec: format!("{oid}:{name}"),
         source_oid: oid,
-    };
-    valid_pin(call, &pin).then_some(pin).ok_or(ToolError::Path)
+        destination: String::new(),
+    })
 }
 
 fn read_ref(git: &Dir, name: &str) -> Result<Option<Vec<u8>>, ToolError> {
@@ -399,13 +425,17 @@ async fn prepare_push(
     if let Some(refusal) = git.admit(deadline).await.map_err(|_| REFUSED)? {
         return Err(format!("host: {refusal}"));
     }
-    if git.rewrites(remote, deadline).await.map_err(|_| REFUSED)? {
-        return Err(REWRITTEN.into());
-    }
-    if Some(&pin(environment.workspace(), &intent.call).map_err(|_| REFUSED)?)
-        != intent.host.as_ref()
-    {
-        return Err(REFUSED.into());
+    let mut current = pin_from_git(
+        &git_directory(environment.workspace()).map_err(|_| REFUSED)?,
+        &intent.call,
+    )
+    .map_err(|_| REFUSED)?;
+    current.destination = git
+        .push_destination(remote, deadline)
+        .await
+        .map_err(|_| REFUSED)?;
+    if Some(&current) != intent.host.as_ref() {
+        return Err(MOVED.into());
     }
     super::runner::verify(program).map_err(|_| REFUSED)?;
     let refspec = &intent.host.as_ref().ok_or(REFUSED)?.refspec;
@@ -2076,9 +2106,17 @@ mod tests {
         );
     }
 
+    fn test_pin(workspace: &Path, call: &ToolCall) -> HostIntent {
+        let program = super::super::tests::git_program();
+        let home = workspace.parent().unwrap().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let environment = super::super::tests::environment(workspace, &home.join("editors"), &home);
+        pin(workspace, call, Some((&program, &environment))).unwrap()
+    }
+
     fn intent(workspace: &Path, call: ToolCall) -> EffectIntent {
         EffectIntent {
-            host: Some(pin(workspace, &call).unwrap()),
+            host: Some(test_pin(workspace, &call)),
             wrap: None,
             rewrite: Vec::new(),
             host_command: None,
@@ -2311,7 +2349,7 @@ mod tests {
                 .to_string()
                 .contains("credential-canary")
         );
-        assert_eq!(pin(&workspace, &push()).unwrap(), intent.host.unwrap());
+        assert_eq!(test_pin(&workspace, &push()), intent.host.unwrap());
         host_git(
             &workspace,
             &home,
@@ -2772,6 +2810,7 @@ mod tests {
                 host: Some(HostIntent {
                     source_oid: "1".repeat(40),
                     refspec: format!("{}:refs/heads/main", "1".repeat(40)),
+                    destination: "https://github.com/example/project.git".into(),
                 }),
                 wrap: None,
                 rewrite: Vec::new(),
