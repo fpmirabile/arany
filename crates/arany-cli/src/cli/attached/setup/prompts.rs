@@ -307,36 +307,36 @@ pub(in super::super) async fn choose_focused(
             return Ok(None);
         }
     }
-    choose_display(terminal, step, title, instruction, choices, current).await
-}
-
-async fn choose_display(
-    terminal: &mut AttachedTerminal,
-    step: u8,
-    title: &str,
-    instruction: &str,
-    choices: &[(u8, &str)],
-    current: Option<u8>,
-) -> Result<Option<u8>, SetupError> {
-    let selected = choices
-        .iter()
-        .position(|(value, _)| Some(*value) == current)
-        .unwrap_or(0);
+    let prompt = SetupChoices {
+        step,
+        title,
+        instruction,
+        choices,
+        selected: choices
+            .iter()
+            .position(|(value, _)| Some(*value) == current)
+            .unwrap_or(0),
+        notice: None,
+    };
     if terminal.is_linear() {
-        choose_linear(terminal, step, title, instruction, choices, selected).await
+        choose_linear(terminal, prompt).await
     } else {
-        choose_inline(terminal, step, title, instruction, choices, selected).await
+        choose_inline(terminal, prompt).await
     }
 }
 
 async fn choose_linear(
     terminal: &mut AttachedTerminal,
-    step: u8,
-    title: &str,
-    instruction: &str,
-    choices: &[(u8, &str)],
-    mut selected: usize,
+    prompt: SetupChoices<'_>,
 ) -> Result<Option<u8>, SetupError> {
+    let SetupChoices {
+        step,
+        title,
+        instruction,
+        choices,
+        mut selected,
+        ..
+    } = prompt;
     let linear_choices = linear_rendered_choices(choices);
     let linear_rendered = linear_choices
         .iter()
@@ -440,12 +440,16 @@ fn linear_choice_value(input: &str, choices: &[(u8, &str)]) -> Option<u8> {
 
 async fn choose_inline(
     terminal: &mut AttachedTerminal,
-    step: u8,
-    title: &str,
-    instruction: &str,
-    choices: &[(u8, &str)],
-    mut selected: usize,
+    prompt: SetupChoices<'_>,
 ) -> Result<Option<u8>, SetupError> {
+    let SetupChoices {
+        step,
+        title,
+        instruction,
+        choices,
+        mut selected,
+        ..
+    } = prompt;
     let mut notice = None::<&str>;
     loop {
         terminal.draw_setup_choices(SetupChoices {

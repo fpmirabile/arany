@@ -244,22 +244,7 @@ pub(super) async fn admit_history(
         let reason = if uncertain {
             "Reset may be incomplete; check storage access and retry."
         } else {
-            match reset.as_ref().err().unwrap_or(&error).history_recovery() {
-                HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
-                HistoryRecovery::Damaged => "Saved history is damaged.",
-                HistoryRecovery::ArchiveConflict => {
-                    "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
-                }
-                HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
-                HistoryRecovery::Changed => "History changed during recovery; retry.",
-                HistoryRecovery::StorageFull => "Storage is full; free space and retry.",
-                HistoryRecovery::Inaccessible | HistoryRecovery::InvalidStateDirectory => {
-                    "History files are unsafe or inaccessible; check permissions and retry."
-                }
-                HistoryRecovery::Unavailable => {
-                    "History cannot be opened; check storage access and retry."
-                }
-            }
+            recovery_reason(reset.as_ref().err().unwrap_or(&error).history_recovery())
         };
         let reset = reset.ok().flatten();
         let instruction = if reset.is_some() {
@@ -289,6 +274,23 @@ pub(super) async fn admit_history(
             }
             _ => return Ok(HistoryAdmission::Exit),
         }
+    }
+}
+
+fn recovery_reason(recovery: HistoryRecovery) -> &'static str {
+    match recovery {
+        HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
+        HistoryRecovery::Damaged => "Saved history is damaged.",
+        HistoryRecovery::ArchiveConflict => {
+            "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
+        }
+        HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
+        HistoryRecovery::Changed => "History changed during recovery; retry.",
+        HistoryRecovery::StorageFull => "Storage is full; free space and retry.",
+        HistoryRecovery::Inaccessible | HistoryRecovery::InvalidStateDirectory => {
+            "History files are unsafe or inaccessible; check permissions and retry."
+        }
+        HistoryRecovery::Unavailable => "History cannot be opened; check storage access and retry.",
     }
 }
 

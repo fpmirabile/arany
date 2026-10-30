@@ -298,17 +298,7 @@ impl AttachedSession {
                     .into(),
                 ));
             } else {
-                self.ui.notice = Some(Feedback::History(
-                    rewind::open(
-                        &self.engine,
-                        &mut self.terminal,
-                        &self.admission,
-                        &mut self.session_id,
-                        &mut self.view,
-                        &mut self.composer,
-                    )
-                    .await?,
-                ));
+                self.rewind().await?;
             }
         } else {
             self.ui.idle_escape = Some(Instant::now());
@@ -647,34 +637,14 @@ impl AttachedSession {
             InteractiveCommand::Settings => self.settings(controls::Panel::Settings).await?,
             InteractiveCommand::Limits => self.settings(controls::Panel::Limits).await?,
             InteractiveCommand::Permissions => return self.permissions().await,
-            InteractiveCommand::Setup => {
-                self.ui.notice = Some(
-                    configure_account(
-                        &mut self.terminal,
-                        &mut self.admission,
-                        &mut self.session_id,
-                        &mut self.view,
-                        &mut self.composer,
-                    )
-                    .await?,
-                );
-            }
+            InteractiveCommand::Setup => self.setup().await?,
             InteractiveCommand::Usage | InteractiveCommand::Status => {
                 self.terminal
                     .open_usage(&self.view, command == InteractiveCommand::Status, None)
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            InteractiveCommand::Storage => {
-                crate::cli::storage::attached(
-                    &mut self.terminal,
-                    (&self.admission.workspace, self.admission.workspace_identity),
-                    self.admission.state_dir.clone(),
-                    &self.view,
-                    &mut self.composer,
-                )
-                .await?;
-            }
+            InteractiveCommand::Storage => self.storage().await?,
             InteractiveCommand::Help => {
                 self.terminal
                     .open_help(&self.view)
@@ -712,6 +682,31 @@ impl AttachedSession {
         Ok(IdleAction::Continue)
     }
 
+    async fn setup(&mut self) -> Result<(), String> {
+        self.ui.notice = Some(
+            configure_account(
+                &mut self.terminal,
+                &mut self.admission,
+                &mut self.session_id,
+                &mut self.view,
+                &mut self.composer,
+            )
+            .await?,
+        );
+        Ok(())
+    }
+
+    async fn storage(&mut self) -> Result<(), String> {
+        crate::cli::storage::attached(
+            &mut self.terminal,
+            (&self.admission.workspace, self.admission.workspace_identity),
+            self.admission.state_dir.clone(),
+            &self.view,
+            &mut self.composer,
+        )
+        .await
+    }
+
     async fn settings(&mut self, panel: controls::Panel) -> Result<(), String> {
         self.ui.notice = Some(Feedback::History(
             controls::settings(
@@ -733,11 +728,13 @@ impl AttachedSession {
         self.ui.notice = Some(Feedback::History(
             rewind::open(
                 &self.engine,
-                &mut self.terminal,
                 &self.admission,
                 &mut self.session_id,
-                &mut self.view,
-                &mut self.composer,
+                super::run::RunUi {
+                    terminal: &mut self.terminal,
+                    view: &mut self.view,
+                    composer: &mut self.composer,
+                },
             )
             .await?,
         ));
@@ -865,50 +862,32 @@ impl AttachedSession {
         self.engine
             .revoke_host_approvals()
             .map_err(|error| error.to_string())?;
-        match permissions::choose_area(&mut self.terminal).await? {
-            None => {
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History("Permissions unchanged".into()));
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::TypedGitRules) => {
-                let summary = permissions::manage_rules(
+        // Rule edits that change what host commands may do readmit host permissions.
+        let (summary, readmit) = match permissions::choose_area(&mut self.terminal).await? {
+            None => ("Permissions unchanged".into(), false),
+            Some(permissions::PermissionArea::FolderTrust) => return self.folder_trust().await,
+            Some(permissions::PermissionArea::TypedGitRules) => (
+                permissions::manage_rules(
                     &mut self.terminal,
                     &self.admission.state_dir,
                     &self.admission.workspace,
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::HostRules) => {
-                let summary = permissions::manage_host_rules(
-                    &mut self.terminal,
-                    &self.admission.state_dir,
-                    &self.admission.workspace,
-                    &self.view,
-                )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                match summary {
-                    permissions::HostRuleEditOutcome::Confirmed(summary) => {
-                        self.ui.notice = Some(Feedback::History(summary));
-                        readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                    }
-                    permissions::HostRuleEditOutcome::Uncertain => self.ui.notice = Some(Feedback::History("Host rule save is uncertain; reopen /permissions to verify. Nothing dispatched.".into())),
-                }
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::CommandEnvironment) => {
-                let outcome = permissions::manage_command_environment(
+                .await?,
+                true,
+            ),
+            Some(permissions::PermissionArea::HostRules) => match permissions::manage_host_rules(
+                &mut self.terminal,
+                &self.admission.state_dir,
+                &self.admission.workspace,
+                &self.view,
+            )
+            .await?
+            {
+                permissions::HostRuleEditOutcome::Confirmed(summary) => (summary, true),
+                permissions::HostRuleEditOutcome::Uncertain => ("Host rule save is uncertain; reopen /permissions to verify. Nothing dispatched.".into(), false),
+            },
+            Some(permissions::PermissionArea::CommandEnvironment) => (
+                permissions::manage_command_environment(
                     &mut self.terminal,
                     permissions::EnvironmentSession {
                         engine: &self.engine,
@@ -917,64 +896,60 @@ impl AttachedSession {
                         view: &mut self.view,
                     },
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(outcome.summary()));
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::CommandTools) => {
-                let summary = permissions::manage_command_tools(
+                .await?
+                .summary(),
+                false,
+            ),
+            Some(permissions::PermissionArea::CommandTools) => (
+                permissions::manage_command_tools(
                     &mut self.terminal,
                     &self.engine,
                     &self.admission,
                     &mut self.session_id,
                     &mut self.view,
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::NetworkDomains) => {
-                let summary = permissions::manage_network_rules(
+                .await?,
+                false,
+            ),
+            Some(permissions::PermissionArea::NetworkDomains) => (
+                permissions::manage_network_rules(
                     &mut self.terminal,
                     &self.admission.state_dir,
                     &self.admission.workspace,
                     &self.view,
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                return Ok(IdleAction::Handled);
-            }
+                .await?,
+                true,
+            ),
             Some(permissions::PermissionArea::GitHooks) => {
-                let summary = match self.admission.workspace_permissions.as_mut() {
-                    Some(access) => permissions::ask_git_hooks(
-                        &mut self.terminal,
-                        access,
-                        &self.admission.state_dir,
-                        true,
-                    )
-                    .await?
-                    .unwrap_or_else(|| "Git hooks unchanged".into()),
-                    None => "Trust this folder before choosing its Git hooks".into(),
-                };
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                return Ok(IdleAction::Handled);
+                (self.git_hooks().await?, false)
             }
-            Some(permissions::PermissionArea::FolderTrust) => {}
+        };
+        self.terminal
+            .restore_draft_input(self.composer.input_capacity())
+            .map_err(|error| error.to_string())?;
+        self.ui.notice = Some(Feedback::History(summary));
+        if readmit {
+            readmit_host_permissions(&self.engine, &mut self.ui.notice);
         }
+        Ok(IdleAction::Handled)
+    }
 
+    async fn git_hooks(&mut self) -> Result<String, String> {
+        Ok(match self.admission.workspace_permissions.as_mut() {
+            Some(access) => permissions::ask_git_hooks(
+                &mut self.terminal,
+                access,
+                &self.admission.state_dir,
+                true,
+            )
+            .await?
+            .unwrap_or_else(|| "Git hooks unchanged".into()),
+            None => "Trust this folder before choosing its Git hooks".into(),
+        })
+    }
+
+    async fn folder_trust(&mut self) -> Result<IdleAction, String> {
         let access = match self.choose_folder_permissions().await? {
             FolderPermissions::Selected(access) => access,
             FolderPermissions::Handled => return Ok(IdleAction::Handled),

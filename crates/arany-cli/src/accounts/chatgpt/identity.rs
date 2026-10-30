@@ -4,9 +4,15 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer};
 
 pub(super) const ISSUER: &str = "https://auth.openai.com";
-const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_KEYS: usize = 16;
 const CLOCK_SKEW_SECONDS: u64 = 5;
+const MAX_HEADER_BYTES: usize = 1024;
+const MAX_KEY_ID_BYTES: usize = 128;
+const MAX_CLAIMS_BYTES: usize = 8 * 1024;
+// RS256 keys of 2048 to 8192 bits; a signature is as long as its modulus.
+const MIN_MODULUS_BYTES: usize = 2048 / 8;
+const MAX_MODULUS_BYTES: usize = 8192 / 8;
+const MAX_EXPONENT_BYTES: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum IdentityFailure {
@@ -106,9 +112,22 @@ pub(super) fn verify(
     nonce: &str,
     now_seconds: u64,
 ) -> Result<VerifiedIdentity, AuthorizationError> {
+    let (header_segment, payload_segment, signature_segment) = split_token(id_token)?;
+    let header = checked_header(header_segment)?;
+    let signed_length = header_segment.len() + 1 + payload_segment.len();
+    check_signature(
+        &id_token.as_bytes()[..signed_length],
+        signature_segment,
+        jwks,
+        &header.kid,
+    )?;
+    checked_claims(payload_segment, client_id, nonce, now_seconds)
+}
+
+fn split_token(id_token: &str) -> Result<(&str, &str, &str), AuthorizationError> {
     let invalid = || AuthorizationError::IdentityRejected(IdentityFailure::TokenFormat);
     if id_token.is_empty()
-        || id_token.len() > MAX_ID_TOKEN_BYTES
+        || id_token.len() > super::MAX_ID_TOKEN_BYTES
         || !id_token.bytes().all(|byte| byte.is_ascii_graphic())
     {
         return Err(invalid());
@@ -120,8 +139,12 @@ pub(super) fn verify(
     if segments.next().is_some() {
         return Err(invalid());
     }
+    Ok((header_segment, payload_segment, signature_segment))
+}
+
+fn checked_header(segment: &str) -> Result<Header, AuthorizationError> {
     let header_error = || AuthorizationError::IdentityRejected(IdentityFailure::HeaderFormat);
-    let header_bytes = decode_segment(header_segment, 1024).map_err(|_| header_error())?;
+    let header_bytes = decode_segment(segment, MAX_HEADER_BYTES).map_err(|_| header_error())?;
     let header: Header = serde_json::from_slice(&header_bytes).map_err(|_| header_error())?;
     if header.alg != "RS256" {
         return Err(AuthorizationError::IdentityRejected(
@@ -129,7 +152,7 @@ pub(super) fn verify(
         ));
     }
     if header.kid.is_empty()
-        || header.kid.len() > 128
+        || header.kid.len() > MAX_KEY_ID_BYTES
         || !header.kid.bytes().all(|byte| byte.is_ascii_graphic())
         || header.typ.as_deref().is_some_and(|kind| kind != "JWT")
         || header.crit.is_some()
@@ -137,12 +160,22 @@ pub(super) fn verify(
     {
         return Err(header_error());
     }
+    Ok(header)
+}
+
+// Exactly one RS256 signing key in the set carries the header's key id.
+fn check_signature(
+    signed: &[u8],
+    signature_segment: &str,
+    jwks: &[u8],
+    kid: &str,
+) -> Result<(), AuthorizationError> {
     let keys: Jwks = serde_json::from_slice(jwks)
         .map_err(|_| AuthorizationError::IdentityRejected(IdentityFailure::KeySet))?;
     let mut matches = keys
         .keys
         .iter()
-        .filter(|key| key.kid.as_deref() == Some(header.kid.as_str()));
+        .filter(|key| key.kid.as_deref() == Some(kid));
     let key = matches
         .next()
         .ok_or(AuthorizationError::IdentityRejected(IdentityFailure::KeyId))?;
@@ -159,12 +192,12 @@ pub(super) fn verify(
     {
         return Err(key_error());
     }
-    let modulus =
-        decode_segment(key.n.as_deref().ok_or_else(key_error)?, 1024).map_err(|_| key_error())?;
-    let exponent =
-        decode_segment(key.e.as_deref().ok_or_else(key_error)?, 8).map_err(|_| key_error())?;
-    let signature = decode_segment(signature_segment, 1024)?;
-    if !(256..=1024).contains(&modulus.len())
+    let modulus = decode_segment(key.n.as_deref().ok_or_else(key_error)?, MAX_MODULUS_BYTES)
+        .map_err(|_| key_error())?;
+    let exponent = decode_segment(key.e.as_deref().ok_or_else(key_error)?, MAX_EXPONENT_BYTES)
+        .map_err(|_| key_error())?;
+    let signature = decode_segment(signature_segment, MAX_MODULUS_BYTES)?;
+    if !(MIN_MODULUS_BYTES..=MAX_MODULUS_BYTES).contains(&modulus.len())
         || modulus[0] == 0
         || exponent.is_empty()
         || exponent[0] == 0
@@ -172,20 +205,23 @@ pub(super) fn verify(
     {
         return Err(key_error());
     }
-    let signed_length = header_segment.len() + 1 + payload_segment.len();
     RsaPublicKeyComponents {
         n: &modulus,
         e: &exponent,
     }
-    .verify(
-        &RSA_PKCS1_2048_8192_SHA256,
-        &id_token.as_bytes()[..signed_length],
-        &signature,
-    )
-    .map_err(|_| AuthorizationError::IdentityRejected(IdentityFailure::Signature))?;
+    .verify(&RSA_PKCS1_2048_8192_SHA256, signed, &signature)
+    .map_err(|_| AuthorizationError::IdentityRejected(IdentityFailure::Signature))
+}
 
+fn checked_claims(
+    payload_segment: &str,
+    client_id: &str,
+    nonce: &str,
+    now_seconds: u64,
+) -> Result<VerifiedIdentity, AuthorizationError> {
     let claims_error = || AuthorizationError::IdentityRejected(IdentityFailure::ClaimsFormat);
-    let claims_bytes = decode_segment(payload_segment, 8192).map_err(|_| claims_error())?;
+    let claims_bytes =
+        decode_segment(payload_segment, MAX_CLAIMS_BYTES).map_err(|_| claims_error())?;
     let claims: Claims = serde_json::from_slice(&claims_bytes).map_err(|_| claims_error())?;
     if claims.iss != ISSUER {
         return Err(AuthorizationError::IdentityRejected(
@@ -210,7 +246,7 @@ pub(super) fn verify(
         return Err(AuthorizationError::IdentityRejected(IdentityFailure::Nonce));
     }
     if claims.sub.is_empty()
-        || claims.sub.len() > 512
+        || claims.sub.len() > super::MAX_SUBJECT_BYTES
         || !claims.sub.bytes().all(|byte| byte.is_ascii_graphic())
     {
         return Err(AuthorizationError::IdentityRejected(

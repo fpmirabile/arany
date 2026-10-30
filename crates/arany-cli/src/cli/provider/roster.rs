@@ -315,33 +315,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
     {
         return Err(INVALID.into());
     }
-    let mut names = BTreeSet::new();
-    for profile in &mut config.profiles {
-        if !valid_profile_name(&profile.name)
-            || !names.insert(profile.name.clone())
-            || profile.routes.is_empty()
-            || profile.routes.len() > arany::MAX_PROVIDER_FALLBACKS + 1
-        {
-            return Err(INVALID.into());
-        }
-        for index in 0..profile.routes.len() {
-            let route = &mut profile.routes[index];
-            route.validate().map_err(|_| INVALID)?;
-            if route.provider.kind().is_native_api() {
-                route.effort = Some(
-                    arany::resolve_native_effort_for_run(
-                        &route.provider.profile(),
-                        &route.model,
-                        route.effort,
-                    )
-                    .map_err(|_| INVALID)?,
-                );
-            }
-            if profile.routes[..index].contains(&profile.routes[index]) {
-                return Err(INVALID.into());
-            }
-        }
-    }
+    let names = validate_profiles(&mut config.profiles)?;
     let mut preset_names = BTreeSet::new();
     let mut result = Vec::with_capacity(config.presets.len());
     for preset in config.presets {
@@ -393,6 +367,39 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         });
     }
     Ok(result)
+}
+
+// Profile names are unique, and each route chain is bounded, valid and free of repeats; a native
+// route pins its resolved effort.
+fn validate_profiles(profiles: &mut [Profile]) -> Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for profile in profiles {
+        if !valid_profile_name(&profile.name)
+            || !names.insert(profile.name.clone())
+            || profile.routes.is_empty()
+            || profile.routes.len() > arany::MAX_PROVIDER_FALLBACKS + 1
+        {
+            return Err(INVALID.into());
+        }
+        for index in 0..profile.routes.len() {
+            let route = &mut profile.routes[index];
+            route.validate().map_err(|_| INVALID)?;
+            if route.provider.kind().is_native_api() {
+                route.effort = Some(
+                    arany::resolve_native_effort_for_run(
+                        &route.provider.profile(),
+                        &route.model,
+                        route.effort,
+                    )
+                    .map_err(|_| INVALID)?,
+                );
+            }
+            if profile.routes[..index].contains(&profile.routes[index]) {
+                return Err(INVALID.into());
+            }
+        }
+    }
+    Ok(names)
 }
 
 pub(crate) fn load(

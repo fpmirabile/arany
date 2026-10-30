@@ -1,7 +1,9 @@
 use super::{Admission, Selector};
-use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalInput};
+use crate::terminal::{AttachedTerminal, Composer, SELECTOR_ROWS, ShutdownSignal, TerminalInput};
 use arany::{SessionId, SessionListItem, SessionView, StateRoot, list_sessions};
 use std::str::FromStr;
+
+const MAX_SESSION_CHOICE_BYTES: usize = 64;
 
 pub(super) enum PickerChoice {
     Selected(SessionId),
@@ -216,9 +218,9 @@ async fn pick_session_linear(
             .map_err(|error| error.to_string())?
         {
             TerminalInput::Character(character) => {
-                if character.is_ascii_graphic() && input.len() < 64 {
+                if character.is_ascii_graphic() && input.len() < MAX_SESSION_CHOICE_BYTES {
                     input.push(character);
-                } else if character != ' ' || input.len() >= 64 {
+                } else if character != ' ' || input.len() >= MAX_SESSION_CHOICE_BYTES {
                     too_long = true;
                 } else {
                     input.push(character);
@@ -232,43 +234,27 @@ async fn pick_session_linear(
                 if !too_long {
                     match choice {
                         "q" => return Ok(PickerChoice::Closed),
-                        "n" if start + 10 < items.len() => {
-                            start += 10;
+                        "n" if start + SELECTOR_ROWS < items.len() => {
+                            start += SELECTOR_ROWS;
                             input.clear();
                             continue;
                         }
                         "p" if start > 0 => {
-                            start -= 10;
+                            start -= SELECTOR_ROWS;
                             input.clear();
                             continue;
                         }
                         _ => {}
                     }
-                    if let Ok(number) = choice.parse::<usize>()
-                        && (1..=10).contains(&number)
-                        && let Some(item) = items.get(start + number - 1)
-                    {
-                        return Ok(PickerChoice::Selected(item.id));
-                    }
-                    if let Ok(id) = SessionId::from_str(choice)
-                        && items.iter().any(|item| item.id == id)
-                    {
+                    if let Some(id) = session_choice(choice, items, start) {
                         return Ok(PickerChoice::Selected(id));
                     }
                 }
-                terminal
-                    .session_picker_invalid()
-                    .map_err(|error| error.to_string())?;
-                input.clear();
-                too_long = false;
+                reject_line(terminal, &mut input, &mut too_long)?;
                 terminal.redraw_sessions();
             }
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
-                terminal
-                    .session_picker_invalid()
-                    .map_err(|error| error.to_string())?;
-                input.clear();
-                too_long = false;
+                reject_line(terminal, &mut input, &mut too_long)?;
                 terminal.discard_draft_input();
                 terminal.redraw_sessions();
             }
@@ -283,4 +269,30 @@ async fn pick_session_linear(
             _ => {}
         }
     }
+}
+
+// A line names a row of the shown page or a listed Session's id.
+fn session_choice(choice: &str, items: &[SessionListItem], start: usize) -> Option<SessionId> {
+    if let Ok(number) = choice.parse::<usize>()
+        && (1..=SELECTOR_ROWS).contains(&number)
+        && let Some(item) = items.get(start + number - 1)
+    {
+        return Some(item.id);
+    }
+    SessionId::from_str(choice)
+        .ok()
+        .filter(|id| items.iter().any(|item| item.id == *id))
+}
+
+fn reject_line(
+    terminal: &mut AttachedTerminal,
+    input: &mut String,
+    too_long: &mut bool,
+) -> Result<(), String> {
+    terminal
+        .session_picker_invalid()
+        .map_err(|error| error.to_string())?;
+    input.clear();
+    *too_long = false;
+    Ok(())
 }

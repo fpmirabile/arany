@@ -74,57 +74,11 @@ impl AgentInspectorModel {
         locked: bool,
     ) -> Self {
         let width = usize::from(width);
-        let entries = view
-            .runs
-            .iter()
-            .rev()
-            .take(MAX_RECENT_RUNS)
-            .enumerate()
-            .flat_map(|(index, run)| {
-                run.agents
-                    .iter()
-                    .take(MAX_AGENTS_PER_RUN)
-                    .map(move |agent| (view.runs.len() - index, run, agent))
-            })
-            .collect::<Vec<_>>();
+        let entries = recent_agents(view);
         let total = entries.len();
-        let needle = query.filter.to_ascii_lowercase();
-        let matches = entries
-            .iter()
-            .filter_map(|(run_number, run, agent)| {
-                let objective = agent.objective.as_deref().unwrap_or(&run.objective);
-                let label = format!(
-                    "Run {run_number}: {}; {} · {}",
-                    agent_label(agent),
-                    agent.status,
-                    safe_truncate(objective, MAX_OBJECTIVE_PREVIEW)
-                );
-                label.to_ascii_lowercase().contains(&needle).then_some((
-                    AgentRow::Agent(run.id, agent.id),
-                    *run,
-                    *agent,
-                    label,
-                ))
-            })
-            .collect::<Vec<_>>();
+        let matches = matching_agents(&entries, &query.filter.to_ascii_lowercase());
         let found = matches.len();
-        // Settled idle rows beyond the first few collapse into one row; focus keeps its own row visible.
-        let mut idle = 0;
-        let mut hidden = Vec::new();
-        let mut shown = Vec::new();
-        for entry in matches {
-            if entry.2.status == AgentStatus::Finished {
-                idle += 1;
-                if idle > MAX_EXPANDED_IDLE
-                    && !query.expanded
-                    && query.focus != AgentFocus::Row(entry.0)
-                {
-                    hidden.push(entry.0);
-                    continue;
-                }
-            }
-            shown.push(entry);
-        }
+        let (shown, hidden) = collapse_idle(matches, query);
         let mut rows = shown.iter().map(|entry| entry.0).collect::<Vec<_>>();
         let mut choices = shown
             .iter()
@@ -142,58 +96,9 @@ impl AgentInspectorModel {
             AgentFocus::Row(row) => rows.iter().position(|shown| *shown == row),
             AgentFocus::Nothing => None,
         };
-        let plural = |count: usize| if count == 1 { "" } else { "s" };
-        let search = if query.filter.is_empty() {
-            format!("Type to search {total} agent{}", plural(total))
-        } else if found == 0 {
-            format!("Search: {} · no matching agents", query.filter)
-        } else {
-            format!(
-                "Search: {} · {found} of {total} agent{}",
-                query.filter,
-                plural(total)
-            )
-        };
+        let search = search_line(&query.filter, total, found);
         let hidden_runs = view.runs.len().saturating_sub(MAX_RECENT_RUNS);
-        let mut lines = vec![
-            match view.runs.last() {
-                Some(run) => format!(
-                    "{} Run: {} agent{}; children: {}",
-                    if run.status == RunStatus::Active {
-                        "Current"
-                    } else {
-                        "Last"
-                    },
-                    run.agents.len(),
-                    plural(run.agents.len()),
-                    run.agents
-                        .iter()
-                        .filter(|agent| agent.role == AgentRole::Child)
-                        .count()
-                ),
-                None => "No Runs yet".into(),
-            },
-            format!(
-                "History: {total} agents in {} recent Runs; {} older Runs",
-                view.runs.len().min(MAX_RECENT_RUNS),
-                hidden_runs
-            ),
-        ];
-        lines.push(format!("Next Run: {}", view.defaults.policy));
-        if locked {
-            lines.push(
-                view.runs
-                    .last()
-                    .filter(|run| run.status == RunStatus::Active)
-                    .and_then(|run| run.config.as_ref())
-                    .map_or_else(
-                        || "Current Run: admission in progress; topology locked".into(),
-                        |config| format!("Current Run: {}; topology locked", config.policy),
-                    ),
-            );
-        } else {
-            lines.push("Set next Run: /agents single|auto N|team N".into());
-        }
+        let mut lines = session_lines(view, total, locked);
         let header = lines.len();
         match selected.map(|index| (index, rows[index])) {
             Some((index, AgentRow::Agent(..))) => {
@@ -239,8 +144,132 @@ impl AgentInspectorModel {
     }
 }
 
+type AgentEntry<'a> = (usize, &'a RunView, &'a AgentView);
+type AgentMatch<'a> = (AgentRow, &'a RunView, &'a AgentView, String);
+
+fn recent_agents(view: &SessionView) -> Vec<AgentEntry<'_>> {
+    view.runs
+        .iter()
+        .rev()
+        .take(MAX_RECENT_RUNS)
+        .enumerate()
+        .flat_map(|(index, run)| {
+            run.agents
+                .iter()
+                .take(MAX_AGENTS_PER_RUN)
+                .map(move |agent| (view.runs.len() - index, run, agent))
+        })
+        .collect()
+}
+
+fn matching_agents<'a>(entries: &[AgentEntry<'a>], needle: &str) -> Vec<AgentMatch<'a>> {
+    entries
+        .iter()
+        .filter_map(|(run_number, run, agent)| {
+            let objective = agent.objective.as_deref().unwrap_or(&run.objective);
+            let label = format!(
+                "Run {run_number}: {}; {} · {}",
+                agent_label(agent),
+                agent.status,
+                safe_truncate(objective, MAX_OBJECTIVE_PREVIEW)
+            );
+            label.to_ascii_lowercase().contains(needle).then_some((
+                AgentRow::Agent(run.id, agent.id),
+                *run,
+                *agent,
+                label,
+            ))
+        })
+        .collect()
+}
+
+// Settled idle rows beyond the first few collapse into one row; focus keeps its own row visible.
+fn collapse_idle<'a>(
+    matches: Vec<AgentMatch<'a>>,
+    query: &AgentQuery,
+) -> (Vec<AgentMatch<'a>>, Vec<AgentRow>) {
+    let mut idle = 0;
+    let mut hidden = Vec::new();
+    let mut shown = Vec::new();
+    for entry in matches {
+        if entry.2.status == AgentStatus::Finished {
+            idle += 1;
+            if idle > MAX_EXPANDED_IDLE
+                && !query.expanded
+                && query.focus != AgentFocus::Row(entry.0)
+            {
+                hidden.push(entry.0);
+                continue;
+            }
+        }
+        shown.push(entry);
+    }
+    (shown, hidden)
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn search_line(filter: &str, total: usize, found: usize) -> String {
+    if filter.is_empty() {
+        format!("Type to search {total} agent{}", plural(total))
+    } else if found == 0 {
+        format!("Search: {filter} · no matching agents")
+    } else {
+        format!(
+            "Search: {filter} · {found} of {total} agent{}",
+            plural(total)
+        )
+    }
+}
+
+fn session_lines(view: &SessionView, total: usize, locked: bool) -> Vec<String> {
+    let hidden_runs = view.runs.len().saturating_sub(MAX_RECENT_RUNS);
+    let mut lines = vec![
+        match view.runs.last() {
+            Some(run) => format!(
+                "{} Run: {} agent{}; children: {}",
+                if run.status == RunStatus::Active {
+                    "Current"
+                } else {
+                    "Last"
+                },
+                run.agents.len(),
+                plural(run.agents.len()),
+                run.agents
+                    .iter()
+                    .filter(|agent| agent.role == AgentRole::Child)
+                    .count()
+            ),
+            None => "No Runs yet".into(),
+        },
+        format!(
+            "History: {total} agents in {} recent Runs; {} older Runs",
+            view.runs.len().min(MAX_RECENT_RUNS),
+            hidden_runs
+        ),
+    ];
+    lines.push(format!("Next Run: {}", view.defaults.policy));
+    if locked {
+        lines.push(
+            view.runs
+                .last()
+                .filter(|run| run.status == RunStatus::Active)
+                .and_then(|run| run.config.as_ref())
+                .map_or_else(
+                    || "Current Run: admission in progress; topology locked".into(),
+                    |config| format!("Current Run: {}; topology locked", config.policy),
+                ),
+        );
+    } else {
+        lines.push("Set next Run: /agents single|auto N|team N".into());
+    }
+    lines
+}
+
 fn idle_agents(count: usize) -> String {
-    format!("{count} idle agent{}", if count == 1 { "" } else { "s" })
+    format!("{count} idle agent{}", plural(count))
 }
 
 fn agent_lines(
@@ -261,48 +290,8 @@ fn agent_lines(
             agent.objective.as_deref().unwrap_or(&run.objective)
         ),
     ];
-    let recent_files = (!run.tool_compaction_recent_files.is_empty())
-        .then_some(run.tool_compaction_recent_files.as_slice())
-        .or_else(|| {
-            view.compactions
-                .iter()
-                .rev()
-                .find(|compaction| {
-                    compaction.record.covered_run_id == run.id
-                        && !compaction.record.recent_files.is_empty()
-                })
-                .map(|compaction| compaction.record.recent_files.as_slice())
-        });
-    if let Some(recent_files) = recent_files {
-        lines.push("Files changed before compaction:".into());
-        lines.extend(
-            recent_files
-                .iter()
-                .map(|file| format!("  {} ({})", file.path, file.digest)),
-        );
-    }
-    if let Some(worker) = run
-        .worker_history()
-        .into_iter()
-        .find(|w| w.assignment_id == agent.id)
-    {
-        lines.push(format!(
-            "Worker: {}; cause: {:?}",
-            worker.status, worker.cause
-        ));
-        lines.push(format!("Publication: {:?}", worker.publication));
-        lines.push(format!(
-            "Lease released: {}; verified: {}",
-            worker.lease_released, worker.verified
-        ));
-        lines.extend(worker.changed_paths.lines().map(str::to_owned));
-        if let Some(source) = worker.resumes {
-            lines.push(format!("Resumes: {source}"));
-        }
-        if let Some(source) = worker.supersedes {
-            lines.push(format!("Supersedes: {source}"));
-        }
-    }
+    lines.extend(compacted_files(view, run));
+    lines.extend(worker_lines(run, agent));
     lines.extend(
         run.supervisor
             .verdicts()
@@ -336,6 +325,58 @@ fn agent_lines(
     }
     if agent.summary.is_some() || agent.result.is_some() {
         lines.push("Full text: use arany show SESSION_ID".into());
+    }
+    lines
+}
+
+fn compacted_files(view: &SessionView, run: &RunView) -> Vec<String> {
+    let mut lines = Vec::new();
+    let recent_files = (!run.tool_compaction_recent_files.is_empty())
+        .then_some(run.tool_compaction_recent_files.as_slice())
+        .or_else(|| {
+            view.compactions
+                .iter()
+                .rev()
+                .find(|compaction| {
+                    compaction.record.covered_run_id == run.id
+                        && !compaction.record.recent_files.is_empty()
+                })
+                .map(|compaction| compaction.record.recent_files.as_slice())
+        });
+    if let Some(recent_files) = recent_files {
+        lines.push("Files changed before compaction:".into());
+        lines.extend(
+            recent_files
+                .iter()
+                .map(|file| format!("  {} ({})", file.path, file.digest)),
+        );
+    }
+    lines
+}
+
+fn worker_lines(run: &RunView, agent: &AgentView) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(worker) = run
+        .worker_history()
+        .into_iter()
+        .find(|w| w.assignment_id == agent.id)
+    {
+        lines.push(format!(
+            "Worker: {}; cause: {:?}",
+            worker.status, worker.cause
+        ));
+        lines.push(format!("Publication: {:?}", worker.publication));
+        lines.push(format!(
+            "Lease released: {}; verified: {}",
+            worker.lease_released, worker.verified
+        ));
+        lines.extend(worker.changed_paths.lines().map(str::to_owned));
+        if let Some(source) = worker.resumes {
+            lines.push(format!("Resumes: {source}"));
+        }
+        if let Some(source) = worker.supersedes {
+            lines.push(format!("Supersedes: {source}"));
+        }
     }
     lines
 }
@@ -449,116 +490,18 @@ impl AgentTranscript {
             .find(|agent| agent.id == agent_id && agent.role == AgentRole::Child)?;
         let label = agent_label(agent);
         let status = agent_status_notice(run, agent, &label);
-        // The status, the cue and up to two text replacements are reserved before any record.
-        let reserved = [
-            status.as_str(),
-            TRANSCRIPT_OMITTED,
-            TEXT_OMITTED,
-            TEXT_OMITTED,
-        ]
-        .map(narrow_cost);
-        let mut budget = Budget {
-            bytes: MAX_TRANSCRIPT_BYTES - reserved.iter().map(|cost| cost.0).sum::<usize>(),
-            rows: MAX_TRANSCRIPT_ROWS - reserved.iter().map(|cost| cost.1).sum::<usize>(),
-        };
-        let mut omitted = false;
-        let mut bounded = |text: &str| {
-            if budget.take(text) {
-                text.to_owned()
-            } else {
-                omitted = true;
-                TEXT_OMITTED.to_owned()
-            }
-        };
-        let objective = bounded(agent.objective.as_deref().unwrap_or(&run.objective));
-        let answer = agent
-            .result
-            .as_deref()
-            .or(agent.summary.as_deref())
-            .map(&mut bounded);
-        let first_note = (0..agent.steering_notes.len())
-            .rev()
-            .take_while(|&index| {
-                budget.take(&format!("{STEERING_NOTE_HEADING}\n"))
-                    && budget.take(&agent.steering_notes[index])
-            })
-            .last()
-            .unwrap_or(agent.steering_notes.len());
-        omitted |= first_note > 0;
-        // Grouping consecutive reads only shortens rows, so per-Tool costs bound the grouped text.
-        let first_tool = (0..agent.tools.len())
-            .rev()
-            .take_while(|&index| {
-                super::tool_groups(&agent.tools[index..=index]).all(|(_, text)| budget.take(&text))
-            })
-            .last()
-            .unwrap_or(agent.tools.len());
-        omitted |= first_tool > 0;
+        let kept = ChildText::bounded(run, agent, &status);
+        let (tool_offset, note_offset) = (kept.first_tool, kept.first_note);
         let mut notices = vec![status];
-        if omitted {
+        if kept.omitted {
             notices.push(TRANSCRIPT_OMITTED.to_owned());
         }
         Some(Self {
             label,
-            view: SessionView {
-                usage: Default::default(),
-                rewinds: Default::default(),
-                id: view.id,
-                title: String::new(),
-                title_is_explicit: false,
-                inherited_title: None,
-                workspace_identity: None,
-                defaults: view.defaults.clone(),
-                host_epoch_floor: 0,
-                created_sequence: view.created_sequence,
-                last_sequence: view.last_sequence,
-                lineage: None,
-                runs: vec![RunView {
-                    skill: None,
-                    supervisor: Default::default(),
-                    workers: Default::default(),
-                    id: run.id,
-                    objective,
-                    images: Vec::new(),
-                    config: None,
-                    provider_fallbacks: Vec::new(),
-                    provider_retries: Vec::new(),
-                    agents: Vec::new(),
-                    assistant_message: answer,
-                    status: match agent.status {
-                        AgentStatus::Active => RunStatus::Active,
-                        AgentStatus::Finished => RunStatus::Finished,
-                        AgentStatus::Failed => RunStatus::Failed,
-                        AgentStatus::Cancelled => RunStatus::Cancelled,
-                        AgentStatus::Interrupted => RunStatus::Interrupted,
-                        AgentStatus::StoppedByHook => RunStatus::StoppedByHook,
-                    },
-                    accepted_sequence: run.accepted_sequence,
-                    // Siblings and the primary finish the Run; that alone changes nothing here.
-                    finished_sequence: None,
-                    failure: None,
-                    tools: agent.tools[first_tool..].to_vec(),
-                    tool_compaction_summary: None,
-                    tool_compaction_recent_files: Vec::new(),
-                    tool_compaction_covered_count: 0,
-                    tool_results_cleared_count: 0,
-                    definitions: Default::default(),
-                    display: Vec::new(),
-                    steering_notes: agent.steering_notes[first_note..].to_vec(),
-                    lifecycle_hooks: Vec::new(),
-                    lifecycle_hook_sequence: None,
-                    provider_sequences: Default::default(),
-                }],
-                compactions: Vec::new(),
-                goals: Vec::new(),
-                command_tool_probe: None,
-                pending_provider_setup_edit: None,
-                provider_setup_uncertain: false,
-                environment_capture: None,
-            },
+            view: single_run_view(view, child_run(run, agent, kept)),
             notices,
-            tool_offset: first_tool,
-            note_offset: first_note,
+            tool_offset,
+            note_offset,
         })
     }
 
@@ -635,6 +578,129 @@ impl AgentTranscript {
             parts.push(TranscriptPart::Notice(cue));
         }
         parts
+    }
+}
+
+// What of a child's text fits the transcript bound: newest notes and Tools first.
+struct ChildText {
+    objective: String,
+    answer: Option<String>,
+    first_tool: usize,
+    first_note: usize,
+    omitted: bool,
+}
+
+impl ChildText {
+    fn bounded(run: &RunView, agent: &AgentView, status: &str) -> Self {
+        // The status, the cue and up to two text replacements are reserved before any record.
+        let reserved = [status, TRANSCRIPT_OMITTED, TEXT_OMITTED, TEXT_OMITTED].map(narrow_cost);
+        let mut budget = Budget {
+            bytes: MAX_TRANSCRIPT_BYTES - reserved.iter().map(|cost| cost.0).sum::<usize>(),
+            rows: MAX_TRANSCRIPT_ROWS - reserved.iter().map(|cost| cost.1).sum::<usize>(),
+        };
+        let mut omitted = false;
+        let mut bounded = |text: &str| {
+            if budget.take(text) {
+                text.to_owned()
+            } else {
+                omitted = true;
+                TEXT_OMITTED.to_owned()
+            }
+        };
+        let objective = bounded(agent.objective.as_deref().unwrap_or(&run.objective));
+        let answer = agent
+            .result
+            .as_deref()
+            .or(agent.summary.as_deref())
+            .map(&mut bounded);
+        let first_note = (0..agent.steering_notes.len())
+            .rev()
+            .take_while(|&index| {
+                budget.take(&format!("{STEERING_NOTE_HEADING}\n"))
+                    && budget.take(&agent.steering_notes[index])
+            })
+            .last()
+            .unwrap_or(agent.steering_notes.len());
+        omitted |= first_note > 0;
+        // Grouping consecutive reads only shortens rows, so per-Tool costs bound the grouped text.
+        let first_tool = (0..agent.tools.len())
+            .rev()
+            .take_while(|&index| {
+                super::tool_groups(&agent.tools[index..=index]).all(|(_, text)| budget.take(&text))
+            })
+            .last()
+            .unwrap_or(agent.tools.len());
+        omitted |= first_tool > 0;
+        Self {
+            objective,
+            answer,
+            first_tool,
+            first_note,
+            omitted,
+        }
+    }
+}
+
+fn child_run(run: &RunView, agent: &AgentView, kept: ChildText) -> RunView {
+    RunView {
+        skill: None,
+        supervisor: Default::default(),
+        workers: Default::default(),
+        id: run.id,
+        objective: kept.objective,
+        images: Vec::new(),
+        config: None,
+        provider_fallbacks: Vec::new(),
+        provider_retries: Vec::new(),
+        agents: Vec::new(),
+        assistant_message: kept.answer,
+        status: match agent.status {
+            AgentStatus::Active => RunStatus::Active,
+            AgentStatus::Finished => RunStatus::Finished,
+            AgentStatus::Failed => RunStatus::Failed,
+            AgentStatus::Cancelled => RunStatus::Cancelled,
+            AgentStatus::Interrupted => RunStatus::Interrupted,
+            AgentStatus::StoppedByHook => RunStatus::StoppedByHook,
+        },
+        accepted_sequence: run.accepted_sequence,
+        // Siblings and the primary finish the Run; that alone changes nothing here.
+        finished_sequence: None,
+        failure: None,
+        tools: agent.tools[kept.first_tool..].to_vec(),
+        tool_compaction_summary: None,
+        tool_compaction_recent_files: Vec::new(),
+        tool_compaction_covered_count: 0,
+        tool_results_cleared_count: 0,
+        definitions: Default::default(),
+        display: Vec::new(),
+        steering_notes: agent.steering_notes[kept.first_note..].to_vec(),
+        lifecycle_hooks: Vec::new(),
+        lifecycle_hook_sequence: None,
+        provider_sequences: Default::default(),
+    }
+}
+
+fn single_run_view(view: &SessionView, run: RunView) -> SessionView {
+    SessionView {
+        usage: Default::default(),
+        rewinds: Default::default(),
+        id: view.id,
+        title: String::new(),
+        title_is_explicit: false,
+        inherited_title: None,
+        workspace_identity: None,
+        defaults: view.defaults.clone(),
+        host_epoch_floor: 0,
+        created_sequence: view.created_sequence,
+        last_sequence: view.last_sequence,
+        lineage: None,
+        runs: vec![run],
+        compactions: Vec::new(),
+        goals: Vec::new(),
+        command_tool_probe: None,
+        pending_provider_setup_edit: None,
+        provider_setup_uncertain: false,
+        environment_capture: None,
     }
 }
 

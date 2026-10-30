@@ -95,6 +95,27 @@ impl CallbackListener {
 }
 
 async fn read_callback(stream: &mut TcpStream, port: u16) -> Result<String, AuthorizationError> {
+    let request = read_request_head(stream).await?;
+    let text = std::str::from_utf8(&request).map_err(|_| AuthorizationError::InvalidCallback)?;
+    let mut lines = text[..request.len() - 2].split("\r\n");
+    let line = lines.next().ok_or(AuthorizationError::InvalidCallback)?;
+    let target = line
+        .strip_prefix("GET ")
+        .and_then(|line| line.strip_suffix(" HTTP/1.1"))
+        .ok_or(AuthorizationError::InvalidCallback)?;
+    if target.len() > MAX_CALLBACK_BYTES
+        || !target.starts_with("/auth/callback?")
+        || target.bytes().any(|byte| !byte.is_ascii_graphic())
+    {
+        return Err(AuthorizationError::InvalidCallback);
+    }
+    let expected_host = format!("127.0.0.1:{port}");
+    check_headers(lines, &expected_host)?;
+    Ok(format!("http://{expected_host}{target}"))
+}
+
+// The request is exactly an ASCII header block: no body may follow it.
+async fn read_request_head(stream: &mut TcpStream) -> Result<Vec<u8>, AuthorizationError> {
     let mut request = Vec::with_capacity(1024);
     let header_end = loop {
         if request.len() == MAX_REQUEST_BYTES {
@@ -118,20 +139,14 @@ async fn read_callback(stream: &mut TcpStream, port: u16) -> Result<String, Auth
     if request.len() != header_end || !request[..header_end].is_ascii() {
         return Err(AuthorizationError::InvalidCallback);
     }
-    let text = std::str::from_utf8(&request).map_err(|_| AuthorizationError::InvalidCallback)?;
-    let mut lines = text[..header_end - 2].split("\r\n");
-    let line = lines.next().ok_or(AuthorizationError::InvalidCallback)?;
-    let target = line
-        .strip_prefix("GET ")
-        .and_then(|line| line.strip_suffix(" HTTP/1.1"))
-        .ok_or(AuthorizationError::InvalidCallback)?;
-    if target.len() > MAX_CALLBACK_BYTES
-        || !target.starts_with("/auth/callback?")
-        || target.bytes().any(|byte| !byte.is_ascii_graphic())
-    {
-        return Err(AuthorizationError::InvalidCallback);
-    }
-    let expected_host = format!("127.0.0.1:{port}");
+    Ok(request)
+}
+
+// One Host header naming the loopback listener; no Origin and no request body headers.
+fn check_headers<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    expected_host: &str,
+) -> Result<(), AuthorizationError> {
     let mut host_seen = false;
     let mut count = 0;
     for line in lines {
@@ -173,7 +188,7 @@ async fn read_callback(stream: &mut TcpStream, port: u16) -> Result<String, Auth
     if !host_seen {
         return Err(AuthorizationError::InvalidCallback);
     }
-    Ok(format!("http://{expected_host}{target}"))
+    Ok(())
 }
 
 async fn write_response(stream: &mut TcpStream, accepted: bool) -> Result<(), AuthorizationError> {

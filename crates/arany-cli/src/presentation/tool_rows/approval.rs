@@ -111,16 +111,7 @@ fn file(call: &ToolCall) -> Vec<String> {
                 "Edit {} · only if the file is unchanged",
                 escape_terminal(path)
             ));
-            lines.push("Remove:".into());
-            lines.extend(
-                old.split('\n')
-                    .map(|line| format!("- {}", escape_terminal(line))),
-            );
-            lines.push("Insert:".into());
-            lines.extend(
-                new.split('\n')
-                    .map(|line| format!("+ {}", escape_terminal(line))),
-            );
+            push_replacement(&mut lines, old, new);
         }
         ToolCall::MultiEdit {
             file_path, edits, ..
@@ -139,18 +130,7 @@ fn file(call: &ToolCall) -> Vec<String> {
                         "one match"
                     }
                 ));
-                lines.push("Remove:".into());
-                lines.extend(
-                    edit.old_string
-                        .split('\n')
-                        .map(|line| format!("- {}", escape_terminal(line))),
-                );
-                lines.push("Insert:".into());
-                lines.extend(
-                    edit.new_string
-                        .split('\n')
-                        .map(|line| format!("+ {}", escape_terminal(line))),
-                );
+                push_replacement(&mut lines, &edit.old_string, &edit.new_string);
             }
         }
         ToolCall::Delete { path, .. } => lines.push(format!(
@@ -174,29 +154,44 @@ fn file(call: &ToolCall) -> Vec<String> {
         }
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
-        } => {
-            lines.push(format!(
-                "Publish {} command file changes",
-                changeset.files.len()
-            ));
-            for file in &changeset.files {
-                let operation = match (&file.before, &file.after) {
-                    (None, Some(_)) => "Create",
-                    (Some(_), None) => "Delete",
-                    _ => "Replace",
-                };
-                lines.push(format!("{operation} {}", escape_terminal(&file.path)));
-                if let Some(before) = &file.before {
-                    changeset_version_lines(&mut lines, "Before", "-", before);
-                }
-                if let Some(after) = &file.after {
-                    changeset_version_lines(&mut lines, "After", "+", after);
-                }
-            }
-        }
+        } => push_changeset(&mut lines, changeset),
         _ => return fallback(call),
     }
     lines
+}
+
+fn push_replacement(lines: &mut Vec<String>, old: &str, new: &str) {
+    lines.push("Remove:".into());
+    lines.extend(
+        old.split('\n')
+            .map(|line| format!("- {}", escape_terminal(line))),
+    );
+    lines.push("Insert:".into());
+    lines.extend(
+        new.split('\n')
+            .map(|line| format!("+ {}", escape_terminal(line))),
+    );
+}
+
+fn push_changeset(lines: &mut Vec<String>, changeset: &arany::CommandChangeset) {
+    lines.push(format!(
+        "Publish {} command file changes",
+        changeset.files.len()
+    ));
+    for file in &changeset.files {
+        let operation = match (&file.before, &file.after) {
+            (None, Some(_)) => "Create",
+            (Some(_), None) => "Delete",
+            _ => "Replace",
+        };
+        lines.push(format!("{operation} {}", escape_terminal(&file.path)));
+        if let Some(before) = &file.before {
+            changeset_version_lines(lines, "Before", "-", before);
+        }
+        if let Some(after) = &file.after {
+            changeset_version_lines(lines, "After", "+", after);
+        }
+    }
 }
 
 fn process(call: &ToolCall) -> Vec<String> {

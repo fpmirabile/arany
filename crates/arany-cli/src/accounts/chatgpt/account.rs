@@ -624,7 +624,6 @@ fn save_keyring_at_with(
     if !token.content_valid(AccountStorage::Keyring) {
         return Err(AuthorizationError::ConsentRequired);
     }
-    let host_id = token.credentials.host_id;
     let account_id = token
         .credentials
         .chatgpt_account_id
@@ -632,69 +631,79 @@ fn save_keyring_at_with(
         .ok_or(AuthorizationError::InvalidIdentity)?;
     state
         .with_account_replacement_lock(workspace, || {
-            let mut index = AccountIndex::read(state)?;
-            registration::verify_host_at(state, host_id)?;
-            if index
-                .accounts
-                .first()
-                .is_some_and(|entry| entry.host_id != host_id)
-            {
-                return Err(AuthorizationError::RegistrationConflict);
-            }
-            let client_id = token.credentials.client_id.clone();
-            let subject = token.credentials.subject.clone();
-            let position = index.signed_in_position(
-                SignedIn {
-                    client_id: &client_id,
-                    subject: &subject,
-                    host_id,
-                    account_id: &account_id,
-                },
-                AccountStorage::Keyring,
-                expected_selected,
-            )?;
-            let (id, slot, record) = prepare_keyring_record(&index, position, &mut token)?;
-            if let Some(position) = position {
-                index.accounts[position].signout_pending = false;
-                index.accounts[position].renewal_pending = true;
-                index.write(state)?;
-            } else {
-                index.push_account(AccountEntry {
-                    id,
-                    host_id,
-                    client_id,
-                    subject,
-                    chatgpt_account_id: account_id.clone(),
-                    keyring_slot: Some(slot.clone()),
-                    storage: AccountStorage::Keyring,
-                    renewal_pending: false,
-                    signout_pending: false,
-                    disconnected: false,
-                    token: None,
-                });
-            }
-            write(&slot, &record).map_err(|error| {
-                if position.is_some() {
-                    uncertain_account_publication(error)
-                } else {
-                    error
-                }
-            })?;
-            let entry = index
-                .accounts
-                .iter_mut()
-                .find(|entry| entry.id == id)
-                .ok_or_else(|| {
-                    uncertain_account_publication(AuthorizationError::InvalidIdentity)
-                })?;
-            entry.renewal_pending = false;
-            entry.signout_pending = false;
-            entry.disconnected = false;
-            index.select_account(id);
-            index.write(state).map_err(uncertain_account_publication)?;
-            Ok(id)
+            publish_keyring_account(state, &mut token, &account_id, expected_selected, write)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+// Runs under the account replacement lock.
+fn publish_keyring_account(
+    state: &StateRoot,
+    token: &mut TokenRecord,
+    account_id: &str,
+    expected_selected: Option<Uuid>,
+    write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
+) -> Result<Uuid, AuthorizationError> {
+    let host_id = token.credentials.host_id;
+    let mut index = AccountIndex::read(state)?;
+    registration::verify_host_at(state, host_id)?;
+    if index
+        .accounts
+        .first()
+        .is_some_and(|entry| entry.host_id != host_id)
+    {
+        return Err(AuthorizationError::RegistrationConflict);
+    }
+    let client_id = token.credentials.client_id.clone();
+    let subject = token.credentials.subject.clone();
+    let position = index.signed_in_position(
+        SignedIn {
+            client_id: &client_id,
+            subject: &subject,
+            host_id,
+            account_id,
+        },
+        AccountStorage::Keyring,
+        expected_selected,
+    )?;
+    let (id, slot, record) = prepare_keyring_record(&index, position, token)?;
+    if let Some(position) = position {
+        index.accounts[position].signout_pending = false;
+        index.accounts[position].renewal_pending = true;
+        index.write(state)?;
+    } else {
+        index.push_account(AccountEntry {
+            id,
+            host_id,
+            client_id,
+            subject,
+            chatgpt_account_id: account_id.to_owned(),
+            keyring_slot: Some(slot.clone()),
+            storage: AccountStorage::Keyring,
+            renewal_pending: false,
+            signout_pending: false,
+            disconnected: false,
+            token: None,
+        });
+    }
+    write(&slot, &record).map_err(|error| {
+        if position.is_some() {
+            uncertain_account_publication(error)
+        } else {
+            error
+        }
+    })?;
+    let entry = index
+        .accounts
+        .iter_mut()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| uncertain_account_publication(AuthorizationError::InvalidIdentity))?;
+    entry.renewal_pending = false;
+    entry.signout_pending = false;
+    entry.disconnected = false;
+    index.select_account(id);
+    index.write(state).map_err(uncertain_account_publication)?;
+    Ok(id)
 }
 
 fn prepare_keyring_record(
@@ -1291,32 +1300,7 @@ fn refresh_selected_with(
     state
         .with_account_replacement_lock(workspace, || {
             let mut index = AccountIndex::read(state)?;
-            if index.selected != Some(id) {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
-            let position = index.account_position(id)?;
-            let entry = &index.accounts[position];
-            entry.ensure_usable()?;
-            let client_id = entry.client_id.clone();
-            let subject = entry.subject.clone();
-            let storage = entry.storage;
-            let token = match storage {
-                AccountStorage::Keyring => read_keyring_token(entry)?,
-                AccountStorage::PrivateFile => entry
-                    .token
-                    .as_ref()
-                    .cloned()
-                    .ok_or(AuthorizationError::InvalidIdentity)?,
-            };
-            if token.credentials.client_id != client_id
-                || token.credentials.host_id != entry.host_id
-                || token.credentials.subject != subject
-            {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
-            if !token.valid_for(storage) {
-                return Err(AuthorizationError::ConsentRequired);
-            }
+            let (position, storage, token) = selected_token(&index, id)?;
             if token.credentials.access_expires_at_unix > now.saturating_add(REFRESH_EARLY_SECONDS)
             {
                 return Ok(SelectedAccount::from_token(id, storage, token));
@@ -1326,31 +1310,11 @@ fn refresh_selected_with(
             let replacement = match refresh(&token.credentials) {
                 Ok(replacement) => replacement,
                 Err(error) => {
-                    if matches!(&error, AuthorizationError::Unavailable) {
-                        index.accounts[position].renewal_pending = false;
-                        index
-                            .write(state)
-                            .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    } else if matches!(&error, AuthorizationError::RefreshTokenUnusable) {
-                        disconnect_unusable_refresh_with(state, &mut index, position, |slot| {
-                            delete_chatgpt_keyring_record(slot)
-                                .map_err(|_| AuthorizationError::Unavailable)
-                        })?;
-                    }
+                    settle_failed_refresh(state, &mut index, position, &error)?;
                     return Err(error);
                 }
             };
-            if !replacement.valid_saved()
-                || replacement.client_id != client_id
-                || replacement.subject != subject
-                || replacement.host_id != token.credentials.host_id
-                || replacement.id_token != token.credentials.id_token
-                || replacement.access_token == token.credentials.access_token
-                || replacement.refresh_token == token.credentials.refresh_token
-                || replacement.access_expires_at_unix <= now
-            {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
+            check_replacement(&replacement, &token.credentials, now)?;
             let updated = TokenRecord {
                 slot: token.slot.clone(),
                 credentials: replacement,
@@ -1359,40 +1323,121 @@ fn refresh_selected_with(
             if !updated.valid_for(storage) {
                 return Err(AuthorizationError::InvalidIdentity);
             }
-            match storage {
-                AccountStorage::Keyring => {
-                    let record = serde_json::to_string(&updated)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    let slot = index.accounts[position]
-                        .keyring_slot
-                        .as_deref()
-                        .ok_or(AuthorizationError::RenewalStorageUncertain)?;
-                    write_chatgpt_keyring_record(slot, &record)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    index.accounts[position].renewal_pending = false;
-                    index
-                        .write(state)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    Ok(SelectedAccount::from_token(id, storage, updated))
-                }
-                AccountStorage::PrivateFile => {
-                    index.accounts[position].token = Some(updated);
-                    index.accounts[position].renewal_pending = false;
-                    index
-                        .write(state)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    Ok(SelectedAccount::from_token(
-                        id,
-                        storage,
-                        index.accounts[position]
-                            .token
-                            .take()
-                            .ok_or(AuthorizationError::RenewalStorageUncertain)?,
-                    ))
-                }
-            }
+            store_refreshed(state, &mut index, position, id, updated)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn selected_token(
+    index: &AccountIndex,
+    id: Uuid,
+) -> Result<(usize, AccountStorage, TokenRecord), AuthorizationError> {
+    if index.selected != Some(id) {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    let position = index.account_position(id)?;
+    let entry = &index.accounts[position];
+    entry.ensure_usable()?;
+    let storage = entry.storage;
+    let token = match storage {
+        AccountStorage::Keyring => read_keyring_token(entry)?,
+        AccountStorage::PrivateFile => entry
+            .token
+            .as_ref()
+            .cloned()
+            .ok_or(AuthorizationError::InvalidIdentity)?,
+    };
+    if token.credentials.client_id != entry.client_id
+        || token.credentials.host_id != entry.host_id
+        || token.credentials.subject != entry.subject
+    {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    if !token.valid_for(storage) {
+        return Err(AuthorizationError::ConsentRequired);
+    }
+    Ok((position, storage, token))
+}
+
+// An unavailable refresh clears the pending mark; an unusable refresh token disconnects the account.
+fn settle_failed_refresh(
+    state: &StateRoot,
+    index: &mut AccountIndex,
+    position: usize,
+    error: &AuthorizationError,
+) -> Result<(), AuthorizationError> {
+    if matches!(error, AuthorizationError::Unavailable) {
+        index.accounts[position].renewal_pending = false;
+        index
+            .write(state)
+            .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+    } else if matches!(error, AuthorizationError::RefreshTokenUnusable) {
+        disconnect_unusable_refresh_with(state, index, position, |slot| {
+            delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable)
+        })?;
+    }
+    Ok(())
+}
+
+fn check_replacement(
+    replacement: &VerifiedCredentials,
+    current: &VerifiedCredentials,
+    now: u64,
+) -> Result<(), AuthorizationError> {
+    if !replacement.valid_saved()
+        || replacement.client_id != current.client_id
+        || replacement.subject != current.subject
+        || replacement.host_id != current.host_id
+        || replacement.id_token != current.id_token
+        || replacement.access_token == current.access_token
+        || replacement.refresh_token == current.refresh_token
+        || replacement.access_expires_at_unix <= now
+    {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn store_refreshed(
+    state: &StateRoot,
+    index: &mut AccountIndex,
+    position: usize,
+    id: Uuid,
+    updated: TokenRecord,
+) -> Result<SelectedAccount, AuthorizationError> {
+    let storage = index.accounts[position].storage;
+    match storage {
+        AccountStorage::Keyring => {
+            let record = serde_json::to_string(&updated)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            let slot = index.accounts[position]
+                .keyring_slot
+                .as_deref()
+                .ok_or(AuthorizationError::RenewalStorageUncertain)?;
+            write_chatgpt_keyring_record(slot, &record)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            index.accounts[position].renewal_pending = false;
+            index
+                .write(state)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            Ok(SelectedAccount::from_token(id, storage, updated))
+        }
+        AccountStorage::PrivateFile => {
+            index.accounts[position].token = Some(updated);
+            index.accounts[position].renewal_pending = false;
+            index
+                .write(state)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            Ok(SelectedAccount::from_token(
+                id,
+                storage,
+                index.accounts[position]
+                    .token
+                    .take()
+                    .ok_or(AuthorizationError::RenewalStorageUncertain)?,
+            ))
+        }
+    }
 }
 
 fn disconnect_unusable_refresh_with(

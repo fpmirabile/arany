@@ -156,6 +156,10 @@ const MAX_CALLBACK_BYTES: usize = 4096;
 const MAX_CODE_BYTES: usize = 2048;
 const MAX_CLIENT_ID_BYTES: usize = 128;
 const MAX_SCOPE_BYTES: usize = 512;
+const MAX_SUBJECT_BYTES: usize = 512;
+const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_REFRESH_TOKEN_BYTES: usize = 8 * 1024;
 
 fn publication_error(error: arany::StoreError) -> AuthorizationError {
     match error {
@@ -294,14 +298,14 @@ impl VerifiedCredentials {
         valid_client_id(&self.client_id)
             && self.host_id.get_version() == Some(Version::Random)
             && self.host_id.get_variant() == Variant::RFC4122
-            && bounded_graphic(&self.subject, 512)
+            && bounded_graphic(&self.subject, MAX_SUBJECT_BYTES)
             && self
                 .chatgpt_account_id
                 .as_deref()
                 .is_none_or(valid_account_id)
-            && bounded_graphic(&self.id_token, 16 * 1024)
-            && bounded_graphic(&self.access_token, 16 * 1024)
-            && bounded_graphic(&self.refresh_token, 8 * 1024)
+            && bounded_graphic(&self.id_token, MAX_ID_TOKEN_BYTES)
+            && bounded_graphic(&self.access_token, MAX_ACCESS_TOKEN_BYTES)
+            && bounded_graphic(&self.refresh_token, MAX_REFRESH_TOKEN_BYTES)
             && self.access_expires_at_unix != 0
     }
 
@@ -333,7 +337,7 @@ impl AuthorizationAttempt {
     ) -> Result<Self, AuthorizationError> {
         if !valid_client_id(&account.client_id)
             || !valid_account_id(&account.chatgpt_account_id)
-            || !bounded_graphic(&account.subject, 512)
+            || !bounded_graphic(&account.subject, MAX_SUBJECT_BYTES)
             || account.id.get_version() != Some(Version::SortRand)
         {
             return Err(AuthorizationError::InvalidIdentity);

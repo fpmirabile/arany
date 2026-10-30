@@ -1,4 +1,4 @@
-use super::{AuthorizationError, VerifiedCredentials, client, read_json};
+use super::{AuthorizationError, VerifiedCredentials, client, form_body, read_json};
 use crate::accounts::chatgpt::identity::ISSUER;
 use reqwest::{StatusCode, Url, header};
 use serde::Deserialize;
@@ -8,6 +8,10 @@ const DISCOVERY_ENDPOINT: &str = "https://auth.openai.com/.well-known/openid-con
 const MAX_DISCOVERY_BYTES: usize = 16 * 1024;
 const MAX_REVOKE_FORM_BYTES: usize = 25 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
+const MAX_REVOCATION_PATH_BYTES: usize = 256;
+const REVOKE_ATTEMPTS: u64 = 3;
+const REVOKE_BACKOFF_MS: u64 = 200;
+const REVOKE_JITTER_MS: u8 = 100;
 
 #[derive(Clone)]
 struct Endpoints {
@@ -45,12 +49,13 @@ async fn revoke_with_retry(
     credentials: &VerifiedCredentials,
     endpoints: Endpoints,
 ) -> Result<(), AuthorizationError> {
-    for attempt in 0..3u64 {
+    for attempt in 0..REVOKE_ATTEMPTS {
         match revoke_at(credentials, endpoints.clone()).await {
-            Err(AuthorizationError::Unavailable) if attempt < 2 => {
+            Err(AuthorizationError::Unavailable) if attempt + 1 < REVOKE_ATTEMPTS => {
                 let mut jitter = [0u8; 1];
                 getrandom::fill(&mut jitter).map_err(|_| AuthorizationError::Unavailable)?;
-                let backoff_ms = 200 * (1 << attempt) + u64::from(jitter[0] % 100);
+                let backoff_ms =
+                    REVOKE_BACKOFF_MS * (1 << attempt) + u64::from(jitter[0] % REVOKE_JITTER_MS);
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
             result => return result,
@@ -65,57 +70,27 @@ async fn revoke_at(
 ) -> Result<(), AuthorizationError> {
     if !crate::accounts::chatgpt::valid_client_id(&credentials.client_id)
         || credentials.host_id.is_nil()
-        || !crate::accounts::chatgpt::bounded_graphic(&credentials.subject, 512)
-        || !super::bounded_token(&credentials.refresh_token, 8 * 1024)
+        || !crate::accounts::chatgpt::bounded_graphic(
+            &credentials.subject,
+            crate::accounts::chatgpt::MAX_SUBJECT_BYTES,
+        )
+        || !super::bounded_token(
+            &credentials.refresh_token,
+            crate::accounts::chatgpt::MAX_REFRESH_TOKEN_BYTES,
+        )
     {
         return Err(AuthorizationError::InvalidIdentity);
     }
     let client = client(endpoints.https_only)?;
-    let response = client
-        .get(endpoints.discovery.clone())
-        .header(header::ACCEPT, "application/json")
-        .header(header::ACCEPT_ENCODING, "identity")
-        .send()
-        .await
-        .map_err(|_| AuthorizationError::Unavailable)?;
-    if response.url() != &endpoints.discovery {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
-    if response.status().is_server_error() {
-        return Err(AuthorizationError::Unavailable);
-    }
-    let bytes = read_json(response, StatusCode::OK, MAX_DISCOVERY_BYTES, false, || {
-        AuthorizationError::ExchangeFailed
-    })
-    .await?;
-    let discovery: Discovery =
-        serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::ExchangeFailed)?;
-    let endpoint = Url::parse(&discovery.revocation_endpoint)
-        .map_err(|_| AuthorizationError::ExchangeFailed)?;
-    if discovery.issuer != ISSUER
-        || endpoint.origin() != endpoints.discovery.origin()
-        || endpoint.scheme() != endpoints.discovery.scheme()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-        || endpoint.path().is_empty()
-        || endpoint.path().len() > 256
-    {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in [
-        ("token", credentials.refresh_token.as_str()),
-        ("token_type_hint", "refresh_token"),
-        ("client_id", credentials.client_id.as_str()),
-    ] {
-        serializer.append_pair(name, value);
-    }
-    let body = serializer.finish();
-    if body.len() > MAX_REVOKE_FORM_BYTES {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
+    let endpoint = revocation_endpoint(&client, &endpoints.discovery).await?;
+    let body = form_body(
+        &[
+            ("token", credentials.refresh_token.as_str()),
+            ("token_type_hint", "refresh_token"),
+            ("client_id", credentials.client_id.as_str()),
+        ],
+        MAX_REVOKE_FORM_BYTES,
+    )?;
     let mut response = client
         .post(endpoint.clone())
         .header(header::ACCEPT_ENCODING, "identity")
@@ -147,6 +122,47 @@ async fn revoke_at(
         return Err(AuthorizationError::ExchangeFailed);
     }
     Ok(())
+}
+
+// The discovered revocation endpoint must share the discovery document's origin and scheme.
+async fn revocation_endpoint(
+    client: &reqwest::Client,
+    discovery: &Url,
+) -> Result<Url, AuthorizationError> {
+    let response = client
+        .get(discovery.clone())
+        .header(header::ACCEPT, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .map_err(|_| AuthorizationError::Unavailable)?;
+    if response.url() != discovery {
+        return Err(AuthorizationError::ExchangeFailed);
+    }
+    if response.status().is_server_error() {
+        return Err(AuthorizationError::Unavailable);
+    }
+    let bytes = read_json(response, StatusCode::OK, MAX_DISCOVERY_BYTES, false, || {
+        AuthorizationError::ExchangeFailed
+    })
+    .await?;
+    let document: Discovery =
+        serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::ExchangeFailed)?;
+    let endpoint = Url::parse(&document.revocation_endpoint)
+        .map_err(|_| AuthorizationError::ExchangeFailed)?;
+    if document.issuer != ISSUER
+        || endpoint.origin() != discovery.origin()
+        || endpoint.scheme() != discovery.scheme()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.path().is_empty()
+        || endpoint.path().len() > MAX_REVOCATION_PATH_BYTES
+    {
+        return Err(AuthorizationError::ExchangeFailed);
+    }
+    Ok(endpoint)
 }
 
 #[cfg(test)]

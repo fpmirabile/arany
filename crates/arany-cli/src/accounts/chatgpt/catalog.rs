@@ -39,7 +39,7 @@ pub(crate) async fn list_models(
 ) -> Result<Vec<ChatGptModel>, AuthorizationError> {
     if !consent.matches(credentials, storage)
         || credentials.access_token.is_empty()
-        || credentials.access_token.len() > 16 * 1024
+        || credentials.access_token.len() > super::MAX_ACCESS_TOKEN_BYTES
         || !credentials
             .access_token
             .bytes()

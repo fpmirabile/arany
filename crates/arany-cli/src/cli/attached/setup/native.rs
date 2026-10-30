@@ -300,61 +300,20 @@ pub(super) async fn native_setup(
         .transpose()
         .map_err(SetupError::recoverable)?;
     let storage = inspected.storage;
-    if storage == AccountStorage::PrivateFile
-        && choose(
-            terminal,
-            1,
-            "Use private file?",
-            "NOT encrypted; same-user apps read key",
-            &[(b'2', "Cancel"), (b'1', "Use private file")],
-        )
-        .await?
-            != Some(b'1')
-    {
+    if storage == AccountStorage::PrivateFile && !confirm_private_file(terminal).await? {
         return Ok(None);
     }
-    let Some(provider) = choose(
-        terminal,
-        2,
-        "Choose Provider",
-        "Only the selected Provider receives requests",
-        &[(b'1', "OpenAI"), (b'2', "Anthropic")],
-    )
-    .await?
-    else {
+    let Some(provider) = choose_native_provider(terminal).await? else {
         return Ok(None);
-    };
-    let provider = if provider == b'1' {
-        ProviderKind::OpenAi
-    } else {
-        ProviderKind::Anthropic
     };
     let Some(key) = read_api_key(terminal).await? else {
         return Ok(None);
     };
     let workspace_id = if provider == ProviderKind::Anthropic {
-        match choose(
-            terminal,
-            3,
-            "API workspace",
-            "Use the key's scope or choose a Console workspace",
-            &[
-                (b'1', "Key scoped to workspace"),
-                (b'2', "Choose API workspace"),
-            ],
-        )
-        .await?
-        {
-            Some(b'1') => None,
-            Some(b'2') => {
-                let Some(id) = read_workspace_id(terminal, &key).await? else {
-                    return Ok(None);
-                };
-                Some(id)
-            }
-            None => return Ok(None),
-            _ => return Err("invalid API workspace selection".into()),
-        }
+        let Some(workspace_id) = choose_api_workspace(terminal, &key).await? else {
+            return Ok(None);
+        };
+        workspace_id
     } else {
         None
     };
@@ -366,13 +325,7 @@ pub(super) async fn native_setup(
     };
     let (model, preferred) = native_catalog_default(provider, &items)
         .ok_or("selected account has no visible models; use /setup to retry")?;
-    let notice = if preferred {
-        format!("{provider} ready: {model} · low. Use /model to change.")
-    } else {
-        format!(
-            "{provider} ready: {model} · low. The catalog does not list prices; use /model to change."
-        )
-    };
+    let notice = ready_notice(provider, model, preferred);
     let workspace_id = credentials.anthropic_workspace_id().map(str::to_owned);
     let account = SavedAccount::new(
         provider.into(),
@@ -393,6 +346,88 @@ pub(super) async fn native_setup(
         0,
         None,
     )?;
+    save_account(journal, workspace, account, storage, expected).await?;
+    Ok(Some(SetupSelection::Native {
+        defaults,
+        notice,
+        catalog: items,
+    }))
+}
+
+async fn confirm_private_file(terminal: &mut AttachedTerminal) -> Result<bool, SetupError> {
+    Ok(choose(
+        terminal,
+        1,
+        "Use private file?",
+        "NOT encrypted; same-user apps read key",
+        &[(b'2', "Cancel"), (b'1', "Use private file")],
+    )
+    .await?
+        == Some(b'1'))
+}
+
+async fn choose_native_provider(
+    terminal: &mut AttachedTerminal,
+) -> Result<Option<ProviderKind>, SetupError> {
+    let Some(provider) = choose(
+        terminal,
+        2,
+        "Choose Provider",
+        "Only the selected Provider receives requests",
+        &[(b'1', "OpenAI"), (b'2', "Anthropic")],
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(if provider == b'1' {
+        ProviderKind::OpenAi
+    } else {
+        ProviderKind::Anthropic
+    }))
+}
+
+// None cancels setup; Some(None) keeps the key's own workspace scope.
+async fn choose_api_workspace(
+    terminal: &mut AttachedTerminal,
+    key: &str,
+) -> Result<Option<Option<String>>, SetupError> {
+    match choose(
+        terminal,
+        3,
+        "API workspace",
+        "Use the key's scope or choose a Console workspace",
+        &[
+            (b'1', "Key scoped to workspace"),
+            (b'2', "Choose API workspace"),
+        ],
+    )
+    .await?
+    {
+        Some(b'1') => Ok(Some(None)),
+        Some(b'2') => Ok(read_workspace_id(terminal, key).await?.map(Some)),
+        None => Ok(None),
+        _ => Err("invalid API workspace selection".into()),
+    }
+}
+
+fn ready_notice(provider: &str, model: &str, preferred: bool) -> String {
+    if preferred {
+        format!("{provider} ready: {model} · low. Use /model to change.")
+    } else {
+        format!(
+            "{provider} ready: {model} · low. The catalog does not list prices; use /model to change."
+        )
+    }
+}
+
+async fn save_account(
+    journal: &mut SetupJournal,
+    workspace: &Path,
+    account: SavedAccount,
+    storage: AccountStorage,
+    expected: Option<[u8; 32]>,
+) -> Result<(), SetupError> {
     let account_id = account.id;
     let operation = journal
         .start(
@@ -407,12 +442,7 @@ pub(super) async fn native_setup(
         account_id,
         credentials::save(workspace, account, storage, expected).await,
     )
-    .await?;
-    Ok(Some(SetupSelection::Native {
-        defaults,
-        notice,
-        catalog: items,
-    }))
+    .await
 }
 
 pub(super) async fn settle_native_save(
@@ -571,22 +601,11 @@ async fn read_workspace_id(
             {
                 draft.apply(TerminalInput::Character(character));
             }
-            TerminalInput::Paste => match terminal.take_paste() {
-                Ok(text)
-                    if rejected == 0
-                        && draft.text().len() + text.len() <= MAX_ANTHROPIC_WORKSPACE_ID_BYTES
-                        && text
-                            .bytes()
-                            .all(|byte| byte.is_ascii_graphic() || byte == b' ') =>
-                {
-                    if draft.insert_paste(&text).is_err() {
-                        notice = Some("Error: invalid workspace ID paste; unchanged");
-                    }
+            TerminalInput::Paste => {
+                if let Some(error) = paste_workspace_id(terminal, &mut draft, rejected) {
+                    notice = Some(error);
                 }
-                _ => {
-                    notice = Some("Error: invalid or overlong workspace ID paste; unchanged");
-                }
-            },
+            }
             TerminalInput::Character(_) => {
                 if terminal.is_linear() {
                     rejected = rejected.saturating_add(1);
@@ -603,16 +622,7 @@ async fn read_workspace_id(
                 draft.apply(input);
             }
             TerminalInput::Submit => {
-                if rejected == 0
-                    && NativeApiCredentials::new(
-                        ProviderKind::Anthropic
-                            .native_name()
-                            .expect("native Provider name"),
-                        key.to_owned(),
-                        Some(draft.text().to_owned()),
-                    )
-                    .is_ok()
-                {
+                if rejected == 0 && valid_workspace_id(key, draft.text()) {
                     return Ok(Some(draft.take()));
                 }
                 if terminal.is_linear() {
@@ -637,6 +647,40 @@ async fn read_workspace_id(
             _ => {}
         }
     }
+}
+
+// Some names why the paste left the draft unchanged.
+fn paste_workspace_id(
+    terminal: &mut AttachedTerminal,
+    draft: &mut Composer,
+    rejected: u16,
+) -> Option<&'static str> {
+    match terminal.take_paste() {
+        Ok(text)
+            if rejected == 0
+                && draft.text().len() + text.len() <= MAX_ANTHROPIC_WORKSPACE_ID_BYTES
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic() || byte == b' ') =>
+        {
+            draft
+                .insert_paste(&text)
+                .is_err()
+                .then_some("Error: invalid workspace ID paste; unchanged")
+        }
+        _ => Some("Error: invalid or overlong workspace ID paste; unchanged"),
+    }
+}
+
+fn valid_workspace_id(key: &str, workspace_id: &str) -> bool {
+    NativeApiCredentials::new(
+        ProviderKind::Anthropic
+            .native_name()
+            .expect("native Provider name"),
+        key.to_owned(),
+        Some(workspace_id.to_owned()),
+    )
+    .is_ok()
 }
 
 #[cfg(test)]

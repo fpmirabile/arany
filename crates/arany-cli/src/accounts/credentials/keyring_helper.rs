@@ -25,6 +25,7 @@ pub(crate) static TEST_HELPER: std::sync::Mutex<Option<std::path::PathBuf>> =
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const AUTHORIZATION_DEADLINE: Duration = Duration::from_secs(120);
+const HELPER_POLL: Duration = Duration::from_millis(10);
 const PROBE_SLOT: &str = "credential-backend-probe";
 const EXIT_NOT_FOUND: u8 = 2;
 const EXIT_LOCKED: u8 = 3;
@@ -231,26 +232,7 @@ fn invoke_command(
                 .map_err(|_| CredentialError::Unavailable)?;
             Ok::<_, CredentialError>(bytes)
         });
-        let status = loop {
-            if cancelled.load(Ordering::Acquire) {
-                child.stop();
-                return Err(CredentialError::Unavailable);
-            }
-            match child.0.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Ok(None) => {
-                    child.stop();
-                    return Err(CredentialError::TimedOut);
-                }
-                Err(_) => {
-                    child.stop();
-                    return Err(CredentialError::Unavailable);
-                }
-            }
-        };
+        let status = wait_helper(&mut child, deadline, cancelled)?;
         let write_result = writer.map(|writer| writer.join());
         let output = reader.join().map_err(|_| CredentialError::Unavailable)??;
         helper_reply(
@@ -262,6 +244,32 @@ fn invoke_command(
         )
     })
     .map_err(|error| unconfirmed_error(operation, error))
+}
+
+// A cancelled or overdue helper is stopped before its outcome is reported.
+fn wait_helper(
+    child: &mut OwnedChild,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<std::process::ExitStatus, CredentialError> {
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            child.stop();
+            return Err(CredentialError::Unavailable);
+        }
+        match child.0.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(HELPER_POLL),
+            Ok(None) => {
+                child.stop();
+                return Err(CredentialError::TimedOut);
+            }
+            Err(_) => {
+                child.stop();
+                return Err(CredentialError::Unavailable);
+            }
+        }
+    }
 }
 
 fn unconfirmed_error(operation: &str, error: CredentialError) -> CredentialError {
@@ -414,21 +422,8 @@ pub(super) fn main() -> ExitCode {
     let (Some(operation), Some(slot)) = (operation.to_str(), slot.to_str()) else {
         return ExitCode::FAILURE;
     };
-    let expected = match (args.next(), args.next(), args.next()) {
-        (None, None, None) if operation != "authorize" || slot.starts_with("chatgpt-") => None,
-        (Some(id), Some(provider), None) if operation == "authorize" => {
-            let Some((id, provider)) = id.to_str().zip(provider.to_str()) else {
-                return ExitCode::FAILURE;
-            };
-            let Ok(id) = Uuid::parse_str(id) else {
-                return ExitCode::FAILURE;
-            };
-            if !valid_native_identity(slot, id, provider) {
-                return ExitCode::FAILURE;
-            }
-            Some((id, provider.to_owned()))
-        }
-        _ => return ExitCode::FAILURE,
+    let Some(expected) = expected_identity(args, operation, slot) else {
+        return ExitCode::FAILURE;
     };
     if !matches!(
         operation,
@@ -444,6 +439,29 @@ pub(super) fn main() -> ExitCode {
     if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
         return ExitCode::FAILURE;
     }
+    run_operation(operation, slot, expected)
+}
+
+// Only a native `authorize` names the account and Provider it expects; None refuses the call.
+fn expected_identity(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+    operation: &str,
+    slot: &str,
+) -> Option<Option<(Uuid, String)>> {
+    match (args.next(), args.next(), args.next()) {
+        (None, None, None) if operation != "authorize" || slot.starts_with("chatgpt-") => {
+            Some(None)
+        }
+        (Some(id), Some(provider), None) if operation == "authorize" => {
+            let (id, provider) = id.to_str().zip(provider.to_str())?;
+            let id = Uuid::parse_str(id).ok()?;
+            valid_native_identity(slot, id, provider).then(|| Some((id, provider.to_owned())))
+        }
+        _ => None,
+    }
+}
+
+fn run_operation(operation: &str, slot: &str, expected: Option<(Uuid, String)>) -> ExitCode {
     match operation {
         "authorize" => match Entry::new(SERVICE, slot).and_then(|entry| entry.get_password()) {
             Ok(record) => {
@@ -475,35 +493,37 @@ pub(super) fn main() -> ExitCode {
             Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
             Err(_) => ExitCode::FAILURE,
         },
-        "write" => {
-            let mut record = Vec::new();
-            if std::io::stdin()
-                .take((slot_record_limit(slot).unwrap_or(0) + 1) as u64)
-                .read_to_end(&mut record)
-                .is_err()
-                || record.is_empty()
-                || record.len() > slot_record_limit(slot).unwrap_or(0)
-            {
-                return ExitCode::FAILURE;
-            }
-            let Ok(record) = String::from_utf8(record) else {
-                return ExitCode::FAILURE;
-            };
-            if !valid_record(slot, record.as_bytes()) {
-                return ExitCode::FAILURE;
-            }
-            match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
-                Err(_) => ExitCode::FAILURE,
-            }
-        }
+        "write" => write_slot(slot),
         "delete" => match Entry::new(SERVICE, slot).and_then(|entry| entry.delete_credential()) {
             Ok(()) | Err(Error::NoEntry) => ExitCode::SUCCESS,
             Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
             Err(_) => ExitCode::FAILURE,
         },
         _ => ExitCode::FAILURE,
+    }
+}
+
+fn write_slot(slot: &str) -> ExitCode {
+    let mut record = Vec::new();
+    if std::io::stdin()
+        .take((slot_record_limit(slot).unwrap_or(0) + 1) as u64)
+        .read_to_end(&mut record)
+        .is_err()
+        || record.is_empty()
+        || record.len() > slot_record_limit(slot).unwrap_or(0)
+    {
+        return ExitCode::FAILURE;
+    }
+    let Ok(record) = String::from_utf8(record) else {
+        return ExitCode::FAILURE;
+    };
+    if !valid_record(slot, record.as_bytes()) {
+        return ExitCode::FAILURE;
+    }
+    match Entry::new(SERVICE, slot).and_then(|entry| entry.set_password(&record)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(Error::NoStorageAccess(error)) => locked_reply(error.as_ref()),
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
