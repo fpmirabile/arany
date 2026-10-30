@@ -66,6 +66,16 @@ pub(super) fn transcript_details(run: &arany::RunView) -> Vec<String> {
     parts
 }
 
+// One linear setup screen: its title and instruction print once, a notice every time.
+struct SetupLine<'a> {
+    step: u8,
+    title: &'a str,
+    instruction: &'a str,
+    notice: Option<&'a str>,
+    instruction_limit: usize,
+    takes_input: bool,
+}
+
 impl LinearState {
     // A submitted, interrupted or rejected line needs a fresh prompt.
     pub(super) fn note_input(&mut self, input: TerminalInput) {
@@ -436,7 +446,17 @@ impl LinearState {
         warning: &str,
         notice: Option<&str>,
     ) -> io::Result<()> {
-        self.write_setup_with_limit(&mut io::stderr(), 1, title, warning, notice, (1024, false))
+        self.write_setup_with_limit(
+            &mut io::stderr(),
+            SetupLine {
+                step: 1,
+                title,
+                instruction: warning,
+                notice,
+                instruction_limit: 1024,
+                takes_input: false,
+            },
+        )
     }
 
     pub(super) fn draw_setup_choices(
@@ -448,11 +468,14 @@ impl LinearState {
     ) -> io::Result<()> {
         self.write_setup_with_limit(
             &mut io::stderr(),
-            step,
-            title,
-            instruction,
-            notice,
-            (MAX_ROW_WIDTH, true),
+            SetupLine {
+                step,
+                title,
+                instruction,
+                notice,
+                instruction_limit: MAX_ROW_WIDTH,
+                takes_input: true,
+            },
         )
     }
 
@@ -467,23 +490,30 @@ impl LinearState {
         let instruction_limit = if step == 3 { 512 } else { MAX_ROW_WIDTH };
         self.write_setup_with_limit(
             writer,
-            step,
-            title,
-            instruction,
-            notice,
-            (instruction_limit, matches!(step, 1 | 2 | 3 | 5)),
+            SetupLine {
+                step,
+                title,
+                instruction,
+                notice,
+                instruction_limit,
+                takes_input: matches!(step, 1 | 2 | 3 | 5),
+            },
         )
     }
 
     fn write_setup_with_limit(
         &mut self,
         writer: &mut impl Write,
-        step: u8,
-        title: &str,
-        instruction: &str,
-        notice: Option<&str>,
-        (instruction_limit, takes_input): (usize, bool),
+        line: SetupLine<'_>,
     ) -> io::Result<()> {
+        let SetupLine {
+            step,
+            title,
+            instruction,
+            notice,
+            instruction_limit,
+            takes_input,
+        } = line;
         let unchanged = self.last_setup.as_ref().is_some_and(|previous| {
             previous.0 == step && previous.1 == title && previous.2 == instruction
         });
@@ -1754,11 +1784,14 @@ mod tests {
         linear
             .write_setup_with_limit(
                 &mut output,
-                1,
-                "ChatGPT plan consent",
-                &warning,
-                None,
-                (1024, false),
+                SetupLine {
+                    step: 1,
+                    title: "ChatGPT plan consent",
+                    instruction: &warning,
+                    notice: None,
+                    instruction_limit: 1024,
+                    takes_input: false,
+                },
             )
             .expect("complete warning");
         assert_eq!(
@@ -1769,11 +1802,14 @@ mod tests {
         linear
             .write_setup_with_limit(
                 &mut unchanged,
-                1,
-                "ChatGPT plan consent",
-                &warning,
-                None,
-                (1024, false),
+                SetupLine {
+                    step: 1,
+                    title: "ChatGPT plan consent",
+                    instruction: &warning,
+                    notice: None,
+                    instruction_limit: 1024,
+                    takes_input: false,
+                },
             )
             .expect("no repeated announcement");
         assert!(unchanged.is_empty());
