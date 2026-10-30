@@ -395,6 +395,7 @@ pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
 const WINDOW_REQUEST_HEADROOM_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_WINDOW_REQUEST_BYTES: usize =
     crate::session::MAX_WINDOW_CONTENT_BYTES + WINDOW_REQUEST_HEADROOM_BYTES;
+pub const MAX_MODEL_ID_BYTES: usize = 128;
 pub const MIN_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
 pub const MAX_CONTEXT_WINDOW_TOKENS: u32 = 2_000_000;
 
@@ -635,7 +636,7 @@ impl ProviderIdentity {
             && self.profile.len() <= 128
             && ProviderKind::custom_name(&self.profile).is_none_or(valid_profile_name)
             && !self.model.is_empty()
-            && self.model.len() <= 128
+            && self.model.len() <= MAX_MODEL_ID_BYTES
             && (provider == Some(ProviderKind::Custom)) == self.custom_provenance().is_some()
             && valid_saved_api_account_id(&self.profile, self.saved_api_account_id())
             && chatgpt == self.chatgpt_provenance().is_some()

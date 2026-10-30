@@ -796,7 +796,7 @@ impl LinearState {
                 writer,
                 "Choice {}: {}; selected effort {}; {}",
                 index + 1,
-                safe_truncate(&item.id, 128),
+                safe_truncate(&item.id, arany::MAX_MODEL_ID_BYTES),
                 effort,
                 status
             )?;

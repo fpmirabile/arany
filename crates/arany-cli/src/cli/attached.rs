@@ -204,7 +204,9 @@ impl AttachedArgs {
 
     fn validate_text_inputs(&self) -> Result<(), String> {
         if self.model.as_ref().is_some_and(|model| {
-            model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)
+            model.is_empty()
+                || model.len() > arany::MAX_MODEL_ID_BYTES
+                || model.chars().any(char::is_control)
         }) {
             return Err("invalid model".into());
         }

@@ -301,7 +301,7 @@ impl CommandChoices {
             .iter()
             .filter(|item| {
                 !item.id.is_empty()
-                    && item.id.len() <= 128
+                    && item.id.len() <= arany::MAX_MODEL_ID_BYTES
                     && item.id.bytes().all(|byte| byte.is_ascii_graphic())
             })
             .take(MAX_CATALOG_MODELS)

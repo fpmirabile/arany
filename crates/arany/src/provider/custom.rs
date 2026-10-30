@@ -17,7 +17,7 @@ pub(crate) use destination::resolve_admitted;
 const MAX_PROFILES: usize = 32;
 pub const MAX_CUSTOM_PROFILE_NAME_BYTES: usize = super::roster::MAX_PROFILE_NAME_BYTES;
 pub const MAX_CUSTOM_PROFILE_ENDPOINT_BYTES: usize = 512;
-pub const MAX_CUSTOM_PROFILE_MODEL_BYTES: usize = 128;
+pub const MAX_CUSTOM_PROFILE_MODEL_BYTES: usize = super::MAX_MODEL_ID_BYTES;
 pub const MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES: usize = 64;
 pub const MAX_CUSTOM_PROFILE_EFFORTS_BYTES: usize = 64;
 const CUSTOM_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;

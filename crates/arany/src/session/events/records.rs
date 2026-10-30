@@ -190,7 +190,7 @@ impl SessionDefaults {
             bounded(provider, 128)?;
         }
         if let Some(model) = &self.model {
-            bounded(model, 128)?;
+            bounded(model, crate::provider::MAX_MODEL_ID_BYTES)?;
         }
         self.policy.validate()
     }
@@ -838,7 +838,8 @@ impl CompactionRecord {
             return Err(ReplayError::InvalidSnapshot);
         }
         bounded(&self.provider, 128).map_err(|_| ReplayError::InvalidSnapshot)?;
-        bounded(&self.model, 128).map_err(|_| ReplayError::InvalidSnapshot)?;
+        bounded(&self.model, crate::provider::MAX_MODEL_ID_BYTES)
+            .map_err(|_| ReplayError::InvalidSnapshot)?;
         if let CompactionStatus::Succeeded {
             summary,
             summary_bytes,

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{path::Path, str::FromStr, sync::Arc};
 use uuid::{Uuid, Version};
 
-pub(crate) const MAX_ROLE_MODEL_BYTES: usize = 128;
+pub(crate) const MAX_ROLE_MODEL_BYTES: usize = arany::MAX_MODEL_ID_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RoutingError {

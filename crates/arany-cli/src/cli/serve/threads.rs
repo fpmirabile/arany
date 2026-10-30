@@ -74,7 +74,7 @@ impl Threads {
         let provider = ProviderArg::from_str(&params.provider)
             .map_err(|_| Fault::selection("invalid Provider", Reason::InvalidSelection))?;
         if params.model.is_empty()
-            || params.model.len() > 128
+            || params.model.len() > arany::MAX_MODEL_ID_BYTES
             || params.model.chars().any(char::is_control)
         {
             return Err(Fault::params());

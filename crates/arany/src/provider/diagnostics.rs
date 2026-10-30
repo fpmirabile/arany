@@ -354,7 +354,7 @@ fn context_record(
     components.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
     let mut record = BoundedRecord::default();
     // Only a bounded model identifier is permitted; all conversation and Tool values stay private.
-    let model = if request.model.len() <= 128
+    let model = if request.model.len() <= super::MAX_MODEL_ID_BYTES
         && request
             .model
             .bytes()
