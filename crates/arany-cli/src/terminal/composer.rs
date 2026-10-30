@@ -329,9 +329,9 @@ impl Composer {
         draft
     }
 
-    pub fn restore_draft(&mut self, draft: ComposerDraft) -> bool {
-        self.disarm_continuation();
-        let separator = usize::from(!self.text.is_empty() && !draft.text.is_empty());
+    // A restored draft must fit the text, editable-byte, image-count and image-byte limits together
+    // with the current draft.
+    fn draft_fits(&self, draft: &ComposerDraft, separator: usize) -> bool {
         let limit = self.draft_limit();
         let draft_escape = objective_escape_len(&draft.text, &draft.pastes, !self.text_only);
         let current_escape = if draft.text.is_empty() {
@@ -339,7 +339,7 @@ impl Composer {
         } else {
             0
         };
-        if self.text.len() + draft.text.len() + separator > limit + draft_escape + current_escape
+        !(self.text.len() + draft.text.len() + separator > limit + draft_escape + current_escape
             || editable_bytes(
                 &self.text,
                 &self.pastes,
@@ -354,16 +354,26 @@ impl Composer {
                 .chain(&draft.images)
                 .map(ImageAttachment::byte_len)
                 .sum::<usize>()
-                > MAX_IMAGE_BYTES
-        {
-            if self.retained.is_none() {
-                self.retained = Some(draft);
-            } else if self.recalled_pending {
-                self.pending_draft = Some(draft);
-            } else {
-                self.recalled_draft = Some(draft);
-                self.recalled_pending = true;
-            }
+                > MAX_IMAGE_BYTES)
+    }
+
+    // A draft that does not fit waits as retained, then pending, then recalled.
+    fn park_draft(&mut self, draft: ComposerDraft) {
+        if self.retained.is_none() {
+            self.retained = Some(draft);
+        } else if self.recalled_pending {
+            self.pending_draft = Some(draft);
+        } else {
+            self.recalled_draft = Some(draft);
+            self.recalled_pending = true;
+        }
+    }
+
+    pub fn restore_draft(&mut self, draft: ComposerDraft) -> bool {
+        self.disarm_continuation();
+        let separator = usize::from(!self.text.is_empty() && !draft.text.is_empty());
+        if !self.draft_fits(&draft, separator) {
+            self.park_draft(draft);
             return false;
         }
         let offset = draft.text.len() + separator;
@@ -377,20 +387,8 @@ impl Composer {
         }
         text.push_str(&self.text);
         let mut pastes = draft.pastes;
-        for mut paste in self.pastes.drain(..) {
-            if pastes
-                .iter()
-                .any(|old| old.characters == paste.characters && old.suffix == paste.suffix)
-            {
-                paste.suffix = pastes
-                    .iter()
-                    .filter(|old| old.characters == paste.characters)
-                    .map(|old| old.suffix)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-            }
-            pastes.push(paste);
+        for paste in self.pastes.drain(..) {
+            push_renumbered(&mut pastes, paste);
         }
         let mut images = draft.images;
         let draft_image_count = images.len();
@@ -1034,130 +1032,12 @@ impl Composer {
         if input == TerminalInput::Submit && self.continue_line() {
             return ComposerEdit::Changed;
         }
-        if input == TerminalInput::Up
-            && self.is_empty()
-            && let Some(draft) = self
-                .retained
-                .take()
-                .or_else(|| self.pending_draft.take())
-                .or_else(|| self.recalled_draft.take())
+        if let Some(edit) = self
+            .recall_draft(input)
+            .or_else(|| self.file_menu_input(input))
+            .or_else(|| self.completion_menu_input(input))
         {
-            if self.recalled_draft.is_none() {
-                self.recalled_pending = false;
-            }
-            self.restore_draft(draft);
-            return ComposerEdit::Changed;
-        }
-        if let Some((items, selected)) = self.file_menu() {
-            let count = items.len();
-            match input {
-                TerminalInput::Up => {
-                    self.completion_index = (selected + count - 1) % count;
-                    return ComposerEdit::Changed;
-                }
-                TerminalInput::Down => {
-                    self.completion_index = (selected + 1) % count;
-                    return ComposerEdit::Changed;
-                }
-                TerminalInput::Escape => {
-                    self.completion_hidden = true;
-                    return ComposerEdit::Changed;
-                }
-                TerminalInput::Tab | TerminalInput::Submit => {
-                    let path = &items[selected];
-                    let directory = path.ends_with('/');
-                    let browse = directory && input == TerminalInput::Tab;
-                    let replacement = if browse
-                        && !path.chars().any(char::is_whitespace)
-                        && !path.contains('"')
-                    {
-                        format!("@{path}")
-                    } else if browse {
-                        let mut quoted = serde_json::to_string(path).expect("serializable path");
-                        quoted.pop();
-                        format!("@{quoted}")
-                    } else {
-                        format!(
-                            "@{} ",
-                            serde_json::to_string(path).expect("file name is serializable")
-                        )
-                    };
-                    let start = self.text[..self.cursor]
-                        .rfind('@')
-                        .expect("file menu query");
-                    if self.text.len() - (self.cursor - start) + replacement.len()
-                        > self.draft_limit()
-                    {
-                        return ComposerEdit::AtCapacity;
-                    }
-                    self.text.replace_range(start..self.cursor, &replacement);
-                    self.cursor = start + replacement.len();
-                    self.selected_image = None;
-                    self.vertical_grapheme_column = None;
-                    self.completion_index = 0;
-                    return ComposerEdit::Changed;
-                }
-                _ => {}
-            }
-        }
-        if let Some((names, selected)) = self.completion_menu() {
-            if matches!(input, TerminalInput::Left | TerminalInput::Right) && self.completion_tabs()
-            {
-                self.skills_tab = !self.skills_tab;
-                self.completion_index = 0;
-                return ComposerEdit::Changed;
-            }
-            if names.is_empty()
-                && matches!(
-                    input,
-                    TerminalInput::Tab
-                        | TerminalInput::Submit
-                        | TerminalInput::Up
-                        | TerminalInput::Down
-                )
-            {
-                return ComposerEdit::Changed;
-            }
-            match input {
-                TerminalInput::Up => {
-                    self.completion_index = (selected + names.len() - 1) % names.len();
-                    return ComposerEdit::Changed;
-                }
-                TerminalInput::Down => {
-                    self.completion_index = (selected + 1) % names.len();
-                    return ComposerEdit::Changed;
-                }
-                TerminalInput::Tab | TerminalInput::Submit => {
-                    let name = names[selected];
-                    let mut completed = format!("/{name}");
-                    if input == TerminalInput::Tab {
-                        if let Some(suffix) = completion_suffix(&completed, &self.choices) {
-                            completed.push_str(&suffix);
-                        } else if self.skills.iter().any(|skill| skill == name) {
-                            completed.push(' ');
-                        }
-                    }
-                    if completed.len() > self.draft_limit() {
-                        return ComposerEdit::AtCapacity;
-                    }
-                    self.text = completed;
-                    self.cursor = self.text.len();
-                    self.selected_image = None;
-                    self.vertical_grapheme_column = None;
-                    self.completion_index = 0;
-                    self.completion_hidden = input == TerminalInput::Submit;
-                    return if input == TerminalInput::Submit {
-                        ComposerEdit::Unchanged
-                    } else {
-                        ComposerEdit::Changed
-                    };
-                }
-                TerminalInput::Escape => {
-                    self.completion_hidden = true;
-                    return ComposerEdit::Changed;
-                }
-                _ => {}
-            }
+            return edit;
         }
         if (self.retained.is_some() || self.pending_draft.is_some())
             && matches!(
@@ -1168,6 +1048,124 @@ impl Composer {
             return ComposerEdit::AtCapacity;
         }
         let edit = self.apply_edit(input);
+        self.settle_edit(input, edit);
+        edit
+    }
+
+    // Up on an empty draft brings back a retained, pending or recalled draft.
+    fn recall_draft(&mut self, input: TerminalInput) -> Option<ComposerEdit> {
+        if input != TerminalInput::Up || !self.is_empty() {
+            return None;
+        }
+        let draft = self
+            .retained
+            .take()
+            .or_else(|| self.pending_draft.take())
+            .or_else(|| self.recalled_draft.take())?;
+        if self.recalled_draft.is_none() {
+            self.recalled_pending = false;
+        }
+        self.restore_draft(draft);
+        Some(ComposerEdit::Changed)
+    }
+
+    fn file_menu_input(&mut self, input: TerminalInput) -> Option<ComposerEdit> {
+        let (items, selected) = self.file_menu()?;
+        let count = items.len();
+        match input {
+            TerminalInput::Up => self.completion_index = (selected + count - 1) % count,
+            TerminalInput::Down => self.completion_index = (selected + 1) % count,
+            TerminalInput::Escape => self.completion_hidden = true,
+            TerminalInput::Tab | TerminalInput::Submit => {
+                let replacement = file_completion(&items[selected], input == TerminalInput::Tab);
+                return Some(self.insert_file_completion(&replacement));
+            }
+            _ => return None,
+        }
+        Some(ComposerEdit::Changed)
+    }
+
+    // The completion replaces the `@` query before the caret, within the draft limit.
+    fn insert_file_completion(&mut self, replacement: &str) -> ComposerEdit {
+        let start = self.text[..self.cursor]
+            .rfind('@')
+            .expect("file menu query");
+        if self.text.len() - (self.cursor - start) + replacement.len() > self.draft_limit() {
+            return ComposerEdit::AtCapacity;
+        }
+        self.text.replace_range(start..self.cursor, replacement);
+        self.cursor = start + replacement.len();
+        self.selected_image = None;
+        self.vertical_grapheme_column = None;
+        self.completion_index = 0;
+        ComposerEdit::Changed
+    }
+
+    fn completion_menu_input(&mut self, input: TerminalInput) -> Option<ComposerEdit> {
+        let (names, selected) = self.completion_menu()?;
+        if matches!(input, TerminalInput::Left | TerminalInput::Right) && self.completion_tabs() {
+            self.skills_tab = !self.skills_tab;
+            self.completion_index = 0;
+            return Some(ComposerEdit::Changed);
+        }
+        if names.is_empty()
+            && matches!(
+                input,
+                TerminalInput::Tab
+                    | TerminalInput::Submit
+                    | TerminalInput::Up
+                    | TerminalInput::Down
+            )
+        {
+            return Some(ComposerEdit::Changed);
+        }
+        match input {
+            TerminalInput::Up => {
+                self.completion_index = (selected + names.len() - 1) % names.len();
+            }
+            TerminalInput::Down => self.completion_index = (selected + 1) % names.len(),
+            TerminalInput::Tab | TerminalInput::Submit => {
+                let name = names[selected];
+                let mut completed = format!("/{name}");
+                if input == TerminalInput::Tab {
+                    if let Some(suffix) = completion_suffix(&completed, &self.choices) {
+                        completed.push_str(&suffix);
+                    } else if self.skills.iter().any(|skill| skill == name) {
+                        completed.push(' ');
+                    }
+                }
+                return Some(self.insert_command_completion(completed, input));
+            }
+            TerminalInput::Escape => self.completion_hidden = true,
+            _ => return None,
+        }
+        Some(ComposerEdit::Changed)
+    }
+
+    // Tab fills the command for editing; Enter fills it and hides the menu for submission.
+    fn insert_command_completion(
+        &mut self,
+        completed: String,
+        input: TerminalInput,
+    ) -> ComposerEdit {
+        if completed.len() > self.draft_limit() {
+            return ComposerEdit::AtCapacity;
+        }
+        self.text = completed;
+        self.cursor = self.text.len();
+        self.selected_image = None;
+        self.vertical_grapheme_column = None;
+        self.completion_index = 0;
+        self.completion_hidden = input == TerminalInput::Submit;
+        if input == TerminalInput::Submit {
+            ComposerEdit::Unchanged
+        } else {
+            ComposerEdit::Changed
+        }
+    }
+
+    // The caret never rests inside a paste chip, and a trailing backslash arms continuation.
+    fn settle_edit(&mut self, input: TerminalInput, edit: ComposerEdit) {
         if let Some(paste) = self
             .pastes
             .iter()
@@ -1189,7 +1187,6 @@ impl Composer {
             self.completion_index = 0;
             self.completion_hidden = false;
         }
-        edit
     }
 
     fn apply_edit(&mut self, input: TerminalInput) -> ComposerEdit {
@@ -1422,6 +1419,40 @@ fn next_word_boundary(text: &str, cursor: usize) -> usize {
         .skip_while(|(_, grapheme)| !grapheme.chars().next().is_some_and(char::is_whitespace))
         .find(|(_, grapheme)| !grapheme.chars().next().is_some_and(char::is_whitespace))
         .map_or(text.len(), |(offset, _)| cursor + offset)
+}
+
+// Tab on a directory keeps browsing inside it; otherwise the path is quoted and closed.
+fn file_completion(path: &str, tab: bool) -> String {
+    let browse = path.ends_with('/') && tab;
+    if browse && !path.chars().any(char::is_whitespace) && !path.contains('"') {
+        format!("@{path}")
+    } else if browse {
+        let mut quoted = serde_json::to_string(path).expect("serializable path");
+        quoted.pop();
+        format!("@{quoted}")
+    } else {
+        format!(
+            "@{} ",
+            serde_json::to_string(path).expect("file name is serializable")
+        )
+    }
+}
+
+// A paste whose label repeats an earlier one gets the next free suffix.
+fn push_renumbered(pastes: &mut Vec<TextPaste>, mut paste: TextPaste) {
+    if pastes
+        .iter()
+        .any(|old| old.characters == paste.characters && old.suffix == paste.suffix)
+    {
+        paste.suffix = pastes
+            .iter()
+            .filter(|old| old.characters == paste.characters)
+            .map(|old| old.suffix)
+            .max()
+            .unwrap_or(0)
+            + 1;
+    }
+    pastes.push(paste);
 }
 
 #[cfg(test)]
