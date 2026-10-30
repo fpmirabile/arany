@@ -2,8 +2,8 @@ use super::{Admission, LoopError, controls};
 use crate::accounts::{chatgpt, credentials};
 use crate::files::bounded_list;
 use crate::terminal::{
-    AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, ShutdownSignal,
-    TerminalInput,
+    AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, SELECTOR_ROWS,
+    ShutdownSignal, TerminalInput,
 };
 use arany::RecordKind;
 use arany::{
@@ -1093,8 +1093,8 @@ async fn browse_linear(
         .as_deref()
         .and_then(|id| items.iter().position(|item| item.id == id))
         .unwrap_or(0)
-        / 10
-        * 10;
+        / SELECTOR_ROWS
+        * SELECTOR_ROWS;
     let efforts = initial_efforts(items, view, exact_custom);
     let mut input = String::new();
     let mut invalid = false;
@@ -1164,14 +1164,16 @@ async fn browse_linear(
                 let choice = input.trim();
                 match choice {
                     "q" if !too_long => return Ok(Choice::Closed),
-                    "n" if !too_long && start + 10 < items.len() => start += 10,
-                    "p" if !too_long && start > 0 => start = start.saturating_sub(10),
+                    "n" if !too_long && start + SELECTOR_ROWS < items.len() => {
+                        start += SELECTOR_ROWS
+                    }
+                    "p" if !too_long && start > 0 => start = start.saturating_sub(SELECTOR_ROWS),
                     _ => {
                         let mut parts = choice.split_ascii_whitespace();
                         if !too_long
                             && let Some(number) =
                                 parts.next().and_then(|value| value.parse::<usize>().ok())
-                            && (1..=10).contains(&number)
+                            && (1..=SELECTOR_ROWS).contains(&number)
                             && let Some(item) = items.get(start + number - 1)
                         {
                             let level = match parts.next() {

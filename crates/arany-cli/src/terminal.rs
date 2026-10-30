@@ -404,6 +404,7 @@ use history::History;
 use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
+pub use view::SELECTOR_ROWS;
 use view::{
     AGENT_PICKER_ROWS, Palette, agent_detail_lines, agent_detail_rows, agent_picker_index,
     bottom_area, composer_height, draw_agent_inspector_frame, draw_help_frame,

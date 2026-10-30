@@ -2118,7 +2118,7 @@ fn settings_stacked(rows: &[String], width: usize) -> bool {
 
 // Classic selector lists show at most this many rows and scroll inside, like Codex's
 // MAX_POPUP_ROWS; ten matches the page size of the linear pickers.
-pub(super) const SELECTOR_ROWS: usize = 10;
+pub const SELECTOR_ROWS: usize = 10;
 
 // From this width dialogs keep side gutters and full labels and hints; narrower ones shorten.
 pub(super) const FULL_LAYOUT_WIDTH: u16 = 40;
