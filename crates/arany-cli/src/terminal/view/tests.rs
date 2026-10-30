@@ -195,12 +195,14 @@ fn classic_dialogs_fill_their_content_sized_viewport() {
                         crate::terminal::rewind::draw_rewind_frame(
                             frame,
                             area,
-                            "Checkpoints",
-                            if panel == "rewind" { &[] } else { &lines },
-                            &["Cancel".into(), "Restore".into()],
-                            0,
-                            0,
-                            palette,
+                            crate::terminal::rewind::RewindFrame {
+                                title: "Checkpoints",
+                                lines: if panel == "rewind" { &[] } else { &lines },
+                                choices: &["Cancel".into(), "Restore".into()],
+                                selected: 0,
+                                page: 0,
+                                palette,
+                            },
                         );
                     }
                     _ => unreachable!(),

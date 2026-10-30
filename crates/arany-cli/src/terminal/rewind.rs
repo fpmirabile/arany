@@ -14,20 +14,24 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph},
 };
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dialog content and its explicit rendering bounds stay together"
-)]
-pub(super) fn draw_rewind_frame(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    lines: &[String],
-    choices: &[String],
-    selected: usize,
-    page: usize,
-    palette: view::Palette,
-) -> bool {
+pub(super) struct RewindFrame<'a> {
+    pub title: &'a str,
+    pub lines: &'a [String],
+    pub choices: &'a [String],
+    pub selected: usize,
+    pub page: usize,
+    pub palette: view::Palette,
+}
+
+pub(super) fn draw_rewind_frame(frame: &mut Frame, area: Rect, state: RewindFrame<'_>) -> bool {
+    let RewindFrame {
+        title,
+        lines,
+        choices,
+        selected,
+        page,
+        palette,
+    } = state;
     frame.render_widget(Clear, area);
     if !view::dialog_fits(area) {
         frame.render_widget(Paragraph::new("Resize; Esc closes"), area);
@@ -163,7 +167,16 @@ impl AttachedTerminal {
                 let mut more = true;
                 self.draw_frame(12, |frame, area| {
                     more = draw_rewind_frame(
-                        frame, area, title, &lines, &choices, selected, page, palette,
+                        frame,
+                        area,
+                        RewindFrame {
+                            title,
+                            lines: &lines,
+                            choices: &choices,
+                            selected,
+                            page,
+                            palette,
+                        },
                     );
                 })?;
                 more
