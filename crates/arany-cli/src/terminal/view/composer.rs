@@ -153,9 +153,8 @@ pub(super) fn draw_composer(
 ) -> Vec<(usize, Rect)> {
     let ComposerHints {
         palette,
-        menu_height,
         picker_focused,
-        newline,
+        ..
     } = hints;
     let area = composer_area;
     let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
@@ -169,17 +168,131 @@ pub(super) fn draw_composer(
         .then(|| composer.command_preview(model.draft_action == DraftAction::InspectRun))
         .flatten();
     let inner_width = usize::from(area.width.saturating_sub(2));
-    let mut rendered_lines = Vec::with_capacity(visible_lines);
+    let cursor_line = draft_rows.lines[draft_rows.cursor_row].as_str();
+    let ghost = ghost_span(
+        preview.as_ref(),
+        inner_width.saturating_sub(UnicodeWidthStr::width(cursor_line)),
+        palette,
+    );
+    let mut rendered_lines = draft_lines(
+        composer,
+        &draft_rows,
+        first_line..first_line + visible_lines,
+        ghost,
+        palette,
+    );
+    let position = draft_position(&draft_rows, first_line, visible_lines, area.width);
+    let (compact_image_chip, position) = image_heading(composer, position, area.width);
+    let title = if compact_image_chip {
+        ""
+    } else if 2 + "Ask Arany".len() + position.len() <= usize::from(composer_area.width) {
+        "Ask Arany"
+    } else {
+        "Draft"
+    };
+    let image_chips = image_chip_areas(composer, area, title, compact_image_chip);
+    draw_heading(frame, area, title, position, palette);
+    if visible_lines > 0 && composer_area.width >= 3 {
+        if draft.is_empty() {
+            let hint = empty_draft_hint(composer, model, composer_area.width);
+            rendered_lines[0] = Line::styled(safe_truncate(hint, inner_width), palette.subtle());
+        }
+        frame.render_widget(
+            Paragraph::new(Line::styled("> ", palette.accent())),
+            Rect::new(composer_area.x, composer_area.y + 1, 2, 1),
+        );
+        let hint = footer_hint(composer, model, hints, composer_area.width);
+        draw_footer(frame, composer_area, hint, palette);
+        frame.render_widget(
+            Paragraph::new(rendered_lines),
+            Rect::new(
+                composer_area.x + 2,
+                composer_area.y + 1,
+                composer_area.width - 2,
+                u16::try_from(visible_lines).unwrap_or(u16::MAX),
+            ),
+        );
+        place_cursor(frame, composer_area, &draft_rows, first_line);
+    }
+    image_chips
+}
+
+fn draw_footer(frame: &mut Frame, area: Rect, hint: String, palette: Palette) {
+    let rules = usize::from(area.width).saturating_sub(UnicodeWidthStr::width(hint.as_str()));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("─".repeat(rules / 2), palette.subtle()),
+            Span::raw(hint),
+            Span::styled("─".repeat(rules - rules / 2), palette.subtle()),
+        ])),
+        Rect::new(area.x, area.bottom() - 1, area.width, 1),
+    );
+}
+
+fn place_cursor(frame: &mut Frame, area: Rect, draft_rows: &ComposerRows, first_line: usize) {
+    let cursor_x = area
+        .x
+        .saturating_add(2)
+        .saturating_add(u16::try_from(draft_rows.cursor_cells).unwrap_or(u16::MAX))
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position(Position {
+        x: cursor_x,
+        y: area
+            .y
+            .saturating_add(1)
+            .saturating_add(u16::try_from(draft_rows.cursor_row - first_line).unwrap_or(u16::MAX)),
+    });
+}
+
+// The command preview's ghost text, bracketed when color cannot dim it.
+fn ghost_span(
+    preview: Option<&super::super::commands::CommandPreview>,
+    available: usize,
+    palette: Palette,
+) -> Span<'static> {
+    let ghost = preview.map_or(String::new(), |preview| {
+        if palette.color || preview.ghost.is_empty() || preview.ghost_is_placeholder {
+            safe_truncate(&preview.ghost, available)
+        } else if available >= 3 {
+            format!("[{}]", safe_truncate(&preview.ghost, available - 2))
+        } else {
+            String::new()
+        }
+    });
+    Span::styled(
+        ghost,
+        if palette.color {
+            Style::default().add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+        },
+    )
+}
+
+fn draft_lines(
+    composer: &Composer,
+    draft_rows: &ComposerRows,
+    window: std::ops::Range<usize>,
+    ghost: Span<'static>,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let mut rendered_lines = Vec::with_capacity(window.len());
     let mut slash_cells = composer
         .slash_token()
         .map_or(0, |token| token.text.len())
-        .saturating_sub(draft_rows.lines[..first_line].iter().map(String::len).sum());
+        .saturating_sub(
+            draft_rows.lines[..window.start]
+                .iter()
+                .map(String::len)
+                .sum(),
+        );
+    let mut ghost = Some(ghost);
     for (index, line) in draft_rows
         .lines
         .iter()
         .enumerate()
-        .skip(first_line)
-        .take(visible_lines)
+        .skip(window.start)
+        .take(window.len())
     {
         let mut spans = slash_spans(
             line.clone(),
@@ -188,30 +301,24 @@ pub(super) fn draw_composer(
             palette,
         );
         slash_cells = slash_cells.saturating_sub(line.len());
-        if index == draft_rows.cursor_row {
-            let available = inner_width.saturating_sub(UnicodeWidthStr::width(line.as_str()));
-            let ghost = preview.as_ref().map_or(String::new(), |preview| {
-                if palette.color || preview.ghost.is_empty() || preview.ghost_is_placeholder {
-                    safe_truncate(&preview.ghost, available)
-                } else if available >= 3 {
-                    format!("[{}]", safe_truncate(&preview.ghost, available - 2))
-                } else {
-                    String::new()
-                }
-            });
-            spans.push(Span::styled(
-                ghost,
-                if palette.color {
-                    Style::default().add_modifier(Modifier::DIM)
-                } else {
-                    Style::default()
-                },
-            ));
+        if index == draft_rows.cursor_row
+            && let Some(ghost) = ghost.take()
+        {
+            spans.push(ghost);
         }
         rendered_lines.push(Line::from(spans));
     }
-    let mut position = if visible_lines > 0 && draft_rows.lines.len() > visible_lines {
-        if composer_area.width >= FULL_LAYOUT_WIDTH {
+    rendered_lines
+}
+
+fn draft_position(
+    draft_rows: &ComposerRows,
+    first_line: usize,
+    visible_lines: usize,
+    width: u16,
+) -> String {
+    if visible_lines > 0 && draft_rows.lines.len() > visible_lines {
+        if width >= FULL_LAYOUT_WIDTH {
             format!(
                 " · rows {}-{}/{}",
                 first_line + 1,
@@ -223,51 +330,58 @@ pub(super) fn draw_composer(
         }
     } else {
         String::new()
-    };
-    let mut compact_image_chip = !composer.images().is_empty() && composer_area.width < 28;
-    if !composer.images().is_empty() {
-        let labels = (0..composer.images().len())
-            .map(|index| {
-                format!(
-                    "{}[Image #{}]",
-                    if composer.selected_image() == Some(index) {
-                        ">"
-                    } else {
-                        ""
-                    },
-                    index + 1
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let all_chips = format!(" · {labels}{position}");
-        compact_image_chip |= UnicodeWidthStr::width(all_chips.as_str())
-            > usize::from(composer_area.width).saturating_sub(12);
-        if compact_image_chip {
-            let chip = match (composer.selected_image(), composer.images().len()) {
-                (Some(index), _) => format!(" >[Image #{}]", index + 1),
-                (None, 1) => " [Image #1]".to_owned(),
-                (None, count) => format!(" [{count} images]"),
-            };
-            position = if UnicodeWidthStr::width(chip.as_str())
-                + UnicodeWidthStr::width(position.as_str())
-                <= usize::from(composer_area.width)
-            {
-                format!("{chip}{position}")
-            } else {
-                chip
-            };
-        } else {
-            position = all_chips;
-        }
     }
-    let title = if compact_image_chip {
-        ""
-    } else if 2 + "Ask Arany".len() + position.len() <= usize::from(composer_area.width) {
-        "Ask Arany"
+}
+
+// Image chips join the row position in the heading, collapsing to one chip when they do not fit.
+fn image_heading(composer: &Composer, mut position: String, width: u16) -> (bool, String) {
+    let mut compact_image_chip = !composer.images().is_empty() && width < 28;
+    if composer.images().is_empty() {
+        return (compact_image_chip, position);
+    }
+    let labels = (0..composer.images().len())
+        .map(|index| {
+            format!(
+                "{}[Image #{}]",
+                if composer.selected_image() == Some(index) {
+                    ">"
+                } else {
+                    ""
+                },
+                index + 1
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let all_chips = format!(" · {labels}{position}");
+    compact_image_chip |=
+        UnicodeWidthStr::width(all_chips.as_str()) > usize::from(width).saturating_sub(12);
+    if compact_image_chip {
+        let chip = match (composer.selected_image(), composer.images().len()) {
+            (Some(index), _) => format!(" >[Image #{}]", index + 1),
+            (None, 1) => " [Image #1]".to_owned(),
+            (None, count) => format!(" [{count} images]"),
+        };
+        position = if UnicodeWidthStr::width(chip.as_str())
+            + UnicodeWidthStr::width(position.as_str())
+            <= usize::from(width)
+        {
+            format!("{chip}{position}")
+        } else {
+            chip
+        };
     } else {
-        "Draft"
-    };
+        position = all_chips;
+    }
+    (compact_image_chip, position)
+}
+
+fn image_chip_areas(
+    composer: &Composer,
+    area: Rect,
+    title: &str,
+    compact_image_chip: bool,
+) -> Vec<(usize, Rect)> {
     let mut image_chips = Vec::new();
     if !compact_image_chip {
         let lead_width = if title == "Ask Arany" { 2 } else { 0 };
@@ -287,6 +401,16 @@ pub(super) fn draw_composer(
             Rect::new(area.x + 1, area.y, "[Image #1]".len() as u16, 1),
         ));
     }
+    image_chips
+}
+
+fn draw_heading(
+    frame: &mut Frame,
+    area: Rect,
+    title: &'static str,
+    position: String,
+    palette: Palette,
+) {
     let lead = if title == "Ask Arany" { "─ " } else { "" };
     let heading_cells = UnicodeWidthStr::width(lead) + title.len() + position.len() + 1;
     frame.render_widget(
@@ -297,157 +421,129 @@ pub(super) fn draw_composer(
             Span::styled(
                 format!(
                     " {}",
-                    "─".repeat(usize::from(composer_area.width).saturating_sub(heading_cells))
+                    "─".repeat(usize::from(area.width).saturating_sub(heading_cells))
                 ),
                 palette.subtle(),
             ),
         ])),
-        Rect::new(composer_area.x, composer_area.y, composer_area.width, 1),
+        Rect::new(area.x, area.y, area.width, 1),
     );
-    if visible_lines > 0 && composer_area.width >= 3 {
-        if draft.is_empty() {
-            let hint = if !composer.images().is_empty() {
-                if composer_area.width < FULL_LAYOUT_WIDTH {
-                    "Message or Enter"
-                } else {
-                    "Add a message, or Enter to send image"
-                }
-            } else if model.setup_required {
-                if composer_area.width < FULL_LAYOUT_WIDTH {
-                    "Type /setup"
-                } else {
-                    "Type /setup to connect an account"
-                }
-            } else if composer_area.width < FULL_LAYOUT_WIDTH {
-                "Message Arany"
-            } else {
-                "Ask a question, or type / for commands"
-            };
-            rendered_lines[0] = Line::styled(safe_truncate(hint, inner_width), palette.subtle());
+}
+
+fn empty_draft_hint(composer: &Composer, model: &PresentationModel, width: u16) -> &'static str {
+    if !composer.images().is_empty() {
+        if width < FULL_LAYOUT_WIDTH {
+            "Message or Enter"
+        } else {
+            "Add a message, or Enter to send image"
         }
-        frame.render_widget(
-            Paragraph::new(Line::styled("> ", palette.accent())),
-            Rect::new(composer_area.x, composer_area.y + 1, 2, 1),
-        );
-        let command = model.draft_action != DraftAction::Retain
-            && matches!(composer.submission(), Ok(Submission::Command { .. }));
-        let hint = if composer.selected_image().is_some() {
-            let image_hint = " ←/→ select · Del/Backspace remove ";
-            if usize::from(composer_area.width) >= UnicodeWidthStr::width(image_hint) {
-                image_hint
-            } else {
-                " Del remove "
-            }
-        } else if composer.selected_paste().is_some() {
-            if composer_area.width >= 28 {
-                " Tab: inspect · Del: remove "
-            } else {
-                " Tab / Del "
-            }
-        } else if picker_focused {
-            if composer_area.width < FULL_LAYOUT_WIDTH {
-                " Draft kept "
-            } else {
-                " Draft kept · Esc returns "
-            }
-        } else if model.draft_action == DraftAction::Retain
-            && composer_area.width >= FULL_LAYOUT_WIDTH
-        {
-            "Enter keeps draft · \\ then Enter newline"
-        } else if model.draft_action == DraftAction::Retain && composer_area.width >= 24 {
-            " Enter keeps · \\ Enter "
-        } else if model.draft_action == DraftAction::Retain && composer_area.width >= 16 {
-            " Enter keeps "
-        } else if menu_height > 0 && composer_area.width >= FULL_LAYOUT_WIDTH {
-            if draft.starts_with('/') {
-                " Tab completes · Enter invokes · Esc close "
-            } else {
-                " Up/Down · Tab/Enter fills · Esc close "
-            }
-        } else if menu_height > 0 && composer_area.width >= 20 {
-            if draft.starts_with('/') {
-                " Tab fills Enter runs "
-            } else {
-                " Tab/Enter fills Esc "
-            }
-        } else if menu_height > 0 {
-            if draft.starts_with('/') {
-                " Enter runs Esc "
-            } else {
-                " Tab/Enter Esc "
-            }
-        } else if command && composer_area.width >= FULL_LAYOUT_WIDTH {
-            " Enter command · \\ then Enter newline "
-        } else if command && composer_area.width >= 16 {
-            " Enter command "
-        } else if model.draft_action != DraftAction::Submit
-            && composer_area.width >= FULL_LAYOUT_WIDTH
-        {
-            "Enter keeps draft · \\ then Enter newline"
-        } else if model.draft_action != DraftAction::Submit && composer_area.width >= 24 {
-            " Enter keeps · \\ Enter "
-        } else if model.draft_action != DraftAction::Submit && composer_area.width >= 16 {
-            " Enter keeps "
-        } else if composer_area.width >= FULL_LAYOUT_WIDTH {
-            " Enter sends · \\ then Enter newline "
-        } else if composer_area.width >= 16 {
-            " Enter · \\ Enter "
+    } else if model.setup_required {
+        if width < FULL_LAYOUT_WIDTH {
+            "Type /setup"
         } else {
-            ""
-        };
-        let agents_hint = draft.is_empty()
-            && composer.images().is_empty()
-            && model.agent_switch
-            && menu_height == 0
-            && !picker_focused;
-        let hint = match composer_area.width {
-            FULL_LAYOUT_WIDTH.. if agents_hint => " Alt+Left/Right agents ",
-            24.. if agents_hint => " Alt+←/→ agents ",
-            _ => hint,
-        };
-        let hint = if composer_area.width >= FULL_LAYOUT_WIDTH && newline != "\\ then Enter" {
-            hint.replace("\\ then Enter newline", &format!("{} / \\ Enter", newline))
-                .replace("Enter keeps draft", "Enter keeps")
+            "Type /setup to connect an account"
+        }
+    } else if width < FULL_LAYOUT_WIDTH {
+        "Message Arany"
+    } else {
+        "Ask a question, or type / for commands"
+    }
+}
+
+fn footer_hint(
+    composer: &Composer,
+    model: &PresentationModel,
+    hints: ComposerHints<'_>,
+    width: u16,
+) -> String {
+    let ComposerHints {
+        menu_height,
+        picker_focused,
+        newline,
+        ..
+    } = hints;
+    let draft = composer.text();
+    let agents_hint = draft.is_empty()
+        && composer.images().is_empty()
+        && model.agent_switch
+        && menu_height == 0
+        && !picker_focused;
+    let hint = match width {
+        FULL_LAYOUT_WIDTH.. if agents_hint => " Alt+Left/Right agents ",
+        24.. if agents_hint => " Alt+←/→ agents ",
+        _ => key_hint(composer, model, hints, width),
+    };
+    if width >= FULL_LAYOUT_WIDTH && newline != "\\ then Enter" {
+        hint.replace("\\ then Enter newline", &format!("{} / \\ Enter", newline))
+            .replace("Enter keeps draft", "Enter keeps")
+    } else {
+        hint.to_owned()
+    }
+}
+
+fn key_hint(
+    composer: &Composer,
+    model: &PresentationModel,
+    hints: ComposerHints<'_>,
+    width: u16,
+) -> &'static str {
+    let draft = composer.text();
+    let (menu_height, picker_focused) = (hints.menu_height, hints.picker_focused);
+    let command = model.draft_action != DraftAction::Retain
+        && matches!(composer.submission(), Ok(Submission::Command { .. }));
+    if composer.selected_image().is_some() {
+        let image_hint = " ←/→ select · Del/Backspace remove ";
+        if usize::from(width) >= UnicodeWidthStr::width(image_hint) {
+            image_hint
         } else {
-            hint.to_owned()
-        };
-        let rules =
-            usize::from(composer_area.width).saturating_sub(UnicodeWidthStr::width(hint.as_str()));
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("─".repeat(rules / 2), palette.subtle()),
-                Span::raw(hint),
-                Span::styled("─".repeat(rules - rules / 2), palette.subtle()),
-            ])),
-            Rect::new(
-                composer_area.x,
-                composer_area.bottom() - 1,
-                composer_area.width,
-                1,
-            ),
-        );
-        frame.render_widget(
-            Paragraph::new(rendered_lines),
-            Rect::new(
-                composer_area.x + 2,
-                composer_area.y + 1,
-                composer_area.width - 2,
-                u16::try_from(visible_lines).unwrap_or(u16::MAX),
-            ),
-        );
+            " Del remove "
+        }
+    } else if composer.selected_paste().is_some() {
+        if width >= 28 {
+            " Tab: inspect · Del: remove "
+        } else {
+            " Tab / Del "
+        }
+    } else if picker_focused {
+        if width < FULL_LAYOUT_WIDTH {
+            " Draft kept "
+        } else {
+            " Draft kept · Esc returns "
+        }
+    } else if model.draft_action == DraftAction::Retain && width >= FULL_LAYOUT_WIDTH {
+        "Enter keeps draft · \\ then Enter newline"
+    } else if model.draft_action == DraftAction::Retain && width >= 24 {
+        " Enter keeps · \\ Enter "
+    } else if model.draft_action == DraftAction::Retain && width >= 16 {
+        " Enter keeps "
+    } else if menu_height > 0 {
+        menu_hint(draft.starts_with('/'), width)
+    } else if command && width >= FULL_LAYOUT_WIDTH {
+        " Enter command · \\ then Enter newline "
+    } else if command && width >= 16 {
+        " Enter command "
+    } else if model.draft_action != DraftAction::Submit && width >= FULL_LAYOUT_WIDTH {
+        "Enter keeps draft · \\ then Enter newline"
+    } else if model.draft_action != DraftAction::Submit && width >= 24 {
+        " Enter keeps · \\ Enter "
+    } else if model.draft_action != DraftAction::Submit && width >= 16 {
+        " Enter keeps "
+    } else if width >= FULL_LAYOUT_WIDTH {
+        " Enter sends · \\ then Enter newline "
+    } else if width >= 16 {
+        " Enter · \\ Enter "
+    } else {
+        ""
     }
-    if visible_lines > 0 && composer_area.width >= 3 {
-        let cursor_x = composer_area
-            .x
-            .saturating_add(2)
-            .saturating_add(u16::try_from(draft_rows.cursor_cells).unwrap_or(u16::MAX))
-            .min(composer_area.right().saturating_sub(1));
-        frame.set_cursor_position(Position {
-            x: cursor_x,
-            y: composer_area.y.saturating_add(1).saturating_add(
-                u16::try_from(draft_rows.cursor_row - first_line).unwrap_or(u16::MAX),
-            ),
-        });
+}
+
+fn menu_hint(slash: bool, width: u16) -> &'static str {
+    match (width, slash) {
+        (FULL_LAYOUT_WIDTH.., true) => " Tab completes · Enter invokes · Esc close ",
+        (FULL_LAYOUT_WIDTH.., false) => " Up/Down · Tab/Enter fills · Esc close ",
+        (20.., true) => " Tab fills Enter runs ",
+        (20.., false) => " Tab/Enter fills Esc ",
+        (_, true) => " Enter runs Esc ",
+        (_, false) => " Tab/Enter Esc ",
     }
-    image_chips
 }
