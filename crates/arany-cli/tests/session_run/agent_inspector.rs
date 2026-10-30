@@ -26,12 +26,13 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     assert!(!text.contains("\x1b[?1000h"));
 }
 
-#[tokio::test]
-async fn editor_inspector_shows_integrated_paths_and_digests() {
-    // A cancelled editor integrates nothing, so the integrated command case carries the report.
+// Runs an editor command case, then opens the inspector over its closed Session without changing it.
+async fn inspect_editor_case(
+    case: &'static str,
+) -> (arany::test_support::worker_teams::TeamObservation, String) {
     let observed = arany::test_support::worker_teams::run_case(
         std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
-        "command",
+        case,
     )
     .await;
     let state = observed.directory.path().join("state");
@@ -49,13 +50,6 @@ async fn editor_inspector_shows_integrated_paths_and_digests() {
     .expect("inspector provider defaults");
     let (before, _) = arany::test_support::goals::replayed(&state, observed.session).await;
     let text = inspect_agents(&state, &workspace, Some(observed.session));
-    let report = &observed.view.runs[0].worker_history()[0].changed_paths;
-    assert!(text.contains("Changed paths (untrusted"));
-    assert!(text.contains("notes/0"));
-    let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
-    assert!(text.contains(row["after_sha256"].as_str().unwrap()));
-    assert!(text.contains("Lease released: true; verified: true"));
-    assert!(text.contains("Publication: Confirmed"));
     for removed in [
         "integration:",
         "discarded:",
@@ -66,6 +60,44 @@ async fn editor_inspector_shows_integrated_paths_and_digests() {
     }
     let (events, _) = arany::test_support::goals::replayed(&state, observed.session).await;
     assert_eq!(events, before);
+    (observed, text)
+}
+
+#[tokio::test]
+async fn editor_inspector_shows_integrated_paths_and_digests() {
+    let (observed, text) = inspect_editor_case("command").await;
+    let report = &observed.view.runs[0].worker_history()[0].changed_paths;
+    assert!(text.contains("Changed paths (untrusted"));
+    assert!(text.contains("notes/0"));
+    let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
+    assert!(text.contains(row["after_sha256"].as_str().unwrap()));
+    assert!(text.contains("Lease released: true; verified: true"));
+    assert!(text.contains("Publication: Confirmed"));
+}
+
+#[tokio::test]
+async fn editor_inspector_shows_a_cancelled_editor_integrated_nothing() {
+    let (observed, text) = inspect_editor_case("command_cancel").await;
+    let run = &observed.view.runs[0];
+    assert!(run.worker_history()[0].changed_paths.is_empty());
+    assert!(text.contains("Worker: Cancelled; cause: Some(Cancelled)"));
+    assert!(text.contains("Publication: Unpublished"));
+    assert!(text.contains("Lease released: true; verified: false"));
+    assert!(!text.contains("Changed paths (untrusted"));
+    let directory = observed.directory.path();
+    assert_eq!(
+        std::fs::read(directory.join("workspace/notes/0")).unwrap(),
+        b"original 0"
+    );
+    // The command's edit stays in the editor's kept workspace, and inspecting does not sweep it.
+    let kept = directory
+        .join("state/editors")
+        .join(observed.session.to_string())
+        .join(run.agents[1].id.to_string());
+    assert_eq!(
+        std::fs::read(kept.join("tree/notes/0")).unwrap(),
+        b"edited 0"
+    );
 }
 
 fn inspect_agents(
