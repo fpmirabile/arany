@@ -505,8 +505,7 @@ impl AttachedSession {
                     &self.admission,
                     &self.view,
                     start,
-                    &self.composer.editable_text(),
-                    !self.composer.images().is_empty(),
+                    &self.composer,
                     self.terminal.is_linear(),
                 )
             }
@@ -531,8 +530,7 @@ impl AttachedSession {
                 &self.admission,
                 &self.view,
                 GoalStart::Plain,
-                &self.composer.editable_text(),
-                !self.composer.images().is_empty(),
+                &self.composer,
                 self.terminal.is_linear(),
             ),
         };
@@ -804,11 +802,13 @@ impl AttachedSession {
         self.ui.notice = run_selector(
             &self.engine,
             selector,
-            &mut self.terminal,
             &mut self.admission,
             &mut self.session_id,
-            &mut self.view,
-            &mut self.composer,
+            super::run::RunUi {
+                terminal: &mut self.terminal,
+                view: &mut self.view,
+                composer: &mut self.composer,
+            },
         )
         .await
         .transpose()
@@ -826,10 +826,12 @@ impl AttachedSession {
         }
         let maintenance = match compact_current(
             &self.engine,
-            &mut self.terminal,
             &self.admission,
-            &self.view,
-            &mut self.composer,
+            super::run::RunUi {
+                terminal: &mut self.terminal,
+                view: &mut self.view,
+                composer: &mut self.composer,
+            },
             None,
         )
         .await?

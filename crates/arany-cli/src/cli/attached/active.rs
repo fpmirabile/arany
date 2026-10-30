@@ -153,10 +153,11 @@ pub(super) fn preflight_idle_run(
     admission: &Admission,
     view: &SessionView,
     start: GoalStart,
-    draft: &str,
-    has_images: bool,
+    composer: &Composer,
     linear: bool,
 ) -> Result<Option<String>, String> {
+    let draft = &composer.editable_text();
+    let has_images = !composer.images().is_empty();
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Err("Use /setup to choose an account".into());
     };
@@ -333,10 +334,12 @@ impl SubmissionFinish<'_> {
                 None => Err(error),
                 Some(submitted) => {
                     super::reconcile_failed_submission(
-                        ui.terminal,
+                        super::run::RunUi {
+                            terminal: ui.terminal,
+                            view: ui.view,
+                            composer: ui.composer,
+                        },
                         &self.admission.state_dir,
-                        ui.view,
-                        ui.composer,
                         submitted,
                         starting_sequence,
                     )
@@ -618,10 +621,12 @@ impl CompletedRun<'_> {
         };
         let compaction_notice = match compact_current(
             self.engine,
-            ui.terminal,
             self.admission,
-            ui.view,
-            ui.composer,
+            RunUi {
+                terminal: ui.terminal,
+                view: ui.view,
+                composer: ui.composer,
+            },
             Some((config, self.outcome.run.id)),
         )
         .await?
@@ -681,12 +686,16 @@ impl CompletedRun<'_> {
 
 pub(super) async fn compact_current(
     engine: &arany::Engine,
-    terminal: &mut AttachedTerminal,
     admission: &Admission,
-    view: &SessionView,
-    composer: &mut Composer,
+    ui: RunUi<'_>,
     pinned: Option<(&arany::RunConfig, arany::RunId)>,
 ) -> Result<CompactionOutcome, String> {
+    let RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
+    let view: &SessionView = view;
     let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
         view.runs
             .last()
@@ -713,15 +722,10 @@ pub(super) async fn compact_current(
         .map_err(|error| error.to_string())?;
     let future = run::compact_selected(
         engine,
-        &admission.state_dir,
+        admission,
         selection,
-        view.id,
-        &admission.workspace,
+        view,
         pinned.map(|(_, run_id)| run_id),
-        view.runs
-            .last()
-            .and_then(|run| run.config.as_ref())
-            .filter(|config| config.roster.is_some()),
     );
     drive_compaction(
         future,
@@ -1388,8 +1392,14 @@ mod goal_request_tests {
             resume_goal: None,
         };
         view.goals.clear();
-        let message = preflight_idle_run(&admission, &view, GoalStart::Resume, "", false, false)
-            .expect_err("no interrupted Goal to resume");
+        let message = preflight_idle_run(
+            &admission,
+            &view,
+            GoalStart::Resume,
+            &Composer::default(),
+            false,
+        )
+        .expect_err("no interrupted Goal to resume");
         assert_eq!(message, "Error: No interrupted Goal is available to resume");
         assert!(
             !admission.state_dir.exists(),

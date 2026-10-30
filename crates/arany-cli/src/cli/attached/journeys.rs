@@ -1280,10 +1280,12 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
             let backup = root.join("recovery-state");
             std::fs::rename(&state, &backup).unwrap();
             super::reconcile_failed_submission(
-                &mut terminal,
+                super::run::RunUi {
+                    terminal: &mut terminal,
+                    view: &mut recovery_view,
+                    composer: &mut recovery_composer,
+                },
                 &state,
-                &mut recovery_view,
-                &mut recovery_composer,
                 submitted.clone(),
                 view.last_sequence,
             )
@@ -1291,10 +1293,12 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
             .unwrap();
             assert_eq!(recovery_composer.take_draft(), submitted);
             super::reconcile_failed_submission(
-                &mut terminal,
+                super::run::RunUi {
+                    terminal: &mut terminal,
+                    view: &mut recovery_view,
+                    composer: &mut recovery_composer,
+                },
                 &state,
-                &mut recovery_view,
-                &mut recovery_composer,
                 submitted.clone(),
                 0,
             )
@@ -1306,10 +1310,12 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
             );
             std::fs::rename(&state, &backup).unwrap();
             let error = super::reconcile_failed_submission(
-                &mut terminal,
+                super::run::RunUi {
+                    terminal: &mut terminal,
+                    view: &mut recovery_view,
+                    composer: &mut recovery_composer,
+                },
                 &state,
-                &mut recovery_view,
-                &mut recovery_composer,
                 submitted,
                 view.last_sequence,
             )

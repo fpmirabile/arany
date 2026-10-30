@@ -361,12 +361,15 @@ async fn close_engine(engine: std::sync::Arc<Engine>) -> Result<(), String> {
 async fn run_selector(
     engine: &Engine,
     selector: Selector,
-    terminal: &mut AttachedTerminal,
     admission: &mut Admission,
     session_id: &mut SessionId,
-    view: &mut SessionView,
-    composer: &mut Composer,
+    ui: run::RunUi<'_>,
 ) -> Result<Option<Feedback>, LoopError> {
+    let run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
     Ok(Some(match selector {
         Selector::Usage => {
             terminal
@@ -556,13 +559,16 @@ fn consume_local_command(composer: &mut Composer, submission: &Submission<'_>) {
 }
 
 async fn reconcile_failed_submission(
-    terminal: &mut AttachedTerminal,
+    ui: run::RunUi<'_>,
     state_dir: &Path,
-    view: &mut SessionView,
-    composer: &mut Composer,
     submitted: ComposerDraft,
     starting_sequence: u64,
 ) -> Result<(), String> {
+    let run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
     loop {
         match load_view(state_dir, view.id).await {
             Ok(reloaded) => {

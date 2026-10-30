@@ -7,9 +7,7 @@ use crate::terminal::{
     AgentChatFollow, AttachedTerminal, Composer, ComposerDraft, TerminalError, TerminalInput,
     TerminalNotice,
 };
-use arany::{
-    CompactionRecord, Engine, RunId, RunOutcome, RunRequest, RunResult, SessionId, SessionView,
-};
+use arany::{CompactionRecord, Engine, RunId, RunOutcome, RunRequest, RunResult, SessionView};
 use arany_cli::protocol::{methods::*, rpc::*};
 use std::path::Path;
 
@@ -62,25 +60,38 @@ pub(super) fn finish_attempt(
     }
 }
 
+const PINNED_COMPACTION_ADMISSION: std::time::Duration = std::time::Duration::from_secs(120);
+
+// The latest Run's roster, when it has one, pins the compaction routes.
 pub(super) async fn compact_selected(
     engine: &Engine,
-    state_dir: &Path,
+    admission: &Admission,
     selection: Selection<'_>,
-    session_id: SessionId,
-    workspace: &Path,
+    view: &SessionView,
     expected_run_id: Option<RunId>,
-    pinned_roster: Option<&arany::RunConfig>,
 ) -> Result<Option<CompactionRecord>, String> {
+    let (state_dir, workspace) = (&admission.state_dir, &admission.workspace);
+    let session_id = view.id;
+    let pinned_roster = view
+        .runs
+        .last()
+        .and_then(|run| run.config.as_ref())
+        .filter(|config| config.roster.is_some());
     engine
         .readmit_state()
         .map_err(|_| "state directory unavailable or unsafe")?;
     let providers = if let Some(config) = pinned_roster {
         tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            PINNED_COMPACTION_ADMISSION,
             crate::cli::provider::roster::pinned_compaction(state_dir, workspace, config),
         )
         .await
-        .map_err(|_| "compaction admission exceeded 120 seconds")??
+        .map_err(|_| {
+            format!(
+                "compaction admission exceeded {} seconds",
+                PINNED_COMPACTION_ADMISSION.as_secs()
+            )
+        })??
     } else {
         let provider = select_provider(state_dir, selection)
             .await
