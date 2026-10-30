@@ -176,12 +176,14 @@ impl ServerLoop {
                         control.clone(),
                         &self.outbound,
                         self.history.dispatch(
-                            &self.engine,
-                            &self.state,
+                            history::Context {
+                                engine: &self.engine,
+                                state: &self.state,
+                                outbound: &self.outbound,
+                                opt_out: &self.opt_out,
+                            },
                             &mut self.threads,
                             request,
-                            &self.outbound,
-                            &self.opt_out,
                         ),
                     )
                     .await
@@ -709,15 +711,17 @@ impl ServerLoop {
         approval_end: RunCancellation,
     ) -> approvals::Approvals {
         approvals::Approvals::start(
-            inbox,
-            cancel,
-            thread_id,
+            approvals::ApprovalRun {
+                inbox,
+                cancel,
+                finished: approval_end,
+                thread_id,
+            },
             approvals::Channel {
                 outbound: self.outbound.clone(),
                 next_id: self.next_server_id.clone(),
                 approval_channel: self.threads.approval_channel,
             },
-            approval_end,
             {
                 let state = self.state.clone();
                 move |intent| approvals::started_at(state.clone(), thread_id, intent)

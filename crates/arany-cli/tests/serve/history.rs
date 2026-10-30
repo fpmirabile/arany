@@ -553,7 +553,16 @@ async fn events_resync_is_emitted_when_the_tap_lags_behind_a_stalled_client() {
         params: Some(json!({"threadId":thread,"since":0})),
     };
     let replay = history
-        .dispatch(&app, &state, &mut loaded, subscription, &outbound, &[])
+        .dispatch(
+            super::super::history::Context {
+                engine: &app,
+                state: &state,
+                outbound: &outbound,
+                opt_out: &[],
+            },
+            &mut loaded,
+            subscription,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -627,7 +636,16 @@ async fn events_resync_is_emitted_when_the_tap_lags_behind_a_stalled_client() {
         params: Some(json!({"threadId":thread,"since":cursor})),
     };
     let recovered = history
-        .dispatch(&app, &state, &mut loaded, subscription, &outbound, &[])
+        .dispatch(
+            super::super::history::Context {
+                engine: &app,
+                state: &state,
+                outbound: &outbound,
+                opt_out: &[],
+            },
+            &mut loaded,
+            subscription,
+        )
         .await
         .unwrap()
         .unwrap();

@@ -159,7 +159,7 @@ pub(crate) fn answer_summary(text: &str) -> String {
     line[..end].to_owned()
 }
 
-pub(crate) const MAX_SESSION_TITLE_BYTES: usize = 128;
+pub const MAX_SESSION_TITLE_BYTES: usize = 128;
 
 pub fn valid_session_title(title: &str) -> bool {
     !title.is_empty() && title.len() <= MAX_SESSION_TITLE_BYTES

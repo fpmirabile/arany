@@ -88,13 +88,13 @@ pub use session::{
     GoalStatus, GoalSuccessCriterion, GoalView, IncludeFit, IncludeSource, InstructionFile,
     InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
     MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
-    MAX_USER_MESSAGE_BYTES, MIN_CONTEXT_WINDOW_PERCENT, PartialInclude, PlanUsage, ProposalRefusal,
-    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
-    ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
-    RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
-    SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
-    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView, UsageGroup,
-    UsageView, WorkspaceIdentity, escape_status_text, valid_session_title,
+    MAX_SESSION_TITLE_BYTES, MAX_USER_MESSAGE_BYTES, MIN_CONTEXT_WINDOW_PERCENT, PartialInclude,
+    PlanUsage, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord,
+    ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind, RecentFile,
+    ReplayError, RunConfig, RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus,
+    RunStop, RunView, SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView,
+    TokenCount, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView,
+    UsageGroup, UsageView, WorkspaceIdentity, escape_status_text, valid_session_title,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{

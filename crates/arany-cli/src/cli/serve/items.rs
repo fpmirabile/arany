@@ -43,10 +43,21 @@ pub(super) fn project(
     };
     state.last_sequence = envelope.sequence;
     let mut messages = Vec::new();
-    let (run_id, item, started) = match &envelope.event {
+    if let Some((run_id, item, started)) = event_item(envelope, state, &mut messages) {
+        push_item(&mut messages, envelope, run_id, item, started);
+    }
+    messages
+}
+
+fn event_item(
+    envelope: &arany::EventEnvelope,
+    state: &mut TurnState,
+    messages: &mut Vec<Notification>,
+) -> Option<(RunId, Item, bool)> {
+    Some(match &envelope.event {
         Event::GoalRunLinked { goal_id, .. } => {
             state.goal_id = Some(*goal_id);
-            return messages;
+            return None;
         }
         Event::MessageAccepted {
             run_id,
@@ -84,10 +95,19 @@ pub(super) fn project(
         ),
         Event::RunFinished { .. } => {
             state.pending_completion = true;
-            return messages;
+            return None;
         }
-        _ => return messages,
-    };
+        _ => return None,
+    })
+}
+
+fn push_item(
+    messages: &mut Vec<Notification>,
+    envelope: &arany::EventEnvelope,
+    run_id: RunId,
+    item: Item,
+    started: bool,
+) {
     if started {
         messages.push(notification(
             "item/started",
@@ -110,7 +130,6 @@ pub(super) fn project(
             },
         ));
     }
-    messages
 }
 
 pub(super) fn in_progress(id: RunId, goal_id: GoalId) -> Turn {
@@ -277,20 +296,7 @@ fn tool_item_with_denial_output(
     let id = intent.id.to_string();
     let disposition = observation.map(|o| o.disposition);
     let output = observation.map(|o| denial_output.unwrap_or(&o.output).to_owned());
-    let status = match observation {
-        Some(o) if o.cache_update == CacheUpdate::Uncertain => ItemStatus::Uncertain,
-        Some(o) => match o.disposition {
-            ToolDisposition::Succeeded => ItemStatus::Completed,
-            ToolDisposition::Denied => ItemStatus::Declined,
-            ToolDisposition::Uncertain => ItemStatus::Uncertain,
-            ToolDisposition::Failed
-            | ToolDisposition::Conflict
-            | ToolDisposition::Limit
-            | ToolDisposition::Cancelled => ItemStatus::Failed,
-        },
-        None if history => ItemStatus::Uncertain,
-        None => ItemStatus::InProgress,
-    };
+    let status = item_status(observation, history);
     if let Some(changes) = file_changes(&intent.call) {
         return Item::FileChange {
             id,
@@ -313,13 +319,7 @@ fn tool_item_with_denial_output(
             output,
             attestation: observation
                 .and_then(|o| o.attestation.as_ref())
-                .and_then(|a| match a {
-                    arany::Attestation::Guard(_) => Some(Attestation::Guard),
-                    arany::Attestation::InProcess { .. } => Some(Attestation::InProcess),
-                    arany::Attestation::Host(_)
-                    | arany::Attestation::Unguarded(_)
-                    | arany::Attestation::Git(_) => None,
-                }),
+                .and_then(command_attestation),
         },
         ToolCall::McpList { server } => Item::McpToolCall {
             id,
@@ -351,6 +351,34 @@ fn tool_item_with_denial_output(
             disposition,
             output,
         },
+    }
+}
+
+// An unobserved Tool is in progress live, but unknown when replayed from history.
+fn item_status(observation: Option<&ToolObservation>, history: bool) -> ItemStatus {
+    match observation {
+        Some(o) if o.cache_update == CacheUpdate::Uncertain => ItemStatus::Uncertain,
+        Some(o) => match o.disposition {
+            ToolDisposition::Succeeded => ItemStatus::Completed,
+            ToolDisposition::Denied => ItemStatus::Declined,
+            ToolDisposition::Uncertain => ItemStatus::Uncertain,
+            ToolDisposition::Failed
+            | ToolDisposition::Conflict
+            | ToolDisposition::Limit
+            | ToolDisposition::Cancelled => ItemStatus::Failed,
+        },
+        None if history => ItemStatus::Uncertain,
+        None => ItemStatus::InProgress,
+    }
+}
+
+fn command_attestation(attestation: &arany::Attestation) -> Option<Attestation> {
+    match attestation {
+        arany::Attestation::Guard(_) => Some(Attestation::Guard),
+        arany::Attestation::InProcess { .. } => Some(Attestation::InProcess),
+        arany::Attestation::Host(_)
+        | arany::Attestation::Unguarded(_)
+        | arany::Attestation::Git(_) => None,
     }
 }
 
