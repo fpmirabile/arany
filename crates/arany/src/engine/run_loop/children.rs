@@ -201,6 +201,31 @@ impl WaveStop {
             Self::Boundary(cause) | Self::Abort(cause) => cause,
         }
     }
+
+    const fn from_queue(cause: StopCause) -> Self {
+        match cause {
+            StopCause::ToolRefused(_) | StopCause::Uncertain => Self::Abort(cause),
+            StopCause::ContextFull
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::ActiveTime
+            | StopCause::DelegationDeadline
+            | StopCause::Capacity => Self::Boundary(cause),
+            StopCause::Budget
+            | StopCause::Paused
+            | StopCause::Refused(_)
+            | StopCause::ToolStopped
+            | StopCause::InvalidCommandResult => Self::BUDGET,
+        }
+    }
+
+    // A budget boundary lets workers end on their budget cause; every other stop cancels them.
+    pub(super) const fn tears_down(self) -> bool {
+        !matches!(
+            self,
+            Self::Boundary(StopCause::Budget | StopCause::Capacity | StopCause::ActiveTime)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -569,15 +594,8 @@ fn wave_stop_after(
     end: Option<AgentDisposition>,
     hook: HookFacts,
 ) -> Option<WaveStop> {
-    if let Some(cause @ (StopCause::ToolRefused(_) | StopCause::Uncertain)) = queue_stop {
-        Some(WaveStop::Abort(cause))
-    } else if let Some(
-        cause @ (StopCause::ActiveTime | StopCause::DelegationDeadline | StopCause::Capacity),
-    ) = queue_stop
-    {
-        Some(WaveStop::Boundary(cause))
-    } else if queue_stop.is_some() {
-        Some(WaveStop::BUDGET)
+    if let Some(cause) = queue_stop {
+        Some(WaveStop::from_queue(cause))
     } else if cancelled {
         Some(WaveStop::Abort(StopCause::Cancelled))
     } else if paused {
@@ -1835,7 +1853,7 @@ impl RunLoop<'_> {
                     &mut wave.children[index],
                     WorkerEnd {
                         answer,
-                        torn_down: matches!(abort, Some(WaveStop::Abort(_))),
+                        torn_down: abort.is_some_and(WaveStop::tears_down),
                         failure,
                         step_stop,
                         integration,
@@ -1872,15 +1890,7 @@ impl RunLoop<'_> {
         if let Some(cause) = queue.stop
             && abort.is_none()
         {
-            *abort = Some(match cause {
-                cause @ (StopCause::ToolRefused(_) | StopCause::Uncertain) => {
-                    WaveStop::Abort(cause)
-                }
-                cause @ (StopCause::ActiveTime
-                | StopCause::DelegationDeadline
-                | StopCause::Capacity) => WaveStop::Boundary(cause),
-                _ => WaveStop::BUDGET,
-            });
+            *abort = Some(WaveStop::from_queue(cause));
         }
         // A pause lets in-flight child calls finish and be recorded; every other stop drains them.
         if abort.is_some_and(|stop| stop != WaveStop::Boundary(StopCause::Paused))
@@ -2477,21 +2487,8 @@ impl RunLoop<'_> {
     fn unstarted_stop(&self, queue: &ChildQueue) -> Option<WaveStop> {
         if self.pause_requested() {
             Some(WaveStop::Boundary(StopCause::Paused))
-        } else if let Some(cause @ (StopCause::ToolRefused(_) | StopCause::Uncertain)) = queue.stop
-        {
-            Some(WaveStop::Abort(cause))
-        } else if let Some(
-            cause @ (StopCause::ContextFull
-            | StopCause::Cancelled
-            | StopCause::HookStop
-            | StopCause::ActiveTime
-            | StopCause::DelegationDeadline
-            | StopCause::Capacity),
-        ) = queue.stop
-        {
-            Some(WaveStop::Boundary(cause))
-        } else if queue.stop.is_some() {
-            Some(WaveStop::BUDGET)
+        } else if let Some(cause) = queue.stop {
+            Some(WaveStop::from_queue(cause))
         } else if queue.pending.is_empty() && queue.unspawned.is_empty() {
             None
         } else if !self.ledger().can_start_provider_call()
@@ -4105,6 +4102,73 @@ mod decision_tests {
                 decide_child_stop(run, abort, &facts),
                 expected,
                 "row {index}: {run:?} {abort:?} {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_stops_settle_the_run_with_their_own_cause() {
+        use super::super::stop::{PrimaryEnd, RunFacts, Settlement, settle};
+        use crate::session::RunFailure;
+        let failed = |failure| Settlement::Fail {
+            failure,
+            exhausted: false,
+        };
+        let refusal = StopCause::ToolRefused(crate::session::ToolRefusal::INVALID_TRANSITION);
+        for (cause, wave, settlement) in [
+            (
+                StopCause::ContextFull,
+                WaveStop::Boundary(StopCause::ContextFull),
+                failed(RunFailure::ToolContextFull),
+            ),
+            (
+                StopCause::Cancelled,
+                WaveStop::Boundary(StopCause::Cancelled),
+                Settlement::Cancel,
+            ),
+            (
+                StopCause::HookStop,
+                WaveStop::Boundary(StopCause::HookStop),
+                Settlement::HookStop,
+            ),
+            (
+                StopCause::Budget,
+                WaveStop::BUDGET,
+                Settlement::Fail {
+                    failure: RunFailure::BudgetExhausted,
+                    exhausted: true,
+                },
+            ),
+            (
+                StopCause::Capacity,
+                WaveStop::Boundary(StopCause::Capacity),
+                failed(RunFailure::ToolStopped),
+            ),
+            (
+                StopCause::DelegationDeadline,
+                WaveStop::Boundary(StopCause::DelegationDeadline),
+                failed(RunFailure::ToolStopped),
+            ),
+            (
+                StopCause::Uncertain,
+                WaveStop::Abort(StopCause::Uncertain),
+                Settlement::Unknown,
+            ),
+            (
+                refusal,
+                WaveStop::Abort(refusal),
+                failed(RunFailure::ProposalRefused),
+            ),
+        ] {
+            assert_eq!(
+                wave_stop_after(Some(cause), false, false, None, OPEN.hook),
+                Some(wave),
+                "{cause:?}"
+            );
+            assert_eq!(
+                settle(PrimaryEnd::Stopped(wave.cause()), &RunFacts::ready()),
+                settlement,
+                "{cause:?}"
             );
         }
     }

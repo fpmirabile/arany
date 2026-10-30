@@ -30,13 +30,9 @@ pub(super) struct WorkerEnd {
 }
 impl WorkerEnd {
     pub(super) fn stopped(stop: super::children::WaveStop) -> Self {
-        use super::children::WaveStop;
         Self {
             answer: None,
-            torn_down: !matches!(
-                stop,
-                WaveStop::Boundary(StopCause::Budget | StopCause::Capacity | StopCause::ActiveTime)
-            ),
+            torn_down: stop.tears_down(),
             failure: WorkerCause::ToolFailed,
             step_stop: None,
             integration: None,
@@ -961,6 +957,52 @@ mod tests {
             assert_eq!(outcome.cause, expected_cause, "{cause:?}");
             assert!(outcome.valid());
         }
+    }
+
+    #[test]
+    fn an_answered_editor_under_a_teardown_stop_is_cancelled_not_ready() {
+        use super::super::children::WaveStop;
+        for cause in [
+            StopCause::DelegationDeadline,
+            StopCause::ContextFull,
+            StopCause::Paused,
+            StopCause::Cancelled,
+            StopCause::HookStop,
+        ] {
+            let stop = WaveStop::Boundary(cause);
+            let terminal = editor_terminal(
+                WorkerCause::ToolFailed,
+                &EditorFacts {
+                    answered: true,
+                    unknown: false,
+                    changed: true,
+                    stopped: false,
+                    cancelled: stop.tears_down(),
+                    actor_hook_stop: false,
+                    step_stop: None,
+                    integration: None,
+                },
+            );
+            assert_eq!(
+                terminal,
+                EditorTerminal::Known {
+                    agent: AgentDisposition::Cancelled,
+                    outcome: WorkerOutcome {
+                        disposition: WorkerDisposition::Cancelled,
+                        cause: WorkerCause::Cancelled,
+                    },
+                },
+                "{cause:?}"
+            );
+        }
+        for cause in [
+            StopCause::Budget,
+            StopCause::Capacity,
+            StopCause::ActiveTime,
+        ] {
+            assert!(!WaveStop::Boundary(cause).tears_down(), "{cause:?}");
+        }
+        assert!(WaveStop::Abort(StopCause::ToolStopped).tears_down());
     }
 
     #[test]
