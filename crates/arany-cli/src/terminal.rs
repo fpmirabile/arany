@@ -830,12 +830,7 @@ impl OwnedTerminal {
         self.stop_reader();
         self.input.take();
         after_reader(first_error);
-        if let Some(mut modes) = self.pointer_modes.take() {
-            attempt_cleanup(first_error, || modes.release());
-        }
-        if let Some(mut keyboard) = self.keyboard.take() {
-            attempt_cleanup(first_error, || keyboard.release());
-        }
+        self.release_capture(first_error);
         if let Some(mut paste) = self.bracketed_paste.take() {
             attempt_cleanup(first_error, || paste.release());
         }
@@ -860,6 +855,42 @@ impl OwnedTerminal {
         if let Some(mut raw_mode) = self.raw_mode.take() {
             attempt_cleanup(first_error, || raw_mode.release());
         }
+    }
+
+    fn release_capture(&mut self, first_error: &mut Option<io::Error>) {
+        if let Some(mut modes) = self.pointer_modes.take() {
+            attempt_cleanup(first_error, || modes.release());
+        }
+        if let Some(mut keyboard) = self.keyboard.take() {
+            attempt_cleanup(first_error, || keyboard.release());
+        }
+    }
+
+    // The pager's scrollback dump keeps raw input and the reader.
+    fn leave_screen(&mut self, scrollback_dump: &mut bool, first_error: &mut Option<io::Error>) {
+        self.release_capture(first_error);
+        *scrollback_dump = true;
+        if let Some(mut alternate) = self.alternate.take() {
+            attempt_cleanup(first_error, || alternate.release());
+        }
+        attempt_cleanup(first_error, || self.terminal().show_cursor());
+    }
+
+    fn acquire_keyboard(&mut self, graphics_probe: bool) -> io::Result<()> {
+        let reader = self.input.as_ref().expect("terminal reader acquired");
+        self.keyboard = keyboard_mode(reader, graphics_probe)?;
+        self.graphics_protocol = detected_graphics_protocol(reader, graphics_probe);
+        Ok(())
+    }
+
+    fn acquire_pointer(&mut self, mode: TerminalMode, linear: bool) -> io::Result<()> {
+        self.pointer_modes = pointer_modes(
+            mode,
+            linear,
+            mouse_capture_enabled(),
+            self.graphics_protocol.is_some(),
+        )?;
+        Ok(())
     }
 }
 
@@ -1011,19 +1042,11 @@ impl OwnedTerminal {
                         .transpose()?;
                 }
                 AcquisitionStep::KeyboardMode => {
-                    let graphics_probe = mode_label.is_none() && graphics_probe_allowed(mode);
-                    let reader = resources.input.as_ref().expect("terminal reader acquired");
-                    resources.keyboard = keyboard_mode(reader, graphics_probe)?;
-                    resources.graphics_protocol =
-                        detected_graphics_protocol(reader, graphics_probe);
+                    resources
+                        .acquire_keyboard(mode_label.is_none() && graphics_probe_allowed(mode))?;
                 }
                 AcquisitionStep::PointerModes => {
-                    resources.pointer_modes = pointer_modes(
-                        mode,
-                        mode_label.is_some(),
-                        mouse_capture_enabled(),
-                        resources.graphics_protocol.is_some(),
-                    )?;
+                    resources.acquire_pointer(mode, mode_label.is_some())?;
                 }
             }
             Ok(())
@@ -2070,18 +2093,13 @@ impl AttachedTerminal {
     fn dump_to_scrollback(&mut self, view: &SessionView) -> Result<(), TerminalError> {
         let text = history::scrollback_transcript(view);
         self.clear_graphics_hover();
-        self.delete_graphics_placement()?;
-        if let Some(mut modes) = self.owned.pointer_modes.take() {
-            modes.release()?;
+        let mut first_error = None;
+        attempt_cleanup(&mut first_error, || self.delete_graphics_placement());
+        self.owned
+            .leave_screen(&mut self.transcript.scrollback_dump, &mut first_error);
+        if let Some(error) = first_error {
+            return Err(error.into());
         }
-        if let Some(mut keyboard) = self.owned.keyboard.take() {
-            keyboard.release()?;
-        }
-        self.transcript.scrollback_dump = true;
-        if let Some(mut alternate) = self.owned.alternate.take() {
-            alternate.release()?;
-        }
-        self.owned().show_cursor()?;
         // Raw mode turns off output processing, so the text carries its own carriage returns.
         let mut output = io::stderr().lock();
         output.write_all(text.as_bytes())?;
@@ -2095,18 +2113,9 @@ impl AttachedTerminal {
         }
         self.owned.alternate = Some(AlternateScreen::acquire()?);
         self.transcript.scrollback_dump = false;
-        {
-            let graphics_probe = graphics_probe_allowed(self.mode);
-            self.owned.keyboard = keyboard_mode(self.reader(), graphics_probe)?;
-            self.owned.graphics_protocol =
-                detected_graphics_protocol(self.reader(), graphics_probe);
-        }
-        self.owned.pointer_modes = pointer_modes(
-            self.mode,
-            false,
-            mouse_capture_enabled(),
-            self.owned.graphics_protocol.is_some(),
-        )?;
+        self.owned
+            .acquire_keyboard(graphics_probe_allowed(self.mode))?;
+        self.owned.acquire_pointer(self.mode, false)?;
         // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
         let terminal = self.owned();
         let area = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
@@ -4446,7 +4455,7 @@ mod graphics_lifecycle_tests {
 mod terminal_lifecycle_tests {
     use super::{
         AcquisitionStep, AlternateScreen, GraphicsPlacement, GraphicsProtocol, ModeGuard, RawMode,
-        TerminalBackend, TerminalMode, classic_cursor_timeout_fallback,
+        TerminalBackend, TerminalError, TerminalMode, classic_cursor_timeout_fallback,
     };
     use ratatui::{Terminal, TerminalOptions, Viewport, layout::Rect};
     use std::{cell::RefCell, io, rc::Rc};
@@ -4628,6 +4637,55 @@ mod terminal_lifecycle_tests {
                 .filter_map(|step| steps.iter().position(|seen| seen == step))
                 .collect::<Vec<_>>();
             assert_eq!(positions.len(), order.len());
+            assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
+    #[tokio::test]
+    async fn scrollback_dump_leaves_the_screen_past_each_reset_failure() {
+        for (failure, expected_error) in [
+            ("pointer", "injected pointer reset failure"),
+            ("keyboard", "injected keyboard reset failure"),
+            ("alternate", "injected alternate reset failure"),
+            ("cursor", "injected cursor failure"),
+        ] {
+            let steps = Rc::new(RefCell::new(Vec::new()));
+            let backend =
+                TerminalBackend::failing_lifecycle_writer(80, 24, vec![failure], steps.clone());
+            let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+            terminal.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
+            terminal.owned.pointer_modes = Some(ModeGuard::tracked_for_test(
+                "pointer",
+                steps.clone(),
+                failure == "pointer",
+            ));
+            terminal.owned.keyboard = Some(ModeGuard::tracked_for_test(
+                "keyboard",
+                steps.clone(),
+                failure == "keyboard",
+            ));
+            terminal.owned.alternate = Some(AlternateScreen::tracked_for_test(
+                "alternate",
+                steps.clone(),
+                failure == "alternate",
+            ));
+
+            let error = terminal.dump_to_scrollback(&crate::presentation::team_view());
+
+            let Err(TerminalError::Io(error)) = error else {
+                panic!("{failure}: expected the injected reset failure");
+            };
+            assert_eq!(error.to_string(), expected_error);
+            assert!(terminal.transcript.scrollback_dump, "{failure}");
+            assert!(terminal.owned.pointer_modes.is_none(), "{failure}");
+            assert!(terminal.owned.keyboard.is_none(), "{failure}");
+            assert!(terminal.owned.alternate.is_none(), "{failure}");
+            let steps = steps.borrow();
+            let positions = ["pointer", "keyboard", "alternate", "cursor"]
+                .iter()
+                .filter_map(|step| steps.iter().position(|seen| seen == step))
+                .collect::<Vec<_>>();
+            assert_eq!(positions.len(), 4, "{failure}: {steps:?}");
             assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
         }
     }
