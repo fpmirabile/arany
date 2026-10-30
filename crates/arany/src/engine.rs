@@ -1175,7 +1175,6 @@ impl Engine {
             .find_map(|run_id| view.runs.iter().find(|run| run.id == *run_id))
             .ok_or(EngineError::InvalidHistory)?;
         let mut goal_view = goal_view.clone();
-        let unknown_recovery = goal.usage.token_usage_unknown && !goal_view.token_usage_unknown;
         goal_view.uncertain_active_ms = goal_view
             .uncertain_active_ms
             .saturating_add(goal.usage.active_ms.saturating_sub(goal_view.active_ms));
@@ -1189,9 +1188,6 @@ impl Engine {
             .refusal(goal.usage, crate::session::BudgetAction::Resume)
             .ok_or(EngineError::InvalidHistory)?;
         goal_view.qualify_charge(&mut refusal);
-        if unknown_recovery {
-            refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
-        }
         goal_view.budget_refusal = Some(refusal);
         self.finish_goal(
             session_id,

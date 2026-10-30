@@ -151,11 +151,25 @@ impl GoalView {
             })
     }
 
-    // Uncertain active time leaves any refusal charged on a conservative basis.
+    pub(crate) fn charges_conservatively(&self) -> bool {
+        self.recovered_usage_unknown()
+            || self.uncertain_active_ms > 0
+            || self.unsettled_active_charge_ms() > 0
+    }
+
+    // Settlement re-qualifies a refusal captured mid-Run, so the basis follows the current state.
     pub(crate) fn qualify_charge(&self, refusal: &mut super::BudgetRefusal) {
-        if self.uncertain_active_ms > 0 {
-            refusal.charge_basis = super::BudgetChargeBasis::Conservative;
-        }
+        refusal.charge_basis = if refusal.token_usage_unknown || self.charges_conservatively() {
+            super::BudgetChargeBasis::Conservative
+        } else {
+            super::BudgetChargeBasis::Observed
+        };
+    }
+
+    fn recovered_usage_unknown(&self) -> bool {
+        self.token_usage_unknown
+            || !self.unobserved_provider_calls.is_empty()
+            || self.compaction_call_reserved.is_some()
     }
 
     pub(crate) fn resume_usage(&self, view: &SessionView) -> GoalUsage {
@@ -170,9 +184,7 @@ impl GoalView {
                 .active_ms
                 .saturating_add(self.unsettled_active_charge_ms()),
             known_tokens: self.known_tokens,
-            token_usage_unknown: self.token_usage_unknown
-                || !self.unobserved_provider_calls.is_empty()
-                || self.compaction_call_reserved.is_some(),
+            token_usage_unknown: self.recovered_usage_unknown(),
         }
     }
 
