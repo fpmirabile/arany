@@ -115,6 +115,8 @@ done
             .env_clear()
             .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
             .env("HOME", temp.path().join("home"))
+            // Runs resolve Git from PATH; the Command Line Tools Git is the only one on it here.
+            .env("PATH", "/Library/Developer/CommandLineTools/usr/bin")
             .env("XDG_STATE_HOME", temp.path().join("environment-state"))
             .env("XDG_DATA_HOME", temp.path().join("environment-data"))
             .current_dir(temp.path());
