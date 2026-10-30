@@ -202,9 +202,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::Uncertain
             | ToolError::StaleGitLocks(_)
             | ToolError::GuardRejected(_)
-            | ToolError::GuardBootstrap(_)
-            | ToolError::HostHelperSearch
-            | ToolError::CredentialIncludes,
+            | ToolError::GuardBootstrap(_),
         ) => b"SELECT_REJECTED\n",
     }
 }

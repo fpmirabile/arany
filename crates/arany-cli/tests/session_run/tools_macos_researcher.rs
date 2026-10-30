@@ -336,7 +336,8 @@ done
                     "git_log",
                     "git_commit",
                     "git_branch",
-                    "git_switch"
+                    "git_switch",
+                    "git_push"
                 ])
             );
             let catalog: Value =

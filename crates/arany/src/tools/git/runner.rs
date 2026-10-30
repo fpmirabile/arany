@@ -19,6 +19,13 @@ const CAGE: [&str; 3] = [
 ];
 const NO_HOOKS: &str = "/dev/null";
 const NO_NETWORK: &str = "protocol.allow=never";
+// The user's own settings a Git or gh process keeps, when set: configuration home, agent and gh profile.
+const USER_VARIABLES: [&str; 4] = [
+    "XDG_CONFIG_HOME",
+    "SSH_AUTH_SOCK",
+    "GH_CONFIG_DIR",
+    "GH_HOST",
+];
 const CONFIG_LIST_BYTES: usize = 64 * 1024;
 const CONFIG_ADMISSION_TIME: Duration = Duration::from_secs(2);
 const MAX_PATH_DIRECTORIES: usize = 64;
@@ -57,7 +64,7 @@ fn executable_key(key: &str, value: &str) -> bool {
 pub(crate) struct Environment {
     home: PathBuf,
     path: OsString,
-    xdg_config_home: Option<OsString>,
+    variables: Vec<(&'static str, OsString)>,
     workspace: PathBuf,
     editors: PathBuf,
 }
@@ -78,8 +85,10 @@ impl Environment {
         let mut environment = Self {
             home,
             path: OsString::new(),
-            xdg_config_home: variable("XDG_CONFIG_HOME")
-                .filter(|path| Path::new(path).is_absolute()),
+            variables: USER_VARIABLES
+                .into_iter()
+                .filter_map(|name| variable(name).map(|value| (name, value)))
+                .collect(),
             workspace: std::fs::canonicalize(workspace).ok()?,
             editors: canonical(editors),
         };
@@ -101,6 +110,24 @@ impl Environment {
 
     pub(crate) fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    // A host process with the user's home, configuration and agent that never prompts.
+    pub(super) fn command(&self, executable: &Path) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(executable);
+        command
+            .env_clear()
+            .envs(self.variables.iter().map(|(name, value)| (name, value)))
+            .env("HOME", &self.home)
+            .env("PATH", &self.path)
+            .env("LC_ALL", "C")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GH_PAGER", "cat")
+            .env("GH_NO_UPDATE_NOTIFIER", "1")
+            .process_group(0)
+            .kill_on_drop(true);
+        command
     }
 }
 
@@ -250,28 +277,25 @@ impl<'a> Git<'a> {
         self.exit.lock().ok().and_then(|exit| *exit)
     }
 
-    fn command(&self, argv: &[String]) -> tokio::process::Command {
-        let mut command = tokio::process::Command::new(&self.program.executable);
+    // Only a push reaches the network; every other invocation refuses transports and lazy fetches.
+    pub(super) fn command(&self, argv: &[String], network: bool) -> tokio::process::Command {
+        let mut command = self
+            .environment
+            .command(Path::new(&self.program.executable));
         command.args(["-c", &format!("core.hooksPath={NO_HOOKS}")]);
-        for setting in CAGE.iter().chain([&NO_NETWORK]) {
+        for setting in CAGE {
             command.args(["-c", setting]);
+        }
+        if !network {
+            command
+                .args(["-c", NO_NETWORK])
+                .env("GIT_NO_LAZY_FETCH", "1");
         }
         command
             .args(argv)
-            .env_clear()
-            .env("HOME", &self.environment.home)
-            .env("PATH", &self.environment.path)
             .env("GIT_DIR", &self.git_dir)
             .env("GIT_WORK_TREE", &self.work_tree)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("LC_ALL", "C")
-            .current_dir(&self.work_tree)
-            .process_group(0)
-            .kill_on_drop(true);
-        if let Some(xdg) = &self.environment.xdg_config_home {
-            command.env("XDG_CONFIG_HOME", xdg);
-        }
+            .current_dir(&self.work_tree);
         command
     }
 
@@ -282,7 +306,7 @@ impl<'a> Git<'a> {
         deadline: tokio::time::Instant,
     ) -> Result<Captured, ToolError> {
         verify(self.program)?;
-        let mut command = self.command(argv);
+        let mut command = self.command(argv, false);
         command
             .stdin(if io.stdin.is_some() {
                 Stdio::piped()
@@ -401,6 +425,23 @@ impl<'a> Git<'a> {
             }
         }
         None
+    }
+
+    // A configured `insteadOf` or `pushInsteadOf` would send an approved push somewhere else.
+    pub(super) async fn rewrites(
+        &self,
+        url: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool, ToolError> {
+        let argv = ["config", "--get-regexp", r"^url\..*\.(push)?insteadof$"].map(String::from);
+        let captured = self.run(&argv, Io::default(), deadline).await?;
+        if captured.overflow || !matches!(captured.status, Some(0 | 1)) {
+            return Err(ToolError::Configuration);
+        }
+        Ok(String::from_utf8_lossy(&captured.stdout)
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .any(|(_, prefix)| !prefix.is_empty() && url.starts_with(prefix)))
     }
 
     // ponytail: shell words are split on separators only; `$VAR` paths and bare programs reading folder files are not caught.

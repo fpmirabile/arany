@@ -424,7 +424,6 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         host_settings_saved: Default::default(),
         guard_available: true,
         git_environment: None,
-        host_authentication: Default::default(),
         handover: None,
         definitions: Default::default(),
         permissions: None,
@@ -475,6 +474,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
                 "git_commit",
                 "git_branch",
                 "git_switch",
+                "git_push",
             ]
         } else {
             vec!["git_status", "git_diff", "git_log", "git_branch"]
@@ -521,7 +521,6 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         host_settings_saved: Default::default(),
         guard_available: true,
         git_environment: None,
-        host_authentication: Default::default(),
         handover: None,
         definitions: Default::default(),
         permissions: None,

@@ -215,7 +215,6 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         host_settings_saved: Default::default(),
         guard_available: true,
         git_environment: None,
-        host_authentication: Default::default(),
         handover: None,
         definitions: Default::default(),
         permissions: None,

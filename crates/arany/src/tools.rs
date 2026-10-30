@@ -127,7 +127,6 @@ pub use approval::{
 pub(crate) use approval::{ApprovalWaitReply, ApprovalWithdrawal};
 pub use cancel::Cancellation;
 use config::Config;
-pub(crate) use git::host::sweep_stale as sweep_host_scratch;
 pub(crate) use git::stale_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
@@ -191,10 +190,6 @@ pub enum ToolError {
         #[source]
         source: Box<ToolError>,
     },
-    #[error("No admitted credential-helper search directory")]
-    HostHelperSearch,
-    #[error("Credential includes cannot be safely omitted")]
-    CredentialIncludes,
     #[error("tools require a private tools.json; see docs/tools.md")]
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
@@ -301,8 +296,6 @@ impl ToolError {
         match self {
             Self::SpillUnavailable => "SpillUnavailable",
             Self::AtPath { source, .. } => source.variant(),
-            Self::HostHelperSearch => "HostHelperSearch",
-            Self::CredentialIncludes => "CredentialIncludes",
             Self::MissingConfiguration => "MissingConfiguration",
             Self::Configuration => "Configuration",
             Self::HostPrefixConflict { .. } => "HostPrefixConflict",
@@ -373,7 +366,6 @@ pub(crate) struct ToolRuntime {
     guard_available: bool,
     config: Config,
     git_environment: Option<std::sync::Arc<git::Environment>>,
-    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -419,7 +411,6 @@ struct RuntimeState {
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
     git_environment: Option<std::sync::Arc<git::Environment>>,
-    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
     definitions: definitions::DefinitionSnapshots,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
@@ -922,14 +913,6 @@ impl ToolRuntime {
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         match call {
-            _ if call.is_host() => {
-                self.config.allows(call)
-                    && self
-                        .host_authentication
-                        .as_ref()
-                        .as_ref()
-                        .is_some_and(|auth| auth.allows(call))
-            }
             ToolCall::Command { program, .. } if Path::new(program).is_absolute() => {
                 self.command_tools.entries().iter().any(|tool| {
                     tool.enabled
@@ -1129,7 +1112,6 @@ impl ToolRuntime {
             })
             .transpose()?;
         merge_network(&mut config, permissions.as_ref())?;
-        let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         config.bind_environment(&command_environment);
         let definitions = definitions::snapshot(&root, state, &config)?;
@@ -1162,7 +1144,6 @@ impl ToolRuntime {
                 enforcement_digest,
                 process_enforcement_digest,
                 git_environment,
-                host_authentication,
                 definitions,
                 #[cfg(target_os = "macos")]
                 system_programs,
@@ -1191,7 +1172,6 @@ impl ToolRuntime {
             enforcement_digest,
             process_enforcement_digest,
             git_environment,
-            host_authentication,
             definitions,
             #[cfg(target_os = "macos")]
             system_programs,
@@ -1204,7 +1184,6 @@ impl ToolRuntime {
             definitions: std::sync::Arc::new(definitions),
             config,
             git_environment,
-            host_authentication,
             handover: None,
             permissions,
             result_filter: None,
@@ -1413,13 +1392,7 @@ impl ToolRuntime {
                 let write = self.config.write;
                 let operations: Vec<_> = catalog::git_operations(write, true)
                     .into_iter()
-                    .filter(|name| match *name {
-                        "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
-                            .is_some_and(|auth| auth.offers(name)),
-                        "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
-                            .is_some_and(|auth| auth.offers(name)),
-                        _ => true,
-                    })
+                    .filter(|name| !matches!(*name, "git_push" | "gh_pr_create") || self.config.write)
                     .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view") || self.config.pinned_gh().is_some())
                     .collect();
                 serde_json::json!({"write":write,"host":true,"operations":operations,"scope":catalog::GIT_SCOPE})
@@ -1761,9 +1734,7 @@ impl ToolRuntime {
                 }
                 git::host::run(
                     &self.config,
-                    self.host_authentication.as_ref().as_ref(),
-                    self.cache_state.as_deref(),
-                    &self.workspace,
+                    self.git_environment.as_deref(),
                     intent,
                     cancellation,
                 )

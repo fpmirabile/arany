@@ -2429,7 +2429,6 @@ done
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available: true,
-            host_authentication: Default::default(),
             handover: None,
             definitions: Default::default(),
             permissions: None,

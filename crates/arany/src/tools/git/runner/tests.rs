@@ -209,3 +209,25 @@ fn stale_locks_are_listed_never_removed() {
     assert_eq!(locks, [".git/index.lock", ".git/refs/heads/main.lock"]);
     assert!(workspace.join(".git/index.lock").exists());
 }
+
+#[test]
+fn push_url_rewrites_are_detected_before_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = fixture(temp.path());
+    let home = temp.path().join("home");
+    let program = git_program();
+    let environment = environment(&workspace, &scratch(temp.path(), 703), &home);
+    let git = Git::workspace(&program, &environment);
+    let url = "https://github.com/example/project.git";
+    assert!(!block_on(git.rewrites(url, deadline())).unwrap());
+    for key in ["insteadOf", "pushInsteadOf"] {
+        let setting = format!("url.https://elsewhere.example/.{key}");
+        host_git(
+            &workspace,
+            &home,
+            &["config", &setting, "https://github.com/"],
+        );
+        assert!(block_on(git.rewrites(url, deadline())).unwrap(), "{key}");
+        host_git(&workspace, &home, &["config", "--unset", &setting]);
+    }
+}
