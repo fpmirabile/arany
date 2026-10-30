@@ -34,8 +34,8 @@ fn limits() -> ChangeLimits {
     }
 }
 
-fn run(editor: &Dir) -> Result<Vec<(String, bool, bool)>, &'static str> {
-    let changes = changes(editor, Instant::now() + TEST_RUNTIME, &limits());
+fn run(editor: &Dir, source: &Dir) -> Result<Vec<(String, bool, bool)>, &'static str> {
+    let changes = changes(editor, source, Instant::now() + TEST_RUNTIME, &limits());
     changes.map_err(|error| error.variant()).map(|changes| {
         changes
             .into_iter()
@@ -59,7 +59,7 @@ fn editor_workspaces_clone_project_inputs_and_integrate_only_project_changes() {
         std::fs::read(tree.join("large.bin")).unwrap().len(),
         MAX_FILE_BYTES + 1
     );
-    assert_eq!(run(&editor).unwrap(), []);
+    assert_eq!(run(&editor, &source).unwrap(), []);
 
     std::fs::write(tree.join("src/lib.rs"), b"fn b() {}\n").unwrap();
     std::fs::remove_file(tree.join("src/gone.rs")).unwrap();
@@ -69,8 +69,15 @@ fn editor_workspaces_clone_project_inputs_and_integrate_only_project_changes() {
     std::fs::write(tree.join("target/debug/bin"), b"build output").unwrap();
     std::fs::write(tree.join(".env"), b"SECRET=1").unwrap();
     std::fs::write(tree.join("kept.txt"), b"kept").unwrap();
+    // An excluded output over an existing Workspace path refuses by name; new ones are discarded.
+    let error = changes(&editor, &source, Instant::now() + TEST_RUNTIME, &limits()).unwrap_err();
+    assert!(
+        matches!(&error, ToolError::Conflicts(paths) if paths == "target"),
+        "{error:?}"
+    );
+    std::fs::remove_dir_all(tree.join("target")).unwrap();
     assert_eq!(
-        run(&editor).unwrap(),
+        run(&editor, &source).unwrap(),
         [
             ("new.rs".to_owned(), false, true),
             ("src/gone.rs".to_owned(), true, false),
@@ -79,29 +86,43 @@ fn editor_workspaces_clone_project_inputs_and_integrate_only_project_changes() {
     );
     std::fs::remove_file(tree.join("new.rs")).unwrap();
     std::fs::write(tree.join("big"), vec![b'x'; 2048]).unwrap();
-    assert_eq!(run(&editor), Err("Limit"));
+    assert_eq!(run(&editor, &source), Err("Limit"));
     std::fs::remove_file(tree.join("big")).unwrap();
+    // An oversized input is present but refuses typed edits as in the Workspace, and changing it
+    // refuses the integration by name.
+    let control = MutationControl::default();
+    let edit = ToolCall::Edit {
+        path: "large.bin".into(),
+        expected_digest: Some(hex_digest(&vec![b'x'; MAX_FILE_BYTES + 1])),
+        old: "x".into(),
+        new: "y".into(),
+    };
+    let tree_dir = editor.open_dir_nofollow(TREE).unwrap();
+    assert!(matches!(
+        mutate(&tree_dir, &edit, &config(), &control),
+        Err(ToolError::Limit)
+    ));
     std::fs::write(tree.join("large.bin"), vec![b'y'; MAX_FILE_BYTES + 2]).unwrap();
-    let error = changes(&editor, Instant::now() + TEST_RUNTIME, &limits()).unwrap_err();
+    let error = changes(&editor, &source, Instant::now() + TEST_RUNTIME, &limits()).unwrap_err();
     assert!(
         matches!(&error, ToolError::AtPath { path, source } if path == "large.bin" && matches!(**source, ToolError::Limit)),
         "{error:?}"
     );
     std::fs::write(tree.join("large.bin"), vec![b'x'; MAX_FILE_BYTES + 1]).unwrap();
     std::os::unix::fs::symlink("kept.txt", tree.join("link")).unwrap();
-    assert_eq!(run(&editor), Err("Path"));
+    assert_eq!(run(&editor, &source), Err("Path"));
 }
 
 #[test]
 fn editor_changes_refuse_unready_workspaces_and_disordered_bases() {
     let (temp, source, editor) = workspace();
     std::fs::remove_file(temp.path().join("source/large.bin")).unwrap();
-    assert_eq!(run(&editor), Err("Path"));
+    assert_eq!(run(&editor, &source), Err("Path"));
     create(&editor, &source, &config(), Instant::now() + TEST_RUNTIME).unwrap();
     let base = read_regular(open_file(&editor, BASE).unwrap(), MAX_FILE_BYTES).unwrap();
     let mut lines: Vec<_> = base.split_inclusive(|byte| *byte == b'\n').collect();
     lines.reverse();
     editor.remove_file(BASE).unwrap();
     put(&editor, BASE, &lines.concat(), false).unwrap();
-    assert_eq!(run(&editor), Err("Path"));
+    assert_eq!(run(&editor, &source), Err("Path"));
 }

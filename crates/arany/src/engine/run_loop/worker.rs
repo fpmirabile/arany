@@ -841,6 +841,12 @@ fn changes_refusal(
                 crate::tools::types::MAX_FILE_BYTES
             ),
         ),
+        (ToolError::Conflicts(paths), _) => refused(
+            WorkerCause::IntegrationConflict,
+            &format!(
+                "these ignored, dependency or protected outputs would replace existing Workspace paths: {paths}"
+            ),
+        ),
         (ToolError::Limit, None) => refused(
             WorkerCause::ChangesTooLarge,
             &format!(
@@ -861,6 +867,38 @@ fn changes_refusal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn integration_refusals_name_the_cause_and_paths_for_the_primary() {
+        use crate::tools::ToolError;
+        let settings = crate::tools::ToolResourceSettings::default();
+        for (error, cause, named) in [
+            (
+                ToolError::Limit.at_path("assets/big.bin"),
+                WorkerCause::ChangesTooLarge,
+                "assets/big.bin",
+            ),
+            (ToolError::Limit, WorkerCause::ChangesTooLarge, "512 files"),
+            (
+                ToolError::Conflicts(".env".into()),
+                WorkerCause::IntegrationConflict,
+                ".env",
+            ),
+            (
+                ToolError::Path.at_path("link"),
+                WorkerCause::ToolFailed,
+                "link",
+            ),
+        ] {
+            let (refused, note) = changes_refusal(error, &settings);
+            assert_eq!(refused, cause);
+            assert!(
+                note.starts_with("Nothing was integrated") && note.contains(named),
+                "{note}"
+            );
+            assert!(note.len() <= MAX_EDITOR_CHANGE_REPORT_BYTES);
+        }
+    }
+
     #[test]
     fn wave_stop_worker_ends_preserve_budget_and_cancellation_causes() {
         use super::super::children::WaveStop;

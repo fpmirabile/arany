@@ -81,8 +81,13 @@ impl ToolRuntime {
     ) -> Result<Vec<EditorChange>, ToolError> {
         let root = self.editor_root(id).ok_or(ToolError::Configuration)?;
         let directory = fs::open_directory(root.path.parent().ok_or(ToolError::Path)?)?;
+        let workspace = fs::open_directory(&self.workspace)?;
+        if fs::workspace_identity(&workspace)? != self.workspace_identity {
+            return Err(ToolError::ChangedInput);
+        }
         fs::editor::changes(
             &directory,
+            &workspace,
             Instant::now() + EDITOR_WORKSPACE_TIME,
             &fs::editor::ChangeLimits {
                 files: files as usize,

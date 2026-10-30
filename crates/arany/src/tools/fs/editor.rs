@@ -196,9 +196,11 @@ pub(in crate::tools) struct ChangeLimits {
 }
 
 // The project changes an editor made: tree against base, under the frozen selection rules. Ignored,
-// dependency and protected outputs never integrate; unsafe entries refuse, and overflow is `Limit`.
+// dependency and protected outputs never integrate: new ones are discarded, while one that would shadow
+// an existing Workspace path refuses as `Conflicts` naming it. Unsafe entries refuse; overflow is `Limit`.
 pub(in crate::tools) fn changes(
     directory: &Dir,
+    workspace: &Dir,
     deadline: Instant,
     limits: &ChangeLimits,
 ) -> Result<Vec<EditorChange>, ToolError> {
@@ -211,11 +213,13 @@ pub(in crate::tools) fn changes(
         .map_err(|_| ToolError::Path)?;
     let mut capture = Capture {
         tree: &tree,
+        workspace,
         selector: selection.selector(deadline)?,
         selection: &selection,
         limits,
         bytes: 0,
         changes: Vec::new(),
+        shadowing: Vec::new(),
     };
     tree::diff(
         &mut BaseReader::new(open_file(directory, BASE)?),
@@ -232,6 +236,10 @@ pub(in crate::tools) fn changes(
         },
     )?;
     capture.selector.check_time()?;
+    if !capture.shadowing.is_empty() {
+        let paths: Vec<_> = capture.shadowing.iter().map(String::as_str).collect();
+        return Err(ToolError::Conflicts(conflict_list(&paths)));
+    }
     let mut changes = capture.changes;
     changes.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(changes)
@@ -239,6 +247,8 @@ pub(in crate::tools) fn changes(
 
 struct Capture<'a> {
     tree: &'a Dir,
+    workspace: &'a Dir,
+    shadowing: Vec<String>,
     selection: &'a CommandSelection,
     selector: crate::tools::selection::Selector,
     limits: &'a ChangeLimits,
@@ -259,6 +269,7 @@ impl Capture<'_> {
         };
         let path = node.path;
         if path.split('/').any(forbidden) && base.is_none() {
+            self.shadows(path);
             return Ok(false);
         }
         if !valid_relative(&path, false) {
@@ -272,6 +283,7 @@ impl Capture<'_> {
                 || self.selection.prunes(&path)
                 || self.selector.excluded(&path, node.metadata.is_dir())?);
         if ignored {
+            self.shadows(path);
             return Ok(false);
         }
         if node.metadata.is_dir() {
@@ -303,6 +315,13 @@ impl Capture<'_> {
         };
         let before = base.map(|base| base.state()).transpose()?;
         self.push(path, before, Some(after)).map(|()| true)
+    }
+
+    // An excluded output over an existing Workspace path cannot integrate, and silence would hide it.
+    fn shadows(&mut self, path: String) {
+        if self.workspace.symlink_metadata(&path).is_ok() {
+            self.shadowing.push(path);
+        }
     }
 
     fn push(
