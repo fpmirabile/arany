@@ -563,92 +563,111 @@ pub(super) fn command_preview(draft: &str, choices: &CommandChoices) -> Option<C
         if spec.command == InteractiveCommand::Model
             && let Some((model, effort)) = argument.split_once(' ')
         {
-            let prefix = effort.trim_start_matches(' ');
-            let values = choices.effort_values(model);
-            let placeholder = if choices.default_available(model) {
-                "<effort|default>"
-            } else {
-                "<effort>"
-            };
-            let matched = unique_value(values.iter().copied(), prefix);
-            let ghost = if prefix.is_empty() {
-                placeholder.to_owned()
-            } else {
-                matched
-                    .filter(|value| *value != prefix)
-                    .map_or_else(String::new, |value| value[prefix.len()..].to_owned())
-            };
-            let status = if values.contains(&prefix) {
-                "Enter submits this command".to_owned()
-            } else if !prefix.is_empty() && !ghost.is_empty() {
-                format!("Tab: {}", matched.expect("unique effort"))
-            } else {
-                format!("Model reasoning · choices: {}", values.join(", "))
-            };
-            return Some(CommandPreview {
-                ghost,
-                ghost_is_placeholder: prefix.is_empty(),
-                status,
-            });
+            return Some(effort_preview(model, effort, choices));
         }
-        let (ghost, ghost_is_placeholder) = if argument.is_empty() {
-            (argument_hint(spec, choices).unwrap_or("").to_owned(), true)
-        } else if spec.command == InteractiveCommand::Provider && argument == "custom:" {
-            ("<name>".to_owned(), true)
-        } else if spec.command == InteractiveCommand::Agents
-            && matches!(argument.trim(), "auto" | "team")
-        {
-            (
-                format!(
-                    "{}[max-active-children]",
-                    if argument.ends_with(' ') { "" } else { " " }
-                ),
-                true,
-            )
-        } else {
-            (
-                choices
-                    .unique_value(spec, argument)
-                    .filter(|value| *value != argument)
-                    .map_or_else(String::new, |value| value[argument.len()..].to_owned()),
-                false,
-            )
-        };
-        let status = if !ghost_is_placeholder && !ghost.is_empty() {
-            choices.unique_value(spec, argument).map_or_else(
-                || command_status(spec, choices),
-                |value| format!("Tab: {value}"),
-            )
-        } else if ghost.is_empty() && choices.is_exact_value(spec, argument.trim_end_matches(' ')) {
-            "Enter submits this command".to_owned()
-        } else {
-            command_status(spec, choices)
-        };
-        return Some(CommandPreview {
-            ghost,
-            ghost_is_placeholder,
-            status,
-        });
+        return Some(argument_preview(spec, argument, choices));
     }
+    Some(name_preview(&matches, name, choices))
+}
+
+// `/model ID EFFORT` completes the effort among the model's reasoning choices.
+fn effort_preview(model: &str, effort: &str, choices: &CommandChoices) -> CommandPreview {
+    let prefix = effort.trim_start_matches(' ');
+    let values = choices.effort_values(model);
+    let placeholder = if choices.default_available(model) {
+        "<effort|default>"
+    } else {
+        "<effort>"
+    };
+    let matched = unique_value(values.iter().copied(), prefix);
+    let ghost = if prefix.is_empty() {
+        placeholder.to_owned()
+    } else {
+        matched
+            .filter(|value| *value != prefix)
+            .map_or_else(String::new, |value| value[prefix.len()..].to_owned())
+    };
+    let status = if values.contains(&prefix) {
+        "Enter submits this command".to_owned()
+    } else if !prefix.is_empty() && !ghost.is_empty() {
+        format!("Tab: {}", matched.expect("unique effort"))
+    } else {
+        format!("Model reasoning · choices: {}", values.join(", "))
+    };
+    CommandPreview {
+        ghost,
+        ghost_is_placeholder: prefix.is_empty(),
+        status,
+    }
+}
+
+// A typed argument shows its placeholder or unique completion and whether Enter submits it.
+fn argument_preview(
+    spec: &CommandSpec,
+    argument: &str,
+    choices: &CommandChoices,
+) -> CommandPreview {
+    let (ghost, ghost_is_placeholder) = if argument.is_empty() {
+        (argument_hint(spec, choices).unwrap_or("").to_owned(), true)
+    } else if spec.command == InteractiveCommand::Provider && argument == "custom:" {
+        ("<name>".to_owned(), true)
+    } else if spec.command == InteractiveCommand::Agents
+        && matches!(argument.trim(), "auto" | "team")
+    {
+        (
+            format!(
+                "{}[max-active-children]",
+                if argument.ends_with(' ') { "" } else { " " }
+            ),
+            true,
+        )
+    } else {
+        (
+            choices
+                .unique_value(spec, argument)
+                .filter(|value| *value != argument)
+                .map_or_else(String::new, |value| value[argument.len()..].to_owned()),
+            false,
+        )
+    };
+    let status = if !ghost_is_placeholder && !ghost.is_empty() {
+        choices.unique_value(spec, argument).map_or_else(
+            || command_status(spec, choices),
+            |value| format!("Tab: {value}"),
+        )
+    } else if ghost.is_empty() && choices.is_exact_value(spec, argument.trim_end_matches(' ')) {
+        "Enter submits this command".to_owned()
+    } else {
+        command_status(spec, choices)
+    };
+    CommandPreview {
+        ghost,
+        ghost_is_placeholder,
+        status,
+    }
+}
+
+// A command name: an exact match shows its argument hint, a unique prefix completes, several list.
+fn name_preview(matches: &[&CommandSpec], name: &str, choices: &CommandChoices) -> CommandPreview {
     if let Some(spec) = matches.iter().find(|spec| spec.name == name) {
-        return Some(CommandPreview {
+        return CommandPreview {
             ghost: argument_hint(spec, choices)
                 .map_or_else(String::new, |value| format!(" {value}")),
             ghost_is_placeholder: spec.argument.is_some(),
             status: command_status(spec, choices),
-        });
+        };
     }
-    if let [spec] = matches.as_slice() {
+    if let [spec] = matches {
         let ghost = format!(
             "{}{}",
             &spec.name[name.len()..],
             argument_hint(spec, choices).map_or_else(String::new, |value| format!(" {value}"))
         );
-        return Some(CommandPreview {
+        return CommandPreview {
             ghost,
             ghost_is_placeholder: false,
             status: format!("Tab: /{}", spec.name),
-        });
+        };
     }
     let names = matches
         .iter()
@@ -662,11 +681,11 @@ pub(super) fn command_preview(draft: &str, choices: &CommandChoices) -> Option<C
     } else {
         format!("Commands: {names}, +{remainder} more")
     };
-    Some(CommandPreview {
+    CommandPreview {
         ghost: String::new(),
         ghost_is_placeholder: false,
         status,
-    })
+    }
 }
 
 fn command_parts(draft: &str) -> Option<(&str, Option<&str>)> {
