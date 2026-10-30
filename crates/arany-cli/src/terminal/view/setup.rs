@@ -11,20 +11,24 @@ pub(super) fn setup_area(full: Rect) -> Rect {
     )
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dialog content and its explicit rendering bounds stay together"
-)]
-pub(in crate::terminal) fn draw_setup_frame(
-    frame: &mut Frame,
-    full: Rect,
-    step: u8,
-    title: &str,
-    instruction: &str,
-    input_chars: usize,
-    notice: Option<&str>,
-    palette: Palette,
-) {
+pub(in crate::terminal) struct SetupFrame<'a> {
+    pub step: u8,
+    pub title: &'a str,
+    pub instruction: &'a str,
+    pub input_chars: usize,
+    pub notice: Option<&'a str>,
+    pub palette: Palette,
+}
+
+pub(in crate::terminal) fn draw_setup_frame(frame: &mut Frame, full: Rect, state: SetupFrame<'_>) {
+    let SetupFrame {
+        step,
+        title,
+        instruction,
+        input_chars,
+        notice,
+        palette,
+    } = state;
     let area = setup_area(full);
     if area.width == 0 || area.height == 0 {
         return;
@@ -93,15 +97,26 @@ pub(in crate::terminal) fn draw_setup_frame(
     }
 }
 
+pub(in crate::terminal) struct SetupTextFrame<'a> {
+    pub title: &'a str,
+    pub instruction: &'a str,
+    pub draft: &'a Composer,
+    pub notice: Option<&'a str>,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_setup_text_frame(
     frame: &mut Frame,
     full: Rect,
-    title: &str,
-    instruction: &str,
-    draft: &Composer,
-    notice: Option<&str>,
-    palette: Palette,
+    state: SetupTextFrame<'_>,
 ) {
+    let SetupTextFrame {
+        title,
+        instruction,
+        draft,
+        notice,
+        palette,
+    } = state;
     let area = setup_area(full);
     if area.width < 3 || area.height < 6 {
         return;
@@ -172,20 +187,28 @@ pub(in crate::terminal) fn setup_choices_height(choices: usize) -> u16 {
         .max(MIN_DIALOG_HEIGHT)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dialog content and its explicit rendering bounds stay together"
-)]
+pub(in crate::terminal) struct SetupChoicesFrame<'a> {
+    pub title: &'a str,
+    pub instruction: &'a str,
+    pub choices: &'a [(u8, &'a str)],
+    pub selected: usize,
+    pub notice: Option<&'a str>,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_setup_choices_frame(
     frame: &mut Frame,
     full: Rect,
-    title: &str,
-    instruction: &str,
-    choices: &[(u8, &str)],
-    selected: usize,
-    notice: Option<&str>,
-    palette: Palette,
+    state: SetupChoicesFrame<'_>,
 ) {
+    let SetupChoicesFrame {
+        title,
+        instruction,
+        choices,
+        selected,
+        notice,
+        palette,
+    } = state;
     let height = full.height.min(setup_choices_height(choices.len()));
     let width = full.width.min(64);
     let area = Rect::new(
@@ -283,20 +306,28 @@ pub(in crate::terminal) fn setup_warning_height(warning: &str, width: u16) -> u1
     .clamp(MIN_DIALOG_HEIGHT, 16)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dialog content and its explicit rendering bounds stay together"
-)]
+pub(in crate::terminal) struct SetupWarningFrame<'a> {
+    pub title: &'a str,
+    pub warning: &'a str,
+    pub page: usize,
+    pub accept_selected: bool,
+    pub notice: Option<&'a str>,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_setup_warning_frame(
     frame: &mut Frame,
     full: Rect,
-    title: &str,
-    warning: &str,
-    page: usize,
-    accept_selected: bool,
-    notice: Option<&str>,
-    palette: Palette,
+    state: SetupWarningFrame<'_>,
 ) -> bool {
+    let SetupWarningFrame {
+        title,
+        warning,
+        page,
+        accept_selected,
+        notice,
+        palette,
+    } = state;
     let width = full.width.min(72);
     let height = full.height.min(16);
     if width == 0 || height < MIN_DIALOG_HEIGHT {

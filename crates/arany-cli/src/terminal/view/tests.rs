@@ -145,42 +145,50 @@ fn classic_dialogs_fill_their_content_sized_viewport() {
                     "secret" => draw_setup_frame(
                         frame,
                         area,
-                        3,
-                        "API key",
-                        "Hidden input",
-                        0,
-                        Some("Enter confirms"),
-                        palette,
+                        SetupFrame {
+                            step: 3,
+                            title: "API key",
+                            instruction: "Hidden input",
+                            input_chars: 0,
+                            notice: Some("Enter confirms"),
+                            palette,
+                        },
                     ),
                     "text" => draw_setup_text_frame(
                         frame,
                         area,
-                        "Workspace",
-                        "Enter ID",
-                        &Composer::default(),
-                        None,
-                        palette,
+                        SetupTextFrame {
+                            title: "Workspace",
+                            instruction: "Enter ID",
+                            draft: &Composer::default(),
+                            notice: None,
+                            palette,
+                        },
                     ),
                     "choices" => draw_setup_choices_frame(
                         frame,
                         area,
-                        "Account",
-                        "Choose one",
-                        &[(1, "Saved"), (2, "New")],
-                        0,
-                        None,
-                        palette,
+                        SetupChoicesFrame {
+                            title: "Account",
+                            instruction: "Choose one",
+                            choices: &[(1, "Saved"), (2, "New")],
+                            selected: 0,
+                            notice: None,
+                            palette,
+                        },
                     ),
                     "warning" => {
                         draw_setup_warning_frame(
                             frame,
                             area,
-                            "Consent",
-                            "Review this change",
-                            0,
-                            false,
-                            None,
-                            palette,
+                            SetupWarningFrame {
+                                title: "Consent",
+                                warning: "Review this change",
+                                page: 0,
+                                accept_selected: false,
+                                notice: None,
+                                palette,
+                            },
                         );
                     }
                     "rewind" | "rewind review" => {
@@ -1143,19 +1151,52 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                             let palette = Palette { color: false };
                             match name {
                                 "quick actions" => {
-                                    draw_quick_actions_frame(frame, area, 1, armed, false, palette);
+                                    draw_quick_actions_frame(
+                                        frame,
+                                        area,
+                                        QuickActionsFrame {
+                                            selected: 1,
+                                            armed,
+                                            has_draft: false,
+                                            palette,
+                                        },
+                                    );
                                 }
                                 "resume" => {
                                     draw_session_picker_frame(
-                                        frame, area, &items, 0, armed, palette,
+                                        frame,
+                                        area,
+                                        SessionPickerFrame {
+                                            items: &items,
+                                            selected: 0,
+                                            armed,
+                                            palette,
+                                        },
                                     );
                                 }
                                 "help" => draw_help_frame(frame, area, 0, armed, palette),
                                 "settings" => draw_settings_frame(
-                                    frame, area, "Settings", &settings, 3, armed, None, palette,
+                                    frame,
+                                    area,
+                                    SettingsFrame {
+                                        title: "Settings",
+                                        rows: &settings,
+                                        selected: 3,
+                                        armed,
+                                        notice: None,
+                                        palette,
+                                    },
                                 ),
                                 _ => draw_agent_inspector_frame(
-                                    frame, area, &agents, 0, armed, None, palette,
+                                    frame,
+                                    area,
+                                    AgentInspectorFrame {
+                                        model: &agents,
+                                        scroll: 0,
+                                        armed,
+                                        notice: None,
+                                        palette,
+                                    },
                                 ),
                             }
                             if name == "settings" && width == 80 && height == 24 && armed {
@@ -1320,23 +1361,25 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                             );
                             draw_model_catalog_frame(
                                 frame,
-                                &crate::terminal::ModelPicker {
-                                    items: &items,
-                                    efforts: &efforts,
-                                    selected: 4095,
-                                    exact_custom: false,
-                                    filter,
-                                    invalid: false,
-                                    catalog_state,
-                                    refresh_error: Some("Provider unavailable"),
+                                ModelCatalogFrame {
+                                    picker: &crate::terminal::ModelPicker {
+                                        items: &items,
+                                        efforts: &efforts,
+                                        selected: 4095,
+                                        exact_custom: false,
+                                        filter,
+                                        invalid: false,
+                                        catalog_state,
+                                        refresh_error: Some("Provider unavailable"),
+                                    },
+                                    armed: true,
+                                    composer: &composer,
+                                    model: &model,
+                                    hints: ComposerHints::new(
+                                        Palette { color },
+                                        composer.newline_hint(KeyboardSupport::Legacy),
+                                    ),
                                 },
-                                true,
-                                &composer,
-                                &model,
-                                ComposerHints::new(
-                                    Palette { color },
-                                    composer.newline_hint(KeyboardSupport::Legacy),
-                                ),
                             );
                         })
                         .expect("chat model panel");
@@ -1526,11 +1569,13 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                         draw_agent_inspector_frame(
                             frame,
                             bottom_area(frame.area(), 14),
-                            &inspector,
-                            scroll,
-                            true,
-                            None,
-                            Palette { color },
+                            AgentInspectorFrame {
+                                model: &inspector,
+                                scroll,
+                                armed: true,
+                                notice: None,
+                                palette: Palette { color },
+                            },
                         )
                     })
                     .unwrap();
@@ -1586,11 +1631,15 @@ fn agent_chat_frames_label_a_read_only_child_and_hint_keys_only_once_armed() {
                         draw_agent_chat_frame(
                             frame,
                             area,
-                            transcript.label.as_str().into(),
-                            armed,
-                            None,
-                            fullscreen,
-                            palette,
+                            AgentChatFrame {
+                                label: transcript.label.as_str(),
+                                draft: None,
+                                editable: false,
+                                armed,
+                                notice: None,
+                                fullscreen,
+                                palette,
+                            },
                         );
                     })
                     .unwrap();

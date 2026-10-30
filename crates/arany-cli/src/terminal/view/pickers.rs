@@ -1,13 +1,23 @@
 use super::*;
 
+pub(in crate::terminal) struct SessionPickerFrame<'a> {
+    pub items: &'a [SessionListItem],
+    pub selected: usize,
+    pub armed: bool,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_session_picker_frame(
     frame: &mut Frame,
     area: Rect,
-    items: &[SessionListItem],
-    selected: usize,
-    armed: bool,
-    palette: Palette,
+    state: SessionPickerFrame<'_>,
 ) {
+    let SessionPickerFrame {
+        items,
+        selected,
+        armed,
+        palette,
+    } = state;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -87,14 +97,24 @@ pub(in crate::terminal) fn draw_session_picker_frame(
     }
 }
 
+pub(in crate::terminal) struct QuickActionsFrame {
+    pub selected: usize,
+    pub armed: bool,
+    pub has_draft: bool,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_quick_actions_frame(
     frame: &mut Frame,
     area: Rect,
-    selected: usize,
-    armed: bool,
-    has_draft: bool,
-    palette: Palette,
+    state: QuickActionsFrame,
 ) {
+    let QuickActionsFrame {
+        selected,
+        armed,
+        has_draft,
+        palette,
+    } = state;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -188,20 +208,28 @@ pub(in crate::terminal) fn guidance_height(text: &str, width: u16) -> u16 {
     u16::try_from(wrap_cells(text, usize::from(width.max(1)), 0).len()).unwrap_or(u16::MAX)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a dialog frame takes its title, rows, focus and notice together"
-)]
+pub(in crate::terminal) struct SettingsFrame<'a> {
+    pub title: &'a str,
+    pub rows: &'a [String],
+    pub selected: usize,
+    pub armed: bool,
+    pub notice: Option<&'a str>,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_settings_frame(
     frame: &mut Frame,
     area: Rect,
-    title: &str,
-    rows: &[String],
-    selected: usize,
-    armed: bool,
-    notice: Option<&str>,
-    palette: Palette,
+    state: SettingsFrame<'_>,
 ) {
+    let SettingsFrame {
+        title,
+        rows,
+        selected,
+        armed,
+        notice,
+        palette,
+    } = state;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -281,15 +309,22 @@ pub(in crate::terminal) fn usage_lines(page: &str, width: u16) -> Vec<String> {
         .collect()
 }
 
-pub(in crate::terminal) fn draw_usage_frame(
-    frame: &mut Frame,
-    area: Rect,
-    lines: &[String],
-    scroll: usize,
-    page: (usize, usize),
-    armed: bool,
-    palette: Palette,
-) {
+pub(in crate::terminal) struct UsageFrame<'a> {
+    pub lines: &'a [String],
+    pub scroll: usize,
+    pub page: (usize, usize),
+    pub armed: bool,
+    pub palette: Palette,
+}
+
+pub(in crate::terminal) fn draw_usage_frame(frame: &mut Frame, area: Rect, state: UsageFrame<'_>) {
+    let UsageFrame {
+        lines,
+        scroll,
+        page,
+        armed,
+        palette,
+    } = state;
     if area.is_empty() {
         return;
     }

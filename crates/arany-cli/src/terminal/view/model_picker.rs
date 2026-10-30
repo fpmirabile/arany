@@ -1,13 +1,24 @@
 use super::*;
 
+pub(in crate::terminal) struct ModelCatalogFrame<'a> {
+    pub picker: &'a super::super::ModelPicker<'a>,
+    pub armed: bool,
+    pub composer: &'a Composer,
+    pub model: &'a PresentationModel,
+    pub hints: ComposerHints<'a>,
+}
+
 pub(in crate::terminal) fn draw_model_catalog_frame(
     frame: &mut Frame,
-    picker: &super::super::ModelPicker<'_>,
-    armed: bool,
-    composer: &Composer,
-    model: &PresentationModel,
-    hints: ComposerHints<'_>,
+    state: ModelCatalogFrame<'_>,
 ) {
+    let ModelCatalogFrame {
+        picker,
+        armed,
+        composer,
+        model,
+        hints,
+    } = state;
     let palette = hints.palette;
     let full = frame.area();
     if !dialog_fits(full) {

@@ -205,12 +205,14 @@ impl AttachedTerminal {
             draw_setup_frame(
                 frame,
                 area,
-                step,
-                title,
-                instruction,
-                input_chars,
-                notice,
-                palette,
+                SetupFrame {
+                    step,
+                    title,
+                    instruction,
+                    input_chars,
+                    notice,
+                    palette,
+                },
             )
         })?;
         Ok(())
@@ -232,20 +234,30 @@ impl AttachedTerminal {
         let palette = self.palette();
         let width = self.owned().size()?.width;
         self.draw_frame(if width < 20 { 8 } else { 7 }, |frame, area| {
-            draw_setup_text_frame(frame, area, title, instruction, draft, notice, palette)
+            draw_setup_text_frame(
+                frame,
+                area,
+                SetupTextFrame {
+                    title,
+                    instruction,
+                    draft,
+                    notice,
+                    palette,
+                },
+            )
         })?;
         Ok(())
     }
 
-    pub fn draw_setup_choices(
-        &mut self,
-        step: u8,
-        title: &str,
-        instruction: &str,
-        choices: &[(u8, &str)],
-        selected: usize,
-        notice: Option<&str>,
-    ) -> Result<(), TerminalError> {
+    pub fn draw_setup_choices(&mut self, setup: SetupChoices<'_>) -> Result<(), TerminalError> {
+        let SetupChoices {
+            step,
+            title,
+            instruction,
+            choices,
+            selected,
+            notice,
+        } = setup;
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
             let paged = setup_choices_need_paging(instruction, choices);
@@ -283,12 +295,14 @@ impl AttachedTerminal {
             draw_setup_choices_frame(
                 frame,
                 area,
-                title,
-                instruction,
-                choices,
-                selected,
-                notice,
-                palette,
+                SetupChoicesFrame {
+                    title,
+                    instruction,
+                    choices,
+                    selected,
+                    notice,
+                    palette,
+                },
             )
         })?;
         Ok(())
@@ -319,12 +333,14 @@ impl AttachedTerminal {
             has_more = draw_setup_warning_frame(
                 frame,
                 area,
-                title,
-                warning,
-                page,
-                accept_selected,
-                notice,
-                palette,
+                SetupWarningFrame {
+                    title,
+                    warning,
+                    page,
+                    accept_selected,
+                    notice,
+                    palette,
+                },
             );
         })?;
         if !visible {

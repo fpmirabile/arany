@@ -256,7 +256,16 @@ impl AttachedTerminal {
         if let Some((label, text, scroll)) = composer.paste_detail() {
             let palette = self.palette();
             return self.draw_frame(screen.height, |frame, area| {
-                view::draw_paste_detail(frame, area, &label, text, scroll, palette);
+                view::draw_paste_detail(
+                    frame,
+                    area,
+                    PasteDetailFrame {
+                        label: &label,
+                        text,
+                        scroll,
+                        palette,
+                    },
+                );
             });
         }
         if self.mode == TerminalMode::Fullscreen && self.transcript.transcript_open {
@@ -425,11 +434,13 @@ impl AttachedTerminal {
             if let Some(picker) = picker {
                 draw_model_catalog_frame(
                     frame,
-                    picker,
-                    armed,
-                    composer,
-                    &model,
-                    view::ComposerHints::new(palette, newline_hint),
+                    ModelCatalogFrame {
+                        picker,
+                        armed,
+                        composer,
+                        model: &model,
+                        hints: view::ComposerHints::new(palette, newline_hint),
+                    },
                 );
             }
         })?;

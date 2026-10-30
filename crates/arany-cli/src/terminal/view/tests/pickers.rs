@@ -87,12 +87,14 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
             draw_setup_choices_frame(
                 frame,
                 area,
-                "Settings",
-                "↑↓ selects a setting; ←→ changes it; Enter saves",
-                &choices,
-                0,
-                None,
-                Palette { color: false },
+                SetupChoicesFrame {
+                    title: "Settings",
+                    instruction: "↑↓ selects a setting; ←→ changes it; Enter saves",
+                    choices: &choices,
+                    selected: 0,
+                    notice: None,
+                    palette: Palette { color: false },
+                },
             )
         })
         .expect("dense Settings frame");
@@ -107,12 +109,14 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
                 draw_settings_frame(
                     frame,
                     frame.area(),
-                    "Settings",
-                    &["Newline shortcut: Shift+Enter".into()],
-                    0,
-                    true,
-                    Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE),
-                    Palette { color: false },
+                    SettingsFrame {
+                        title: "Settings",
+                        rows: &["Newline shortcut: Shift+Enter".into()],
+                        selected: 0,
+                        armed: true,
+                        notice: Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE),
+                        palette: Palette { color: false },
+                    },
                 );
             })
             .unwrap();
@@ -169,10 +173,12 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
                 draw_session_picker_frame(
                     frame,
                     bottom_area(frame.area(), 12),
-                    &items,
-                    14,
-                    true,
-                    Palette { color: false },
+                    SessionPickerFrame {
+                        items: &items,
+                        selected: 14,
+                        armed: true,
+                        palette: Palette { color: false },
+                    },
                 )
             })
             .expect("picker frame");
@@ -216,10 +222,12 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
                 draw_session_picker_frame(
                     frame,
                     bottom_area(frame.area(), 12),
-                    &items,
-                    14,
-                    true,
-                    Palette { color: true },
+                    SessionPickerFrame {
+                        items: &items,
+                        selected: 14,
+                        armed: true,
+                        palette: Palette { color: true },
+                    },
                 )
             })
             .expect("colored picker frame");
@@ -250,10 +258,12 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                                 draw_quick_actions_frame(
                                     frame,
                                     bottom_area(frame.area(), 7),
-                                    selected,
-                                    true,
-                                    has_draft,
-                                    Palette { color },
+                                    QuickActionsFrame {
+                                        selected,
+                                        armed: true,
+                                        has_draft,
+                                        palette: Palette { color },
+                                    },
                                 )
                             })
                             .expect("quick frame");
@@ -321,23 +331,25 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
                     draw_frame(frame, &model, &composer, None, Palette { color: false });
                     draw_model_catalog_frame(
                         frame,
-                        &crate::terminal::ModelPicker {
-                            items: if empty { &[] } else { &items },
-                            efforts: if empty { &[] } else { &[Some(Effort::High)] },
-                            selected: 0,
-                            exact_custom: true,
-                            filter,
-                            invalid: false,
-                            catalog_state: crate::terminal::ModelCatalogState::Current,
-                            refresh_error: None,
+                        ModelCatalogFrame {
+                            picker: &crate::terminal::ModelPicker {
+                                items: if empty { &[] } else { &items },
+                                efforts: if empty { &[] } else { &[Some(Effort::High)] },
+                                selected: 0,
+                                exact_custom: true,
+                                filter,
+                                invalid: false,
+                                catalog_state: crate::terminal::ModelCatalogState::Current,
+                                refresh_error: None,
+                            },
+                            armed: true,
+                            composer: &composer,
+                            model: &model,
+                            hints: ComposerHints::new(
+                                Palette { color: false },
+                                composer.newline_hint(KeyboardSupport::Legacy),
+                            ),
                         },
-                        true,
-                        &composer,
-                        &model,
-                        ComposerHints::new(
-                            Palette { color: false },
-                            composer.newline_hint(KeyboardSupport::Legacy),
-                        ),
                     );
                 })
                 .expect("custom model panel");

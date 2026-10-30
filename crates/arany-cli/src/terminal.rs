@@ -78,8 +78,10 @@ pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
 pub use view::SELECTOR_ROWS;
 use view::{
-    AGENT_PICKER_ROWS, Palette, agent_detail_lines, agent_detail_rows, agent_picker_index,
-    bottom_area, composer_height, draw_agent_inspector_frame, draw_help_frame,
+    AGENT_PICKER_ROWS, AgentInspectorFrame, ModelCatalogFrame, Palette, PasteDetailFrame,
+    QuickActionsFrame, SessionPickerFrame, SettingsFrame, SetupChoicesFrame, SetupFrame,
+    SetupTextFrame, SetupWarningFrame, UsageFrame, agent_detail_lines, agent_detail_rows,
+    agent_picker_index, bottom_area, composer_height, draw_agent_inspector_frame, draw_help_frame,
     draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
     draw_settings_frame, draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame,
     draw_setup_warning_frame, history_top_padding, screen_terminal, session_picker_index,
@@ -256,11 +258,14 @@ impl AttachedTerminal {
     fn from_acquired(
         owned: OwnedTerminal,
         mode_label: Option<&'static str>,
-        mode: TerminalMode,
-        pointer: PointerSettings,
-        screen_reader: bool,
+        settings: AttachedSettings,
         _signals: TerminalSignals,
     ) -> Self {
+        let AttachedSettings {
+            mode,
+            pointer,
+            screen_reader,
+        } = settings;
         Self {
             owned,
             newline_shortcut: NewlineShortcut::default(),
@@ -515,6 +520,21 @@ struct GraphicsPlacement {
     image_index: usize,
     digest: [u8; 32],
     inner: Rect,
+}
+
+pub struct SetupChoices<'a> {
+    pub step: u8,
+    pub title: &'a str,
+    pub instruction: &'a str,
+    pub choices: &'a [(u8, &'a str)],
+    pub selected: usize,
+    pub notice: Option<&'a str>,
+}
+
+struct AttachedSettings {
+    mode: TerminalMode,
+    pointer: PointerSettings,
+    screen_reader: bool,
 }
 
 pub struct ProfileSelection<'a> {

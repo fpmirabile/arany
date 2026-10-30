@@ -1146,11 +1146,11 @@ impl AttachedTerminal {
                     label: &label,
                     draft,
                     editable: chat.editable,
+                    armed,
+                    notice: transient.or(child_notice.as_deref()),
+                    fullscreen: !classic,
+                    palette,
                 },
-                armed,
-                transient.or(child_notice.as_deref()),
-                !classic,
-                palette,
             );
         })?;
         let area = terminal.get_frame().area();

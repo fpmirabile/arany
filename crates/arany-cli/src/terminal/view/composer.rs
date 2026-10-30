@@ -19,14 +19,24 @@ pub(in crate::terminal) fn paste_detail_scroll_limit(
         .saturating_sub(height.saturating_sub(2))
 }
 
+pub(in crate::terminal) struct PasteDetailFrame<'a> {
+    pub label: &'a str,
+    pub text: &'a str,
+    pub scroll: usize,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_paste_detail(
     frame: &mut Frame,
     area: Rect,
-    label: &str,
-    text: &str,
-    scroll: usize,
-    palette: Palette,
+    state: PasteDetailFrame<'_>,
 ) {
+    let PasteDetailFrame {
+        label,
+        text,
+        scroll,
+        palette,
+    } = state;
     let width = usize::from(area.width.max(1));
     let rows: Vec<String> = text
         .split('\n')

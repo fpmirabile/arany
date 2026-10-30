@@ -20,7 +20,18 @@ impl AttachedTerminal {
             u16::try_from(items.len().saturating_add(6))
                 .unwrap_or(u16::MAX)
                 .min(12),
-            |frame, area| draw_session_picker_frame(frame, area, items, selected, armed, palette),
+            |frame, area| {
+                draw_session_picker_frame(
+                    frame,
+                    area,
+                    SessionPickerFrame {
+                        items,
+                        selected,
+                        armed,
+                        palette,
+                    },
+                )
+            },
         );
         match result {
             Ok(area) => {
@@ -62,7 +73,18 @@ impl AttachedTerminal {
             view::settings_height(rows, width, max_rows)
                 .saturating_add(notice.map_or(0, |text| view::guidance_height(text, width))),
             |frame, area| {
-                draw_settings_frame(frame, area, title, rows, selected, armed, notice, palette);
+                draw_settings_frame(
+                    frame,
+                    area,
+                    SettingsFrame {
+                        title,
+                        rows,
+                        selected,
+                        armed,
+                        notice,
+                        palette,
+                    },
+                );
             },
         )?;
         Ok(())
@@ -79,7 +101,16 @@ impl AttachedTerminal {
         let palette = self.palette();
         let armed = self.panels.dialog_armed;
         self.draw_dialog(Some(session), 7, |frame, area| {
-            draw_quick_actions_frame(frame, area, selected, armed, has_draft, palette);
+            draw_quick_actions_frame(
+                frame,
+                area,
+                QuickActionsFrame {
+                    selected,
+                    armed,
+                    has_draft,
+                    palette,
+                },
+            );
         })?;
         Ok(())
     }
@@ -221,11 +252,13 @@ impl AttachedTerminal {
                 view::draw_usage_frame(
                     frame,
                     area,
-                    &lines,
-                    selected,
-                    (page, pages),
-                    armed,
-                    palette,
+                    UsageFrame {
+                        lines: &lines,
+                        scroll: selected,
+                        page: (page, pages),
+                        armed,
+                        palette,
+                    },
                 );
             })?;
             let panel = self.panels.usage_panel.as_mut().expect("open usage panel");
@@ -470,7 +503,17 @@ impl AttachedTerminal {
         let palette = self.palette();
         let armed = self.panels.dialog_armed;
         let area = self.draw_dialog(Some(view), height, |frame, area| {
-            draw_agent_inspector_frame(frame, area, &model, scroll, armed, notice, palette);
+            draw_agent_inspector_frame(
+                frame,
+                area,
+                AgentInspectorFrame {
+                    model: &model,
+                    scroll,
+                    armed,
+                    notice,
+                    palette,
+                },
+            );
         })?;
         self.panels.agent_picker_area = Some(area);
         Ok(())

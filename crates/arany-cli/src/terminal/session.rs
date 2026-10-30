@@ -33,9 +33,11 @@ impl AttachedTerminal {
         Ok(Self::from_acquired(
             owned,
             mode_label,
-            mode,
-            pointer,
-            screen_reader,
+            AttachedSettings {
+                mode,
+                pointer,
+                screen_reader,
+            },
             signals,
         ))
     }

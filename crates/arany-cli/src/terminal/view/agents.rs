@@ -24,15 +24,26 @@ pub(in crate::terminal) fn agent_detail_lines(
 pub(in crate::terminal) const AGENT_PICKER_ROWS: u16 = 23;
 
 // The Session line, the search line, a window of rows, the focused row's details and the key hint.
+pub(in crate::terminal) struct AgentInspectorFrame<'a> {
+    pub model: &'a AgentInspectorModel,
+    pub scroll: usize,
+    pub armed: bool,
+    pub notice: Option<&'a str>,
+    pub palette: Palette,
+}
+
 pub(in crate::terminal) fn draw_agent_inspector_frame(
     frame: &mut Frame,
     area: Rect,
-    model: &AgentInspectorModel,
-    scroll: usize,
-    armed: bool,
-    notice: Option<&str>,
-    palette: Palette,
+    state: AgentInspectorFrame<'_>,
 ) {
+    let AgentInspectorFrame {
+        model,
+        scroll,
+        armed,
+        notice,
+        palette,
+    } = state;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -98,16 +109,10 @@ pub(in crate::terminal) struct AgentChatFrame<'a> {
     pub label: &'a str,
     pub draft: Option<&'a Composer>,
     pub editable: bool,
-}
-
-impl<'a> From<&'a str> for AgentChatFrame<'a> {
-    fn from(label: &'a str) -> Self {
-        Self {
-            label,
-            draft: None,
-            editable: false,
-        }
-    }
+    pub armed: bool,
+    pub notice: Option<&'a str>,
+    pub fullscreen: bool,
+    pub palette: Palette,
 }
 
 // The actor label, its composer and, once armed, the key hint.
@@ -115,11 +120,9 @@ pub(in crate::terminal) fn draw_agent_chat_frame(
     frame: &mut Frame,
     area: Rect,
     state: AgentChatFrame<'_>,
-    armed: bool,
-    notice: Option<&str>,
-    fullscreen: bool,
-    palette: Palette,
 ) {
+    let (armed, notice, fullscreen, palette) =
+        (state.armed, state.notice, state.fullscreen, state.palette);
     if area.width == 0 || area.height == 0 {
         return;
     }

@@ -1,5 +1,5 @@
 use super::SetupError;
-use crate::terminal::{AttachedTerminal, Composer, TerminalInput};
+use crate::terminal::{AttachedTerminal, Composer, SetupChoices, TerminalInput};
 use std::future::Future;
 
 const SETUP_MESSAGE_PAGE_CHARS: usize = 36;
@@ -135,7 +135,14 @@ async fn review_linear_confirmation(
     let mut rejected = 0u16;
     let mut notice = None::<&str>;
     loop {
-        terminal.draw_setup_choices(2, title, instruction, &rendered, 0, notice.take())?;
+        terminal.draw_setup_choices(SetupChoices {
+            step: 2,
+            title,
+            instruction,
+            choices: &rendered,
+            selected: 0,
+            notice: notice.take(),
+        })?;
         match terminal.next_input().await? {
             TerminalInput::Submit => {
                 let accepted = if rejected == 0 && input.trim().is_empty() {
@@ -339,14 +346,14 @@ async fn choose_linear(
     let mut rejected = 0u16;
     let mut notice = None::<&str>;
     loop {
-        terminal.draw_setup_choices(
+        terminal.draw_setup_choices(SetupChoices {
             step,
             title,
             instruction,
-            &linear_rendered,
+            choices: &linear_rendered,
             selected,
-            notice.take(),
-        )?;
+            notice: notice.take(),
+        })?;
         match terminal.next_input().await? {
             TerminalInput::Character(character) => {
                 if !append_linear_choice_character(&mut input, &mut rejected, character) {
@@ -441,7 +448,14 @@ async fn choose_inline(
 ) -> Result<Option<u8>, SetupError> {
     let mut notice = None::<&str>;
     loop {
-        terminal.draw_setup_choices(step, title, instruction, choices, selected, notice.take())?;
+        terminal.draw_setup_choices(SetupChoices {
+            step,
+            title,
+            instruction,
+            choices,
+            selected,
+            notice: notice.take(),
+        })?;
         match terminal.next_input().await? {
             TerminalInput::Character(_) => notice = Some("Use Up/Down and Enter to select"),
             TerminalInput::Up => selected = selected.saturating_sub(1),

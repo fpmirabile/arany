@@ -1100,10 +1100,12 @@ fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
                 draw_paste_detail(
                     frame,
                     frame.area(),
-                    &label,
-                    text,
-                    0,
-                    Palette { color: false },
+                    PasteDetailFrame {
+                        label: &label,
+                        text,
+                        scroll: 0,
+                        palette: Palette { color: false },
+                    },
                 )
             })
             .unwrap();
