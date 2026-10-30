@@ -221,7 +221,7 @@ mod workspace_image_tests {
     #[cfg_attr(not(arany_ci), ignore = "native Linux PNG bind-mount gate")]
     fn pasted_png_rejects_same_device_directory_and_file_mounts() {
         use arany::test_support::process::{BoundedOutput, assert_single_test_completed};
-        const CHILD: &str = "terminal::workspace_image_tests::mounted_workspace_png_child";
+        const CHILD: &str = "terminal::paste::workspace_image_tests::mounted_workspace_png_child";
         let _gate = arany::test_support::process::NATIVE_GATE.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
