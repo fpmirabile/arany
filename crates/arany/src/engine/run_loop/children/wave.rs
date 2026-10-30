@@ -90,12 +90,8 @@ impl RunLoop<'_> {
         &self,
         mut wave: ChildWave<'_>,
     ) -> Result<RunProgress<Drained>, EngineError> {
-        match self.refill_wave(&mut wave).await {
-            Ok(RunProgress::Ready(())) => {}
-            Ok(RunProgress::Stopped(cause)) => {
-                return Ok(wave.queue.abort_with(RunProgress::Stopped(cause)).await);
-            }
-            Err(error) => return Err(wave.queue.abort_with(error).await),
+        if let Some(cause) = self.refill_or_abort(&mut wave).await? {
+            return Ok(RunProgress::Stopped(cause));
         }
         let mut abort = self.unstarted_stop(wave.queue);
         let mut drain_deadline = None;
@@ -155,12 +151,8 @@ impl RunLoop<'_> {
                 );
             }
             if abort.is_none() {
-                match self.refill_wave(&mut wave).await {
-                    Ok(RunProgress::Ready(())) => {}
-                    Ok(RunProgress::Stopped(cause)) => {
-                        return Ok(wave.queue.abort_with(RunProgress::Stopped(cause)).await);
-                    }
-                    Err(error) => return Err(wave.queue.abort_with(error).await),
+                if let Some(cause) = self.refill_or_abort(&mut wave).await? {
+                    return Ok(RunProgress::Stopped(cause));
                 }
                 abort = self.unstarted_stop(wave.queue);
             }
@@ -169,6 +161,18 @@ impl RunLoop<'_> {
             abort,
             pending: std::mem::take(&mut wave.queue.pending),
         }))
+    }
+
+    // A refill that stops or fails tears down the attempts already running.
+    async fn refill_or_abort(
+        &self,
+        wave: &mut ChildWave<'_>,
+    ) -> Result<Option<RunRefusal>, EngineError> {
+        match self.refill_wave(wave).await {
+            Ok(RunProgress::Ready(())) => Ok(None),
+            Ok(RunProgress::Stopped(cause)) => Ok(Some(wave.queue.abort_with(cause).await)),
+            Err(error) => Err(wave.queue.abort_with(error).await),
+        }
     }
 
     async fn next_child_attempt(
@@ -181,18 +185,12 @@ impl RunLoop<'_> {
             .join_child_call(wave.queue, abort, drain_deadline)
             .await?;
         let (task_id, result) = classify_join(joined);
-        let Some(index) = wave.queue.active.get(&task_id).map(|active| active.index) else {
+        let Some(active) = wave.queue.active.get(&task_id) else {
             return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
         };
+        let index = active.index;
         let respawn = self
-            .child_attempt_continuation(
-                wave.queue,
-                task_id,
-                index,
-                &result,
-                *abort,
-                wave.deadline(),
-            )
+            .child_attempt_continuation(active, &result, *abort, wave.deadline())
             .await;
         match respawn {
             Ok(Some(delay)) => {
@@ -218,18 +216,12 @@ impl RunLoop<'_> {
 
     async fn child_attempt_continuation(
         &self,
-        queue: &ChildQueue,
-        task_id: Id,
-        index: Option<usize>,
+        active: &ActiveChild,
         result: &crate::engine::routing::AttemptResult,
         abort: Option<WaveStop>,
         deadline: Instant,
     ) -> Result<Option<Duration>, EngineError> {
-        let active = queue
-            .active
-            .get(&task_id)
-            .ok_or(EngineError::CoordinatorFailed)?;
-        let role = if index.is_none() {
+        let role = if active.index.is_none() {
             crate::provider::ProviderRole::Primary
         } else {
             crate::provider::ProviderRole::Child

@@ -72,85 +72,12 @@ impl RunLoop<'_> {
         child: &mut ChildWork,
         root_request: &ProviderRequest,
     ) -> Result<ProviderRequest, EngineError> {
-        let mut context: Vec<String> = child
-            .definition
-            .iter()
-            .map(|definition| format!("Agent definition:\n{}", definition.body))
-            .collect();
-        if child.kind.is_editor() {
-            let assignment = self.proposed_editor(child.agent_run_id)?;
-            context.push(format!(
-                "Worker assignment: {}",
-                serde_json::to_string(&assignment).map_err(|_| EngineError::InvalidRequest)?,
-            ));
-            if let Some(s) = &child.source_context {
-                context.push(format!(
-                    "Historical source (bounded; no effects or authority resume): {}",
-                    serde_json::json!({"objective":s.objective,"summary":s.summary,"result":s.result})
-                ));
-            }
-        }
-        let context = (!context.is_empty()).then(|| context.join("\n\n"));
+        let context = self.assignment_context(child)?;
         child.turns_remaining = child.turns_remaining.saturating_sub(1);
         if child.turns_remaining == 0 {
             child.tool_calls_remaining = 0;
         }
-        if let Some(tools) = child.tools.as_mut() {
-            let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-            let room = runtime
-                .result_capacity(
-                    tools.rendered_len()
-                        + root_request
-                            .input
-                            .workspace_guidance
-                            .iter()
-                            .map(|guidance| {
-                                crate::provider::instructions_text(&guidance.path, &guidance.text)
-                                    .len()
-                            })
-                            .sum::<usize>()
-                        + context.as_ref().map_or(0, String::len)
-                        + CHILD_INTENT_RESERVE_BYTES
-                        + if self.controls.steering.is_some() {
-                            crate::session::MAX_STEERING_CONTEXT_BYTES
-                        } else {
-                            0
-                        },
-                    crate::tools::ToolRuntime::step_context_reserve(
-                        false,
-                        Self::maximum_feedback_reserve(runtime),
-                    ),
-                )
-                .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
-            if !room {
-                child.tool_calls_remaining = 0;
-            }
-            // Keep the request head frozen; later calls carry their remaining budget in the newest step.
-            match tools.steps.last_mut() {
-                Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
-                None => {
-                    if child.kind.is_editor() {
-                        let mut catalog: serde_json::Value = serde_json::from_str(tools.catalog())
-                            .map_err(|_| EngineError::InvalidRequest)?;
-                        catalog["tool_calls_remaining"] =
-                            serde_json::json!(child.tool_calls_remaining);
-                        tools.set_catalog(&catalog);
-                    } else {
-                        let refreshed = runtime.research_context(child.tool_calls_remaining)?;
-                        tools.set_catalog(
-                            &serde_json::from_str(refreshed.catalog())
-                                .map_err(|_| EngineError::InvalidRequest)?,
-                        );
-                    }
-                    // Only the first call rebuilds the catalog; later calls keep this restriction.
-                    if !child.kind.is_editor()
-                        && let Some(definition) = &child.definition
-                    {
-                        restrict_catalog(tools, definition)?;
-                    }
-                }
-            }
-        }
+        self.refresh_child_tools(child, root_request, context.as_ref().map_or(0, String::len))?;
         let researcher = child.tools.is_some();
         let root = &root_request.input;
         let request = ProviderRequest {
@@ -206,6 +133,92 @@ impl RunLoop<'_> {
         Ok(request)
     }
 
+    fn assignment_context(&self, child: &ChildWork) -> Result<Option<String>, EngineError> {
+        let mut context: Vec<String> = child
+            .definition
+            .iter()
+            .map(|definition| format!("Agent definition:\n{}", definition.body))
+            .collect();
+        if child.kind.is_editor() {
+            let assignment = self.proposed_editor(child.agent_run_id)?;
+            context.push(format!(
+                "Worker assignment: {}",
+                serde_json::to_string(&assignment).map_err(|_| EngineError::InvalidRequest)?,
+            ));
+            if let Some(s) = &child.source_context {
+                context.push(format!(
+                    "Historical source (bounded; no effects or authority resume): {}",
+                    serde_json::json!({"objective":s.objective,"summary":s.summary,"result":s.result})
+                ));
+            }
+        }
+        Ok((!context.is_empty()).then(|| context.join("\n\n")))
+    }
+
+    fn refresh_child_tools(
+        &self,
+        child: &mut ChildWork,
+        root_request: &ProviderRequest,
+        context_len: usize,
+    ) -> Result<(), EngineError> {
+        let Some(tools) = child.tools.as_mut() else {
+            return Ok(());
+        };
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let room = runtime
+            .result_capacity(
+                tools.rendered_len()
+                    + root_request
+                        .input
+                        .workspace_guidance
+                        .iter()
+                        .map(|guidance| {
+                            crate::provider::instructions_text(&guidance.path, &guidance.text).len()
+                        })
+                        .sum::<usize>()
+                    + context_len
+                    + CHILD_INTENT_RESERVE_BYTES
+                    + if self.controls.steering.is_some() {
+                        crate::session::MAX_STEERING_CONTEXT_BYTES
+                    } else {
+                        0
+                    },
+                crate::tools::ToolRuntime::step_context_reserve(
+                    false,
+                    Self::maximum_feedback_reserve(runtime),
+                ),
+            )
+            .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
+        if !room {
+            child.tool_calls_remaining = 0;
+        }
+        // Keep the request head frozen; later calls carry their remaining budget in the newest step.
+        match tools.steps.last_mut() {
+            Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
+            None => {
+                if child.kind.is_editor() {
+                    let mut catalog: serde_json::Value = serde_json::from_str(tools.catalog())
+                        .map_err(|_| EngineError::InvalidRequest)?;
+                    catalog["tool_calls_remaining"] = serde_json::json!(child.tool_calls_remaining);
+                    tools.set_catalog(&catalog);
+                } else {
+                    let refreshed = runtime.research_context(child.tool_calls_remaining)?;
+                    tools.set_catalog(
+                        &serde_json::from_str(refreshed.catalog())
+                            .map_err(|_| EngineError::InvalidRequest)?,
+                    );
+                }
+                // Only the first call rebuilds the catalog; later calls keep this restriction.
+                if !child.kind.is_editor()
+                    && let Some(definition) = &child.definition
+                {
+                    restrict_catalog(tools, definition)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn admit_worker_call(
         &self,
         queue: &mut ChildQueue,
@@ -255,36 +268,36 @@ impl RunLoop<'_> {
                     )
                     .is_ok()
                     && self.model_may_propose(&request.call)
-                    && (if child.kind.is_editor() {
-                        self.proposed_editor(child.agent_run_id)
-                            .and_then(|a| self.editor_grant(&a))
-                            .is_ok_and(|g| g.allows(&request.call))
-                            && self
-                                .ledger()
-                                .view(|view| {
-                                    crate::session::digest_known(
-                                        view,
-                                        self.run_id,
-                                        child.agent_run_id,
-                                        &request.call,
-                                    )
-                                })
-                                .is_ok_and(|known| known)
-                    } else {
-                        request.call.is_child_research()
-                            && (!request.call.is_web()
-                                || self.controls.tools.is_some_and(|runtime| {
-                                    runtime.allows_research_web(&request.call)
-                                }))
-                            && !self
-                                .controls
-                                .tools
-                                .is_some_and(|runtime| runtime.is_remote_mcp(&request.call))
-                            && child
-                                .definition
-                                .as_ref()
-                                .is_none_or(|definition| definition.allows(&request.call))
-                    })
+                    && self.child_call_allowed(child, &request.call)
             })
+    }
+
+    fn child_call_allowed(&self, child: &ChildWork, call: &ToolCall) -> bool {
+        if child.kind.is_editor() {
+            self.proposed_editor(child.agent_run_id)
+                .and_then(|a| self.editor_grant(&a))
+                .is_ok_and(|g| g.allows(call))
+                && self
+                    .ledger()
+                    .view(|view| {
+                        crate::session::digest_known(view, self.run_id, child.agent_run_id, call)
+                    })
+                    .is_ok_and(|known| known)
+        } else {
+            call.is_child_research()
+                && (!call.is_web()
+                    || self
+                        .controls
+                        .tools
+                        .is_some_and(|runtime| runtime.allows_research_web(call)))
+                && !self
+                    .controls
+                    .tools
+                    .is_some_and(|runtime| runtime.is_remote_mcp(call))
+                && child
+                    .definition
+                    .as_ref()
+                    .is_none_or(|definition| definition.allows(call))
+        }
     }
 }

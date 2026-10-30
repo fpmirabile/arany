@@ -658,107 +658,9 @@ impl RunLoop<'_> {
     }
 
     fn refresh_team_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
-        let (reports, pending) = self.ledger().view(|v| {
-            let run = v.runs.last().expect("Run");
-            let proposals: Vec<_> = run
-                .primary()
-                .into_iter()
-                .flat_map(|a| &a.provider_calls)
-                .filter_map(|c| c.delegation.as_ref())
-                .flatten()
-                .collect();
-            let mut order = std::collections::HashMap::new();
-            for agent in run.agents.iter().skip(1) {
-                let index = proposals
-                    .iter()
-                    .enumerate()
-                    .find(|(i, p)| {
-                        !order.values().any(|v| v == i)
-                            && match p {
-                                crate::worker::ChildAssignment::Editor { assignment } => agent
-                                    .assignment
-                                    .as_ref()
-                                    .is_some_and(|w| &w.pins.request == assignment.as_ref()),
-                                crate::worker::ChildAssignment::Researcher {
-                                    objective,
-                                    definition,
-                                    profile,
-                                } => {
-                                    agent.assignment.is_none()
-                                        && agent.objective.as_ref() == Some(objective)
-                                        && &agent.definition == definition
-                                        && &agent.profile == profile
-                                }
-                            }
-                    })
-                    .map(|(index, _)| index)
-                    .expect("spawn matches its proposal");
-                order.insert(agent.id, index);
-            }
-            let workers = run.worker_history();
-            let mut reports = run
-                .agents
-                .iter()
-                .skip(1)
-                .filter(|a| a.status != crate::session::AgentStatus::Active)
-                .map(|a| {
-                    (
-                        order[&a.id],
-                        ChildResult {
-                            objective: a.objective.clone().unwrap_or_default(),
-                            summary: a
-                                .summary
-                                .clone()
-                                .unwrap_or_else(|| "Worker did not finish".into()),
-                            result: {
-                                let history = workers.iter().find(|w| w.assignment_id == a.id);
-                                let tool_facts = child_tool_facts(&a.tools);
-                                let result = a.result.as_deref().unwrap_or(if history.is_some() {
-                                    "Editor stopped; landed Workspace effects retained"
-                                } else {
-                                    ""
-                                });
-                                let mut report = [
-                                    history
-                                        .map(|history| history.description())
-                                        .unwrap_or_default(),
-                                    history
-                                        .map(|history| history.changed_paths.clone())
-                                        .unwrap_or_default(),
-                                    tool_facts,
-                                    result.to_owned(),
-                                ]
-                                .into_iter()
-                                .filter(|part| !part.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                                let mut end = report.len().min(MAX_CHILD_RESULT_BYTES);
-                                while !report.is_char_boundary(end) {
-                                    end -= 1;
-                                }
-                                report.truncate(end);
-                                report
-                            },
-                        },
-                    )
-                })
-                .collect::<Vec<_>>();
-            let pending = run
-                .agents
-                .iter()
-                .skip(1)
-                .filter(|a| a.status == crate::session::AgentStatus::Active)
-                .map(|a| a.id.to_string())
-                .collect::<Vec<_>>();
-            reports.sort_by_key(|(index, _)| *index);
-            (
-                reports
-                    .into_iter()
-                    .map(|(_, report)| report)
-                    .collect::<Vec<_>>(),
-                pending,
-            )
-        })?;
+        let (reports, pending) = self
+            .ledger()
+            .view(|v| team_reports(v.runs.last().expect("Run")))?;
         root.input.child_results = reports;
         if let Some(tools) = root.input.tools.as_mut() {
             let mut catalog: serde_json::Value =
@@ -773,6 +675,117 @@ impl RunLoop<'_> {
             tools.set_catalog(&catalog);
         }
         Ok(())
+    }
+}
+
+// Settled children report in their proposal order; active ones are listed as pending.
+fn team_reports(run: &crate::session::RunView) -> (Vec<ChildResult>, Vec<String>) {
+    let order = proposal_order(run);
+    let workers = run.worker_history();
+    let mut reports = run
+        .agents
+        .iter()
+        .skip(1)
+        .filter(|a| a.status != crate::session::AgentStatus::Active)
+        .map(|a| (order[&a.id], child_report(a, &workers)))
+        .collect::<Vec<_>>();
+    let pending = run
+        .agents
+        .iter()
+        .skip(1)
+        .filter(|a| a.status == crate::session::AgentStatus::Active)
+        .map(|a| a.id.to_string())
+        .collect::<Vec<_>>();
+    reports.sort_by_key(|(index, _)| *index);
+    (
+        reports
+            .into_iter()
+            .map(|(_, report)| report)
+            .collect::<Vec<_>>(),
+        pending,
+    )
+}
+
+fn proposal_order(run: &crate::session::RunView) -> HashMap<AgentRunId, usize> {
+    let proposals: Vec<_> = run
+        .primary()
+        .into_iter()
+        .flat_map(|a| &a.provider_calls)
+        .filter_map(|c| c.delegation.as_ref())
+        .flatten()
+        .collect();
+    let mut order = HashMap::new();
+    for agent in run.agents.iter().skip(1) {
+        let index = proposals
+            .iter()
+            .enumerate()
+            .find(|(i, p)| !order.values().any(|v| v == i) && spawned_from(agent, p))
+            .map(|(index, _)| index)
+            .expect("spawn matches its proposal");
+        order.insert(agent.id, index);
+    }
+    order
+}
+
+fn spawned_from(
+    agent: &crate::session::AgentView,
+    proposal: &crate::worker::ChildAssignment,
+) -> bool {
+    match proposal {
+        crate::worker::ChildAssignment::Editor { assignment } => agent
+            .assignment
+            .as_ref()
+            .is_some_and(|w| &w.pins.request == assignment.as_ref()),
+        crate::worker::ChildAssignment::Researcher {
+            objective,
+            definition,
+            profile,
+        } => {
+            agent.assignment.is_none()
+                && agent.objective.as_ref() == Some(objective)
+                && &agent.definition == definition
+                && &agent.profile == profile
+        }
+    }
+}
+
+fn child_report(
+    agent: &crate::session::AgentView,
+    workers: &[crate::session::worker::WorkerHistory],
+) -> ChildResult {
+    let history = workers.iter().find(|w| w.assignment_id == agent.id);
+    let tool_facts = child_tool_facts(&agent.tools);
+    let result = agent.result.as_deref().unwrap_or(if history.is_some() {
+        "Editor stopped; landed Workspace effects retained"
+    } else {
+        ""
+    });
+    let mut report = [
+        history
+            .map(|history| history.description())
+            .unwrap_or_default(),
+        history
+            .map(|history| history.changed_paths.clone())
+            .unwrap_or_default(),
+        tool_facts,
+        result.to_owned(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let mut end = report.len().min(MAX_CHILD_RESULT_BYTES);
+    while !report.is_char_boundary(end) {
+        end -= 1;
+    }
+    report.truncate(end);
+    ChildResult {
+        objective: agent.objective.clone().unwrap_or_default(),
+        summary: agent
+            .summary
+            .clone()
+            .unwrap_or_else(|| "Worker did not finish".into()),
+        result: report,
     }
 }
 

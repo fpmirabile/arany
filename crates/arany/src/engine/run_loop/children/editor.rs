@@ -52,30 +52,8 @@ impl RunLoop<'_> {
         let gate = GateFacts {
             unmet: gate_failed,
             worker_stopped,
-            stop_room: self
-                .controls
-                .tools
-                .zip(child.tools.as_ref())
-                .zip(match &result {
-                    CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
-                    CallResult::Failed(_) | CallResult::Cancelled => None,
-                })
-                .is_some_and(|((runtime, tools), turn)| {
-                    tools.has_stop_room(turn, runtime.context_limit_bytes())
-                }),
-            continuations_left: gate_failed
-                && self.ledger().view(|v| {
-                    v.runs
-                        .last()
-                        .expect("active Run")
-                        .agents
-                        .iter()
-                        .find(|a| a.id == child.agent_run_id)
-                        .and_then(|a| a.assignment.as_ref())
-                        .is_some_and(|w| {
-                            w.gate_continuations < crate::worker::MAX_EDITOR_CONTINUATIONS
-                        })
-                })?,
+            stop_room: self.editor_stop_room(child, &result),
+            continuations_left: gate_failed && self.editor_continuations_left(child)?,
         };
         let facts = self.child_facts(child, deadline)?;
         Ok(decide_child_call(
@@ -85,6 +63,32 @@ impl RunLoop<'_> {
             abort,
             &facts,
         ))
+    }
+
+    fn editor_stop_room(&self, child: &ChildWork, result: &CallResult) -> bool {
+        self.controls
+            .tools
+            .zip(child.tools.as_ref())
+            .zip(match result {
+                CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
+                CallResult::Failed(_) | CallResult::Cancelled => None,
+            })
+            .is_some_and(|((runtime, tools), turn)| {
+                tools.has_stop_room(turn, runtime.context_limit_bytes())
+            })
+    }
+
+    fn editor_continuations_left(&self, child: &ChildWork) -> Result<bool, EngineError> {
+        self.ledger().view(|v| {
+            v.runs
+                .last()
+                .expect("active Run")
+                .agents
+                .iter()
+                .find(|a| a.id == child.agent_run_id)
+                .and_then(|a| a.assignment.as_ref())
+                .is_some_and(|w| w.gate_continuations < crate::worker::MAX_EDITOR_CONTINUATIONS)
+        })
     }
 
     pub(super) async fn apply_editor_call(
