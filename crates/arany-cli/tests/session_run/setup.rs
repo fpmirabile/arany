@@ -504,13 +504,11 @@ fn release_bare_session(
     access_choice: Option<&str>,
     private_values: &[&str],
 ) -> Option<String> {
-    if access_choice.is_some() {
-        StateRoot::open_existing(&private_home.join(".local/state/arany"))
-            .expect("fixture account root")
-            .record(RecordKind::ModelPreferences)
-            .replace(br#"{"sources":[]}"#)
-            .expect("mixed-access fixture without a remembered route");
-    }
+    StateRoot::open_existing(&private_home.join(".local/state/arany"))
+        .expect("fixture account root")
+        .record(RecordKind::ModelPreferences)
+        .replace(br#"{"sources":[]}"#)
+        .expect("mixed-access fixture without a remembered route");
     let workspace = private_home.join("workspace");
     let state = private_home.join(name);
     let environment_home = format!("{name}-home");
@@ -603,6 +601,29 @@ fn release_passwd_home() -> PathBuf {
     home
 }
 
+// Each record file in the account root's startup archive, as (name, bytes).
+#[cfg(all(target_os = "linux", not(debug_assertions)))]
+fn archived_records(account_path: &Path) -> Vec<(String, Vec<u8>)> {
+    let Ok(folders) = std::fs::read_dir(account_path.join("archive")) else {
+        return Vec::new();
+    };
+    folders
+        .map(|folder| folder.expect("archive folder").path())
+        .filter(|folder| {
+            folder
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("records-"))
+        })
+        .flat_map(|folder| std::fs::read_dir(folder).expect("records archive"))
+        .map(|file| {
+            let path = file.expect("archived record").path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            (name, std::fs::read(path).expect("archived bytes"))
+        })
+        .collect()
+}
+
 #[cfg(all(target_os = "linux", not(debug_assertions)))]
 #[test]
 #[ignore = "native Linux Bubblewrap mixed-access release startup gate"]
@@ -614,42 +635,27 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
     super::prepare_test_file_account_at(&account_path);
     prepare_selected_chatgpt_account_at(&account_path);
     let account = StateRoot::open_existing(&account_path).expect("private account root");
-    account
-        .record(RecordKind::ChatgptAccounts)
-        .replace(b"invalid-unselected-chatgpt-canary")
-        .expect("unselected index fixture");
     let passwd_home = release_passwd_home();
+
+    // Both intact: every start asks for the billing route and loads only the chosen access.
     let api = release_bare_session(
         &private_home,
         &passwd_home,
         "api-session",
         Some("API key"),
-        &[
-            "synthetic-existing-key",
-            "invalid-unselected-chatgpt-canary",
-        ],
+        &["synthetic-existing-key", "synthetic-subject"],
     )
     .expect("explicit native Session");
     assert!(api.contains("Provider: openai\r\nModel: gpt-5.4\r\n"));
-
-    prepare_selected_chatgpt_account_at(&account_path);
-    account
-        .record(RecordKind::SavedAccount)
-        .replace(b"invalid-unselected-native-canary")
-        .expect("unselected API fixture");
     let chatgpt = release_bare_session(
         &private_home,
         &passwd_home,
         "chatgpt-session",
         Some("ChatGPT plan"),
-        &["synthetic-subject", "invalid-unselected-native-canary"],
+        &["synthetic-subject", "synthetic-existing-key"],
     )
     .expect("explicit ChatGPT Session");
     assert!(chatgpt.contains("Provider: chatgpt\r\nModel: unset\r\n"));
-    account
-        .record(RecordKind::ChatgptAccounts)
-        .replace(b"invalid-unselected-chatgpt-canary")
-        .expect("both invalid fixture");
     let native_before = account
         .record(RecordKind::SavedAccount)
         .read()
@@ -665,10 +671,7 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
                 &passwd_home,
                 name,
                 Some(choice),
-                &[
-                    "invalid-unselected-native-canary",
-                    "invalid-unselected-chatgpt-canary"
-                ],
+                &["synthetic-existing-key"],
             )
             .is_none(),
             "cancelled startup selected a route"
@@ -686,6 +689,62 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
                 .read()
                 .expect("unchanged ChatGPT record")
                 == chatgpt_before
+        );
+    }
+
+    // A corrupt unselected record is archived intact with a notice; the other access still starts.
+    for (kind, file, canary, session, private, opened) in [
+        (
+            RecordKind::ChatgptAccounts,
+            "chatgpt-accounts.json",
+            "invalid-unselected-chatgpt-canary",
+            "native-only-session",
+            "synthetic-existing-key",
+            "Provider: openai\r\nModel: gpt-5.4\r\n",
+        ),
+        (
+            RecordKind::SavedAccount,
+            "account-credentials.json",
+            "invalid-unselected-native-canary",
+            "chatgpt-only-session",
+            "synthetic-subject",
+            "Provider: chatgpt\r\n",
+        ),
+    ] {
+        if kind == RecordKind::SavedAccount {
+            super::prepare_test_file_account_at(&account_path);
+            prepare_selected_chatgpt_account_at(&account_path);
+        }
+        account
+            .record(kind)
+            .replace(canary.as_bytes())
+            .expect("corrupt unselected record");
+        let text = release_bare_session(
+            &private_home,
+            &passwd_home,
+            session,
+            None,
+            &[canary, private],
+        )
+        .expect("remaining access Session");
+        assert!(
+            text.contains(&format!("({file}) archived intact")),
+            "archive notice for {file}"
+        );
+        assert!(!text.contains("Both saved; choose billing route"));
+        assert!(text.contains(opened), "remaining access for {file}");
+        assert!(
+            account
+                .record(kind)
+                .read()
+                .expect("archived record")
+                .is_none()
+        );
+        assert!(
+            archived_records(&account_path)
+                .iter()
+                .any(|(name, bytes)| name == file && bytes == canary.as_bytes()),
+            "{file} archived with its original bytes"
         );
     }
 }
