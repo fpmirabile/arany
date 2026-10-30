@@ -25,6 +25,7 @@ use std::time::SystemTime;
 mod command_environment;
 mod command_tools;
 mod compaction;
+mod goal;
 mod hints;
 mod ledger;
 mod lifecycle;
@@ -44,6 +45,7 @@ pub(crate) use run_loop::MAX_DELEGATION_DEADLINE;
 mod tests;
 pub use crate::tools::Cancellation as RunCancellation;
 pub use crate::tools::ToolGrant;
+use goal::GoalClose;
 use hints::HintPublisher;
 pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
@@ -1191,28 +1193,18 @@ impl Engine {
             refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
         }
         goal_view.budget_refusal = Some(refusal);
-        let report = goal_report(view, run, &goal_view);
-        self.append_goal_lifecycle(
+        self.finish_goal(
             session_id,
-            None,
-            Event::GoalFinished {
-                goal_id: goal.id,
+            goal.id,
+            GoalClose {
                 status: GoalStatus::Failed,
                 active_ms: goal.usage.active_ms,
-                report,
+                report: goal_report(view, run, &goal_view),
                 exhausted: true,
                 budget_refusal: Some(refusal),
             },
         )
         .await
-        .map_err(|source| match source {
-            EngineError::GoalAdmissionUncertain => EngineError::GoalAdmissionUncertain,
-            source => EngineError::GoalBudgetUncommitted {
-                refusal: Box::new(refusal),
-                source: Box::new(source),
-            },
-        })?;
-        Ok(())
     }
 
     pub fn open(state: StateRoot, config: EngineConfig) -> Result<Self, EngineError> {
@@ -2297,7 +2289,7 @@ impl Engine {
         } = started;
         let budget_stopped = ledger.budget_stopped();
         let captured_refusal = ledger.budget_refusal()?;
-        let (run, active_ms, terminal) = ledger.view(|view| -> Result<_, EngineError> {
+        let (run, terminal) = ledger.view(|view| -> Result<_, EngineError> {
             let run = view
                 .runs
                 .last()
@@ -2342,41 +2334,20 @@ impl Engine {
                     goal_view.qualify_charge(refusal);
                 }
                 goal_view.budget_refusal = refusal;
-                (
+                GoalClose {
                     status,
-                    goal_report(view, &run, &goal_view),
+                    active_ms: goal_view.active_ms,
+                    report: goal_report(view, &run, &goal_view),
                     exhausted,
-                    goal_view.budget_refusal,
-                )
+                    budget_refusal: goal_view.budget_refusal,
+                }
             });
-            Ok((run, goal_view.active_ms, terminal))
+            Ok((run, terminal))
         })??;
         let mut goal_status = GoalStatus::Running;
-        if let Some((status, report, exhausted, budget_refusal)) = terminal {
-            if exhausted && budget_refusal.is_none() {
-                return Err(EngineError::InvalidHistory);
-            }
-            self.append_goal_lifecycle(
-                session_id,
-                None,
-                Event::GoalFinished {
-                    goal_id: goal.id,
-                    status,
-                    active_ms,
-                    report,
-                    exhausted,
-                    budget_refusal,
-                },
-            )
-            .await
-            .map_err(|error| match (error, budget_refusal) {
-                (EngineError::GoalAdmissionUncertain, _) => EngineError::GoalAdmissionUncertain,
-                (source, Some(refusal)) => EngineError::GoalBudgetUncommitted {
-                    refusal: Box::new(refusal),
-                    source: Box::new(source),
-                },
-                (source, None) => source,
-            })?;
+        if let Some(close) = terminal {
+            let status = close.status;
+            self.finish_goal(session_id, goal.id, close).await?;
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
