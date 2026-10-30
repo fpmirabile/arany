@@ -541,7 +541,10 @@ impl AttachedTerminal {
     async fn admit_agent_chat(&mut self, view: &SessionView) -> Result<(), TerminalError> {
         self.begin_dialog();
         self.draw_agent_chat(view, None)?;
-        self.arm_dialog().await?;
+        if let Err(error) = self.arm_dialog().await {
+            let _ = self.end_agent_chat();
+            return Err(error);
+        }
         self.restore_selected_draft_input(self.primary_input_capacity)
     }
 
@@ -1451,6 +1454,42 @@ mod tests {
             offered: None,
             notice: None,
         }
+    }
+
+    #[tokio::test]
+    async fn agent_chat_closes_when_dialog_admission_fails() {
+        let view = active_child_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+        terminal.mode = super::super::TerminalMode::Fullscreen;
+        let backend = super::super::TerminalBackend::failing_lifecycle_writer(
+            80,
+            24,
+            Vec::new(),
+            std::rc::Rc::default(),
+        );
+        terminal.owned.terminal = Some(ratatui::Terminal::new(backend).expect("test terminal"));
+        terminal.owned.input = Some(super::super::input::TerminalReader::closed_for_test());
+        terminal.agent_chat = Some(AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 1,
+            transcript: None,
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: false,
+            shown: true,
+            choice: String::new(),
+            invalid: false,
+            editable: true,
+            last_child_notice: None,
+        });
+
+        let admitted = terminal.admit_agent_chat(&view).await;
+
+        assert!(matches!(admitted, Err(TerminalError::InputClosed)));
+        assert!(!terminal.agent_chat_open());
     }
 
     #[tokio::test]
