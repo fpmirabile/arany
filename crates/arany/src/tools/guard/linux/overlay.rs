@@ -396,6 +396,10 @@ pub(super) async fn capture(
     ),
     (observation, candidate): (&mut ToolObservation, &mut super::super::CacheCandidate),
 ) -> Result<(), ToolError> {
+    // An editor command relays only its cache view; there is no project to capture.
+    if !selected(intent, &runtime.config) {
+        return Ok(());
+    }
     let truncation = if runtime.hook_stdin.is_some() {
         crate::tools::process::Truncation::Refuse
     } else {

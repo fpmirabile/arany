@@ -27,10 +27,11 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
 }
 
 #[tokio::test]
-async fn editor_inspector_retains_observation_derived_paths_and_digests_after_cancel() {
+async fn editor_inspector_shows_integrated_paths_and_digests() {
+    // A cancelled editor integrates nothing, so the integrated command case carries the report.
     let observed = arany::test_support::worker_teams::run_case(
         std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
-        "command_cancel",
+        "command",
     )
     .await;
     let state = observed.directory.path().join("state");
@@ -53,7 +54,7 @@ async fn editor_inspector_retains_observation_derived_paths_and_digests_after_ca
     assert!(text.contains("notes/0"));
     let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
     assert!(text.contains(row["after_sha256"].as_str().unwrap()));
-    assert!(text.contains("Lease released: true; verified: false"));
+    assert!(text.contains("Lease released: true; verified: true"));
     assert!(text.contains("Publication: Confirmed"));
     for removed in [
         "integration:",

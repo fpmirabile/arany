@@ -153,6 +153,43 @@ impl View {
         Ok(())
     }
 
+    // An editor command binds its own tree, so its supervisor relays only the cache handoffs.
+    pub(in crate::tools::guard::linux) fn relay(
+        &self,
+        child: &mut impl Write,
+    ) -> Result<(), ToolError> {
+        let mut input = std::io::BufReader::new(std::io::stdin().lock());
+        let task = super::super::super::read_task(&mut input)?;
+        if !task.intent.target.editor()
+            || !matches!(task.intent.call, ToolCall::Command { .. })
+            || task.cache.as_ref().map(|cache| cache.view_bytes) != Some(self.bytes())
+        {
+            return Err(ToolError::Configuration);
+        }
+        let mut output = std::io::stdout().lock();
+        output
+            .write_all(b"CACHE_HANDLE_READY\n")
+            .and_then(|()| output.flush())
+            .map_err(|_| ToolError::Operation)?;
+        self.handoff(&mut input, &mut output)?;
+        child
+            .write_all(&super::super::super::encode_task(&task)?)
+            .map_err(|_| ToolError::Operation)?;
+        let mut go = [0; 3];
+        input
+            .read_exact(&mut go)
+            .map_err(|_| ToolError::Operation)?;
+        if go != *b"GO\n" {
+            return Err(ToolError::Configuration);
+        }
+        self.verify()?;
+        child.write_all(&go).map_err(|_| ToolError::Operation)
+    }
+
+    pub(in crate::tools::guard::linux) fn finish(&self) -> Result<(), ToolError> {
+        self.handoff(&mut std::io::stdin().lock(), &mut std::io::stdout().lock())
+    }
+
     pub(in crate::tools::guard::linux) fn handoff(
         &self,
         input: &mut impl Read,

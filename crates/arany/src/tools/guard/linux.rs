@@ -1135,7 +1135,11 @@ pub(super) async fn execute_inner(
         } else {
             None
         };
-        let mut stdin = overlay::selected(intent, &runtime.config).then_some(stdin);
+        let overlay = overlay::selected(intent, &runtime.config);
+        let cache_view = cache
+            .as_ref()
+            .is_some_and(|cache| cache.directory.is_some());
+        let mut stdin = (overlay || cache_view).then_some(stdin);
         let capture = Box::pin(async {
             let (mut observation, mut candidate) = receive_result(
                 &mut stdout,
@@ -1166,9 +1170,7 @@ pub(super) async fn execute_inner(
             {
                 return Err(ToolError::Operation);
             }
-            if (cache.is_some() || overlay::selected(intent, &runtime.config))
-                && !read_capped(&mut stdout, 1).await?.is_empty()
-            {
+            if (cache.is_some() || overlay) && !read_capped(&mut stdout, 1).await?.is_empty() {
                 return Err(ToolError::Operation);
             }
             Ok((observation, candidate))

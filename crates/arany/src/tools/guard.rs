@@ -780,6 +780,10 @@ fn attest_task_mounts(
             linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
         } else if task.intent.target.editor() {
             linux::verify_editor_mount()?;
+            linux::overlay::cache::verify_helper(
+                task.cache.as_ref().map(|cache| cache.view_bytes),
+                task,
+            )?;
         } else {
             linux::verify_copy_mount(task.intent.limits.project_bytes)?;
         }
