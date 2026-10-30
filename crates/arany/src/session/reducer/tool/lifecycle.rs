@@ -437,6 +437,18 @@ fn valid_origin(
     }
 }
 
+fn needs_verdict(
+    run: &RunView,
+    agent_run_id: AgentRunId,
+    call: &crate::tools::ToolCall,
+) -> Result<bool, ReplayError> {
+    Ok(super::permissions_pinned(run)
+        || super::definition_mode(run, agent_run_id)?.is_some()
+        || call.is_host()
+        || call.is_unguarded()
+        || call.is_git() && call.facts().mutates)
+}
+
 pub(super) fn started(
     current: &mut SessionView,
     event: &Event,
@@ -492,16 +504,8 @@ pub(super) fn started(
     }
     if verdict.is_some() {
         super::permission::apply(current, event)?;
-    } else {
-        let run = active_run(current, *run_id)?;
-        if super::permissions_pinned(run)
-            || super::definition_mode(run, *agent_run_id)?.is_some()
-            || intent.call.is_host()
-            || intent.call.is_unguarded()
-            || intent.call.is_git() && intent.call.facts().mutates
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
+    } else if needs_verdict(active_run(current, *run_id)?, *agent_run_id, &intent.call)? {
+        return Err(ReplayError::InvalidTransition);
     }
     super::tool_by_digest(
         active_run(current, *run_id)?,

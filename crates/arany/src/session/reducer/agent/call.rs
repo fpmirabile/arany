@@ -217,21 +217,7 @@ fn continuation_admission(
             c.failure_reason == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
         })
         && record.phase == AgentPhase::ChildWork;
-    let researcher = agent.role == AgentRole::Child
-        && agent.assignment.is_none()
-        && matches!(agent.grant, Some(ChildGrant::ReadOnly { .. }));
-    let refusal_continuation = (agent.role == AgentRole::Primary || researcher)
-        && !agent.refusal_limit_reached()
-        && agent
-            .provider_calls
-            .last()
-            .is_some_and(|call| call.refusal.is_some() && call.phase == record.phase)
-        && run.hooks_settled()
-        && if researcher {
-            agent.tools.iter().all(ToolView::settled_without_stop)
-        } else {
-            run.tools.iter().all(ToolView::settled_without_stop)
-        };
+    let refusal_continuation = refusal_continuation(run, agent, record);
     let plan_continuation = tools_enabled
         && agent.role == AgentRole::Primary
         && agent.provider_calls.last().is_some_and(|call| {
@@ -255,23 +241,45 @@ fn continuation_admission(
         || tool_continuation
         || tool_review
         || delegated
-        || match (agent.role, agent.provider_calls.as_slice(), record.phase) {
-            (AgentRole::Primary, [], AgentPhase::RootPlan) => true,
-            (AgentRole::Primary, calls, AgentPhase::RootSynthesis)
-                if calls
-                    .last()
-                    .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated) =>
-            {
-                all_children_finished(run)
-                    || record.disposition == ProviderCallDisposition::ToolRequested
-                        && worker::coordination_ready(run)
-            }
-            (AgentRole::Child, _, AgentPhase::ChildWork) => is_child_step(agent, record),
-            _ => false,
-        };
+        || is_phase_step(run, agent, record);
     ContinuationAdmission {
         tools_enabled,
         valid,
+    }
+}
+
+fn refusal_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    let researcher = agent.role == AgentRole::Child
+        && agent.assignment.is_none()
+        && matches!(agent.grant, Some(ChildGrant::ReadOnly { .. }));
+    (agent.role == AgentRole::Primary || researcher)
+        && !agent.refusal_limit_reached()
+        && agent
+            .provider_calls
+            .last()
+            .is_some_and(|call| call.refusal.is_some() && call.phase == record.phase)
+        && run.hooks_settled()
+        && if researcher {
+            agent.tools.iter().all(ToolView::settled_without_stop)
+        } else {
+            run.tools.iter().all(ToolView::settled_without_stop)
+        }
+}
+
+fn is_phase_step(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    match (agent.role, agent.provider_calls.as_slice(), record.phase) {
+        (AgentRole::Primary, [], AgentPhase::RootPlan) => true,
+        (AgentRole::Primary, calls, AgentPhase::RootSynthesis)
+            if calls
+                .last()
+                .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated) =>
+        {
+            all_children_finished(run)
+                || record.disposition == ProviderCallDisposition::ToolRequested
+                    && worker::coordination_ready(run)
+        }
+        (AgentRole::Child, _, AgentPhase::ChildWork) => is_child_step(agent, record),
+        _ => false,
     }
 }
 

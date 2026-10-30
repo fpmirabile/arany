@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const REWIND_TIMEOUT: Duration = Duration::from_secs(120);
+const REWIND_CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub struct ConversationRewind {
@@ -342,11 +343,7 @@ impl Engine {
         let restorable = prepared.preview.can_restore();
         let mut started = prepared.preview.started;
         if !restorable
-            || started.head_sequence != expected.head_sequence
-            || started.prefix_digest != expected.prefix_digest
-            || started.plan_digest != expected.plan_digest
-            || started.policy_digest != expected.policy_digest
-            || started.enforcement_digest != expected.enforcement_digest
+            || !same_basis(&started, &expected)
             || prepared.preview.permissions_digest != permissions_digest
         {
             return Err(EngineError::RewindPreviewChanged);
@@ -387,28 +384,8 @@ impl Engine {
         if crate::session::worker::decode_rewind_data(&bytes).is_err() {
             return Err(EngineError::RewindBlocked);
         }
-        let files = changeset
-            .files
-            .iter()
-            .filter_map(|f| f.before.as_ref().map(|v| (f.path.clone(), v)))
-            .map(|(p, v)| {
-                v.bytes_with_limit(1024 * 1024)
-                    .map(|bytes| (p, bytes))
-                    .ok_or(EngineError::InvalidHistory)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut intent = runtime.intent(
-            RunId::new(),
-            AgentRunId::new(),
-            ToolCall::ApplyChangeset {
-                source: ChangesetSource::Rewind {
-                    plan_digest: started.plan_digest,
-                    bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::RewindTooLarge)?,
-                    sha256: crate::validate::digest(&bytes),
-                },
-            },
-        );
-        intent.id = started.rewind_id;
+        let files = checkpoint_files(&changeset)?;
+        let intent = rewind_intent(&runtime, &started, &bytes)?;
         if !started.valid() {
             return Err(EngineError::RewindTooLarge);
         }
@@ -424,27 +401,9 @@ impl Engine {
                 },
             )
             .await?;
-        let checkpoint = if files.is_empty() {
-            Checkpoint::not_needed()
-        } else if cancellation.is_cancelled() {
-            Checkpoint::skipped(CheckpointReason::StoreUnavailable)
-        } else {
-            let capture = crate::store::CheckpointCapture {
-                session,
-                owner: crate::store::CheckpointOwner::Rewind {
-                    rewind_id: started.rewind_id,
-                },
-                files,
-            };
-            tokio::time::timeout(
-                Duration::from_secs(3),
-                self.journal.store().capture_checkpoint(capture),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_else(|| Checkpoint::skipped(CheckpointReason::StoreUnavailable))
-        };
+        let checkpoint = self
+            .rewind_checkpoint(session, started.rewind_id, files, &cancellation)
+            .await;
         crate::fault::rewind_checkpoint(session, REWIND_TIMEOUT).await;
         let mut finished = RewindFinished {
             rewind_id: started.rewind_id,
@@ -464,14 +423,7 @@ impl Engine {
                 .with_handover(bytes.into())
                 .execute(intent.clone(), cancellation)
                 .await;
-            finished.outcome = match observation.disposition {
-                ToolDisposition::Succeeded => RewindOutcome::Restored,
-                ToolDisposition::Conflict => RewindOutcome::Conflict,
-                ToolDisposition::Denied => RewindOutcome::Denied,
-                ToolDisposition::Cancelled => RewindOutcome::Cancelled,
-                ToolDisposition::Uncertain => RewindOutcome::Uncertain,
-                _ => RewindOutcome::Failed,
-            };
+            finished.outcome = restore_outcome(observation.disposition);
             if matches!(
                 finished.outcome,
                 RewindOutcome::Restored | RewindOutcome::Uncertain
@@ -485,12 +437,7 @@ impl Engine {
             }
             if finished.outcome == RewindOutcome::Conflict {
                 let drifted = Self::drifted_paths(&runtime, &changeset).await;
-                finished.conflict_count =
-                    u32::try_from(drifted.len()).map_err(|_| EngineError::RewindTooLarge)?;
-                finished.conflicts = drifted
-                    .into_iter()
-                    .take(rewind::MAX_REWIND_CONFLICTS)
-                    .collect();
+                record_conflicts(&mut finished, drifted)?;
             }
         }
         self.journal
@@ -502,6 +449,34 @@ impl Engine {
             )
             .await?;
         Ok(finished)
+    }
+
+    async fn rewind_checkpoint(
+        &self,
+        session: SessionId,
+        rewind_id: uuid::Uuid,
+        files: Vec<(String, Vec<u8>)>,
+        cancellation: &RunCancellation,
+    ) -> Checkpoint {
+        if files.is_empty() {
+            Checkpoint::not_needed()
+        } else if cancellation.is_cancelled() {
+            Checkpoint::skipped(CheckpointReason::StoreUnavailable)
+        } else {
+            let capture = crate::store::CheckpointCapture {
+                session,
+                owner: crate::store::CheckpointOwner::Rewind { rewind_id },
+                files,
+            };
+            tokio::time::timeout(
+                REWIND_CHECKPOINT_TIMEOUT,
+                self.journal.store().capture_checkpoint(capture),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| Checkpoint::skipped(CheckpointReason::StoreUnavailable))
+        }
     }
 
     async fn drifted_paths(runtime: &ToolRuntime, changeset: &WorkerChangeset) -> Vec<String> {
@@ -560,99 +535,18 @@ impl Engine {
         if request.overwrite.windows(2).any(|p| p[0] >= p[1]) {
             return Err(EngineError::InvalidRequest);
         }
-        let mut files: Vec<RewindFile> = Vec::new();
-        let mut changes = Vec::new();
-        let mut comparisons = Vec::new();
-        let mut comparison_bytes = 0u64;
-        let mut checkpoint_storage_unavailable = false;
-        let mut overwrite = Vec::new();
-        let mut current_bytes = 0u64;
+        let mut scan = PreviewScan::default();
         for file in &plan.files {
-            let mut issues = Vec::new();
-            let kept = request.kept.contains(&file.path);
-            let before = live_version(&runtime, &file.path, &mut issues).await?;
-            let observed = before.as_ref().map(file_state).transpose()?;
-            if !kept {
-                current_bytes += observed.as_ref().map_or(0, |v| u64::from(v.bytes));
-                if current_bytes > rewind::MAX_REWIND_BYTES {
-                    return Err(EngineError::RewindTooLarge);
-                }
-            }
-            if issues.is_empty() && observed != file.expected_current {
-                issues.push(RewindIssue::Drifted);
-            }
-            if file.history_drift {
-                issues.push(RewindIssue::HistoryDrift);
-            }
-            let after = if let Some(state) = &file.restore_to {
-                if file.unavailable {
-                    issues.push(RewindIssue::Unavailable);
-                    None
-                } else {
-                    match self
-                        .journal
-                        .store()
-                        .checkpoint_blob(parse_digest(&state.sha256)?)
-                        .await
-                    {
-                        Ok(Some(bytes)) if bytes.len() == state.bytes as usize => {
-                            Some(FileVersion::from_bytes(&bytes, state.executable))
-                        }
-                        result => {
-                            checkpoint_storage_unavailable |= result.is_err();
-                            issues.push(RewindIssue::Unavailable);
-                            None
-                        }
-                    }
-                }
-            } else {
-                None
-            };
-            let compared_bytes = observed.as_ref().map_or(0, |v| u64::from(v.bytes))
-                + file.restore_to.as_ref().map_or(0, |v| u64::from(v.bytes));
-            if comparison_bytes + compared_bytes <= 2 * rewind::MAX_REWIND_BYTES
-                && !issues.iter().any(|issue| {
-                    matches!(
-                        issue,
-                        RewindIssue::OutsideGrant | RewindIssue::Unsafe | RewindIssue::Unavailable
-                    )
-                })
-            {
-                comparison_bytes += compared_bytes;
-                comparisons.push(FileChange {
-                    path: file.path.clone(),
-                    before: before.clone(),
-                    after: after.clone(),
-                });
-            }
-            if request.overwrite.contains(&file.path) {
-                if issues.is_empty()
-                    || issues
-                        .iter()
-                        .any(|i| !matches!(i, RewindIssue::Drifted | RewindIssue::HistoryDrift))
-                {
-                    return Err(EngineError::InvalidRequest);
-                }
-                overwrite.push(Overwrite {
-                    path: file.path.clone(),
-                    observed: observed.clone(),
-                });
-                issues.clear();
-            }
-            if !kept && issues.is_empty() {
-                changes.push(FileChange {
-                    path: file.path.clone(),
-                    before,
-                    after,
-                });
-            }
-            files.push(RewindFile {
-                path: file.path.clone(),
-                observed,
-                issues,
-                kept,
-            });
+            scan.file(self, &runtime, &request, file).await?;
         }
+        let PreviewScan {
+            mut files,
+            mut changes,
+            comparisons,
+            checkpoint_storage_unavailable,
+            overwrite,
+            ..
+        } = scan;
         if overwrite.len() != request.overwrite.len() {
             return Err(EngineError::InvalidRequest);
         }
@@ -763,7 +657,7 @@ fn file_state(version: &FileVersion) -> Result<FileState, EngineError> {
         sha256: version.sha256.clone(),
         bytes: u32::try_from(
             version
-                .bytes_with_limit(1024 * 1024)
+                .bytes_with_limit(crate::tools::types::MAX_FILE_BYTES)
                 .ok_or(EngineError::InvalidHistory)?
                 .len(),
         )
@@ -819,6 +713,187 @@ fn rewind_attestation(
         enforcement_digest: started.enforcement_digest,
         receipt_digest: crate::validate::digest(&receipt),
     })
+}
+
+fn same_basis(started: &RewindStarted, expected: &RewindStarted) -> bool {
+    started.head_sequence == expected.head_sequence
+        && started.prefix_digest == expected.prefix_digest
+        && started.plan_digest == expected.plan_digest
+        && started.policy_digest == expected.policy_digest
+        && started.enforcement_digest == expected.enforcement_digest
+}
+
+fn checkpoint_files(changeset: &WorkerChangeset) -> Result<Vec<(String, Vec<u8>)>, EngineError> {
+    changeset
+        .files
+        .iter()
+        .filter_map(|f| f.before.as_ref().map(|v| (f.path.clone(), v)))
+        .map(|(p, v)| {
+            v.bytes_with_limit(crate::tools::types::MAX_FILE_BYTES)
+                .map(|bytes| (p, bytes))
+                .ok_or(EngineError::InvalidHistory)
+        })
+        .collect()
+}
+
+fn rewind_intent(
+    runtime: &ToolRuntime,
+    started: &RewindStarted,
+    bytes: &[u8],
+) -> Result<crate::tools::EffectIntent, EngineError> {
+    let mut intent = runtime.intent(
+        RunId::new(),
+        AgentRunId::new(),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind {
+                plan_digest: started.plan_digest,
+                bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::RewindTooLarge)?,
+                sha256: crate::validate::digest(bytes),
+            },
+        },
+    );
+    intent.id = started.rewind_id;
+    Ok(intent)
+}
+
+fn restore_outcome(disposition: ToolDisposition) -> RewindOutcome {
+    match disposition {
+        ToolDisposition::Succeeded => RewindOutcome::Restored,
+        ToolDisposition::Conflict => RewindOutcome::Conflict,
+        ToolDisposition::Denied => RewindOutcome::Denied,
+        ToolDisposition::Cancelled => RewindOutcome::Cancelled,
+        ToolDisposition::Uncertain => RewindOutcome::Uncertain,
+        _ => RewindOutcome::Failed,
+    }
+}
+
+#[derive(Default)]
+struct PreviewScan {
+    files: Vec<RewindFile>,
+    changes: Vec<FileChange>,
+    comparisons: Vec<FileChange>,
+    comparison_bytes: u64,
+    checkpoint_storage_unavailable: bool,
+    overwrite: Vec<Overwrite>,
+    current_bytes: u64,
+}
+
+impl PreviewScan {
+    async fn file(
+        &mut self,
+        engine: &Engine,
+        runtime: &ToolRuntime,
+        request: &RewindRequest,
+        file: &rewind::FilePlan,
+    ) -> Result<(), EngineError> {
+        let mut issues = Vec::new();
+        let kept = request.kept.contains(&file.path);
+        let before = live_version(runtime, &file.path, &mut issues).await?;
+        let observed = before.as_ref().map(file_state).transpose()?;
+        if !kept {
+            self.current_bytes += observed.as_ref().map_or(0, |v| u64::from(v.bytes));
+            if self.current_bytes > rewind::MAX_REWIND_BYTES {
+                return Err(EngineError::RewindTooLarge);
+            }
+        }
+        if issues.is_empty() && observed != file.expected_current {
+            issues.push(RewindIssue::Drifted);
+        }
+        if file.history_drift {
+            issues.push(RewindIssue::HistoryDrift);
+        }
+        let after = self.restore_version(engine, file, &mut issues).await?;
+        let compared_bytes = observed.as_ref().map_or(0, |v| u64::from(v.bytes))
+            + file.restore_to.as_ref().map_or(0, |v| u64::from(v.bytes));
+        if self.comparison_bytes + compared_bytes <= 2 * rewind::MAX_REWIND_BYTES
+            && !issues.iter().any(|issue| {
+                matches!(
+                    issue,
+                    RewindIssue::OutsideGrant | RewindIssue::Unsafe | RewindIssue::Unavailable
+                )
+            })
+        {
+            self.comparison_bytes += compared_bytes;
+            self.comparisons.push(FileChange {
+                path: file.path.clone(),
+                before: before.clone(),
+                after: after.clone(),
+            });
+        }
+        if request.overwrite.contains(&file.path) {
+            if issues.is_empty()
+                || issues
+                    .iter()
+                    .any(|i| !matches!(i, RewindIssue::Drifted | RewindIssue::HistoryDrift))
+            {
+                return Err(EngineError::InvalidRequest);
+            }
+            self.overwrite.push(Overwrite {
+                path: file.path.clone(),
+                observed: observed.clone(),
+            });
+            issues.clear();
+        }
+        if !kept && issues.is_empty() {
+            self.changes.push(FileChange {
+                path: file.path.clone(),
+                before,
+                after,
+            });
+        }
+        self.files.push(RewindFile {
+            path: file.path.clone(),
+            observed,
+            issues,
+            kept,
+        });
+        Ok(())
+    }
+
+    async fn restore_version(
+        &mut self,
+        engine: &Engine,
+        file: &rewind::FilePlan,
+        issues: &mut Vec<RewindIssue>,
+    ) -> Result<Option<FileVersion>, EngineError> {
+        Ok(if let Some(state) = &file.restore_to {
+            if file.unavailable {
+                issues.push(RewindIssue::Unavailable);
+                None
+            } else {
+                match engine
+                    .journal
+                    .store()
+                    .checkpoint_blob(parse_digest(&state.sha256)?)
+                    .await
+                {
+                    Ok(Some(bytes)) if bytes.len() == state.bytes as usize => {
+                        Some(FileVersion::from_bytes(&bytes, state.executable))
+                    }
+                    result => {
+                        self.checkpoint_storage_unavailable |= result.is_err();
+                        issues.push(RewindIssue::Unavailable);
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        })
+    }
+}
+
+fn record_conflicts(
+    finished: &mut RewindFinished,
+    drifted: Vec<String>,
+) -> Result<(), EngineError> {
+    finished.conflict_count =
+        u32::try_from(drifted.len()).map_err(|_| EngineError::RewindTooLarge)?;
+    finished.conflicts = drifted
+        .into_iter()
+        .take(rewind::MAX_REWIND_CONFLICTS)
+        .collect();
+    Ok(())
 }
 
 #[cfg(test)]

@@ -53,6 +53,28 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     if let Some(tools) = &input.tools {
         append_steps(&mut messages, tools, request)?;
     }
+    if let Some(message) = refusal_message(request)? {
+        messages.push(message);
+    }
+    let system = system_blocks(request);
+    let feedback = harness_feedback(request, &system)?;
+    if !feedback.is_empty() {
+        messages.push(user(feedback));
+    }
+    Ok(Conversation {
+        system,
+        tools,
+        messages,
+        outcome: if input.role == PromptRole::ToolReview {
+            super::decode::review_schema()
+        } else {
+            restrict_outcome_schema(outcome_schema(), request)
+        },
+    })
+}
+
+fn refusal_message(request: &ProviderRequest) -> Result<Option<Message>, ProviderError> {
+    let input = &request.input;
     if let Some(refusal) = &input.last_answer_refused
         && !input.tools.as_ref().is_some_and(|tools| {
             tools
@@ -65,12 +87,19 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         if note.to_string().len() > MAX_TOOL_CATALOG_BYTES {
             return Err(ProviderError::Rejected);
         }
-        messages.push(user(vec![data_block(
+        return Ok(Some(user(vec![data_block(
             "worker_coordination",
             json!({"last_answer_refused": note}),
-        )]));
+        )])));
     }
-    let system = system_blocks(request);
+    Ok(None)
+}
+
+fn harness_feedback(
+    request: &ProviderRequest,
+    system: &[SystemBlock],
+) -> Result<Vec<Block>, ProviderError> {
+    let input = &request.input;
     let correction = input.outcome_correction.then(|| data_block(
         "harness_outcome_correction",
         json!({
@@ -103,19 +132,7 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     {
         return Err(ProviderError::Rejected);
     }
-    if !feedback.is_empty() {
-        messages.push(user(feedback));
-    }
-    Ok(Conversation {
-        system,
-        tools,
-        messages,
-        outcome: if input.role == PromptRole::ToolReview {
-            super::decode::review_schema()
-        } else {
-            restrict_outcome_schema(outcome_schema(), request)
-        },
-    })
+    Ok(feedback)
 }
 
 fn append_stop_feedback(messages: &mut Vec<Message>, request: &ProviderRequest, boundary: usize) {
@@ -378,22 +395,7 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         });
     }
     if let Some(refusal) = &step.refusal {
-        for (index, tool_request) in requests.by_ref().enumerate() {
-            let mut output =
-                json!({"error": refusal_note(refusal), "dispatched": false, "effect": "none"});
-            if step.requests.len() > 1 {
-                output["call_index"] = json!(index);
-                output["error"]["offending_index"] = json!(step.refusal_index);
-            }
-            if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
-                return Err(ProviderError::Rejected);
-            }
-            results.push(Block::ToolResult {
-                id: tool_request.id.clone(),
-                output,
-                is_error: true,
-            });
-        }
+        results.extend(refused_results(step, refusal, requests.by_ref())?);
     }
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
@@ -426,6 +428,11 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     }
     let mut blocks = results;
     blocks.extend(integrations);
+    push_step_context(&mut blocks, step, request);
+    Ok(blocks)
+}
+
+fn push_step_context(blocks: &mut Vec<Block>, step: &ToolStep, request: &ProviderRequest) {
     if step.requests.is_empty() && step.plan.is_none() && !request.input.child_results.is_empty() {
         blocks.push(child_results_block(request));
     }
@@ -444,7 +451,31 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
             data: json!(remaining),
         });
     }
-    Ok(blocks)
+}
+
+fn refused_results<'a>(
+    step: &ToolStep,
+    refusal: &crate::session::ProposalRefusal,
+    requests: impl Iterator<Item = &'a crate::tools::ToolRequest>,
+) -> Result<Vec<Block>, ProviderError> {
+    let mut results = Vec::new();
+    for (index, tool_request) in requests.enumerate() {
+        let mut output =
+            json!({"error": refusal_note(refusal), "dispatched": false, "effect": "none"});
+        if step.requests.len() > 1 {
+            output["call_index"] = json!(index);
+            output["error"]["offending_index"] = json!(step.refusal_index);
+        }
+        if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
+            return Err(ProviderError::Rejected);
+        }
+        results.push(Block::ToolResult {
+            id: tool_request.id.clone(),
+            output,
+            is_error: true,
+        });
+    }
+    Ok(results)
 }
 
 fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {

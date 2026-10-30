@@ -245,6 +245,38 @@ pub(super) fn check(
     event: &Event,
     actor: Option<AgentRunId>,
 ) -> Result<(), ReplayError> {
+    check_worker_failure(run, event)?;
+    let stop_sequence = run
+        .tools
+        .iter()
+        .chain(run.agents.iter().flat_map(|a| &a.tools))
+        .filter(|tool| {
+            tool.observation
+                .as_ref()
+                .is_some_and(|o| o.stops_tool_step())
+        })
+        .filter_map(|tool| tool.finished_sequence)
+        .chain(run.workers.stop.as_ref().map(|(sequence, _)| *sequence))
+        .min();
+    if let Some(sequence) = stop_sequence {
+        check_after_stop(run, event, sequence)?;
+    }
+    if let Some(id) = actor
+        && let Ok(w) = worker(run, id)
+        && matches!(
+            event,
+            Event::GoalProviderCallReserved { .. }
+                | Event::ProviderCallRecorded { .. }
+                | Event::ProviderFallbackUsed { .. }
+                | Event::ProviderRetryScheduled { .. }
+        )
+    {
+        check_editor_budget(run, event, id, w)?;
+    }
+    Ok(())
+}
+
+fn check_worker_failure(run: &RunView, event: &Event) -> Result<(), ReplayError> {
     if let Event::ProviderCallRecorded {
         agent_run_id,
         record,
@@ -279,122 +311,58 @@ pub(super) fn check(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    let stop_sequence = run
-        .tools
+    Ok(())
+}
+
+fn check_editor_budget(
+    run: &RunView,
+    event: &Event,
+    id: AgentRunId,
+    w: &WorkerView,
+) -> Result<(), ReplayError> {
+    let a = run
+        .agents
         .iter()
-        .chain(run.agents.iter().flat_map(|a| &a.tools))
-        .filter(|tool| {
-            tool.observation
-                .as_ref()
-                .is_some_and(|o| o.stops_tool_step())
-        })
-        .filter_map(|tool| tool.finished_sequence)
-        .chain(run.workers.stop.as_ref().map(|(sequence, _)| *sequence))
-        .min();
-    if let Some(sequence) = stop_sequence {
-        check_after_stop(run, event, sequence)?;
-    }
-    if let Some(id) = actor
-        && let Ok(w) = worker(run, id)
-        && matches!(
-            event,
-            Event::GoalProviderCallReserved { .. }
-                | Event::ProviderCallRecorded { .. }
-                | Event::ProviderFallbackUsed { .. }
-                | Event::ProviderRetryScheduled { .. }
-        )
+        .find(|a| a.id == id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let reviewing = matches!(event, Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::ToolReview)
+        || matches!(event, Event::GoalProviderCallReserved { .. })
+            && a.tools.last().is_some_and(|t| t.observation.is_none());
+    if w.outcome.is_some()
+        || matches!(event, Event::GoalProviderCallReserved { .. })
+            && !reviewing
+            && w.gate_continuations >= MAX_EDITOR_CONTINUATIONS
+            && a.provider_calls.last().is_some_and(|c| {
+                c.failure_reason
+                    == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
+            })
+        || a.tools.iter().any(editor_tool_failed)
+        || !reviewing
+            && !matches!(event, Event::ProviderCallRecorded { .. })
+            && a.provider_calls
+                .iter()
+                .filter(|r| r.phase == AgentPhase::ChildWork)
+                .count()
+                >= usize::from(w.pins.request.max_turns)
     {
-        let a = run
-            .agents
-            .iter()
-            .find(|a| a.id == id)
-            .ok_or(ReplayError::InvalidTransition)?;
-        let reviewing = matches!(event, Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::ToolReview)
-            || matches!(event, Event::GoalProviderCallReserved { .. })
-                && a.tools.last().is_some_and(|t| t.observation.is_none());
-        if w.outcome.is_some()
-            || matches!(event, Event::GoalProviderCallReserved { .. })
-                && !reviewing
-                && w.gate_continuations >= MAX_EDITOR_CONTINUATIONS
-                && a.provider_calls.last().is_some_and(|c| {
-                    c.failure_reason
-                        == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
-                })
-            || a.tools.iter().any(editor_tool_failed)
-            || !reviewing
-                && !matches!(event, Event::ProviderCallRecorded { .. })
-                && a.provider_calls
-                    .iter()
-                    .filter(|r| r.phase == AgentPhase::ChildWork)
-                    .count()
-                    >= usize::from(w.pins.request.max_turns)
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
+        return Err(ReplayError::InvalidTransition);
     }
     Ok(())
 }
 
 fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), ReplayError> {
-    let tools = || {
-        run.tools
-            .iter()
-            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
-    };
     match event {
         Event::ToolStarted {
             agent_run_id,
             intent,
             verdict,
             ..
-        } => {
-            let batch = run.agents.iter().any(|agent| {
-                agent.id == *agent_run_id
-                    && agent.assignment.is_none()
-                    && agent
-                        .provider_calls
-                        .iter()
-                        .rev()
-                        .find(|call| call.phase != AgentPhase::ToolReview)
-                        .is_some_and(|call| {
-                            call.disposition == ProviderCallDisposition::ToolRequested
-                                && call.requested_tools > 1
-                        })
-            });
-            if verdict.as_ref().is_some_and(|verdict| verdict.approved)
-                || verdict.is_none() && !batch
-                || !tools().any(|tool| {
-                    tool.intent.id == intent.id
-                        && tool.intent.agent_run_id == *agent_run_id
-                        && tool.started_sequence.is_none()
-                        && tool.observation.is_none()
-                })
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-        }
+        } => check_start_after_stop(run, *agent_run_id, intent, verdict.as_ref())?,
         Event::ToolFinished {
             observation,
             checkpoint,
             ..
-        } => {
-            let started_after_stop = tools().any(|tool| {
-                tool.intent.id == observation.intent.id
-                    && tool
-                        .started_sequence
-                        .is_some_and(|started| started > sequence)
-            });
-            if started_after_stop
-                && (!matches!(
-                    observation.disposition,
-                    ToolDisposition::Denied | ToolDisposition::Limit
-                ) || observation.attestation.is_some()
-                    || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
-                    || checkpoint.is_some())
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-        }
+        } => check_finish_after_stop(run, observation, checkpoint.is_some(), sequence)?,
         Event::AgentSpawned { .. }
         | Event::ToolProposed { .. }
         | Event::ToolActiveTimeReserved { .. }
@@ -437,6 +405,70 @@ fn check_after_stop(run: &RunView, event: &Event, sequence: u64) -> Result<(), R
         | Event::WorkerStopObserved { .. }
         | Event::MessageCommitted { .. }
         | Event::RunFinished { .. } => {}
+    }
+    Ok(())
+}
+
+fn stop_tools(run: &RunView) -> impl Iterator<Item = &ToolView> {
+    run.tools
+        .iter()
+        .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+}
+
+fn check_start_after_stop(
+    run: &RunView,
+    agent_run_id: AgentRunId,
+    intent: &crate::session::events::ToolIntentRecord,
+    verdict: Option<&crate::tools::permissions::PermissionVerdict>,
+) -> Result<(), ReplayError> {
+    let batch = run.agents.iter().any(|agent| {
+        agent.id == agent_run_id
+            && agent.assignment.is_none()
+            && agent
+                .provider_calls
+                .iter()
+                .rev()
+                .find(|call| call.phase != AgentPhase::ToolReview)
+                .is_some_and(|call| {
+                    call.disposition == ProviderCallDisposition::ToolRequested
+                        && call.requested_tools > 1
+                })
+    });
+    if verdict.is_some_and(|verdict| verdict.approved)
+        || verdict.is_none() && !batch
+        || !stop_tools(run).any(|tool| {
+            tool.intent.id == intent.id
+                && tool.intent.agent_run_id == agent_run_id
+                && tool.started_sequence.is_none()
+                && tool.observation.is_none()
+        })
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    Ok(())
+}
+
+fn check_finish_after_stop(
+    run: &RunView,
+    observation: &crate::tools::ToolObservation,
+    has_checkpoint: bool,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    let started_after_stop = stop_tools(run).any(|tool| {
+        tool.intent.id == observation.intent.id
+            && tool
+                .started_sequence
+                .is_some_and(|started| started > sequence)
+    });
+    if started_after_stop
+        && (!matches!(
+            observation.disposition,
+            ToolDisposition::Denied | ToolDisposition::Limit
+        ) || observation.attestation.is_some()
+            || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
+            || has_checkpoint)
+    {
+        return Err(ReplayError::InvalidTransition);
     }
     Ok(())
 }

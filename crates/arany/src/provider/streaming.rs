@@ -4,6 +4,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::watch;
 
+const MAX_OUTPUT_ITEMS: usize = 8192;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PreviewText {
     pub answer: String,
@@ -320,159 +322,171 @@ impl<'a> ResponsesPreview<'a> {
                     .and_then(Value::as_str)
                     .is_some_and(|model| model != self.model) =>
             {
-                return Err(ProviderError::InvalidResponseContract);
+                Err(ProviderError::InvalidResponseContract)
             }
-            Some("response.output_item.added") => {
-                let item = &value["item"];
-                let id = item["id"]
-                    .as_str()
-                    .filter(|id| {
-                        !id.is_empty()
-                            && id.len() <= 128
-                            && id.bytes().all(|byte| byte.is_ascii_graphic())
-                    })
-                    .ok_or(ProviderError::InvalidStream)?;
-                let index = value["output_index"]
-                    .as_u64()
-                    .filter(|index| *index < 8192)
-                    .ok_or(ProviderError::InvalidStream)? as usize;
-                let kind = item["type"].as_str().ok_or(ProviderError::InvalidStream)?;
-                if self.started.len() >= 8192
-                    || self.started.contains_key(id)
-                    || self.started.values().any(|(prior, _, _)| *prior == index)
-                    || kind == "message"
-                        && (!matches!(
-                            item["phase"].as_str(),
-                            None | Some("commentary" | "final_answer")
-                        ) || item["role"] != "assistant")
-                {
+            Some("response.output_item.added") => self.item_added(value),
+            Some("response.output_text.delta" | "response.function_call_arguments.delta") => {
+                self.delta(value)
+            }
+            Some("response.output_item.done") => self.item_done(value),
+            Some("response.completed") => self.completed(value),
+            _ => Ok(()),
+        }
+    }
+
+    fn item_added(&mut self, value: &Value) -> Result<(), ProviderError> {
+        let item = &value["item"];
+        let id = item["id"]
+            .as_str()
+            .filter(|id| {
+                !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
+            })
+            .ok_or(ProviderError::InvalidStream)?;
+        let index = value["output_index"]
+            .as_u64()
+            .filter(|index| *index < MAX_OUTPUT_ITEMS as u64)
+            .ok_or(ProviderError::InvalidStream)? as usize;
+        let kind = item["type"].as_str().ok_or(ProviderError::InvalidStream)?;
+        if self.started.len() >= MAX_OUTPUT_ITEMS
+            || self.started.contains_key(id)
+            || self.started.values().any(|(prior, _, _)| *prior == index)
+            || kind == "message"
+                && (!matches!(
+                    item["phase"].as_str(),
+                    None | Some("commentary" | "final_answer")
+                ) || item["role"] != "assistant")
+        {
+            return Err(ProviderError::InvalidResponseContract);
+        }
+        self.started
+            .insert(id.to_owned(), (index, kind.to_owned(), false));
+        if kind == "message" && item["phase"] != "commentary" && self.live.is_none() {
+            self.live = Some(LiveAnswer {
+                item_id: id.to_owned(),
+                decoder: TextDecoder::new(),
+                visible: String::new(),
+                failed: false,
+                tentative: item["phase"] != "final_answer",
+            });
+        }
+
+        Ok(())
+    }
+
+    fn delta(&mut self, value: &Value) -> Result<(), ProviderError> {
+        let id = value["item_id"]
+            .as_str()
+            .ok_or(ProviderError::InvalidStream)?;
+        let (index, kind, closed) = self.started.get(id).ok_or(ProviderError::InvalidStream)?;
+        let function = value["type"] == "response.function_call_arguments.delta";
+        if *closed
+            || value["output_index"].as_u64() != Some(*index as u64)
+            || (function && kind != "function_call")
+            || (!function && (kind != "message" || value["content_index"].as_u64() != Some(0)))
+            || !value["delta"].is_string()
+        {
+            return Err(ProviderError::InvalidStream);
+        }
+        if !function
+            && let Some(live) = self.live.as_mut().filter(|live| live.item_id == id)
+            && !live.failed
+        {
+            let fragment = value["delta"].as_str().unwrap_or_default();
+            match live.decoder.feed(fragment, self.secret) {
+                Ok(visible) if visible.len() > live.visible.len() => {
+                    live.visible = visible.to_owned();
+                    let streamed = PreviewText {
+                        answer: live.visible.clone(),
+                        tentative: live.tentative,
+                        ..Default::default()
+                    };
+                    live.failed = self.publisher.publish(streamed).is_err();
+                }
+                Ok(_) => {}
+                Err(_) => live.failed = true,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn item_done(&mut self, value: &Value) -> Result<(), ProviderError> {
+        let index = value["output_index"]
+            .as_u64()
+            .filter(|index| *index < MAX_OUTPUT_ITEMS as u64)
+            .ok_or(ProviderError::InvalidStream)? as usize;
+        if let Some(id) = value["item"]["id"].as_str()
+            && let Some((started_index, kind, closed)) = self.started.get_mut(id)
+        {
+            if *closed || *started_index != index || value["item"]["type"] != *kind {
+                return Err(ProviderError::InvalidStream);
+            }
+            *closed = true;
+        }
+        if self.done.insert(index, value["item"].clone()).is_some() {
+            return Err(ProviderError::InvalidStream);
+        }
+
+        Ok(())
+    }
+
+    // Without a call or a final message the last commentary is the answer.
+    fn completed(&mut self, value: &Value) -> Result<(), ProviderError> {
+        if self.started.values().any(|(_, _, closed)| !closed) {
+            return Err(ProviderError::InvalidStream);
+        }
+        let output = value
+            .pointer("/response/output")
+            .and_then(Value::as_array)
+            .ok_or(ProviderError::InvalidStream)?;
+        let items: Vec<_> = if output.is_empty() {
+            self.done.values().collect()
+        } else {
+            output.iter().collect()
+        };
+        let has_call = items.iter().any(|item| item["type"] == "function_call");
+        let messages = || {
+            items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item["type"] == "message" && item["role"] == "assistant")
+        };
+        let commentary_answer = (!has_call
+            && messages().all(|(_, item)| item["phase"] == "commentary"))
+        .then(|| messages().next_back().map(|(index, _)| index))
+        .flatten();
+        let mut preview = PreviewText::default();
+        for (index, item) in messages() {
+            let Some(parts) = item["content"].as_array() else {
+                return Err(ProviderError::InvalidResponseContract);
+            };
+            let mut text = String::new();
+            for part in parts {
+                if part["type"] != "output_text" {
                     return Err(ProviderError::InvalidResponseContract);
                 }
-                self.started
-                    .insert(id.to_owned(), (index, kind.to_owned(), false));
-                if kind == "message" && item["phase"] != "commentary" && self.live.is_none() {
-                    self.live = Some(LiveAnswer {
-                        item_id: id.to_owned(),
-                        decoder: TextDecoder::new(),
-                        visible: String::new(),
-                        failed: false,
-                        tentative: item["phase"] != "final_answer",
-                    });
-                }
+                text.push_str(part["text"].as_str().ok_or(ProviderError::InvalidStream)?);
             }
-            Some("response.output_text.delta" | "response.function_call_arguments.delta") => {
-                let id = value["item_id"]
-                    .as_str()
-                    .ok_or(ProviderError::InvalidStream)?;
-                let (index, kind, closed) =
-                    self.started.get(id).ok_or(ProviderError::InvalidStream)?;
-                let function = value["type"] == "response.function_call_arguments.delta";
-                if *closed
-                    || value["output_index"].as_u64() != Some(*index as u64)
-                    || (function && kind != "function_call")
-                    || (!function
-                        && (kind != "message" || value["content_index"].as_u64() != Some(0)))
-                    || !value["delta"].is_string()
-                {
-                    return Err(ProviderError::InvalidStream);
-                }
-                if !function
-                    && let Some(live) = self.live.as_mut().filter(|live| live.item_id == id)
-                    && !live.failed
-                {
-                    let fragment = value["delta"].as_str().unwrap_or_default();
-                    match live.decoder.feed(fragment, self.secret) {
-                        Ok(visible) if visible.len() > live.visible.len() => {
-                            live.visible = visible.to_owned();
-                            let streamed = PreviewText {
-                                answer: live.visible.clone(),
-                                tentative: live.tentative,
-                                ..Default::default()
-                            };
-                            live.failed = self.publisher.publish(streamed).is_err();
-                        }
-                        Ok(_) => {}
-                        Err(_) => live.failed = true,
-                    }
-                }
+            if !self.secret.is_empty() && text.contains(self.secret) {
+                return Err(ProviderError::InvalidOutcome);
             }
-            Some("response.output_item.done") => {
-                let index = value["output_index"]
-                    .as_u64()
-                    .filter(|index| *index < 8192)
-                    .ok_or(ProviderError::InvalidStream)? as usize;
-                if let Some(id) = value["item"]["id"].as_str()
-                    && let Some((started_index, kind, closed)) = self.started.get_mut(id)
+            if has_call || item["phase"] == "commentary" && Some(index) != commentary_answer {
+                if preview.commentary.len() < MAX_DISPLAY_COMMENTARY_ITEMS
+                    && preview.commentary.iter().map(String::len).sum::<usize>() + text.len()
+                        <= MAX_DISPLAY_TEXT_BYTES
                 {
-                    if *closed || *started_index != index || value["item"]["type"] != *kind {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    *closed = true;
-                }
-                if self.done.insert(index, value["item"].clone()).is_some() {
-                    return Err(ProviderError::InvalidStream);
-                }
-            }
-            Some("response.completed") => {
-                if self.started.values().any(|(_, _, closed)| !closed) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let output = value
-                    .pointer("/response/output")
-                    .and_then(Value::as_array)
-                    .ok_or(ProviderError::InvalidStream)?;
-                let items: Vec<_> = if output.is_empty() {
-                    self.done.values().collect()
+                    preview.commentary.push(text);
                 } else {
-                    output.iter().collect()
-                };
-                let has_call = items.iter().any(|item| item["type"] == "function_call");
-                let messages = || {
-                    items.iter().enumerate().filter(|(_, item)| {
-                        item["type"] == "message" && item["role"] == "assistant"
-                    })
-                };
-                // Without a call or a final message the last commentary is the answer.
-                let commentary_answer = (!has_call
-                    && messages().all(|(_, item)| item["phase"] == "commentary"))
-                .then(|| messages().next_back().map(|(index, _)| index))
-                .flatten();
-                let mut preview = PreviewText::default();
-                for (index, item) in messages() {
-                    let Some(parts) = item["content"].as_array() else {
-                        return Err(ProviderError::InvalidResponseContract);
-                    };
-                    let mut text = String::new();
-                    for part in parts {
-                        if part["type"] != "output_text" {
-                            return Err(ProviderError::InvalidResponseContract);
-                        }
-                        text.push_str(part["text"].as_str().ok_or(ProviderError::InvalidStream)?);
-                    }
-                    if !self.secret.is_empty() && text.contains(self.secret) {
-                        return Err(ProviderError::InvalidOutcome);
-                    }
-                    if has_call || item["phase"] == "commentary" && Some(index) != commentary_answer
-                    {
-                        if preview.commentary.len() < MAX_DISPLAY_COMMENTARY_ITEMS
-                            && preview.commentary.iter().map(String::len).sum::<usize>()
-                                + text.len()
-                                <= MAX_DISPLAY_TEXT_BYTES
-                        {
-                            preview.commentary.push(text);
-                        } else {
-                            preview.commentary_limited = true;
-                        }
-                    } else if text.len() <= MAX_DISPLAY_TEXT_BYTES {
-                        preview.answer = text;
-                    } else if let Some(live) = &self.live {
-                        preview.answer.clone_from(&live.visible);
-                    }
+                    preview.commentary_limited = true;
                 }
-                self.publisher.publish(preview)?;
+            } else if text.len() <= MAX_DISPLAY_TEXT_BYTES {
+                preview.answer = text;
+            } else if let Some(live) = &self.live {
+                preview.answer.clone_from(&live.visible);
             }
-            _ => {}
         }
+        self.publisher.publish(preview)?;
+
         Ok(())
     }
 }

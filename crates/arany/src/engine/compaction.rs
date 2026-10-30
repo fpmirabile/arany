@@ -54,7 +54,7 @@ impl Engine {
         let _slot = self.claim()?;
         super::admit_providers(providers)?;
         let provider = std::sync::Arc::clone(&providers.compaction[0]);
-        let identity = super::checked_identity(provider.as_ref())?;
+        super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
         let (events, view) = self.compaction_history(session_id).await?;
         session_lock.keep();
@@ -78,23 +78,14 @@ impl Engine {
         let prompt = prompts.pin(crate::provider::PromptFile::Compaction);
         let covered_run_id = last_run.id;
         let open_view = self.compaction_view(session_id).await?;
-        let goal = open_view.goals.iter().find(|goal| {
-            goal.status == crate::session::GoalStatus::Running
-                && goal.run_ids.last() == Some(&covered_run_id)
-        });
-        let goal_id = goal.map(|goal| goal.id);
+        let goal_id = running_goal(&open_view, covered_run_id);
+        let trigger = if expected_run_id.is_some() {
+            "auto"
+        } else {
+            "manual"
+        };
         if self
-            .pre_compact_hooks(
-                providers,
-                session_id,
-                &workspace,
-                &open_view,
-                if expected_run_id.is_some() {
-                    "auto"
-                } else {
-                    "manual"
-                },
-            )
+            .pre_compact_hooks(providers, session_id, &workspace, &open_view, trigger)
             .await?
         {
             return Ok(None);
@@ -106,27 +97,36 @@ impl Engine {
         // The call's interval is bounded by the remaining Goal time and settles in ContextCompacted.
         let active_reservation_ms = goal.map(goal_compaction_reservation).transpose()?;
         let covered_sequence = covered_sequence(&events, covered_run_id)?;
-        if expected_run_id.is_some()
-            && view.compactions.iter().any(|compaction| {
-                compaction.record.covered_run_id == covered_run_id
-                    && compaction.record.covered_sequence == covered_sequence
-            })
-        {
+        if expected_run_id.is_some() && already_compacted(&view, covered_run_id, covered_sequence) {
             return Ok(None);
         }
-        self.journal
-            .admit_as(
-                session_id,
-                Action::BoundaryCompaction {
-                    goal: goal_id.is_some(),
-                }
-                .max_events_for_admitted(providers),
-                0,
-                crate::store::AdmissionKind::Compaction,
-            )
-            .await?;
-        let (source_digest, recent_files) = compaction_source(&view, &events, covered_sequence)?;
-        let prepared = prepare_compaction(&view)?;
+        let boundary = BoundaryCompaction {
+            providers,
+            provider,
+            session_id,
+            view: &view,
+            events: &events,
+            last_run,
+            open_view: &open_view,
+            goal,
+            goal_id,
+            active_reservation_ms,
+            covered_sequence,
+            prompts,
+            prompt,
+        };
+        self.compact_boundary(boundary).await.map(Some)
+    }
+
+    async fn compact_boundary(
+        &self,
+        boundary: BoundaryCompaction<'_>,
+    ) -> Result<CompactionRecord, EngineError> {
+        let (session_id, last_run) = (boundary.session_id, boundary.last_run);
+        self.admit_compaction(&boundary).await?;
+        let identity = boundary.provider.identity();
+        let covered_run_id = last_run.id;
+        let (source_digest, recent_files, prepared) = boundary.input()?;
         let compiler_version = prepared.compiler_version;
         let requested_identity = compaction_trace_identity(last_run, identity);
         let trace = self.config.telemetry.begin_compaction(
@@ -139,69 +139,77 @@ impl Engine {
             session_id,
             covered_run_id,
             identity,
-            goal,
-            prompts,
+            boundary.goal,
+            boundary.prompts,
         )?;
         let active_started = Instant::now();
         let routing = self
-            .compaction_routing(session_id, last_run, &open_view)
+            .compaction_routing(session_id, last_run, boundary.open_view)
             .await?;
         let provider_deadline = self
             .reserve_compaction_call(
                 session_id,
                 covered_run_id,
-                goal_id,
-                active_reservation_ms,
+                boundary.goal_id.zip(boundary.active_reservation_ms),
                 active_started,
                 routing.as_ref().map(|(ledger, _)| ledger),
             )
             .await?
             .min(identity.limits.deadline);
         let provider_trace = trace.begin_provider(&requested_identity.model);
-        let limits = crate::provider::RateLimitSlot::default();
-        let (status, response_id, usage, wire_provenance, provider) = self
+        let called = self
             .compaction_call(
-                providers,
+                boundary.providers,
                 routing.as_ref(),
-                provider,
+                std::sync::Arc::clone(&boundary.provider),
                 request,
                 provider_deadline,
-                limits.clone(),
             )
             .await?;
-        let identity = provider.identity();
-        let provider_outcome = ProviderTraceOutcome::from(&status);
+        let (status, _, usage, _) = &called.reply;
+        let provider_outcome = ProviderTraceOutcome::from(status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
-        let mut record = compaction_record(
-            CompactionSource {
-                covered_run_id,
-                covered_sequence,
-                source_digest,
-                recent_files,
-                compiler_version,
-                source_bytes,
-                prompt,
-            },
-            identity,
-            status,
-            response_id,
-            usage,
-            wire_provenance,
-        );
-        record.rate_limits = limits.take();
+        let source = CompactionSource {
+            covered_run_id,
+            covered_sequence: boundary.covered_sequence,
+            source_digest,
+            recent_files,
+            compiler_version,
+            source_bytes,
+            prompt: boundary.prompt,
+        };
+        let record = compaction_record(source, called);
+        let active_ms = boundary
+            .goal_id
+            .map(|_| duration_ms(active_started.elapsed()));
         let committed = self
             .journal
             .append(
                 session_id,
                 Event::ContextCompacted {
                     record: record.clone(),
-                    active_ms: goal_id.map(|_| duration_ms(active_started.elapsed())),
+                    active_ms,
                 },
             )
             .await?;
         trace.event_committed(&committed);
         trace.finish(provider_outcome.into());
-        Ok(Some(record))
+        Ok(record)
+    }
+
+    async fn admit_compaction(&self, boundary: &BoundaryCompaction<'_>) -> Result<(), EngineError> {
+        self.journal
+            .admit_as(
+                boundary.session_id,
+                Action::BoundaryCompaction {
+                    goal: boundary.goal_id.is_some(),
+                }
+                .max_events_for_admitted(boundary.providers),
+                0,
+                crate::store::AdmissionKind::Compaction,
+            )
+            .await?;
+        Ok(())
     }
 
     async fn compaction_history(
@@ -337,12 +345,12 @@ impl Engine {
         &self,
         session_id: SessionId,
         covered_run_id: crate::session::RunId,
-        goal_id: Option<crate::session::GoalId>,
-        active_reservation_ms: Option<u64>,
+        reservation: Option<(crate::session::GoalId, u64)>,
         active_started: Instant,
         ledger: Option<&super::ledger::GoalLedger>,
     ) -> Result<Duration, EngineError> {
-        if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
+        let active_reservation_ms = reservation.map(|(_, active_ceiling_ms)| active_ceiling_ms);
+        if let Some((goal_id, active_ceiling_ms)) = reservation {
             let event = Event::GoalCompactionCallReserved {
                 goal_id,
                 run_id: covered_run_id,
@@ -376,18 +384,9 @@ impl Engine {
         provider: std::sync::Arc<dyn crate::provider::Provider>,
         request: CompactionRequest,
         provider_deadline: Duration,
-        limits: crate::provider::RateLimitSlot,
-    ) -> Result<
-        (
-            CompactionStatus,
-            Option<String>,
-            Usage,
-            Option<crate::provider::ProviderWireProvenance>,
-            std::sync::Arc<dyn crate::provider::Provider>,
-        ),
-        EngineError,
-    > {
-        Ok(match routing {
+    ) -> Result<CompactionCalled, EngineError> {
+        let limits = crate::provider::RateLimitSlot::default();
+        let (reply, provider) = match routing {
             Some((ledger, actor)) => {
                 let router = super::routing::CallRouter {
                     providers: providers.clone(),
@@ -403,31 +402,30 @@ impl Engine {
                         *actor,
                         tokio::time::Instant::now() + provider_deadline,
                         crate::RunCancellation::new(),
-                        limits,
+                        limits.clone(),
                     )
                     .await?
                     .ok_or(EngineError::CoordinatorFailed)?;
-                let (status, response_id, usage, wire_provenance) =
+                let reply =
                     compaction_outcome(response, provider.identity().limits.output_token_bound);
-                (status, response_id, usage, wire_provenance, provider)
+                (reply, provider)
             }
             None => {
                 let response = tokio::time::timeout(
                     provider_deadline,
-                    provider.compact_observed(request, limits),
+                    provider.compact_observed(request, limits.clone()),
                 )
                 .await
                 .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
-                let (status, response_id, usage, wire_provenance) =
+                let reply =
                     compaction_outcome(response, provider.identity().limits.output_token_bound);
-                (
-                    status,
-                    response_id,
-                    usage,
-                    wire_provenance,
-                    std::sync::Arc::clone(&provider),
-                )
+                (reply, std::sync::Arc::clone(&provider))
             }
+        };
+        Ok(CompactionCalled {
+            reply,
+            rate_limits: limits.take(),
+            provider,
         })
     }
 }
@@ -486,6 +484,78 @@ fn compaction_route_ids(
     Ok((actor, goal_id))
 }
 
+struct BoundaryCompaction<'a> {
+    providers: &'a AdmittedProviders,
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+    session_id: SessionId,
+    view: &'a SessionView,
+    events: &'a [EventEnvelope],
+    last_run: &'a crate::session::RunView,
+    open_view: &'a SessionView,
+    goal: Option<&'a crate::session::GoalView>,
+    goal_id: Option<crate::session::GoalId>,
+    active_reservation_ms: Option<u64>,
+    covered_sequence: u64,
+    prompts: crate::provider::EffectivePrompts,
+    prompt: crate::provider::PromptPin,
+}
+
+impl BoundaryCompaction<'_> {
+    fn input(
+        &self,
+    ) -> Result<
+        (
+            [u8; 32],
+            Vec<crate::session::RecentFile>,
+            PreparedCompaction,
+        ),
+        EngineError,
+    > {
+        let (source_digest, recent_files) =
+            compaction_source(self.view, self.events, self.covered_sequence)?;
+        Ok((source_digest, recent_files, prepare_compaction(self.view)?))
+    }
+}
+
+// The classified status, response id, usage and wire provenance of one compaction call.
+type CompactionReply = (
+    CompactionStatus,
+    Option<String>,
+    Usage,
+    Option<crate::provider::ProviderWireProvenance>,
+);
+
+struct CompactionCalled {
+    reply: CompactionReply,
+    rate_limits: Option<crate::provider::RateLimits>,
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+}
+
+fn running_goal(
+    open_view: &SessionView,
+    covered_run_id: crate::session::RunId,
+) -> Option<crate::session::GoalId> {
+    open_view
+        .goals
+        .iter()
+        .find(|goal| {
+            goal.status == crate::session::GoalStatus::Running
+                && goal.run_ids.last() == Some(&covered_run_id)
+        })
+        .map(|goal| goal.id)
+}
+
+fn already_compacted(
+    view: &SessionView,
+    covered_run_id: crate::session::RunId,
+    covered_sequence: u64,
+) -> bool {
+    view.compactions.iter().any(|compaction| {
+        compaction.record.covered_run_id == covered_run_id
+            && compaction.record.covered_sequence == covered_sequence
+    })
+}
+
 struct CompactionSource {
     covered_run_id: crate::session::RunId,
     covered_sequence: u64,
@@ -496,14 +566,10 @@ struct CompactionSource {
     prompt: crate::provider::PromptPin,
 }
 
-fn compaction_record(
-    source: CompactionSource,
-    identity: &crate::provider::ProviderIdentity,
-    status: CompactionStatus,
-    response_id: Option<String>,
-    usage: Usage,
-    wire_provenance: Option<crate::provider::ProviderWireProvenance>,
-) -> CompactionRecord {
+// The record names the route that answered, which a fallback may have changed.
+fn compaction_record(source: CompactionSource, called: CompactionCalled) -> CompactionRecord {
+    let identity = called.provider.identity();
+    let (status, response_id, usage, wire_provenance) = called.reply;
     let CompactionSource {
         covered_run_id,
         covered_sequence,
@@ -514,7 +580,7 @@ fn compaction_record(
         prompt,
     } = source;
     CompactionRecord {
-        rate_limits: None,
+        rate_limits: called.rate_limits,
         covered_run_id,
         covered_sequence,
         source_digest,
@@ -698,12 +764,7 @@ fn pin_goal_context(
 fn compaction_outcome(
     response: Result<CompactionResponse, crate::provider::ProviderError>,
     output_bound: crate::provider::OutputTokenBound,
-) -> (
-    CompactionStatus,
-    Option<String>,
-    Usage,
-    Option<crate::provider::ProviderWireProvenance>,
-) {
+) -> CompactionReply {
     match response {
         Ok(response) => classify_response(response, output_bound),
         Err(error) => (

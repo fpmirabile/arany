@@ -608,41 +608,10 @@ pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<Vec<WorkerFileFact>, Re
         {
             return Err(ReplayError::InvalidPayload);
         }
-        let mut version =
-            |v: &Option<BorrowedVersion<'_>>| -> Result<WorkerBaseVersion, ReplayError> {
-                let Some(v) = v else {
-                    return Ok(WorkerBaseVersion::Absent);
-                };
-                if !crate::validate::valid_digest(&v.sha256)
-                    || v.content.len() > (1024usize * 1024).div_ceil(3) * 4
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                let content = base64::engine::general_purpose::STANDARD
-                    .decode(v.content.as_bytes())
-                    .map_err(|_| ReplayError::InvalidPayload)?;
-                if content.len() > 1024 * 1024
-                    || base64::engine::general_purpose::STANDARD.encode(&content) != v.content
-                    || crate::validate::hex_digest(&content) != v.sha256
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                total = total
-                    .checked_add(content.len())
-                    .ok_or(ReplayError::InvalidPayload)?;
-                if total > 2 * WORKER_CONTENT_BYTES {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(WorkerBaseVersion::File {
-                    sha256: v.sha256.to_string(),
-                    bytes: u32::try_from(content.len()).map_err(|_| ReplayError::InvalidPayload)?,
-                    executable: v.executable,
-                })
-            };
         facts.push(WorkerFileFact {
             path: file.path.to_string(),
-            before: version(&file.before)?,
-            after: version(&file.after)?,
+            before: rewind_version(&file.before, &mut total)?,
+            after: rewind_version(&file.after, &mut total)?,
         });
     }
     for before in [true, false] {
@@ -660,6 +629,40 @@ pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<Vec<WorkerFileFact>, Re
         }
     }
     Ok(facts)
+}
+
+fn rewind_version(
+    v: &Option<BorrowedVersion<'_>>,
+    total: &mut usize,
+) -> Result<WorkerBaseVersion, ReplayError> {
+    let Some(v) = v else {
+        return Ok(WorkerBaseVersion::Absent);
+    };
+    if !crate::validate::valid_digest(&v.sha256)
+        || v.content.len() > crate::tools::types::MAX_FILE_BYTES.div_ceil(3) * 4
+    {
+        return Err(ReplayError::InvalidPayload);
+    }
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(v.content.as_bytes())
+        .map_err(|_| ReplayError::InvalidPayload)?;
+    if content.len() > crate::tools::types::MAX_FILE_BYTES
+        || base64::engine::general_purpose::STANDARD.encode(&content) != v.content
+        || crate::validate::hex_digest(&content) != v.sha256
+    {
+        return Err(ReplayError::InvalidPayload);
+    }
+    *total = total
+        .checked_add(content.len())
+        .ok_or(ReplayError::InvalidPayload)?;
+    if *total > 2 * WORKER_CONTENT_BYTES {
+        return Err(ReplayError::InvalidPayload);
+    }
+    Ok(WorkerBaseVersion::File {
+        sha256: v.sha256.to_string(),
+        bytes: u32::try_from(content.len()).map_err(|_| ReplayError::InvalidPayload)?,
+        executable: v.executable,
+    })
 }
 
 fn canonical(value: &impl Serialize, bytes: &[u8]) -> bool {

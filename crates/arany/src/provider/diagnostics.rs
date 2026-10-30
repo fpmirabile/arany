@@ -1,6 +1,9 @@
 use crate::diagnostics::{BoundedRecord, record_local};
 use std::fmt::{self, Write};
 
+// Diagnostic estimates only; they never bound a request.
+const ESTIMATED_BYTES_PER_TOKEN: usize = 3;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SubscriptionFailureStage {
     RequestTransport,
@@ -133,64 +136,15 @@ impl ToolArgumentShape {
     pub(crate) fn from_call(call: &crate::tools::ToolCall) -> Self {
         use crate::tools::ToolCall;
         use crate::validate::{valid_digest, valid_name, valid_relative};
-        let mut shape = Self {
-            operation: call.label(),
-            serialized_bytes: serde_json::to_vec(call).map_or(0, |bytes| bytes.len()),
-            path_bytes: None,
-            path_valid: None,
-            digest_chars: None,
-            digest_valid: None,
-            read_offset: None,
-            read_limit: None,
-            old_bytes: None,
-            new_bytes: None,
-            text_bytes: None,
-            program_chars: None,
-            program_valid: None,
-            args_count: None,
-            largest_arg_bytes: None,
-            nul_args_count: None,
-        };
-        let path = match call {
-            ToolCall::List { path }
-            | ToolCall::Search { path, .. }
-            | ToolCall::Glob { path, .. } => Some((path, true)),
-            ToolCall::Read { path, .. }
-            | ToolCall::Mkdir { path }
-            | ToolCall::Write { path, .. }
-            | ToolCall::Edit { path, .. }
-            | ToolCall::Delete { path, .. }
-            | ToolCall::MultiEdit {
-                file_path: path, ..
-            } => Some((path, false)),
-            ToolCall::Move { source, .. } => Some((source, false)),
-            ToolCall::Command { cwd, .. } => Some((cwd, true)),
-            _ => None,
-        };
-        if let Some((path, root)) = path {
+        let mut shape = Self::from_serialized(
+            call.label(),
+            serde_json::to_vec(call).map_or(0, |bytes| bytes.len()),
+        );
+        if let Some((path, root)) = call_path(call) {
             shape.path_bytes = Some(path.len());
             shape.path_valid = Some(valid_relative(path, root));
         }
-        let digest = match call {
-            ToolCall::Delete {
-                expected_digest, ..
-            }
-            | ToolCall::Move {
-                expected_digest, ..
-            }
-            | ToolCall::Edit {
-                expected_digest, ..
-            }
-            | ToolCall::MultiEdit {
-                expected_digest, ..
-            }
-            | ToolCall::Write {
-                expected_digest, ..
-            } => expected_digest.as_ref(),
-            ToolCall::McpCall { schema_digest, .. } => Some(schema_digest),
-            _ => None,
-        };
-        if let Some(digest) = digest {
+        if let Some(digest) = call_digest(call) {
             shape.digest_chars = Some(digest.chars().count());
             shape.digest_valid = Some(valid_digest(digest));
         }
@@ -217,6 +171,50 @@ impl ToolArgumentShape {
             _ => {}
         }
         shape
+    }
+}
+
+// The call's path, and whether that path may name the Workspace root.
+fn call_path(call: &crate::tools::ToolCall) -> Option<(&String, bool)> {
+    use crate::tools::ToolCall;
+    match call {
+        ToolCall::List { path } | ToolCall::Search { path, .. } | ToolCall::Glob { path, .. } => {
+            Some((path, true))
+        }
+        ToolCall::Read { path, .. }
+        | ToolCall::Mkdir { path }
+        | ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::Delete { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } => Some((path, false)),
+        ToolCall::Move { source, .. } => Some((source, false)),
+        ToolCall::Command { cwd, .. } => Some((cwd, true)),
+        _ => None,
+    }
+}
+
+fn call_digest(call: &crate::tools::ToolCall) -> Option<&String> {
+    use crate::tools::ToolCall;
+    match call {
+        ToolCall::Delete {
+            expected_digest, ..
+        }
+        | ToolCall::Move {
+            expected_digest, ..
+        }
+        | ToolCall::Edit {
+            expected_digest, ..
+        }
+        | ToolCall::MultiEdit {
+            expected_digest, ..
+        }
+        | ToolCall::Write {
+            expected_digest, ..
+        } => expected_digest.as_ref(),
+        ToolCall::McpCall { schema_digest, .. } => Some(schema_digest),
+        _ => None,
     }
 }
 
@@ -296,8 +294,51 @@ fn context_record(
     tool_allowance_bytes: usize,
     pending_turn_bytes: usize,
 ) -> BoundedRecord {
-    let input = &request.input;
-    let mut components = vec![
+    let mut components = context_components(&request.input, pending_turn_bytes);
+    let estimated_bytes = components.iter().map(|(_, bytes)| bytes).sum::<usize>();
+    components.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    let mut record = BoundedRecord::default();
+    let model = reported_model(&request.model);
+    let _ = writeln!(
+        record,
+        "context cause=ToolContextFull model={model} window_tokens={window_tokens:?} ceiling_bytes={} tool_allowance_bytes={tool_allowance_bytes} estimated_content_bytes={estimated_bytes} estimated_content_tokens={} max_output_tokens={}",
+        crate::session::content_ceiling(window_tokens),
+        estimated_bytes.div_ceil(ESTIMATED_BYTES_PER_TOKEN),
+        request.max_output_tokens,
+    );
+    for (label, bytes) in components {
+        let _ = writeln!(record, "component={label} bytes={bytes}");
+    }
+    if let Some(context) = &request.input.tools {
+        let largest_turn = context
+            .steps
+            .iter()
+            .map(|step| step.turn.len())
+            .max()
+            .unwrap_or(0);
+        let largest_result = context
+            .steps
+            .iter()
+            .flat_map(|step| {
+                (0..step.observations.len())
+                    .map(move |index| context.model_result(step, index).to_string().len())
+            })
+            .max()
+            .unwrap_or(0);
+        let _ = writeln!(
+            record,
+            "catalog_bytes={} largest_turn_bytes={largest_turn} largest_result_bytes={largest_result}",
+            context.catalog().len()
+        );
+    }
+    record
+}
+
+fn context_components(
+    input: &crate::provider::RunInput,
+    pending_turn_bytes: usize,
+) -> Vec<(&'static str, usize)> {
+    vec![
         ("objective", input.objective.len()),
         (
             "instructions",
@@ -313,7 +354,11 @@ fn context_record(
             input
                 .history
                 .iter()
-                .map(|turn| turn.user.len() + turn.assistant.len() + 64)
+                .map(|turn| {
+                    turn.user.len()
+                        + turn.assistant.len()
+                        + crate::session::HISTORY_TURN_OVERHEAD_BYTES
+                })
                 .sum(),
         ),
         (
@@ -349,54 +394,20 @@ fn context_record(
             ))
             .map_or(0, |value| value.len()),
         ),
-    ];
-    let estimated_bytes = components.iter().map(|(_, bytes)| bytes).sum::<usize>();
-    components.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
-    let mut record = BoundedRecord::default();
-    // Only a bounded model identifier is permitted; all conversation and Tool values stay private.
-    let model = if request.model.len() <= super::MAX_MODEL_ID_BYTES
-        && request
-            .model
+    ]
+}
+
+// Only a bounded model identifier is permitted; all conversation and Tool values stay private.
+fn reported_model(model: &str) -> &str {
+    if model.len() <= super::MAX_MODEL_ID_BYTES
+        && model
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
     {
-        request.model.as_str()
+        model
     } else {
         "unreported"
-    };
-    let _ = writeln!(
-        record,
-        "context cause=ToolContextFull model={model} window_tokens={window_tokens:?} ceiling_bytes={} tool_allowance_bytes={tool_allowance_bytes} estimated_content_bytes={estimated_bytes} estimated_content_tokens={} max_output_tokens={}",
-        crate::session::content_ceiling(window_tokens),
-        estimated_bytes.div_ceil(3),
-        request.max_output_tokens,
-    );
-    for (label, bytes) in components {
-        let _ = writeln!(record, "component={label} bytes={bytes}");
     }
-    if let Some(context) = &input.tools {
-        let largest_turn = context
-            .steps
-            .iter()
-            .map(|step| step.turn.len())
-            .max()
-            .unwrap_or(0);
-        let largest_result = context
-            .steps
-            .iter()
-            .flat_map(|step| {
-                (0..step.observations.len())
-                    .map(move |index| context.model_result(step, index).to_string().len())
-            })
-            .max()
-            .unwrap_or(0);
-        let _ = writeln!(
-            record,
-            "catalog_bytes={} largest_turn_bytes={largest_turn} largest_result_bytes={largest_result}",
-            context.catalog().len()
-        );
-    }
-    record
 }
 
 #[cfg(test)]

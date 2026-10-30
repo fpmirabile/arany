@@ -1,6 +1,8 @@
 use crate::session::{GoalReport, RunView};
 
 const FINAL_CALL_FACT: &str = "Provider-call budget reached; the final call was answer-only.";
+const MAX_TOOL_FACT_BYTES: usize = 512;
+const MAX_TOOL_FACT_EXCERPT_BYTES: usize = 256;
 
 pub(super) fn goal_report(
     view: &crate::session::SessionView,
@@ -28,6 +30,45 @@ pub(super) fn goal_report(
     if goal.budget_refusal.is_some() {
         push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
     }
+    let (critical, workers) = goal_workers(view, goal);
+    for worker in &critical {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &worker.description(),
+            &mut omitted_facts,
+        );
+    }
+    push_cache_facts(&mut report, view, goal, &mut omitted_facts);
+    if goal.budget_refusal.is_some() {
+        push_budget_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    }
+    push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
+    push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
+    push_history_facts(&mut report, view, &mut omitted_facts);
+    push_route_notices(&mut report, view, goal, &mut omitted_facts);
+    push_settled_workers(&mut report, workers, &mut omitted_facts);
+    fit_report_summary(&mut report, raw_summary, &mut omitted_facts);
+    let protected_unresolved_count = report.unresolved.len();
+    if goal.budget_refusal.is_none() {
+        push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    }
+    push_success_facts(&mut report, view, goal, &mut omitted_facts);
+    if omitted_facts {
+        append_goal_report_omission(&mut report, protected_unresolved_count);
+    }
+    report
+}
+
+const MAX_ROUTE_NOTICES: usize = 8;
+
+fn goal_workers(
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+) -> (
+    Vec<crate::worker::WorkerHistory>,
+    Vec<crate::worker::WorkerHistory>,
+) {
     let mut workers: Vec<_> = view
         .runs
         .iter()
@@ -46,37 +87,33 @@ pub(super) fn goal_report(
             3
         }
     });
-    let (critical, workers): (Vec<_>, Vec<_>) = workers
+    workers
         .into_iter()
-        .partition(|w| w.publication == crate::worker::WorkerPublication::Unknown);
-    for worker in &critical {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &worker.description(),
-            &mut omitted_facts,
-        );
-    }
-    push_cache_facts(&mut report, view, goal, &mut omitted_facts);
-    if goal.budget_refusal.is_some() {
-        push_budget_tool_facts(&mut report, view, goal, &mut omitted_facts);
-    }
-    push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
-    push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
+        .partition(|w| w.publication == crate::worker::WorkerPublication::Unknown)
+}
+
+fn push_history_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    omitted_facts: &mut bool,
+) {
     if let Some(facts) = crate::session::rewind::history_facts(view, 0, view.last_sequence) {
         let mut lines = facts.lines();
         lines.next();
         let mut lines = lines.rev().peekable();
         let omission = lines.next_if(|line| line.starts_with("Older "));
         for fact in lines.chain(omission) {
-            push_goal_report_item(
-                &mut report,
-                GoalReportSection::Unresolved,
-                fact,
-                &mut omitted_facts,
-            );
+            push_goal_report_item(report, GoalReportSection::Unresolved, fact, omitted_facts);
         }
     }
+}
+
+fn push_route_notices(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
     for (index, notice) in view
         .runs
         .iter()
@@ -89,31 +126,20 @@ pub(super) fn goal_report(
                     .map(|(_, fallback)| fallback.notice()),
             )
         })
-        .take(9)
+        .take(MAX_ROUTE_NOTICES + 1)
         .enumerate()
     {
-        if index == 8 {
-            omitted_facts = true;
+        if index == MAX_ROUTE_NOTICES {
+            *omitted_facts = true;
             break;
         }
         push_goal_report_item(
-            &mut report,
+            report,
             GoalReportSection::Unresolved,
             &notice,
-            &mut omitted_facts,
+            omitted_facts,
         );
     }
-    push_settled_workers(&mut report, workers, &mut omitted_facts);
-    fit_report_summary(&mut report, raw_summary, &mut omitted_facts);
-    let protected_unresolved_count = report.unresolved.len();
-    if goal.budget_refusal.is_none() {
-        push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
-    }
-    push_success_facts(&mut report, view, goal, &mut omitted_facts);
-    if omitted_facts {
-        append_goal_report_omission(&mut report, protected_unresolved_count);
-    }
-    report
 }
 
 // Budget and usage facts lead the unresolved section so a full report cannot hide them.
@@ -343,33 +369,7 @@ fn budget_tool_fact(
     };
     let mut fact = format!("{actor}: {} {label}", tool.intent.call.label());
     if observation.disposition == ToolDisposition::Denied {
-        use crate::tools::permissions::{Decision, PermissionSource};
-        let source = tool.permission_verdict.as_ref().map(|verdict| {
-            if verdict.hook_restriction == Some(Decision::Deny) {
-                PermissionSource::Hook
-            } else {
-                verdict.source
-            }
-        });
-        let cause = match source {
-            Some(PermissionSource::Human) => "permission_denied; human approval not granted",
-            Some(PermissionSource::Hook) => "hook_denied",
-            Some(
-                PermissionSource::Rule
-                | PermissionSource::TypedPrefixRule
-                | PermissionSource::HostPrefixRule,
-            ) => "permission_rule_denied",
-            Some(PermissionSource::Mode) => "permission_mode_denied",
-            Some(PermissionSource::UnavailableApproval) => {
-                "permission_denied; approval unavailable"
-            }
-            Some(
-                PermissionSource::AiReview
-                | PermissionSource::PinnedGrant
-                | PermissionSource::SessionApproval,
-            )
-            | None => "permission_denied",
-        };
+        let cause = denial_cause(tool);
         fact.push_str(&format!("; {cause}"));
     }
     if let Some(cause) = observation.limit_cause {
@@ -386,38 +386,75 @@ fn budget_tool_fact(
     }
     if observation.disposition != ToolDisposition::Denied && observation.attested_for(&tool.intent)
     {
-        let output = if matches!(
-            tool.intent.call,
-            crate::tools::ToolCall::Command { .. }
-                | crate::tools::ToolCall::CommandUnguarded { .. }
-        ) {
-            serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
-                .ok()
-                .map(|result| {
-                    format!(
-                        "exit {}; {}",
-                        result
-                            .exit_code
-                            .map_or("unknown".into(), |code| code.to_string()),
-                        result.stderr
-                    )
-                })
-        } else {
-            Some(observation.output.clone())
-        };
+        let output = output_excerpt_source(tool, observation);
         if let Some(output) = output {
             fact.push_str("; ");
-            let excerpt = crate::tools::types::truncate_utf8(&output, 256);
+            let excerpt = crate::tools::types::truncate_utf8(&output, MAX_TOOL_FACT_EXCERPT_BYTES);
             fact.push_str(&crate::session::escape_status_text(excerpt));
             if excerpt.len() < output.len() {
                 fact.push('…');
             }
         }
     }
-    if fact.len() > 512 {
-        fact = format!("{}…", crate::tools::types::truncate_utf8(&fact, 509));
+    if fact.len() > MAX_TOOL_FACT_BYTES {
+        fact = format!(
+            "{}…",
+            crate::tools::types::truncate_utf8(&fact, MAX_TOOL_FACT_BYTES - '…'.len_utf8())
+        );
     }
     fact
+}
+
+fn denial_cause(tool: &crate::session::ToolView) -> &'static str {
+    use crate::tools::permissions::{Decision, PermissionSource};
+    let source = tool.permission_verdict.as_ref().map(|verdict| {
+        if verdict.hook_restriction == Some(Decision::Deny) {
+            PermissionSource::Hook
+        } else {
+            verdict.source
+        }
+    });
+    match source {
+        Some(PermissionSource::Human) => "permission_denied; human approval not granted",
+        Some(PermissionSource::Hook) => "hook_denied",
+        Some(
+            PermissionSource::Rule
+            | PermissionSource::TypedPrefixRule
+            | PermissionSource::HostPrefixRule,
+        ) => "permission_rule_denied",
+        Some(PermissionSource::Mode) => "permission_mode_denied",
+        Some(PermissionSource::UnavailableApproval) => "permission_denied; approval unavailable",
+        Some(
+            PermissionSource::AiReview
+            | PermissionSource::PinnedGrant
+            | PermissionSource::SessionApproval,
+        )
+        | None => "permission_denied",
+    }
+}
+
+fn output_excerpt_source(
+    tool: &crate::session::ToolView,
+    observation: &crate::tools::ToolObservation,
+) -> Option<String> {
+    if matches!(
+        tool.intent.call,
+        crate::tools::ToolCall::Command { .. } | crate::tools::ToolCall::CommandUnguarded { .. }
+    ) {
+        serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+            .ok()
+            .map(|result| {
+                format!(
+                    "exit {}; {}",
+                    result
+                        .exit_code
+                        .map_or("unknown".into(), |code| code.to_string()),
+                    result.stderr
+                )
+            })
+    } else {
+        Some(observation.output.clone())
+    }
 }
 
 fn push_checkpoint_facts(
@@ -604,95 +641,82 @@ fn push_unresolved_tool_facts(
             .iter()
             .chain(task_run.agents.iter().flat_map(|a| &a.tools))
         {
-            let call = &tool.intent.call;
-            let label = goal_report_call_label(call);
-            let Some(observation) = tool.observation.as_ref() else {
-                if matches!(
-                    task_run.status,
-                    crate::session::RunStatus::Cancelled
-                        | crate::session::RunStatus::Failed
-                        | crate::session::RunStatus::Interrupted
-                ) {
-                    push_goal_report_item(
-                        report,
-                        GoalReportSection::Unresolved,
-                        &format!("{label} has no committed Tool outcome."),
-                        omitted_facts,
-                    );
-                }
-                continue;
-            };
-            match observation.disposition {
-                crate::tools::ToolDisposition::Denied
-                | crate::tools::ToolDisposition::Failed
-                | crate::tools::ToolDisposition::Conflict
-                | crate::tools::ToolDisposition::Limit
-                    if goal.budget_refusal.is_some() => {}
-
-                crate::tools::ToolDisposition::Succeeded
-                    if observation.attested_for(&tool.intent) => {}
-                crate::tools::ToolDisposition::Denied
-                | crate::tools::ToolDisposition::Failed
-                | crate::tools::ToolDisposition::Conflict => push_goal_report_item(
-                    report,
-                    GoalReportSection::Unresolved,
-                    &format!("{label} failed; its effect was not recorded as successful."),
-                    omitted_facts,
-                ),
-                crate::tools::ToolDisposition::Limit => {
-                    let timeout_limit = match call {
-                        crate::tools::ToolCall::Command { .. } => {
-                            crate::session::requested_command_resources(
-                                call,
-                                goal.plan_contract.as_ref(),
-                                goal.resource_settings,
-                            )
-                            .ok()
-                            .and_then(|(_, requested)| {
-                                (requested > goal.resource_settings.max_command_timeout_ms)
-                                    .then_some((
-                                        requested,
-                                        goal.resource_settings.max_command_timeout_ms,
-                                    ))
-                            })
-                        }
-                        _ => None,
-                    };
-                    let fact = timeout_limit.map_or_else(
-                        || format!("{label} failed; its effect was not recorded as successful."),
-                        |(requested, maximum)| {
-                            crate::tools::types::command_timeout_limit_message(requested, maximum)
-                        },
-                    );
-                    push_goal_report_item(
-                        report,
-                        GoalReportSection::Unresolved,
-                        &fact,
-                        omitted_facts,
-                    );
-                }
-                crate::tools::ToolDisposition::Uncertain
-                | crate::tools::ToolDisposition::Cancelled => {
-                    if observation.cache_update != crate::tools::CacheUpdate::Uncertain {
-                        push_goal_report_item(
-                            report,
-                            GoalReportSection::Unresolved,
-                            &format!(
-                                "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
-                            ),
-                            omitted_facts,
-                        );
-                    }
-                }
-                crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
-                    report,
-                    GoalReportSection::Unresolved,
-                    &format!("{label} reported success without a valid attestation."),
-                    omitted_facts,
-                ),
+            if let Some(fact) = unresolved_tool_fact(task_run, tool, goal) {
+                push_goal_report_item(report, GoalReportSection::Unresolved, &fact, omitted_facts);
             }
         }
     }
+}
+
+fn unresolved_tool_fact(
+    task_run: &RunView,
+    tool: &crate::session::ToolView,
+    goal: &crate::session::GoalView,
+) -> Option<String> {
+    let call = &tool.intent.call;
+    let label = goal_report_call_label(call);
+    let Some(observation) = tool.observation.as_ref() else {
+        return matches!(
+            task_run.status,
+            crate::session::RunStatus::Cancelled
+                | crate::session::RunStatus::Failed
+                | crate::session::RunStatus::Interrupted
+        )
+        .then(|| format!("{label} has no committed Tool outcome."));
+    };
+    match observation.disposition {
+        crate::tools::ToolDisposition::Denied
+        | crate::tools::ToolDisposition::Failed
+        | crate::tools::ToolDisposition::Conflict
+        | crate::tools::ToolDisposition::Limit
+            if goal.budget_refusal.is_some() =>
+        {
+            None
+        }
+        crate::tools::ToolDisposition::Succeeded if observation.attested_for(&tool.intent) => None,
+        crate::tools::ToolDisposition::Denied
+        | crate::tools::ToolDisposition::Failed
+        | crate::tools::ToolDisposition::Conflict => Some(format!(
+            "{label} failed; its effect was not recorded as successful."
+        )),
+        crate::tools::ToolDisposition::Limit => Some(limit_fact(&label, call, goal)),
+        crate::tools::ToolDisposition::Uncertain | crate::tools::ToolDisposition::Cancelled => {
+            (observation.cache_update != crate::tools::CacheUpdate::Uncertain).then(|| {
+                format!(
+                    "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
+                )
+            })
+        }
+        crate::tools::ToolDisposition::Succeeded => Some(format!(
+            "{label} reported success without a valid attestation."
+        )),
+    }
+}
+
+fn limit_fact(
+    label: &str,
+    call: &crate::tools::ToolCall,
+    goal: &crate::session::GoalView,
+) -> String {
+    let timeout_limit = match call {
+        crate::tools::ToolCall::Command { .. } => crate::session::requested_command_resources(
+            call,
+            goal.plan_contract.as_ref(),
+            goal.resource_settings,
+        )
+        .ok()
+        .and_then(|(_, requested)| {
+            (requested > goal.resource_settings.max_command_timeout_ms)
+                .then_some((requested, goal.resource_settings.max_command_timeout_ms))
+        }),
+        _ => None,
+    };
+    timeout_limit.map_or_else(
+        || format!("{label} failed; its effect was not recorded as successful."),
+        |(requested, maximum)| {
+            crate::tools::types::command_timeout_limit_message(requested, maximum)
+        },
+    )
 }
 
 fn push_success_facts(
@@ -723,81 +747,8 @@ fn push_success_facts(
                 continue;
             }
             let call = &tool.intent.call;
-            match call {
-                crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
-                crate::tools::ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
-                } => {
-                    for change in files {
-                        let action = if change.after.is_none() {
-                            "removed"
-                        } else if change.before.is_none() {
-                            "created"
-                        } else {
-                            "updated"
-                        };
-                        push_goal_report_item(
-                            report,
-                            GoalReportSection::Changes,
-                            &format!("Editor {action} {}.", change.path),
-                            omitted_facts,
-                        );
-                    }
-                }
-                crate::tools::ToolCall::Write { path, .. }
-                | crate::tools::ToolCall::Edit { path, .. }
-                | crate::tools::ToolCall::Delete { path, .. }
-                | crate::tools::ToolCall::MultiEdit {
-                    file_path: path, ..
-                } => {
-                    push_goal_report_item(
-                        report,
-                        GoalReportSection::Changes,
-                        &format!("{} {path}.", call.label()),
-                        omitted_facts,
-                    );
-                }
-                crate::tools::ToolCall::Move {
-                    source,
-                    destination,
-                    ..
-                } => {
-                    push_goal_report_item(
-                        report,
-                        GoalReportSection::Changes,
-                        &format!("Moved {source} to {destination}."),
-                        omitted_facts,
-                    );
-                }
-                crate::tools::ToolCall::Mkdir { path } => {
-                    push_goal_report_item(
-                        report,
-                        GoalReportSection::Changes,
-                        &format!("Created directory {path}."),
-                        omitted_facts,
-                    );
-                }
-                crate::tools::ToolCall::ApplyChangeset {
-                    source:
-                        crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
-                } => {
-                    for change in &changeset.files {
-                        let action = if change.after.is_none() {
-                            "removed"
-                        } else if change.before.is_none() {
-                            "created"
-                        } else {
-                            "updated"
-                        };
-                        push_goal_report_item(
-                            report,
-                            GoalReportSection::Changes,
-                            &format!("Command {action} {}.", change.path),
-                            omitted_facts,
-                        );
-                    }
-                }
-                _ => {}
+            for change in change_facts(call) {
+                push_goal_report_item(report, GoalReportSection::Changes, &change, omitted_facts);
             }
             push_goal_report_item(
                 report,
@@ -806,6 +757,55 @@ fn push_success_facts(
                 omitted_facts,
             );
         }
+    }
+}
+
+fn change_facts(call: &crate::tools::ToolCall) -> Vec<String> {
+    use crate::session::worker::ChangesetSource;
+    use crate::tools::ToolCall;
+    match call {
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .map(|change| {
+                let action = change_action(change.before.is_some(), change.after.is_some());
+                format!("Editor {action} {}.", change.path)
+            })
+            .collect(),
+        ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::Delete { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } => vec![format!("{} {path}.", call.label())],
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => vec![format!("Moved {source} to {destination}.")],
+        ToolCall::Mkdir { path } => vec![format!("Created directory {path}.")],
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::CommandReceipt { changeset, .. },
+        } => changeset
+            .files
+            .iter()
+            .map(|change| {
+                let action = change_action(change.before.is_some(), change.after.is_some());
+                format!("Command {action} {}.", change.path)
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn change_action(before: bool, after: bool) -> &'static str {
+    if !after {
+        "removed"
+    } else if !before {
+        "created"
+    } else {
+        "updated"
     }
 }
 

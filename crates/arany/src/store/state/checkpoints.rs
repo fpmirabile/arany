@@ -25,6 +25,9 @@ const MAX_VERSION: usize = 1024 * 1024;
 const MAX_CAPTURE: usize = 32 * 1024 * 1024;
 const MAX_FILES: usize = 2048;
 const HEADROOM: u64 = 4 * 1024 * 1024;
+// SQLite page size, and the pages a new file's rows and index entries may take.
+const PAGE_BYTES: i64 = 4096;
+const PAGES_PER_FILE: i64 = 16;
 
 pub(crate) type Pruned = BTreeMap<SessionId, RunId>;
 pub(crate) type Checked = Option<i64>;
@@ -545,8 +548,6 @@ fn capture_inner(
     let capacity = rustix::fs::fstatvfs(&root.dir).map_err(|e| StoreError::Io(e.into()))?;
     let available =
         i64::try_from(capacity.f_bavail.saturating_mul(capacity.f_frsize)).unwrap_or(i64::MAX);
-    let bytes: i64 = capture.files.iter().map(|(_, b)| b.len() as i64).sum();
-    let files = capture.files.len() as i64;
     let incoming: BTreeSet<[u8; 32]> = capture
         .files
         .iter()
@@ -558,7 +559,6 @@ fn capture_inner(
     tx.commit()?;
     in_time(deadline)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let session = capture.session.to_string();
     let (goal, run_id, rewind_id) = match capture.owner {
         CaptureOwner::Tool { goal, run, .. } => (goal.to_string(), Some(run.to_string()), None),
         CaptureOwner::Rewind { rewind_id } => (
@@ -571,119 +571,25 @@ fn capture_inner(
         .as_ref()
         .or(rewind_id.as_ref())
         .ok_or(StoreError::CheckpointUnavailable)?;
-    let sequence = i64::try_from(sequence).map_err(|_| StoreError::CheckpointUnavailable)?;
-    for (path, content) in &capture.files {
-        if !crate::validate::valid_relative(path, false) || path.len() > MAX_PATH_BYTES {
-            return Err(StoreError::CheckpointUnavailable);
-        }
-        let count = scalar(
-            &tx,
-            "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND path=?2",
-            params![session, path],
-        )?;
-        let len = scalar(
-            &tx,
-            "SELECT COALESCE(SUM(len),0) FROM refs WHERE session_id=?1 AND path=?2",
-            params![session, path],
-        )?;
-        let add = content.len() as i64;
-        if count + 1 > limits.path_versions || len + add > limits.path_bytes {
-            evict(
-                &tx,
-                &format!(
-                    "{ROWS},CAST(rowid AS TEXT) FROM refs WHERE session_id=?1 AND path=?2 AND tool_sequence!=?3 ORDER BY captured_at_ms,tool_sequence,rowid"
-                ),
-                params![session, path, sequence],
-                &incoming,
-                &mut pruned,
-                true,
-                |freed, rows| {
-                    count + 1 - rows <= limits.path_versions
-                        && len - freed + add <= limits.path_bytes
-                },
-            )?;
-        }
-    }
-    in_time(deadline)?;
-    let goal_bytes = scalar(
-        &tx,
-        "SELECT COALESCE(SUM(len),0) FROM refs WHERE goal_id=?1",
-        [&goal],
-    )?;
-    if goal_bytes + bytes > limits.goal_bytes {
-        evict_checkpoints(
-            &tx,
-            "goal_id=?1",
-            &goal,
-            run,
-            &incoming,
-            &mut pruned,
-            |freed, _| goal_bytes - freed + bytes <= limits.goal_bytes,
-        )?;
-    }
-    let session_bytes = scalar(
-        &tx,
-        "SELECT COALESCE(SUM(len),0) FROM refs WHERE session_id=?1",
-        [&session],
-    )?;
-    let session_checkpoints = scalar(
-        &tx,
-        "SELECT COUNT(DISTINCT COALESCE(run_id,rewind_id)) FROM refs WHERE session_id=?1",
-        [&session],
-    )? + i64::from(
-        scalar(
-            &tx,
-            "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND COALESCE(run_id,rewind_id)=?2",
-            params![session, run],
-        )? == 0,
-    );
-    if session_bytes + bytes > limits.session_bytes
-        || session_checkpoints > limits.session_checkpoints
-    {
-        evict_checkpoints(
-            &tx,
-            "session_id=?1",
-            &session,
-            run,
-            &incoming,
-            &mut pruned,
-            |freed, groups| {
-                session_bytes - freed + bytes <= limits.session_bytes
-                    && session_checkpoints - groups <= limits.session_checkpoints
-            },
-        )?;
-    }
-    in_time(deadline)?;
-    let rows = scalar(&tx, "SELECT COUNT(*) FROM refs", [])?;
-    if rows + files > limits.refs {
-        evict_total(&tx, &incoming, &mut pruned, true, |_, removed| {
-            rows - removed + files <= limits.refs
-        })?;
-    }
-    in_time(deadline)?;
-    let needed = bytes + files * 16 * 4096;
-    let pages = |tx: &Connection| -> Result<(i64, i64), StoreError> {
-        let free = scalar(tx, "PRAGMA freelist_count", [])? * 4096;
-        Ok((scalar(tx, "PRAGMA page_count", [])? * 4096 - free, free))
+    let mut fit = CaptureFit {
+        tx: &tx,
+        incoming: &incoming,
+        pruned: &mut pruned,
+        limits,
+        session: capture.session.to_string(),
+        goal: &goal,
+        run,
+        sequence: i64::try_from(sequence).map_err(|_| StoreError::CheckpointUnavailable)?,
+        bytes: capture.files.iter().map(|(_, b)| b.len() as i64).sum(),
+        files: capture.files.len() as i64,
     };
-    let shortfall = |tx: &Connection| -> Result<i64, StoreError> {
-        let (used, free) = pages(tx)?;
-        let growth = (needed - free).max(0);
-        Ok((used + needed - limits.bytes).max(HEADROOM as i64 + needed + growth - available))
-    };
-    let short = shortfall(&tx)?;
-    if short > 0 {
-        if HEADROOM as i64 + needed > available {
-            return Err(StoreError::StorageFull);
-        }
-        evict_total(&tx, &incoming, &mut pruned, false, |freed, _| {
-            freed >= short.saturating_mul(2)
-        })?;
-        in_time(deadline)?;
-        if shortfall(&tx)? > 0 {
-            return Err(StoreError::StorageFull);
-        }
-    }
+    fit.paths(capture)?;
+    in_time(deadline)?;
+    fit.owners()?;
+    in_time(deadline)?;
+    fit.refs()?;
+    in_time(deadline)?;
+    fit.space(available, deadline)?;
     for (path, content) in &capture.files {
         let digest = Sha256::digest(content);
         tx.execute(
@@ -694,12 +600,159 @@ fn capture_inner(
         if &stored != content {
             return Err(StoreError::CheckpointUnavailable);
         }
-        tx.execute("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![session,goal,run_id,rewind_id,sequence,path,digest.as_slice(),content.len() as i64,now])?;
+        tx.execute("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![fit.session,goal,run_id,rewind_id,fit.sequence,path,digest.as_slice(),content.len() as i64,now])?;
     }
     in_time(deadline)?;
     tx.commit()?;
     connection.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(pruned)
+}
+
+struct CaptureFit<'a> {
+    tx: &'a Connection,
+    incoming: &'a BTreeSet<[u8; 32]>,
+    pruned: &'a mut Pruned,
+    limits: Limits,
+    session: String,
+    goal: &'a str,
+    run: &'a str,
+    sequence: i64,
+    bytes: i64,
+    files: i64,
+}
+
+impl CaptureFit<'_> {
+    fn paths(&mut self, capture: &Capture) -> Result<(), StoreError> {
+        let (session, sequence, limits) = (&self.session, self.sequence, self.limits);
+        for (path, content) in &capture.files {
+            if !crate::validate::valid_relative(path, false) || path.len() > MAX_PATH_BYTES {
+                return Err(StoreError::CheckpointUnavailable);
+            }
+            let count = scalar(
+                self.tx,
+                "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND path=?2",
+                params![session, path],
+            )?;
+            let len = scalar(
+                self.tx,
+                "SELECT COALESCE(SUM(len),0) FROM refs WHERE session_id=?1 AND path=?2",
+                params![session, path],
+            )?;
+            let add = content.len() as i64;
+            if count + 1 > limits.path_versions || len + add > limits.path_bytes {
+                evict(
+                    self.tx,
+                    &format!(
+                        "{ROWS},CAST(rowid AS TEXT) FROM refs WHERE session_id=?1 AND path=?2 AND tool_sequence!=?3 ORDER BY captured_at_ms,tool_sequence,rowid"
+                    ),
+                    params![session, path, sequence],
+                    self.incoming,
+                    self.pruned,
+                    true,
+                    |freed, rows| {
+                        count + 1 - rows <= limits.path_versions
+                            && len - freed + add <= limits.path_bytes
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn owners(&mut self) -> Result<(), StoreError> {
+        let (bytes, limits) = (self.bytes, self.limits);
+        let goal_bytes = scalar(
+            self.tx,
+            "SELECT COALESCE(SUM(len),0) FROM refs WHERE goal_id=?1",
+            [self.goal],
+        )?;
+        if goal_bytes + bytes > limits.goal_bytes {
+            evict_checkpoints(
+                self.tx,
+                "goal_id=?1",
+                self.goal,
+                self.run,
+                self.incoming,
+                self.pruned,
+                |freed, _| goal_bytes - freed + bytes <= limits.goal_bytes,
+            )?;
+        }
+        let session_bytes = scalar(
+            self.tx,
+            "SELECT COALESCE(SUM(len),0) FROM refs WHERE session_id=?1",
+            [&self.session],
+        )?;
+        let session_checkpoints = scalar(
+            self.tx,
+            "SELECT COUNT(DISTINCT COALESCE(run_id,rewind_id)) FROM refs WHERE session_id=?1",
+            [&self.session],
+        )? + i64::from(
+            scalar(
+                self.tx,
+                "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND COALESCE(run_id,rewind_id)=?2",
+                params![self.session, self.run],
+            )? == 0,
+        );
+        if session_bytes + bytes > limits.session_bytes
+            || session_checkpoints > limits.session_checkpoints
+        {
+            evict_checkpoints(
+                self.tx,
+                "session_id=?1",
+                &self.session,
+                self.run,
+                self.incoming,
+                self.pruned,
+                |freed, groups| {
+                    session_bytes - freed + bytes <= limits.session_bytes
+                        && session_checkpoints - groups <= limits.session_checkpoints
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn refs(&mut self) -> Result<(), StoreError> {
+        let (files, limits) = (self.files, self.limits);
+        let rows = scalar(self.tx, "SELECT COUNT(*) FROM refs", [])?;
+        if rows + files > limits.refs {
+            evict_total(self.tx, self.incoming, self.pruned, true, |_, removed| {
+                rows - removed + files <= limits.refs
+            })?;
+        }
+        Ok(())
+    }
+
+    fn space(&mut self, available: i64, deadline: Instant) -> Result<(), StoreError> {
+        let limits = self.limits;
+        let needed = self.bytes + self.files * PAGES_PER_FILE * PAGE_BYTES;
+        let pages = |tx: &Connection| -> Result<(i64, i64), StoreError> {
+            let free = scalar(tx, "PRAGMA freelist_count", [])? * PAGE_BYTES;
+            Ok((
+                scalar(tx, "PRAGMA page_count", [])? * PAGE_BYTES - free,
+                free,
+            ))
+        };
+        let shortfall = |tx: &Connection| -> Result<i64, StoreError> {
+            let (used, free) = pages(tx)?;
+            let growth = (needed - free).max(0);
+            Ok((used + needed - limits.bytes).max(HEADROOM as i64 + needed + growth - available))
+        };
+        let short = shortfall(self.tx)?;
+        if short > 0 {
+            if HEADROOM as i64 + needed > available {
+                return Err(StoreError::StorageFull);
+            }
+            evict_total(self.tx, self.incoming, self.pruned, false, |freed, _| {
+                freed >= short.saturating_mul(2)
+            })?;
+            in_time(deadline)?;
+            if shortfall(self.tx)? > 0 {
+                return Err(StoreError::StorageFull);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn read(connection: &Connection, digest: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {

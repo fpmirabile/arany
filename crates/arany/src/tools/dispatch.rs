@@ -73,15 +73,7 @@ pub(super) fn outcome(
     Option<EnforcementCause>,
     Option<LimitCause>,
 ) {
-    let limit_cause = match &result {
-        Ok(output) if output.len() > intent.limits.result_bytes as usize => {
-            Some(LimitCause::Resource)
-        }
-        Err(ToolError::Limit | ToolError::DiskSpace(_)) => Some(LimitCause::Resource),
-        Err(ToolError::OutputCeiling) => Some(LimitCause::OutputCeiling),
-        Err(ToolError::Timeout(_)) => Some(LimitCause::Timeout),
-        _ => None,
-    };
+    let limit_cause = limit_cause(intent, &result);
     let cause = match &result {
         Err(ToolError::FilesystemDenied) => Some(EnforcementCause::FilesystemDenied),
         _ => None,
@@ -95,11 +87,31 @@ pub(super) fn outcome(
             };
             (disposition, output)
         }
-        Ok(_) | Err(ToolError::Limit) => (
+        Ok(_) => error_outcome(intent, ToolError::Limit),
+        Err(error) => error_outcome(intent, error),
+    };
+    (disposition, output, cause, limit_cause)
+}
+
+fn limit_cause(intent: &EffectIntent, result: &Result<String, ToolError>) -> Option<LimitCause> {
+    match result {
+        Ok(output) if output.len() > intent.limits.result_bytes as usize => {
+            Some(LimitCause::Resource)
+        }
+        Err(ToolError::Limit | ToolError::DiskSpace(_)) => Some(LimitCause::Resource),
+        Err(ToolError::OutputCeiling) => Some(LimitCause::OutputCeiling),
+        Err(ToolError::Timeout(_)) => Some(LimitCause::Timeout),
+        _ => None,
+    }
+}
+
+fn error_outcome(intent: &EffectIntent, error: ToolError) -> (ToolDisposition, String) {
+    match error {
+        ToolError::Limit => (
             ToolDisposition::Limit,
             "Tool result or resource limit reached".into(),
         ),
-        Err(ToolError::Timeout(output)) => (
+        ToolError::Timeout(output) => (
             ToolDisposition::Limit,
             if output.is_empty() {
                 "Tool runtime expired".into()
@@ -107,73 +119,73 @@ pub(super) fn outcome(
                 output
             },
         ),
-        Err(ToolError::DiskSpace(output)) => (ToolDisposition::Limit, output),
-        Err(ToolError::OutputCeiling) => (
+        ToolError::DiskSpace(output) => (ToolDisposition::Limit, output),
+        ToolError::OutputCeiling => (
             ToolDisposition::Limit,
             "output_ceiling: output passed 1 GiB per stream; stopped".into(),
         ),
-        Err(ToolError::Pattern(cause)) => (
+        ToolError::Pattern(cause) => (
             ToolDisposition::Failed,
             format!("Search pattern refused: {cause}; nothing was read"),
         ),
-        Err(ToolError::SpillUnavailable) => {
+        ToolError::SpillUnavailable => {
             (ToolDisposition::Failed, "no spill for this Run".into())
         }
-        Err(ToolError::Conflict) => (
+        ToolError::Conflict => (
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),
         ),
-        Err(ToolError::Conflicts(paths)) => (
+        ToolError::Conflicts(paths) => (
             ToolDisposition::Conflict,
             format!("Nothing was integrated; these Workspace files changed since the editor started: {paths}"),
         ),
-        Err(ToolError::NotFound)
-            if matches!(
-                intent.call,
-                ToolCall::Read { .. }
-                    | ToolCall::List { .. }
-                    | ToolCall::Search { .. }
-                    | ToolCall::Glob { .. }
-                    | ToolCall::Write { .. }
-                    | ToolCall::Edit { .. }
-                    | ToolCall::Delete { .. }
-                    | ToolCall::Move { .. }
-                    | ToolCall::MultiEdit { .. }
-                    | ToolCall::Mkdir { .. }
-            ) =>
-        {
-            (
-                ToolDisposition::Failed,
-                if matches!(intent.call, ToolCall::Mkdir { .. }) {
-                    "Parent directory not found; create it with Mkdir first"
-                } else {
-                    "File or directory not found; List the parent directory to check the path"
-                }
-                .into(),
-            )
-        }
-        Err(ToolError::Path | ToolError::FilesystemDenied | ToolError::NotFound) => (
+        ToolError::NotFound if names_file(&intent.call) => (
+            ToolDisposition::Failed,
+            if matches!(intent.call, ToolCall::Mkdir { .. }) {
+                "Parent directory not found; create it with Mkdir first"
+            } else {
+                "File or directory not found; List the parent directory to check the path"
+            }
+            .into(),
+        ),
+        ToolError::Path | ToolError::FilesystemDenied | ToolError::NotFound => (
             ToolDisposition::Denied,
             "File path is unavailable or outside the admitted regular-file boundary".into(),
         ),
-        Err(ToolError::Cancelled) => (
+        ToolError::Cancelled => (
             ToolDisposition::Cancelled,
             "File operation cancelled; nothing in the Workspace changed".into(),
         ),
-        Err(ToolError::Uncertain) if intent.call.is_mcp() => (
+        ToolError::Uncertain if intent.call.is_mcp() => (
             ToolDisposition::Uncertain,
             "The outcome of this remote MCP effect is unknown: its token renewal or the server's reply was lost or invalid. Check the server's state and authorization before another attempt"
                 .into(),
         ),
-        Err(ToolError::Uncertain) => (
+        ToolError::Uncertain => (
             ToolDisposition::Uncertain,
             "Filesystem change may have occurred; inspect current state before another attempt"
                 .into(),
         ),
-        Err(_) => (
+        _ => (
             ToolDisposition::Failed,
             "Tool operation failed; no automatic retry".into(),
         ),
-    };
-    (disposition, output, cause, limit_cause)
+    }
+}
+
+// File Tools name a Workspace path, so a missing one is the model's to correct.
+fn names_file(call: &ToolCall) -> bool {
+    matches!(
+        call,
+        ToolCall::Read { .. }
+            | ToolCall::List { .. }
+            | ToolCall::Search { .. }
+            | ToolCall::Glob { .. }
+            | ToolCall::Write { .. }
+            | ToolCall::Edit { .. }
+            | ToolCall::Delete { .. }
+            | ToolCall::Move { .. }
+            | ToolCall::MultiEdit { .. }
+            | ToolCall::Mkdir { .. }
+    )
 }

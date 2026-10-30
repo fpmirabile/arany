@@ -370,34 +370,10 @@ impl RunTrace {
             | Event::GoalRunLinked { goal_id, .. }
                 if *goal_id == self.goal_id && self.goal.is_none() =>
             {
-                self.goal = Some(TraceSpan::root_at(
-                    &self.tracer,
-                    "invoke_workflow arany.goal",
-                    SpanKind::Internal,
-                    vec![
-                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
-                        KeyValue::new("gen_ai.workflow.name", "arany.goal"),
-                        KeyValue::new("arany.session.id", self.session_id.to_string()),
-                        KeyValue::new("arany.goal.id", self.goal_id.to_string()),
-                    ],
-                    Some(at),
-                ));
+                self.open_goal(at);
             }
             Event::MessageAccepted { run_id, .. } if self.run.is_none() => {
-                let span = child_of(
-                    self.goal.as_ref(),
-                    "invoke_workflow arany.run",
-                    SpanKind::Internal,
-                    vec![
-                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
-                        KeyValue::new("gen_ai.workflow.name", "arany.run"),
-                        KeyValue::new("arany.session.id", self.session_id.to_string()),
-                        KeyValue::new("arany.run.id", run_id.to_string()),
-                        KeyValue::new("arany.goal.id", self.goal_id.to_string()),
-                    ],
-                    at,
-                );
-                self.run = Some((*run_id, span));
+                self.open_run(*run_id, at)
             }
             Event::AgentSpawned {
                 run_id,
@@ -406,52 +382,7 @@ impl RunTrace {
                 profile,
                 ..
             } if self.run_id() == Some(*run_id) => {
-                let mut attributes = vec![
-                    KeyValue::new("gen_ai.operation.name", "invoke_agent"),
-                    KeyValue::new("arany.session.id", self.session_id.to_string()),
-                    KeyValue::new("arany.run.id", run_id.to_string()),
-                    KeyValue::new("arany.agent_run.id", agent_run_id.to_string()),
-                ];
-                let (name, parent) = match role {
-                    AgentRole::Primary => {
-                        self.primary = Some(*agent_run_id);
-                        attributes.push(KeyValue::new("gen_ai.agent.name", "primary"));
-                        attributes.push(KeyValue::new("arany.agent.role", "primary"));
-                        (
-                            "invoke_agent arany.primary",
-                            self.run.as_ref().map(|(_, span)| span),
-                        )
-                    }
-                    AgentRole::Child => {
-                        attributes.push(KeyValue::new("gen_ai.agent.name", "child"));
-                        if let Some(primary) = self.primary {
-                            attributes.push(KeyValue::new(
-                                "arany.agent_run.parent_id",
-                                primary.to_string(),
-                            ));
-                        }
-                        attributes.push(KeyValue::new("arany.agent.role", "child"));
-                        (
-                            "invoke_agent arany.child",
-                            self.primary
-                                .and_then(|primary| self.agents.get(&primary))
-                                .map(|agent| &agent.span),
-                        )
-                    }
-                };
-                let span = child_of(parent, name, SpanKind::Internal, attributes, at);
-                self.agents.insert(
-                    *agent_run_id,
-                    AgentSpan {
-                        child_route: profile
-                            .as_ref()
-                            .and_then(|name| self.roster.as_ref()?.chain(name)?.first())
-                            .cloned(),
-                        span,
-                        call_started: None,
-                        requested: None,
-                    },
-                );
+                self.open_agent(*run_id, *agent_run_id, *role, profile.as_deref(), at);
             }
             Event::RunStarted { run_id, config, .. } if self.run_id() == Some(*run_id) => {
                 self.roster = config.roster.clone();
@@ -475,23 +406,116 @@ impl RunTrace {
                 run_id,
                 agent_run_id,
                 fallback,
-            } if self.run_id() == Some(*run_id) => {
-                // A logical call's span keeps the route it requested; the switch is its own marker.
-                let requested = if fallback.role == ProviderRole::Compaction {
-                    Some(&mut self.compaction_requested)
-                } else {
-                    self.agents
-                        .get_mut(agent_run_id)
-                        .map(|agent| &mut agent.requested)
-                };
-                if let Some(requested) = requested {
-                    requested.get_or_insert_with(|| fallback.from.clone());
-                }
-                self.switched
-                    .insert((*agent_run_id, fallback.role), fallback.to.clone());
-            }
+            } if self.run_id() == Some(*run_id) => self.record_fallback(*agent_run_id, fallback),
             _ => {}
         }
+    }
+
+    fn open_goal(&mut self, at: SystemTime) {
+        self.goal = Some(TraceSpan::root_at(
+            &self.tracer,
+            "invoke_workflow arany.goal",
+            SpanKind::Internal,
+            vec![
+                KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
+                KeyValue::new("gen_ai.workflow.name", "arany.goal"),
+                KeyValue::new("arany.session.id", self.session_id.to_string()),
+                KeyValue::new("arany.goal.id", self.goal_id.to_string()),
+            ],
+            Some(at),
+        ));
+    }
+
+    fn open_run(&mut self, run_id: RunId, at: SystemTime) {
+        let span = child_of(
+            self.goal.as_ref(),
+            "invoke_workflow arany.run",
+            SpanKind::Internal,
+            vec![
+                KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
+                KeyValue::new("gen_ai.workflow.name", "arany.run"),
+                KeyValue::new("arany.session.id", self.session_id.to_string()),
+                KeyValue::new("arany.run.id", run_id.to_string()),
+                KeyValue::new("arany.goal.id", self.goal_id.to_string()),
+            ],
+            at,
+        );
+        self.run = Some((run_id, span));
+    }
+
+    fn open_agent(
+        &mut self,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        role: AgentRole,
+        profile: Option<&str>,
+        at: SystemTime,
+    ) {
+        let mut attributes = vec![
+            KeyValue::new("gen_ai.operation.name", "invoke_agent"),
+            KeyValue::new("arany.session.id", self.session_id.to_string()),
+            KeyValue::new("arany.run.id", run_id.to_string()),
+            KeyValue::new("arany.agent_run.id", agent_run_id.to_string()),
+        ];
+        let (name, parent) = match role {
+            AgentRole::Primary => {
+                self.primary = Some(agent_run_id);
+                attributes.push(KeyValue::new("gen_ai.agent.name", "primary"));
+                attributes.push(KeyValue::new("arany.agent.role", "primary"));
+                (
+                    "invoke_agent arany.primary",
+                    self.run.as_ref().map(|(_, span)| span),
+                )
+            }
+            AgentRole::Child => {
+                attributes.push(KeyValue::new("gen_ai.agent.name", "child"));
+                if let Some(primary) = self.primary {
+                    attributes.push(KeyValue::new(
+                        "arany.agent_run.parent_id",
+                        primary.to_string(),
+                    ));
+                }
+                attributes.push(KeyValue::new("arany.agent.role", "child"));
+                (
+                    "invoke_agent arany.child",
+                    self.primary
+                        .and_then(|primary| self.agents.get(&primary))
+                        .map(|agent| &agent.span),
+                )
+            }
+        };
+        let span = child_of(parent, name, SpanKind::Internal, attributes, at);
+        self.agents.insert(
+            agent_run_id,
+            AgentSpan {
+                child_route: profile
+                    .and_then(|name| self.roster.as_ref()?.chain(name)?.first())
+                    .cloned(),
+                span,
+                call_started: None,
+                requested: None,
+            },
+        );
+    }
+
+    // A logical call's span keeps the route it requested; the switch is its own marker.
+    fn record_fallback(
+        &mut self,
+        agent_run_id: AgentRunId,
+        fallback: &crate::provider::ProviderFallback,
+    ) {
+        let requested = if fallback.role == ProviderRole::Compaction {
+            Some(&mut self.compaction_requested)
+        } else {
+            self.agents
+                .get_mut(&agent_run_id)
+                .map(|agent| &mut agent.requested)
+        };
+        if let Some(requested) = requested {
+            requested.get_or_insert_with(|| fallback.from.clone());
+        }
+        self.switched
+            .insert((agent_run_id, fallback.role), fallback.to.clone());
     }
 
     fn mark(&mut self, envelope: &EventEnvelope, at: SystemTime) {
@@ -575,20 +599,7 @@ impl RunTrace {
                     verdict.as_ref().is_some_and(|verdict| verdict.approved),
                 );
             }
-            Event::ToolFinished { observation, .. } => {
-                if observation.intent.call.is_unguarded()
-                    && self
-                        .unguarded_pending
-                        .remove(&observation.intent.digest())
-                        .is_some()
-                    && (matches!(
-                        observation.attestation,
-                        Some(crate::tools::Attestation::Unguarded(_))
-                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain)
-                {
-                    self.unguarded_completed = self.unguarded_completed.saturating_add(1);
-                }
-            }
+            Event::ToolFinished { observation, .. } => self.unguarded_finished(observation),
             Event::AgentFinished {
                 agent_run_id,
                 disposition,
@@ -598,47 +609,7 @@ impl RunTrace {
                     agent.span.finish_at(TraceOutcome::from(*disposition), at);
                 }
             }
-            Event::GoalContextCompacted { record, .. } => {
-                let started = self.compaction_started.take().unwrap_or(at);
-                let requested = self.compaction_requested.take();
-                let (Some((run_id, run)), Some(_)) = (&self.run, &self.routes) else {
-                    return;
-                };
-                let (provider, model) = requested.as_ref().map_or(
-                    (TraceProvider::from_profile(&record.provider), &record.model),
-                    |identity| {
-                        (
-                            TraceProvider::from_profile(&identity.profile),
-                            &identity.model,
-                        )
-                    },
-                );
-                let span = run.child(
-                    "compact arany.goal_tool_context",
-                    SpanKind::Internal,
-                    vec![
-                        KeyValue::new("arany.operation", "compact_goal_tool_context"),
-                        KeyValue::new("arany.session.id", self.session_id.to_string()),
-                        KeyValue::new("arany.run.id", run_id.to_string()),
-                    ],
-                    Some(started),
-                );
-                let outcome = ProviderTraceOutcome::from(&record.status);
-                ProviderTrace(span.child(
-                    "chat arany.compaction",
-                    SpanKind::Client,
-                    provider.compaction_attributes(model),
-                    Some(started),
-                ))
-                .finish_at(outcome, at, record.input_tokens, record.output_tokens);
-                span.marker(
-                    envelope.sequence,
-                    TraceEventKind::from(&envelope.event),
-                    at,
-                    [],
-                );
-                span.finish_at(outcome.into(), at);
-            }
+            Event::GoalContextCompacted { record, .. } => self.compacted(envelope, record, at),
             Event::RunFinished {
                 run_id,
                 disposition,
@@ -661,6 +632,68 @@ impl RunTrace {
             } if *goal_id == self.goal_id => self.goal_end = Some((*status, at)),
             _ => {}
         }
+    }
+
+    fn unguarded_finished(&mut self, observation: &crate::tools::ToolObservation) {
+        if observation.intent.call.is_unguarded()
+            && self
+                .unguarded_pending
+                .remove(&observation.intent.digest())
+                .is_some()
+            && (matches!(
+                observation.attestation,
+                Some(crate::tools::Attestation::Unguarded(_))
+            ) || observation.disposition == crate::tools::ToolDisposition::Uncertain)
+        {
+            self.unguarded_completed = self.unguarded_completed.saturating_add(1);
+        }
+    }
+
+    fn compacted(
+        &mut self,
+        envelope: &EventEnvelope,
+        record: &crate::session::CompactionRecord,
+        at: SystemTime,
+    ) {
+        let started = self.compaction_started.take().unwrap_or(at);
+        let requested = self.compaction_requested.take();
+        let (Some((run_id, run)), Some(_)) = (&self.run, &self.routes) else {
+            return;
+        };
+        let (provider, model) = requested.as_ref().map_or(
+            (TraceProvider::from_profile(&record.provider), &record.model),
+            |identity| {
+                (
+                    TraceProvider::from_profile(&identity.profile),
+                    &identity.model,
+                )
+            },
+        );
+        let span = run.child(
+            "compact arany.goal_tool_context",
+            SpanKind::Internal,
+            vec![
+                KeyValue::new("arany.operation", "compact_goal_tool_context"),
+                KeyValue::new("arany.session.id", self.session_id.to_string()),
+                KeyValue::new("arany.run.id", run_id.to_string()),
+            ],
+            Some(started),
+        );
+        let outcome = ProviderTraceOutcome::from(&record.status);
+        ProviderTrace(span.child(
+            "chat arany.compaction",
+            SpanKind::Client,
+            provider.compaction_attributes(model),
+            Some(started),
+        ))
+        .finish_at(outcome, at, record.input_tokens, record.output_tokens);
+        span.marker(
+            envelope.sequence,
+            TraceEventKind::from(&envelope.event),
+            at,
+            [],
+        );
+        span.finish_at(outcome.into(), at);
     }
 
     fn provider_call(

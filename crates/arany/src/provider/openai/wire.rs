@@ -1,5 +1,5 @@
 use crate::provider::compaction_input;
-use crate::provider::conversation::{Block, Conversation, Role};
+use crate::provider::conversation::{Block, Conversation, Message, Role};
 use crate::provider::decode::{argument_limit, function_outcome, review_outcome, tool_function};
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
@@ -431,87 +431,95 @@ fn input_items(conversation: &Conversation) -> Result<Vec<Value>, ProviderError>
     let mut unanswered: Vec<String> = Vec::new();
     for message in &conversation.messages {
         match message.role {
-            Role::Assistant => {
-                let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
-                    return Err(ProviderError::Rejected);
-                };
-                let replay = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
-                unanswered = replay
-                    .iter()
-                    .filter(|item| {
-                        item["type"] == "function_call" && item["name"] == "arany_delegate"
-                    })
-                    .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
-                    .collect();
-                items.extend(replay);
-            }
-            Role::User => {
-                let answered = |call_id: &str| {
-                    message.blocks.iter().any(
-                        |block| matches!(block, Block::ToolResult { id, .. } if id.as_str() == call_id),
-                    )
-                };
-                for call_id in std::mem::take(&mut unanswered) {
-                    if !answered(&call_id) {
-                        items.push(json!({"type": "function_call_output", "call_id": call_id, "output": DELEGATED_OUTPUT}));
-                    }
-                }
-                // A user message after function outputs would end the turn and drop its reasoning.
-                let last_result = message
-                    .blocks
-                    .iter()
-                    .rposition(|block| matches!(block, Block::ToolResult { .. }));
-                let harness: Map<String, Value> = message
-                    .blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        Block::Harness { scope, data } => Some(((*scope).to_owned(), data.clone())),
-                        _ => None,
-                    })
-                    .collect();
-                let mut parts = Vec::new();
-                for (index, block) in message.blocks.iter().enumerate() {
-                    match block {
-                        Block::Harness { .. } if last_result.is_some() => {}
-                        Block::Harness { scope, data } => parts.push(json!({
-                            "type": "input_text",
-                            "text": crate::provider::render::data_text(scope, data),
-                        })),
-                        Block::Text(text) if text.is_empty() => {}
-                        Block::Text(text) => {
-                            parts.push(json!({"type": "input_text", "text": text}))
-                        }
-                        Block::Image { label, image } => {
-                            parts.push(json!({"type": "input_text", "text": label}));
-                            parts.push(json!({
-                                "type": "input_image",
-                                "image_url": format!("data:image/png;base64,{}", image.base64()),
-                                "detail": "auto",
-                            }));
-                        }
-                        Block::ToolResult { id, output, .. } => {
-                            if !parts.is_empty() {
-                                items.push(
-                                    json!({"role": "user", "content": std::mem::take(&mut parts)}),
-                                );
-                            }
-                            let output = if Some(index) == last_result && !harness.is_empty() {
-                                with_harness(output, harness.clone())
-                            } else {
-                                output.clone()
-                            };
-                            items.push(json!({"type": "function_call_output", "call_id": id.as_str(), "output": output.to_string()}));
-                        }
-                        Block::AssistantTurn(_) => return Err(ProviderError::Rejected),
-                    }
-                }
-                if !parts.is_empty() {
-                    items.push(json!({"role": "user", "content": parts}));
-                }
-            }
+            Role::Assistant => unanswered = assistant_items(message, &mut items)?,
+            Role::User => user_items(message, std::mem::take(&mut unanswered), &mut items)?,
         }
     }
     Ok(items)
+}
+
+fn assistant_items(
+    message: &Message,
+    items: &mut Vec<Value>,
+) -> Result<Vec<String>, ProviderError> {
+    let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
+        return Err(ProviderError::Rejected);
+    };
+    let replay = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
+    let unanswered = replay
+        .iter()
+        .filter(|item| item["type"] == "function_call" && item["name"] == "arany_delegate")
+        .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
+        .collect();
+    items.extend(replay);
+    Ok(unanswered)
+}
+
+fn user_items(
+    message: &Message,
+    unanswered: Vec<String>,
+    items: &mut Vec<Value>,
+) -> Result<(), ProviderError> {
+    let answered = |call_id: &str| {
+        message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::ToolResult { id, .. } if id.as_str() == call_id))
+    };
+    for call_id in unanswered {
+        if !answered(&call_id) {
+            items.push(json!({"type": "function_call_output", "call_id": call_id, "output": DELEGATED_OUTPUT}));
+        }
+    }
+    // A user message after function outputs would end the turn and drop its reasoning.
+    let last_result = message
+        .blocks
+        .iter()
+        .rposition(|block| matches!(block, Block::ToolResult { .. }));
+    let harness: Map<String, Value> = message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Harness { scope, data } => Some(((*scope).to_owned(), data.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut parts = Vec::new();
+    for (index, block) in message.blocks.iter().enumerate() {
+        match block {
+            Block::Harness { .. } if last_result.is_some() => {}
+            Block::Harness { scope, data } => parts.push(json!({
+                "type": "input_text",
+                "text": crate::provider::render::data_text(scope, data),
+            })),
+            Block::Text(text) if text.is_empty() => {}
+            Block::Text(text) => parts.push(json!({"type": "input_text", "text": text})),
+            Block::Image { label, image } => {
+                parts.push(json!({"type": "input_text", "text": label}));
+                parts.push(json!({
+                    "type": "input_image",
+                    "image_url": format!("data:image/png;base64,{}", image.base64()),
+                    "detail": "auto",
+                }));
+            }
+            Block::ToolResult { id, output, .. } => {
+                if !parts.is_empty() {
+                    items.push(json!({"role": "user", "content": std::mem::take(&mut parts)}));
+                }
+                let output = if Some(index) == last_result && !harness.is_empty() {
+                    with_harness(output, harness.clone())
+                } else {
+                    output.clone()
+                };
+                items.push(json!({"type": "function_call_output", "call_id": id.as_str(), "output": output.to_string()}));
+            }
+            Block::AssistantTurn(_) => return Err(ProviderError::Rejected),
+        }
+    }
+    if !parts.is_empty() {
+        items.push(json!({"role": "user", "content": parts}));
+    }
+    Ok(())
 }
 
 // Harness facts stay labelled beside the result instead of becoming a user message.

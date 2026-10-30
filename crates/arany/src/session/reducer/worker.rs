@@ -340,73 +340,82 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
                 && profile.is_none()
                 && matches!(grant, Some(ChildGrant::EditOnly { .. })) =>
         {
-            let goal = active_run_goal(view, run_id).ok_or(ReplayError::InvalidTransition)?;
-            let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
-            let policy = config
-                .worker_policy
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            let receipt = config
-                .tool_policy
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            validate_request(view, run, &p.request, Some(id))
-                .map_err(|_| ReplayError::InvalidTransition)?;
-            let plan = goal
-                .plan_contract
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            let registry = super::definition_registry(run)?;
-            let def = registry
-                .get(&p.request.definition)
-                .ok_or(ReplayError::InvalidTransition)?;
-            if run.workers.stop.is_some()
-                || !p.grant.within(&policy.parent_grant)
-                || p.grant.write_paths != p.request.lease
-                || p.grant.commands != p.request.commands
-                || !p.grant.read_paths.iter().all(|l| within(l, &plan.paths))
-                || p.policy_digest != receipt.config_digest
-                || p.permissions_digest != receipt.permissions_digest
-                || run
-                    .agents
-                    .iter()
-                    .filter(|a| a.assignment.as_ref().is_some_and(|w| w.released.is_none()))
-                    .count()
-                    >= usize::from(policy.concurrency)
-                || run
-                    .agents
-                    .iter()
-                    .filter_map(|a| a.assignment.as_ref())
-                    .filter(|w| w.released.is_none())
-                    .any(|w| {
-                        w.pins
-                            .request
-                            .lease
-                            .iter()
-                            .any(|a| p.request.lease.iter().any(|b| overlaps(a, b)))
-                    })
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            for op in &p.grant.tools {
-                if !def.allows_worker_tool(*op) {
-                    return Err(ReplayError::InvalidTransition);
-                }
-            }
-            let wave = run
-                .primary()
-                .into_iter()
-                .flat_map(|a| a.provider_calls.iter())
-                .filter(|r| r.delegation.is_some())
-                .count();
-            if usize::from(p.request.wave) != wave {
-                return Err(ReplayError::InvalidTransition);
-            }
-            Ok(())
+            validate_editor_spawn(view, run, id, p)
         }
         _ => Err(ReplayError::InvalidTransition),
     }
 }
+fn validate_editor_spawn(
+    view: &SessionView,
+    run: &RunView,
+    id: AgentRunId,
+    p: &WorkerAssignment,
+) -> Result<(), ReplayError> {
+    let goal = active_run_goal(view, run.id).ok_or(ReplayError::InvalidTransition)?;
+    let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+    let policy = config
+        .worker_policy
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let receipt = config
+        .tool_policy
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    validate_request(view, run, &p.request, Some(id))
+        .map_err(|_| ReplayError::InvalidTransition)?;
+    let plan = goal
+        .plan_contract
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let registry = super::definition_registry(run)?;
+    let def = registry
+        .get(&p.request.definition)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if run.workers.stop.is_some()
+        || !p.grant.within(&policy.parent_grant)
+        || p.grant.write_paths != p.request.lease
+        || p.grant.commands != p.request.commands
+        || !p.grant.read_paths.iter().all(|l| within(l, &plan.paths))
+        || p.policy_digest != receipt.config_digest
+        || p.permissions_digest != receipt.permissions_digest
+        || run
+            .agents
+            .iter()
+            .filter(|a| a.assignment.as_ref().is_some_and(|w| w.released.is_none()))
+            .count()
+            >= usize::from(policy.concurrency)
+        || run
+            .agents
+            .iter()
+            .filter_map(|a| a.assignment.as_ref())
+            .filter(|w| w.released.is_none())
+            .any(|w| {
+                w.pins
+                    .request
+                    .lease
+                    .iter()
+                    .any(|a| p.request.lease.iter().any(|b| overlaps(a, b)))
+            })
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    for op in &p.grant.tools {
+        if !def.allows_worker_tool(*op) {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    let wave = run
+        .primary()
+        .into_iter()
+        .flat_map(|a| a.provider_calls.iter())
+        .filter(|r| r.delegation.is_some())
+        .count();
+    if usize::from(p.request.wave) != wave {
+        return Err(ReplayError::InvalidTransition);
+    }
+    Ok(())
+}
+
 pub(super) fn child_tool_admissible(
     run: &RunView,
     id: AgentRunId,

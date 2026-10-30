@@ -15,6 +15,7 @@ const OPENAI_MODELS: &str = "https://api.openai.com/v1/models";
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
 pub const MAX_CATALOG_MODELS: usize = 4096;
 const MAX_PAGES: usize = 16;
+const ANTHROPIC_PAGE_MODELS: usize = 1000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelEntry {
@@ -132,88 +133,16 @@ async fn list_at(
     for _ in 0..MAX_PAGES {
         let mut url = endpoint.clone();
         if kind == ProviderKind::Anthropic {
-            url.query_pairs_mut().append_pair("limit", "1000");
+            url.query_pairs_mut()
+                .append_pair("limit", &ANTHROPIC_PAGE_MODELS.to_string());
             if let Some(after) = cursor.as_deref() {
                 url.query_pairs_mut().append_pair("after_id", after);
             }
         }
-        let request = client
-            .get(url.clone())
-            .header(header::ACCEPT, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity");
-        let request = match kind {
-            ProviderKind::OpenAi => request.bearer_auth(key),
-            ProviderKind::Anthropic => {
-                let mut key = HeaderValue::from_str(key).map_err(|_| ProviderError::Rejected)?;
-                key.set_sensitive(true);
-                request
-                    .header("x-api-key", key)
-                    .header("anthropic-version", "2023-06-01")
-            }
-            ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
-        };
-        let request = match credentials.anthropic_workspace_id() {
-            Some(id) => request.header("anthropic-workspace-id", id),
-            None => request,
-        };
+        let request = page_request(client, kind, &url, credentials)?;
         let result = async {
-            let mut response = request
-                .send()
-                .await
-                .map_err(|_| ProviderError::Unavailable)?;
-            if response.url() != &url {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            if !response.status().is_success() {
-                return Err(
-                    if response.status().is_server_error()
-                        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    {
-                        ProviderError::Unavailable
-                    } else {
-                        ProviderError::Rejected
-                    },
-                );
-            }
-            let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
-            let content_type = content_types
-                .next()
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next())
-                .map(str::trim);
-            if content_types.next().is_some()
-                || !content_type.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
-            {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
-            if bytes
-                .windows(key.len())
-                .any(|window| window == key.as_bytes())
-            {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            let (rows, next) = if kind == ProviderKind::OpenAi {
-                let page: OpenAiPage =
-                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-                (page.data, None)
-            } else {
-                let page: AnthropicPage =
-                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-                let next = if page.has_more {
-                    let last = page.last_id.ok_or(ProviderError::InvalidOutcome)?;
-                    if !valid_model_id(&last)
-                        || cursor.as_deref() == Some(&last)
-                        || page.data.last().is_none_or(|row| row.id != last)
-                    {
-                        return Err(ProviderError::InvalidOutcome);
-                    }
-                    Some(last)
-                } else {
-                    None
-                };
-                (page.data, next)
-            };
+            let bytes = read_page(request, &url, key).await?;
+            let (rows, next) = page_rows(kind, &bytes, cursor.as_deref())?;
             if rows.len() > MAX_CATALOG_MODELS - entries.len() {
                 return Err(ProviderError::InvalidOutcome);
             }
@@ -244,8 +173,109 @@ async fn list_at(
     Err(ProviderError::InvalidOutcome)
 }
 
+fn page_request(
+    client: &Client,
+    kind: ProviderKind,
+    url: &Url,
+    credentials: &NativeApiCredentials,
+) -> Result<reqwest::RequestBuilder, ProviderError> {
+    let request = client
+        .get(url.clone())
+        .header(header::ACCEPT, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity");
+    let request = match kind {
+        ProviderKind::OpenAi => request.bearer_auth(credentials.api_key()),
+        ProviderKind::Anthropic => {
+            let mut key = HeaderValue::from_str(credentials.api_key())
+                .map_err(|_| ProviderError::Rejected)?;
+            key.set_sensitive(true);
+            request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        }
+        ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
+    };
+    Ok(match credentials.anthropic_workspace_id() {
+        Some(id) => request.header("anthropic-workspace-id", id),
+        None => request,
+    })
+}
+
+async fn read_page(
+    request: reqwest::RequestBuilder,
+    url: &Url,
+    key: &str,
+) -> Result<Vec<u8>, ProviderError> {
+    let mut response = request
+        .send()
+        .await
+        .map_err(|_| ProviderError::Unavailable)?;
+    if response.url() != url {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    if !response.status().is_success() {
+        return Err(
+            if response.status().is_server_error()
+                || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                ProviderError::Unavailable
+            } else {
+                ProviderError::Rejected
+            },
+        );
+    }
+    let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
+    let content_type = content_types
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_types.next().is_some()
+        || !content_type.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
+    {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
+    if bytes
+        .windows(key.len())
+        .any(|window| window == key.as_bytes())
+    {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    Ok(bytes)
+}
+
+fn page_rows(
+    kind: ProviderKind,
+    bytes: &[u8],
+    cursor: Option<&str>,
+) -> Result<(Vec<CatalogRow>, Option<String>), ProviderError> {
+    if kind == ProviderKind::OpenAi {
+        let page: OpenAiPage =
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+        return Ok((page.data, None));
+    }
+    let page: AnthropicPage =
+        serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+    let next = if page.has_more {
+        let last = page.last_id.ok_or(ProviderError::InvalidOutcome)?;
+        if !valid_model_id(&last)
+            || cursor == Some(&last)
+            || page.data.last().is_none_or(|row| row.id != last)
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Some(last)
+    } else {
+        None
+    };
+    Ok((page.data, next))
+}
+
 pub(super) fn valid_model_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
+    !id.is_empty()
+        && id.len() <= super::MAX_MODEL_ID_BYTES
+        && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[cfg(test)]

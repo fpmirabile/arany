@@ -425,75 +425,20 @@ impl RunConfig {
                 .agent_definitions
                 .as_ref()
                 .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
-            || self.roster.as_ref().is_some_and(|roster| {
-                !roster.valid()
-                    || std::iter::once(&roster.providers.primary)
-                        .chain(roster.child_profiles.iter())
-                        .any(|name| {
-                            roster.chain(name).is_none_or(|chain| {
-                                chain.iter().any(|identity| {
-                                    self.provider_concurrency > identity.limits.concurrency
-                                })
-                            })
-                        })
-                    || roster
-                        .role_routes()
-                        .is_none_or(|routes| match &self.providers {
-                            Some(pinned) => *pinned != routes,
-                            None => self.identity().is_none_or(|identity| {
-                                routes.values().iter().any(|chain| {
-                                    chain.len() != 1
-                                        || chain[0].profile != identity.profile
-                                        || chain[0].model != identity.model
-                                        || chain[0].effort != identity.effort
-                                        || chain[0].provenance != identity.provenance
-                                        || chain[0].limits.max_output_tokens
-                                            != identity.limits.max_output_tokens
-                                        || chain[0].limits.output_token_bound
-                                            != identity.limits.output_token_bound
-                                        || identity.limits.concurrency > chain[0].limits.concurrency
-                                })
-                            }),
-                        })
-                    || self.tool_policy.is_some()
-                        && roster.child_profiles.iter().any(|name| {
-                            roster.chain(name).is_none_or(|chain| {
-                                chain
-                                    .iter()
-                                    .any(|identity| !identity.shares_account(&chain[0]))
-                            })
-                        })
-            })
-            || self.providers.as_ref().is_some_and(|providers| {
-                !providers.valid()
-                    || providers
-                        .values()
-                        .iter()
-                        .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
-                    || self.identity().is_none_or(|identity| {
-                        let primary = &providers.primary[0];
-                        identity.profile != primary.profile
-                            || identity.model != primary.model
-                            || identity.effort != primary.effort
-                            || identity.provenance != primary.provenance
-                            || identity.limits.max_output_tokens != primary.limits.max_output_tokens
-                            || identity.limits.output_token_bound
-                                != primary.limits.output_token_bound
-                            || self.provider_concurrency > primary.limits.concurrency
-                    })
-                    || self.tool_policy.is_some()
-                        && providers.values().iter().take(2).any(|chain| {
-                            chain
-                                .iter()
-                                .any(|identity| !identity.shares_account(&chain[0]))
-                        })
-            })
+            || self
+                .roster
+                .as_ref()
+                .is_some_and(|roster| self.invalid_roster(roster))
+            || self
+                .providers
+                .as_ref()
+                .is_some_and(|providers| self.invalid_providers(providers))
             || !self.identity().is_some_and(|identity| identity.valid())
             || self
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
-            || self.include_sources.len() > 16
+            || self.include_sources.len() > crate::session::input::MAX_INCLUDES
             || self
                 .include_sources
                 .iter()
@@ -511,6 +456,70 @@ impl RunConfig {
             return Err(ReplayError::InvalidPayload);
         }
         self.policy.validate()
+    }
+
+    fn invalid_roster(&self, roster: &crate::provider::RosterSnapshot) -> bool {
+        !roster.valid()
+            || std::iter::once(&roster.providers.primary)
+                .chain(roster.child_profiles.iter())
+                .any(|name| {
+                    roster.chain(name).is_none_or(|chain| {
+                        chain
+                            .iter()
+                            .any(|identity| self.provider_concurrency > identity.limits.concurrency)
+                    })
+                })
+            || roster
+                .role_routes()
+                .is_none_or(|routes| match &self.providers {
+                    Some(pinned) => *pinned != routes,
+                    None => self.identity().is_none_or(|identity| {
+                        routes.values().iter().any(|chain| {
+                            chain.len() != 1
+                                || chain[0].profile != identity.profile
+                                || chain[0].model != identity.model
+                                || chain[0].effort != identity.effort
+                                || chain[0].provenance != identity.provenance
+                                || chain[0].limits.max_output_tokens
+                                    != identity.limits.max_output_tokens
+                                || chain[0].limits.output_token_bound
+                                    != identity.limits.output_token_bound
+                                || identity.limits.concurrency > chain[0].limits.concurrency
+                        })
+                    }),
+                })
+            || self.tool_policy.is_some()
+                && roster.child_profiles.iter().any(|name| {
+                    roster.chain(name).is_none_or(|chain| {
+                        chain
+                            .iter()
+                            .any(|identity| !identity.shares_account(&chain[0]))
+                    })
+                })
+    }
+
+    fn invalid_providers(&self, providers: &crate::provider::ProviderRoutes) -> bool {
+        !providers.valid()
+            || providers
+                .values()
+                .iter()
+                .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
+            || self.identity().is_none_or(|identity| {
+                let primary = &providers.primary[0];
+                identity.profile != primary.profile
+                    || identity.model != primary.model
+                    || identity.effort != primary.effort
+                    || identity.provenance != primary.provenance
+                    || identity.limits.max_output_tokens != primary.limits.max_output_tokens
+                    || identity.limits.output_token_bound != primary.limits.output_token_bound
+                    || self.provider_concurrency > primary.limits.concurrency
+            })
+            || self.tool_policy.is_some()
+                && providers.values().iter().take(2).any(|chain| {
+                    chain
+                        .iter()
+                        .any(|identity| !identity.shares_account(&chain[0]))
+                })
     }
 }
 
@@ -970,62 +979,9 @@ impl ProviderCallRecord {
                     self.output_tokens,
                 )
             })
-            || self.failure_reason.is_some_and(|reason| {
-                if matches!(
-                    reason,
-                    crate::provider::ProviderFailureReason::WorkerAnswerDeferred
-                        | crate::provider::ProviderFailureReason::WorkerDelegateRefused
-                        | crate::provider::ProviderFailureReason::WorkerToolRefused
-                ) && self.phase != crate::provider::AgentPhase::RootSynthesis
-                {
-                    return true;
-                }
-                if reason == crate::provider::ProviderFailureReason::ProposalRefused
-                    && (!matches!(
-                        self.phase,
-                        crate::provider::AgentPhase::RootPlan
-                            | crate::provider::AgentPhase::RootSynthesis
-                            | crate::provider::AgentPhase::ChildWork
-                    ) || self.phase == crate::provider::AgentPhase::ChildWork
-                        && self.refusal.as_ref().is_none_or(|refusal| {
-                            refusal.cause != ProposalRefusalCause::InvalidArguments
-                        }))
-                {
-                    return true;
-                }
-                if reason == crate::provider::ProviderFailureReason::CriterionNotMetInView
-                    && self.phase != crate::provider::AgentPhase::ChildWork
-                {
-                    return true;
-                }
-
-                use crate::provider::ProviderFailureReason;
-                !matches!(
-                    (self.disposition, reason),
-                    (
-                        ProviderCallDisposition::Rejected,
-                        ProviderFailureReason::AccountAccess
-                            | ProviderFailureReason::UsageLimit
-                            | ProviderFailureReason::RateLimited
-                            | ProviderFailureReason::ProposalRefused
-                    ) | (
-                        ProviderCallDisposition::Unavailable,
-                        ProviderFailureReason::UsageTemporarilyUnavailable
-                            | ProviderFailureReason::ServiceUnavailable
-                    ) | (
-                        ProviderCallDisposition::InvalidResponse,
-                        ProviderFailureReason::StreamProtocol
-                            | ProviderFailureReason::OutcomeDecode
-                            | ProviderFailureReason::ResponseContract
-                            | ProviderFailureReason::OutcomeContract
-                            | ProviderFailureReason::LocalOutputLimit
-                            | ProviderFailureReason::WorkerAnswerDeferred
-                            | ProviderFailureReason::WorkerDelegateRefused
-                            | ProviderFailureReason::WorkerToolRefused
-                            | ProviderFailureReason::CriterionNotMetInView
-                    )
-                )
-            })
+            || self
+                .failure_reason
+                .is_some_and(|reason| self.invalid_failure_reason(reason))
             || (!matches!(
                 self.disposition,
                 ProviderCallDisposition::Finished
@@ -1044,6 +1000,64 @@ impl ProviderCallRecord {
             return Err(ReplayError::InvalidPayload);
         }
         Ok(())
+    }
+
+    fn invalid_failure_reason(&self, reason: crate::provider::ProviderFailureReason) -> bool {
+        if matches!(
+            reason,
+            crate::provider::ProviderFailureReason::WorkerAnswerDeferred
+                | crate::provider::ProviderFailureReason::WorkerDelegateRefused
+                | crate::provider::ProviderFailureReason::WorkerToolRefused
+        ) && self.phase != crate::provider::AgentPhase::RootSynthesis
+        {
+            return true;
+        }
+        if reason == crate::provider::ProviderFailureReason::ProposalRefused
+            && (!matches!(
+                self.phase,
+                crate::provider::AgentPhase::RootPlan
+                    | crate::provider::AgentPhase::RootSynthesis
+                    | crate::provider::AgentPhase::ChildWork
+            ) || self.phase == crate::provider::AgentPhase::ChildWork
+                && self
+                    .refusal
+                    .as_ref()
+                    .is_none_or(|refusal| refusal.cause != ProposalRefusalCause::InvalidArguments))
+        {
+            return true;
+        }
+        if reason == crate::provider::ProviderFailureReason::CriterionNotMetInView
+            && self.phase != crate::provider::AgentPhase::ChildWork
+        {
+            return true;
+        }
+
+        use crate::provider::ProviderFailureReason;
+        !matches!(
+            (self.disposition, reason),
+            (
+                ProviderCallDisposition::Rejected,
+                ProviderFailureReason::AccountAccess
+                    | ProviderFailureReason::UsageLimit
+                    | ProviderFailureReason::RateLimited
+                    | ProviderFailureReason::ProposalRefused
+            ) | (
+                ProviderCallDisposition::Unavailable,
+                ProviderFailureReason::UsageTemporarilyUnavailable
+                    | ProviderFailureReason::ServiceUnavailable
+            ) | (
+                ProviderCallDisposition::InvalidResponse,
+                ProviderFailureReason::StreamProtocol
+                    | ProviderFailureReason::OutcomeDecode
+                    | ProviderFailureReason::ResponseContract
+                    | ProviderFailureReason::OutcomeContract
+                    | ProviderFailureReason::LocalOutputLimit
+                    | ProviderFailureReason::WorkerAnswerDeferred
+                    | ProviderFailureReason::WorkerDelegateRefused
+                    | ProviderFailureReason::WorkerToolRefused
+                    | ProviderFailureReason::CriterionNotMetInView
+            )
+        )
     }
 }
 

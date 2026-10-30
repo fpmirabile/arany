@@ -4,7 +4,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 use std::time::Instant;
 
-const MAX_PATTERN_BYTES: usize = 512;
+pub(super) const MAX_PATTERN_BYTES: usize = 512;
 const PREVIEW_CHARS: usize = 512;
 
 // Every refusal fits the 128-byte minimum result budget after its fixed prefix and suffix.

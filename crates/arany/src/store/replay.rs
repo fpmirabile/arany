@@ -517,13 +517,59 @@ fn retry_listing_read<T>(mut read: impl FnMut() -> Result<T, StoreError>) -> Res
     result
 }
 
+// Each Session's root: its Workspace when it started there, or the Session it forked from.
+type Roots = HashMap<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>;
+
+fn decode_heads(
+    batch: Vec<(String, i64, RawRow)>,
+    tails: &mut HashMap<SessionId, u64>,
+    roots: &mut Roots,
+) -> Result<(), StoreError> {
+    for (raw_id, tail, raw) in batch {
+        if tails.len() == MAX_DISCOVERED_SESSIONS {
+            return Err(StoreError::TooManySessions);
+        }
+        let id = SessionId::from_str(&raw_id).map_err(|_| StoreError::InvalidHistory)?;
+        tails.insert(
+            id,
+            u64::try_from(tail).map_err(|_| StoreError::InvalidHistory)?,
+        );
+        let envelope = raw.decode()?;
+        let root = match envelope.event {
+            Event::SessionStarted {
+                workspace_identity, ..
+            } => (Some(workspace_identity), None),
+            Event::SessionForked {
+                source_session_id, ..
+            } if source_session_id != id => (None, Some(source_session_id)),
+            _ => return Err(StoreError::InvalidHistory),
+        };
+        roots.insert(id, root);
+    }
+    Ok(())
+}
+
+fn lineage(roots: &Roots, id: SessionId) -> Result<Vec<SessionId>, StoreError> {
+    let mut chain = vec![id];
+    while let (_, Some(source)) = *roots
+        .get(chain.last().expect("lineage"))
+        .ok_or(StoreError::InvalidHistory)?
+    {
+        if chain.len() > MAX_FORK_DEPTH {
+            return Err(StoreError::ReplayLimit);
+        }
+        chain.push(source);
+    }
+    Ok(chain)
+}
+
 fn discover_session_heads_at(
     connection: &Connection,
     workspace_identity: WorkspaceIdentity,
     watermark: i64,
 ) -> Result<SessionListing, StoreError> {
     let mut tails = HashMap::<SessionId, u64>::new();
-    let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
+    let mut roots = Roots::new();
     let mut next_head = connection.prepare(NEXT_HEAD_SQL)?;
     let mut head_tail = connection.prepare(HEAD_TAIL_SQL)?;
     let mut head_first = connection.prepare(HEAD_FIRST_SQL)?;
@@ -553,44 +599,11 @@ fn discover_session_heads_at(
             batch.push((raw_id, tail, first));
         }
         before_decode();
-        for (raw_id, tail, raw) in batch {
-            if tails.len() == MAX_DISCOVERED_SESSIONS {
-                return Err(StoreError::TooManySessions);
-            }
-            let id = SessionId::from_str(&raw_id).map_err(|_| StoreError::InvalidHistory)?;
-            tails.insert(
-                id,
-                u64::try_from(tail).map_err(|_| StoreError::InvalidHistory)?,
-            );
-            let envelope = raw.decode()?;
-            let root = match envelope.event {
-                Event::SessionStarted {
-                    workspace_identity, ..
-                } => (Some(workspace_identity), None),
-                Event::SessionForked {
-                    source_session_id, ..
-                } if source_session_id != id => (None, Some(source_session_id)),
-                _ => return Err(StoreError::InvalidHistory),
-            };
-            roots.insert(id, root);
-        }
+        decode_heads(batch, &mut tails, &mut roots)?;
     }
-    let lineage = |id: SessionId| -> Result<Vec<SessionId>, StoreError> {
-        let mut chain = vec![id];
-        while let (_, Some(source)) = *roots
-            .get(chain.last().expect("lineage"))
-            .ok_or(StoreError::InvalidHistory)?
-        {
-            if chain.len() > MAX_FORK_DEPTH {
-                return Err(StoreError::ReplayLimit);
-            }
-            chain.push(source);
-        }
-        Ok(chain)
-    };
     let mut matching = Vec::new();
     for (&id, &tail) in &tails {
-        let chain = lineage(id)?;
+        let chain = lineage(&roots, id)?;
         let root = chain.last().expect("lineage");
         if roots.get(root).and_then(|(identity, _)| *identity) == Some(workspace_identity) {
             matching.push((tail, id, chain));
@@ -711,81 +724,87 @@ fn scan_session_heads(
     scan_events(connection, filter, |envelope| {
         let id = envelope.session_id;
         if let Some(head) = heads.get_mut(&id) {
-            if matches!(
-                envelope.event,
-                Event::SessionStarted { .. } | Event::SessionForked { .. }
-            ) {
-                return Err(StoreError::InvalidHistory);
-            }
-            if let Event::RunStarted { config, .. } = &envelope.event {
-                head.run_defaults = selection_from_run(config);
-                let identity = WorkspaceIdentity {
-                    device: config.workspace_device,
-                    inode: config.workspace_inode,
-                };
-                if head
-                    .direct_identity
-                    .is_some_and(|pinned| pinned != identity)
-                {
-                    return Err(StoreError::InvalidHistory);
-                }
-                head.direct_identity = Some(identity);
-            }
-            if let Event::SessionRenamed { title } = &envelope.event {
-                head.title.clone_from(title);
-                head.explicit_title = true;
-            }
-            match &envelope.event {
-                Event::SessionDefaultChanged { defaults } => head.defaults = defaults.clone(),
-                Event::MessageAccepted { text, .. } if head.fallback_title.is_none() => {
-                    head.fallback_title =
-                        Some((envelope.sequence, crate::session::title_preview(text)));
-                }
-                _ => {}
-            }
-            head.last_activity_at_ms = envelope.created_at_ms;
-            head.last_sequence = envelope.sequence;
+            advance_head(head, &envelope)
         } else {
             if heads.len() == MAX_DISCOVERED_SESSIONS {
                 return Err(StoreError::TooManySessions);
             }
-            let (title, direct_identity, source_session_id) = match &envelope.event {
-                Event::SessionStarted {
-                    title,
-                    workspace_identity,
-                } => (title.clone(), Some(*workspace_identity), None),
-                Event::SessionForked {
-                    title,
-                    source_session_id,
-                    ..
-                } if *source_session_id != id => (title.clone(), None, Some(*source_session_id)),
-                _ => return Err(StoreError::InvalidHistory),
-            };
-            heads.insert(
-                id,
-                SessionHead {
-                    explicit_title: !crate::session::placeholder_title(&title),
-                    title,
-                    created_at_ms: envelope.created_at_ms,
-                    last_activity_at_ms: envelope.created_at_ms,
-                    fallback_title: None,
-                    source_sequence: match &envelope.event {
-                        Event::SessionForked {
-                            source_sequence, ..
-                        } => Some(*source_sequence),
-                        _ => None,
-                    },
-                    defaults: SessionDefaults::default(),
-                    run_defaults: SessionDefaults::default(),
-                    direct_identity,
-                    source_session_id,
-                    last_sequence: envelope.sequence,
-                },
-            );
+            heads.insert(id, new_head(&envelope)?);
+            Ok(())
         }
-        Ok(())
     })?;
     Ok(heads)
+}
+
+fn advance_head(head: &mut SessionHead, envelope: &EventEnvelope) -> Result<(), StoreError> {
+    if matches!(
+        envelope.event,
+        Event::SessionStarted { .. } | Event::SessionForked { .. }
+    ) {
+        return Err(StoreError::InvalidHistory);
+    }
+    if let Event::RunStarted { config, .. } = &envelope.event {
+        head.run_defaults = selection_from_run(config);
+        let identity = WorkspaceIdentity {
+            device: config.workspace_device,
+            inode: config.workspace_inode,
+        };
+        if head
+            .direct_identity
+            .is_some_and(|pinned| pinned != identity)
+        {
+            return Err(StoreError::InvalidHistory);
+        }
+        head.direct_identity = Some(identity);
+    }
+    if let Event::SessionRenamed { title } = &envelope.event {
+        head.title.clone_from(title);
+        head.explicit_title = true;
+    }
+    match &envelope.event {
+        Event::SessionDefaultChanged { defaults } => head.defaults = defaults.clone(),
+        Event::MessageAccepted { text, .. } if head.fallback_title.is_none() => {
+            head.fallback_title = Some((envelope.sequence, crate::session::title_preview(text)));
+        }
+        _ => {}
+    }
+    head.last_activity_at_ms = envelope.created_at_ms;
+    head.last_sequence = envelope.sequence;
+    Ok(())
+}
+
+fn new_head(envelope: &EventEnvelope) -> Result<SessionHead, StoreError> {
+    let id = envelope.session_id;
+    let (title, direct_identity, source_session_id) = match &envelope.event {
+        Event::SessionStarted {
+            title,
+            workspace_identity,
+        } => (title.clone(), Some(*workspace_identity), None),
+        Event::SessionForked {
+            title,
+            source_session_id,
+            ..
+        } if *source_session_id != id => (title.clone(), None, Some(*source_session_id)),
+        _ => return Err(StoreError::InvalidHistory),
+    };
+    Ok(SessionHead {
+        explicit_title: !crate::session::placeholder_title(&title),
+        title,
+        created_at_ms: envelope.created_at_ms,
+        last_activity_at_ms: envelope.created_at_ms,
+        fallback_title: None,
+        source_sequence: match &envelope.event {
+            Event::SessionForked {
+                source_sequence, ..
+            } => Some(*source_sequence),
+            _ => None,
+        },
+        defaults: SessionDefaults::default(),
+        run_defaults: SessionDefaults::default(),
+        direct_identity,
+        source_session_id,
+        last_sequence: envelope.sequence,
+    })
 }
 
 fn selection_from_run(config: &RunConfig) -> SessionDefaults {

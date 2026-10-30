@@ -241,18 +241,7 @@ impl CallRouter<'_> {
                 preview.clone(),
                 limits.clone(),
                 crate::fault::LatencyReceipt::new(&self.journal.tool_latency, &request, || {
-                    self.ledger
-                        .view(|view| {
-                            view.runs
-                                .last()
-                                .and_then(|run| {
-                                    run.agents
-                                        .iter()
-                                        .find(|agent| agent.id == scope.agent_run_id)
-                                })
-                                .map_or(0, |agent| agent.provider_calls.len())
-                        })
-                        .expect("live measurement scope")
+                    self.recorded_calls(scope.agent_run_id)
                 }),
             )
             .await;
@@ -277,18 +266,17 @@ impl CallRouter<'_> {
                 return Ok(attempt.result);
             };
             // A pause ends the call unsent, as a pause during an approval does.
-            if matches!(decision, AttemptDecision::Retry { .. }) {
-                match back_off(
+            if matches!(decision, AttemptDecision::Retry { .. })
+                && back_off(
                     scope.session_id,
                     delay,
                     &mut cancellation,
                     self.steering.as_ref(),
                 )
                 .await
-                {
-                    Backoff::Elapsed => {}
-                    Backoff::Paused | Backoff::Cancelled => return Ok(CallResult::Cancelled),
-                }
+                    != Backoff::Elapsed
+            {
+                return Ok(CallResult::Cancelled);
             }
         }
     }
@@ -395,18 +383,16 @@ impl CallRouter<'_> {
             if cancellation.is_cancelled() {
                 return Ok(None);
             }
-            let attempt_deadline =
-                deadline.min(Instant::now() + provider.identity().limits.deadline);
-            let response = if Instant::now() >= attempt_deadline {
-                Err(ProviderError::CallTimedOut)
-            } else {
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => return Ok(None),
-                    response = tokio::time::timeout_at(attempt_deadline, provider.compact_observed(request.clone(), limits.clone())) => {
-                        response.unwrap_or(Err(ProviderError::CallTimedOut))
-                    }
-                }
+            let Some(response) = compaction_attempt(
+                provider.as_ref(),
+                &request,
+                &limits,
+                deadline,
+                &mut cancellation,
+            )
+            .await
+            else {
+                return Ok(None);
             };
             // A failure under cancellation or pause ends the compaction unsent, with no further attempt.
             if response.is_err() && (cancellation.is_cancelled() || self.pause_requested()) {
@@ -429,43 +415,72 @@ impl CallRouter<'_> {
                 cancellation.is_cancelled() || self.pause_requested(),
                 false,
             )?;
-            let continued = match decide_attempt(transient, facts) {
-                AttemptDecision::Accept => false,
-                AttemptDecision::Retry { cause, delay } => {
-                    if !self
-                        .retry(scope, ProviderRole::Compaction, cause, delay, None, &limits)
-                        .await?
-                    {
-                        false
-                    } else {
-                        match back_off(
-                            scope.session_id,
-                            delay,
-                            &mut cancellation,
-                            self.steering.as_ref(),
-                        )
-                        .await
-                        {
-                            Backoff::Elapsed => true,
-                            Backoff::Paused | Backoff::Cancelled => return Ok(None),
-                        }
-                    }
-                }
-                AttemptDecision::Switch => {
-                    self.switch(
-                        scope,
-                        ProviderRole::Compaction,
-                        provider.identity(),
-                        None,
-                        &limits,
-                    )
-                    .await?
-                }
+            let decision = decide_attempt(transient, facts);
+            let Some(continued) = self
+                .continue_compaction(
+                    scope,
+                    decision,
+                    provider.identity(),
+                    &limits,
+                    &mut cancellation,
+                )
+                .await?
+            else {
+                return Ok(None);
             };
             if !continued {
                 return Ok(Some(CompactionOutcome { response, provider }));
             }
         }
+    }
+
+    // Whether compaction tries again; None when a back-off ends in pause or cancellation.
+    async fn continue_compaction(
+        &self,
+        scope: CallScope,
+        decision: AttemptDecision,
+        identity: &ProviderIdentity,
+        limits: &RateLimitSlot,
+        cancellation: &mut RunCancellation,
+    ) -> Result<Option<bool>, EngineError> {
+        Ok(Some(match decision {
+            AttemptDecision::Accept => false,
+            AttemptDecision::Retry { cause, delay } => {
+                if !self
+                    .retry(scope, ProviderRole::Compaction, cause, delay, None, limits)
+                    .await?
+                {
+                    false
+                } else {
+                    match back_off(
+                        scope.session_id,
+                        delay,
+                        cancellation,
+                        self.steering.as_ref(),
+                    )
+                    .await
+                    {
+                        Backoff::Elapsed => true,
+                        Backoff::Paused | Backoff::Cancelled => return Ok(None),
+                    }
+                }
+            }
+            AttemptDecision::Switch => {
+                self.switch(scope, ProviderRole::Compaction, identity, None, limits)
+                    .await?
+            }
+        }))
+    }
+
+    fn recorded_calls(&self, actor: AgentRunId) -> usize {
+        self.ledger
+            .view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| run.agents.iter().find(|agent| agent.id == actor))
+                    .map_or(0, |agent| agent.provider_calls.len())
+            })
+            .expect("live measurement scope")
     }
 
     fn next(
@@ -718,6 +733,27 @@ pub(super) struct AttemptResult {
     pub(super) result: CallResult,
     pub(super) transient: Option<Transient>,
     pub(super) visible: bool,
+}
+
+// One compaction attempt within its deadline; None when cancellation interrupts it.
+async fn compaction_attempt(
+    provider: &dyn Provider,
+    request: &crate::provider::CompactionRequest,
+    limits: &RateLimitSlot,
+    deadline: Instant,
+    cancellation: &mut RunCancellation,
+) -> Option<Result<crate::provider::CompactionResponse, ProviderError>> {
+    let attempt_deadline = deadline.min(Instant::now() + provider.identity().limits.deadline);
+    if Instant::now() >= attempt_deadline {
+        return Some(Err(ProviderError::CallTimedOut));
+    }
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        response = tokio::time::timeout_at(attempt_deadline, provider.compact_observed(request.clone(), limits.clone())) => {
+            Some(response.unwrap_or(Err(ProviderError::CallTimedOut)))
+        }
+    }
 }
 
 pub(super) async fn invoke_attempt(

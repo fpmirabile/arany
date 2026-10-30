@@ -651,31 +651,7 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
             "Cancelled before the unguarded run started; nothing ran",
         );
     }
-    let launcher = request.launcher.to_owned();
-    let program = request.program.clone();
-    let host = request.host.cloned();
-    let environment = request.environment.clone();
-    let args = request.args.to_vec();
-    let cwd = request.cwd.to_owned();
-    let workspace = request.workspace.to_owned();
-    let runtime_grants = request.runtime_grants.to_vec();
-    let prepared = tokio::task::spawn_blocking(move || {
-        prepare(&Request {
-            launcher: &launcher,
-            program: &program,
-            host: host.as_ref(),
-            environment: &environment,
-            args: &args,
-            cwd: &cwd,
-            workspace: &workspace,
-            workspace_identity: request.workspace_identity,
-            runtime_grants: &runtime_grants,
-            result_bytes: request.result_bytes,
-            runtime_ms: request.runtime_ms,
-        })
-    })
-    .await
-    .unwrap_or(Err(ToolError::Operation));
+    let prepared = prepare_blocking(&request).await;
     if cancellation.is_cancelled() {
         return Outcome::unstarted(
             ToolDisposition::Cancelled,
@@ -684,18 +660,7 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
     }
     let (mut command, cap) = match prepared {
         Ok(prepared) => prepared,
-        Err(ToolError::Path) => {
-            return Outcome::unstarted(
-                ToolDisposition::Denied,
-                "Working directory is unavailable or outside the Workspace; nothing ran",
-            );
-        }
-        Err(_) => {
-            return Outcome::unstarted(
-                ToolDisposition::Failed,
-                "Unguarded run pinned input unavailable before dispatch; nothing ran",
-            );
-        }
+        Err(error) => return unprepared(&error),
     };
     let Ok(mut child) = command.spawn() else {
         return Outcome::unstarted(
@@ -716,15 +681,7 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
     .await;
     let reaped = match &ended {
         Ended::Done(..) => true,
-        _ => {
-            if let Some(group) = group {
-                let _ = kill_process_group(group, Signal::KILL);
-            }
-            let _ = child.start_kill();
-            tokio::time::timeout(REAP_BOUND, reap_owned_child(&mut child))
-                .await
-                .is_ok_and(|status| status.is_ok())
-        }
+        _ => kill_and_reap(&mut child, group).await,
     };
     // While a member lives the leader pid stays reserved as the group id; after a normal exit, pid reuse is theoretical.
     let stopped = match group {
@@ -734,6 +691,63 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
     let mut outcome = settle(ended, reaped, stopped);
     outcome.pid = group.map_or(0, |group| group.as_raw_nonzero().get().unsigned_abs());
     outcome
+}
+
+// Pinned inputs are verified off the async runtime, on owned copies of the request.
+async fn prepare_blocking(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
+    let launcher = request.launcher.to_owned();
+    let program = request.program.clone();
+    let host = request.host.cloned();
+    let environment = request.environment.clone();
+    let args = request.args.to_vec();
+    let cwd = request.cwd.to_owned();
+    let workspace = request.workspace.to_owned();
+    let runtime_grants = request.runtime_grants.to_vec();
+    let (workspace_identity, result_bytes, runtime_ms) = (
+        request.workspace_identity,
+        request.result_bytes,
+        request.runtime_ms,
+    );
+    tokio::task::spawn_blocking(move || {
+        prepare(&Request {
+            launcher: &launcher,
+            program: &program,
+            host: host.as_ref(),
+            environment: &environment,
+            args: &args,
+            cwd: &cwd,
+            workspace: &workspace,
+            workspace_identity,
+            runtime_grants: &runtime_grants,
+            result_bytes,
+            runtime_ms,
+        })
+    })
+    .await
+    .unwrap_or(Err(ToolError::Operation))
+}
+
+fn unprepared(error: &ToolError) -> Outcome {
+    match error {
+        ToolError::Path => Outcome::unstarted(
+            ToolDisposition::Denied,
+            "Working directory is unavailable or outside the Workspace; nothing ran",
+        ),
+        _ => Outcome::unstarted(
+            ToolDisposition::Failed,
+            "Unguarded run pinned input unavailable before dispatch; nothing ran",
+        ),
+    }
+}
+
+async fn kill_and_reap(child: &mut tokio::process::Child, group: Option<Pid>) -> bool {
+    if let Some(group) = group {
+        let _ = kill_process_group(group, Signal::KILL);
+    }
+    let _ = child.start_kill();
+    tokio::time::timeout(REAP_BOUND, reap_owned_child(child))
+        .await
+        .is_ok_and(|status| status.is_ok())
 }
 
 fn settle(ended: Ended, reaped: bool, stopped: bool) -> Outcome {
@@ -866,12 +880,11 @@ pub(super) async fn stop_group(group: Pid) -> bool {
     false
 }
 
-fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
+fn verify_pinned(request: &Request<'_>) -> Result<(), ToolError> {
     request
         .program
         .verify()
         .map_err(|_| ToolError::ChangedInput)?;
-    let executable = Path::new(&request.program.executable);
     let cwd_path = request.workspace.join(request.cwd);
     let path = request
         .host
@@ -907,6 +920,12 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
     {
         return Err(ToolError::Path);
     }
+    Ok(())
+}
+
+fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
+    verify_pinned(request)?;
+    let executable = Path::new(&request.program.executable);
     let home = directories::BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_owned())
         .ok_or(ToolError::Configuration)?;

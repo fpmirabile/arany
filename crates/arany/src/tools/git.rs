@@ -267,112 +267,130 @@ fn owned(items: &[&str]) -> Vec<String> {
 }
 
 fn invocations(call: &ToolCall, filtered: bool) -> Result<Vec<Vec<String>>, ToolError> {
-    let mut runs = Vec::new();
-    match call {
-        ToolCall::GitStatus { path } => {
-            // No revisions are passed here, and `--` already ends options, so there is no `--end-of-options`.
-            let mut argv = owned(&[
-                "--no-pager",
-                "--no-optional-locks",
-                "status",
-                "--porcelain=v2",
-                "-z",
-                "--branch",
-                "--untracked-files=normal",
-                "--ignore-submodules=all",
-                "--no-renames",
-                "--",
-            ]);
-            argv.extend(pathspecs(path));
-            runs.push(argv);
-        }
+    Ok(match call {
+        ToolCall::GitStatus { path } => vec![status_argv(path)],
         ToolCall::GitDiff {
             path,
             base,
             head,
             staged,
-        } => {
-            for mode in [
-                &["--numstat", "-z"][..],
-                &["--patch", "--unified=3", "--submodule=short"][..],
-            ] {
-                let mut argv = owned(&["--no-pager", "--no-optional-locks", "diff"]);
-                argv.extend(owned(mode));
-                argv.extend(owned(&[
-                    "--no-color",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-renames",
-                    "--ignore-submodules=all",
-                ]));
-                if *staged {
-                    argv.push("--cached".into());
-                }
-                argv.push("--end-of-options".into());
-                argv.extend(base.iter().chain(head.iter()).cloned());
-                argv.push("--".into());
-                argv.extend(pathspecs(path));
-                runs.push(argv);
-            }
-        }
+        } => diff_argvs(path, base.as_deref(), head.as_deref(), *staged),
         ToolCall::GitLog {
             path,
             revision,
             max_count,
-        } => {
-            let mut argv = owned(&[
-                "--no-pager",
-                "--no-optional-locks",
-                "log",
-                "--no-color",
-                "--no-show-signature",
-            ]);
-            if filtered {
-                // Rename detection reports only the destination, which would hide a visible source.
-                argv.extend(owned(&[
-                    "--name-only",
-                    "--no-renames",
-                    "--diff-merges=first-parent",
-                ]));
-                argv.push(format!("--max-count={MAX_FILTERED_LOG_COMMITS}"));
-            } else {
-                argv.push(format!("--max-count={max_count}"));
-            }
-            argv.push("--format=tformat:%H%x00%P%x00%an%x00%at%x00%s".into());
-            argv.push("--end-of-options".into());
-            argv.extend(revision.iter().cloned());
-            argv.push("--".into());
-            argv.extend(pathspecs(path));
-            runs.push(argv);
-        }
+        } => vec![log_argv(path, revision.as_deref(), *max_count, filtered)],
         ToolCall::GitBranch {
             name: None,
             scope,
             max_count,
             ..
-        } => {
-            let mut argv = owned(&[
-                "--no-pager",
-                "--no-optional-locks",
-                "for-each-ref",
-                "--sort=refname",
-                "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(symref)%00%(objecttype)%00%(upstream)%00%(upstream:track,nobracket)",
-            ]);
-            argv.push(format!(
-                "--count={}",
-                max_count.unwrap_or(MAX_ROWS as u32) + 1
-            ));
-            match scope.as_deref().unwrap_or("local") {
-                "local" => argv.push("refs/heads/".into()),
-                "remote" => argv.push("refs/remotes/".into()),
-                "all" => argv.extend(owned(&["refs/heads/", "refs/remotes/"])),
-                _ => return Err(ToolError::Configuration),
-            }
-            runs.push(argv);
+        } => vec![branch_list_argv(scope.as_deref(), *max_count)?],
+        _ => return Err(ToolError::Configuration),
+    })
+}
+
+fn status_argv(path: &str) -> Vec<String> {
+    // No revisions are passed here, and `--` already ends options, so there is no `--end-of-options`.
+    let mut argv = owned(&[
+        "--no-pager",
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--untracked-files=normal",
+        "--ignore-submodules=all",
+        "--no-renames",
+        "--",
+    ]);
+    argv.extend(pathspecs(path));
+    argv
+}
+
+fn diff_argvs(
+    path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    staged: bool,
+) -> Vec<Vec<String>> {
+    let mut runs = Vec::new();
+    for mode in [
+        &["--numstat", "-z"][..],
+        &["--patch", "--unified=3", "--submodule=short"][..],
+    ] {
+        let mut argv = owned(&["--no-pager", "--no-optional-locks", "diff"]);
+        argv.extend(owned(mode));
+        argv.extend(owned(&[
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--ignore-submodules=all",
+        ]));
+        if staged {
+            argv.push("--cached".into());
         }
+        argv.push("--end-of-options".into());
+        argv.extend(
+            base.iter()
+                .chain(head.iter())
+                .map(|revision| (*revision).to_owned()),
+        );
+        argv.push("--".into());
+        argv.extend(pathspecs(path));
+        runs.push(argv);
+    }
+
+    runs
+}
+
+fn log_argv(path: &str, revision: Option<&str>, max_count: u32, filtered: bool) -> Vec<String> {
+    let mut argv = owned(&[
+        "--no-pager",
+        "--no-optional-locks",
+        "log",
+        "--no-color",
+        "--no-show-signature",
+    ]);
+    if filtered {
+        // Rename detection reports only the destination, which would hide a visible source.
+        argv.extend(owned(&[
+            "--name-only",
+            "--no-renames",
+            "--diff-merges=first-parent",
+        ]));
+        argv.push(format!("--max-count={MAX_FILTERED_LOG_COMMITS}"));
+    } else {
+        argv.push(format!("--max-count={max_count}"));
+    }
+    argv.push("--format=tformat:%H%x00%P%x00%an%x00%at%x00%s".into());
+    argv.push("--end-of-options".into());
+    argv.extend(revision.map(str::to_owned));
+    argv.push("--".into());
+    argv.extend(pathspecs(path));
+    argv
+}
+
+fn branch_list_argv(scope: Option<&str>, max_count: Option<u32>) -> Result<Vec<String>, ToolError> {
+    let mut argv = owned(&[
+        "--no-pager",
+        "--no-optional-locks",
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(symref)%00%(objecttype)%00%(upstream)%00%(upstream:track,nobracket)",
+    ]);
+    argv.push(format!(
+        "--count={}",
+        max_count.unwrap_or(MAX_ROWS as u32) + 1
+    ));
+    match scope.unwrap_or("local") {
+        "local" => argv.push("refs/heads/".into()),
+        "remote" => argv.push("refs/remotes/".into()),
+        "all" => argv.extend(owned(&["refs/heads/", "refs/remotes/"])),
         _ => return Err(ToolError::Configuration),
     }
-    Ok(runs)
+    Ok(argv)
 }
 
 fn comparison_revisions(call: &ToolCall) -> Option<(&str, &str)> {
@@ -1031,34 +1049,14 @@ pub(super) async fn run(
             deadline = deadline_after(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
         }
     }
-    let work = async {
-        if mutates {
-            write::execute(&git, &intent.call, &hidden, max_bytes, deadline).await
-        } else {
-            execute(&git, &intent.call, &hidden, max_bytes, deadline)
-                .await
-                .map(|output| write::Written {
-                    output,
-                    refs: None,
-                    exit_code: git.exit_code(),
-                })
-        }
-    };
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => Err(ToolError::Cancelled),
-        result = work => result,
+        result = execute_typed(&git, &intent.call, &hidden, max_bytes, deadline) => result,
     };
     let written = match result {
         Ok(written) => with_hooks_note(written, hooks_note, max_bytes),
-        Err(_) if mutates => return uncertain(intent, environment.workspace()),
-        Err(ToolError::Cancelled) => return super::cancelled_read(intent),
-        Err(ToolError::ChangedInput) => return not_run(intent, ToolError::ChangedInput),
-        Err(error) => {
-            let (disposition, output, _, limit_cause) =
-                super::dispatch::outcome(&intent, Err(error));
-            return observation(intent, disposition, output, None, limit_cause);
-        }
+        Err(error) => return failed_run(intent, error, environment.workspace()),
     };
     let receipt = (!mutates || written.refs.is_some()).then(|| GitReceipt {
         contract_version: 1,
@@ -1070,6 +1068,42 @@ pub(super) async fn run(
     let (disposition, output, _, limit_cause) =
         super::dispatch::outcome(&intent, Ok(written.output));
     observation(intent, disposition, output, receipt, limit_cause)
+}
+
+async fn execute_typed(
+    git: &Git<'_>,
+    call: &ToolCall,
+    hidden: &HiddenPaths,
+    max_bytes: usize,
+    deadline: tokio::time::Instant,
+) -> Result<write::Written, ToolError> {
+    if call.mutates() {
+        write::execute(git, call, hidden, max_bytes, deadline).await
+    } else {
+        execute(git, call, hidden, max_bytes, deadline)
+            .await
+            .map(|output| write::Written {
+                output,
+                refs: None,
+                exit_code: git.exit_code(),
+            })
+    }
+}
+
+// A failed write's effect is unknown; a read that failed changed nothing.
+fn failed_run(intent: EffectIntent, error: ToolError, workspace: &Path) -> ToolObservation {
+    if intent.call.mutates() {
+        return uncertain(intent, workspace);
+    }
+    match error {
+        ToolError::Cancelled => super::cancelled_read(intent),
+        ToolError::ChangedInput => not_run(intent, ToolError::ChangedInput),
+        error => {
+            let (disposition, output, _, limit_cause) =
+                super::dispatch::outcome(&intent, Err(error));
+            observation(intent, disposition, output, None, limit_cause)
+        }
+    }
 }
 
 // Diagnostics cannot be matched against path rules, so a filtered read keeps only its message.

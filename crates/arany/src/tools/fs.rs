@@ -120,70 +120,10 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         "mkdir" => vec![path(
             "Workspace-relative path of the new directory; its parent must exist.",
         )],
-        "read" => vec![
-            (
-                "path",
-                json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
-            ),
-            (
-                "offset",
-                json!({"type":["integer", "null"], "description":format!("1-based start line, 1 through {}; null starts at line 1. Continue using next_line.", u32::MAX)}),
-            ),
-            (
-                "limit",
-                json!({"type":["integer", "null"], "description":format!("Number of lines, 1 through {MAX_READ_PAGE_LINES}; null reads up to {MAX_READ_PAGE_LINES} lines. Lines are numbered and cut after {MAX_READ_LINE_CHARS} characters; the rendered result budget may end the page earlier.")}),
-            ),
-        ],
-        "search" => vec![
-            path(
-                "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
-            ),
-            (
-                "query",
-                json!({"type":"string", "description":"Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true."}),
-            ),
-            (
-                "regex",
-                json!({"type":["boolean", "null"], "description":"true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally."}),
-            ),
-            (
-                "include",
-                json!({"type":["string", "null"], "description":"File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file."}),
-            ),
-            (
-                "case_sensitive",
-                json!({"type":["boolean", "null"], "description":"false ignores case; null or true matches case exactly."}),
-            ),
-            (
-                "offset",
-                json!({"type":["integer", "null"], "description":"Number of matching lines to skip; null starts at 0. Continue using next_offset."}),
-            ),
-            (
-                "limit",
-                json!({"type":["integer", "null"], "description":format!("Matching lines to return, 1 through {MAX_SEARCH_ROWS}; null returns up to {MAX_SEARCH_ROWS}. The rendered result budget may end the page earlier.")}),
-            ),
-        ],
+        "read" => read_schema(),
+        "search" => search_schema(),
         "glob" => super::glob::schema(),
-        "multiedit" => vec![
-            ("file_path", string()),
-            expected_digest("this file", ""),
-            (
-                "edits",
-                json!({
-                    "type":"array",
-                    "description":"Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most 65536. Every intermediate file must fit 1 MiB; unchanged final content rejects.",
-                    "items":{
-                        "type":"object", "additionalProperties":false,
-                        "properties":{
-                            "old_string":{"type":"string", "description":"Nonempty exact literal text, different from new_string; no Read line-number prefixes."},
-                            "new_string":{"type":"string", "description":"Literal replacement; empty removes only the matched bytes."},
-                            "replace_all":{"type":["boolean","null"], "description":"true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false."}
-                        },
-                        "required":["old_string","new_string","replace_all"]
-                    }
-                }),
-            ),
-        ],
+        "multiedit" => multiedit_schema(),
         "delete" => vec![
             path("Workspace-relative regular file to delete."),
             expected_digest("this file", ""),
@@ -218,6 +158,78 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
         ],
         _ => return None,
     })
+}
+
+fn read_schema() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "path",
+            json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
+        ),
+        (
+            "offset",
+            json!({"type":["integer", "null"], "description":format!("1-based start line, 1 through {}; null starts at line 1. Continue using next_line.", u32::MAX)}),
+        ),
+        (
+            "limit",
+            json!({"type":["integer", "null"], "description":format!("Number of lines, 1 through {MAX_READ_PAGE_LINES}; null reads up to {MAX_READ_PAGE_LINES} lines. Lines are numbered and cut after {MAX_READ_LINE_CHARS} characters; the rendered result budget may end the page earlier.")}),
+        ),
+    ]
+}
+
+fn search_schema() -> Vec<(&'static str, Value)> {
+    vec![
+        path(
+            "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
+        ),
+        (
+            "query",
+            json!({"type":"string", "description":format!("Text to find within one line, 1 through {} UTF-8 bytes; literal unless regex is true.", super::search::MAX_PATTERN_BYTES)}),
+        ),
+        (
+            "regex",
+            json!({"type":["boolean", "null"], "description":"true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally."}),
+        ),
+        (
+            "include",
+            json!({"type":["string", "null"], "description":"File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file."}),
+        ),
+        (
+            "case_sensitive",
+            json!({"type":["boolean", "null"], "description":"false ignores case; null or true matches case exactly."}),
+        ),
+        (
+            "offset",
+            json!({"type":["integer", "null"], "description":"Number of matching lines to skip; null starts at 0. Continue using next_offset."}),
+        ),
+        (
+            "limit",
+            json!({"type":["integer", "null"], "description":format!("Matching lines to return, 1 through {MAX_SEARCH_ROWS}; null returns up to {MAX_SEARCH_ROWS}. The rendered result budget may end the page earlier.")}),
+        ),
+    ]
+}
+
+fn multiedit_schema() -> Vec<(&'static str, Value)> {
+    vec![
+        ("file_path", string()),
+        expected_digest("this file", ""),
+        (
+            "edits",
+            json!({
+                "type":"array",
+                "description":format!("Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most {MAX_EDIT_CONTENT_BYTES}. Every intermediate file must fit {} MiB; unchanged final content rejects.", super::types::MAX_FILE_BYTES / (1024 * 1024)),
+                "items":{
+                    "type":"object", "additionalProperties":false,
+                    "properties":{
+                        "old_string":{"type":"string", "description":"Nonempty exact literal text, different from new_string; no Read line-number prefixes."},
+                        "new_string":{"type":"string", "description":"Literal replacement; empty removes only the matched bytes."},
+                        "replace_all":{"type":["boolean","null"], "description":"true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false."}
+                    },
+                    "required":["old_string","new_string","replace_all"]
+                }
+            }),
+        ),
+    ]
 }
 
 struct Entry {

@@ -82,7 +82,7 @@ pub(crate) use compaction::{
     recent_files_across, recent_files_match, render_recent_files, validate_compaction_references,
     validate_compactions_with_sequence, validate_goal_context_compactions_with_sequence,
 };
-pub(crate) use context::CompiledContext;
+pub(crate) use context::{CompiledContext, HISTORY_TURN_OVERHEAD_BYTES};
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal,
     BudgetRefusalCause, ChildGrant, CollaborationPolicy, CompactionFailure, CompactionRecord,

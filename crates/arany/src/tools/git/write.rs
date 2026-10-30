@@ -123,48 +123,15 @@ pub(super) async fn execute(
         _ => None,
     };
     let before = write.head(target.as_deref()).await?;
-    let refuse = |message: &str, before: GitHead| Written {
-        output: failure(message, &[], max_bytes, hidden),
-        refs: Some(Box::new(GitRefs {
-            after: before.clone(),
-            before,
-        })),
-        exit_code: None,
-    };
-    let argv = match call {
+    let (argv, before) = match call {
         ToolCall::GitCommit {
             message,
             paths,
             staged,
-        } => {
-            if branch_of(&before).is_none() {
-                return Ok(refuse(DETACHED, before));
-            }
-            let message = format!("--message={message}");
-            // "." already means every change; another path beside it must not narrow that.
-            let specs = if paths.iter().any(|path| path == ".") {
-                pathspecs_of(["."])
-            } else {
-                pathspecs_of(paths.iter().map(String::as_str))
-            };
-            let mut argv = vec!["commit".to_owned(), "--quiet".into(), message];
-            if !staged {
-                let mut add = vec!["add", "--all", "--"];
-                add.extend(specs.iter().map(String::as_str));
-                let added = write.run(&add).await?;
-                if let Some(failed) = write.failed(&added) {
-                    let after = write.head(None).await?;
-                    return Ok(Written {
-                        output: failed,
-                        refs: Some(Box::new(GitRefs { before, after })),
-                        exit_code: added.status,
-                    });
-                }
-                argv.push("--".into());
-                argv.extend(specs);
-            }
-            argv
-        }
+        } => match write.commit_argv(before, message, paths, *staged).await? {
+            Ok(prepared) => prepared,
+            Err(written) => return Ok(written),
+        },
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
@@ -172,32 +139,12 @@ pub(super) async fn execute(
         } => {
             let mut argv = owned(&["branch", "--no-track", "--end-of-options", name]);
             argv.extend(start_point.iter().cloned());
-            argv
+            (argv, before)
         }
-        ToolCall::GitSwitch { branch } => {
-            if before
-                .target
-                .as_ref()
-                .is_some_and(|target| target.oid.is_none())
-            {
-                return Ok(refuse("No local branch has that name.", before));
-            }
-            // A commit reachable only from a detached HEAD would be left behind.
-            let Some(current) = branch_of(&before) else {
-                return Ok(refuse(DETACHED_SWITCH, before));
-            };
-            if current == branch {
-                return Ok(Written {
-                    output: json!({"branch": branch, "switched": false}).to_string(),
-                    refs: Some(Box::new(GitRefs {
-                        after: before.clone(),
-                        before,
-                    })),
-                    exit_code: Some(0),
-                });
-            }
-            owned(&["switch", "--quiet", "--no-guess", branch])
-        }
+        ToolCall::GitSwitch { branch } => match write.switch_argv(before, branch) {
+            Ok(prepared) => prepared,
+            Err(written) => return Ok(written),
+        },
         _ => return Err(ToolError::Configuration),
     };
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -220,6 +167,83 @@ pub(super) async fn execute(
         refs: Some(Box::new(GitRefs { before, after })),
         exit_code: captured.status,
     })
+}
+
+// The write's argv and the head it started from, or the finished refusal or failed stage.
+type Prepared = Result<(Vec<String>, GitHead), Written>;
+
+impl Write<'_> {
+    fn refuse(&self, message: &str, before: GitHead) -> Written {
+        Written {
+            output: failure(message, &[], self.max_bytes, self.hidden),
+            refs: Some(Box::new(GitRefs {
+                after: before.clone(),
+                before,
+            })),
+            exit_code: None,
+        }
+    }
+
+    async fn commit_argv(
+        &self,
+        before: GitHead,
+        message: &str,
+        paths: &[String],
+        staged: bool,
+    ) -> Result<Prepared, ToolError> {
+        if branch_of(&before).is_none() {
+            return Ok(Err(self.refuse(DETACHED, before)));
+        }
+        let message = format!("--message={message}");
+        // "." already means every change; another path beside it must not narrow that.
+        let specs = if paths.iter().any(|path| path == ".") {
+            pathspecs_of(["."])
+        } else {
+            pathspecs_of(paths.iter().map(String::as_str))
+        };
+        let mut argv = vec!["commit".to_owned(), "--quiet".into(), message];
+        if !staged {
+            let mut add = vec!["add", "--all", "--"];
+            add.extend(specs.iter().map(String::as_str));
+            let added = self.run(&add).await?;
+            if let Some(failed) = self.failed(&added) {
+                let after = self.head(None).await?;
+                return Ok(Err(Written {
+                    output: failed,
+                    refs: Some(Box::new(GitRefs { before, after })),
+                    exit_code: added.status,
+                }));
+            }
+            argv.push("--".into());
+            argv.extend(specs);
+        }
+        Ok(Ok((argv, before)))
+    }
+
+    fn switch_argv(&self, before: GitHead, branch: &str) -> Prepared {
+        if before
+            .target
+            .as_ref()
+            .is_some_and(|target| target.oid.is_none())
+        {
+            return Err(self.refuse("No local branch has that name.", before));
+        }
+        // A commit reachable only from a detached HEAD would be left behind.
+        let Some(current) = branch_of(&before) else {
+            return Err(self.refuse(DETACHED_SWITCH, before));
+        };
+        if current == branch {
+            return Err(Written {
+                output: json!({"branch": branch, "switched": false}).to_string(),
+                refs: Some(Box::new(GitRefs {
+                    after: before.clone(),
+                    before,
+                })),
+                exit_code: Some(0),
+            });
+        }
+        Ok((owned(&["switch", "--quiet", "--no-guess", branch]), before))
+    }
 }
 
 #[cfg(test)]

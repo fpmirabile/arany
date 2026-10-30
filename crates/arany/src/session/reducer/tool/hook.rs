@@ -48,42 +48,7 @@ pub(super) fn started(
             && tool.observation.is_none();
         (tool, fresh)
     };
-    let finished_restriction = tool.hooks.iter().any(|view| {
-        view.outcome.as_ref().is_none_or(|outcome| {
-            outcome.result.restriction(&tool.intent.call)
-                == crate::tools::permissions::Decision::Deny
-                || outcome.observation.stops_run()
-        })
-    });
-    let same_event = tool
-        .hooks
-        .iter()
-        .filter(|view| view.invocation.event == hook.event)
-        .count();
-    if !state_allows
-        || tool.intent.call.is_internal()
-        || tool.intent.agent_run_id != agent_run_id
-        || hook.subject_digest != tool.intent.digest()
-        || hook.intent.policy_digest != tool.intent.policy_digest
-        || hook.intent.workspace_device != tool.intent.workspace_device
-        || hook.intent.workspace_inode != tool.intent.workspace_inode
-        || hook.intent.id == tool.intent.id
-        || same_event >= crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
-        || post
-            && tool
-                .hooks
-                .iter()
-                .rev()
-                .find(|view| view.invocation.event == hook.event)
-                .is_some_and(|view| {
-                    (hook.group, hook.handler) <= (view.invocation.group, view.invocation.handler)
-                })
-        || finished_restriction
-        || tool
-            .hooks
-            .iter()
-            .any(|view| view.invocation.intent.id == hook.intent.id)
-    {
+    if hook_rejected(tool, hook, agent_run_id, state_allows) {
         return Err(ReplayError::InvalidTransition);
     }
     tool.hooks.push(HookView {
@@ -118,54 +83,7 @@ pub(super) fn finished(
                 .is_some_and(|hook| hook.outcome.is_none())
         })
     {
-        let run = current
-            .runs
-            .iter_mut()
-            .find(|run| run.id == run_id)
-            .ok_or(ReplayError::InvalidTransition)?;
-        let hook = run
-            .lifecycle_hooks
-            .last_mut()
-            .ok_or(ReplayError::InvalidTransition)?;
-        if hook.invocation.intent != outcome.observation.intent
-            || hook.invocation.intent.agent_run_id != agent_run_id
-            || outcome.result != HookResult::for_event(hook.invocation.event, &outcome.observation)
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
-        if !hook.idle && run.status != crate::session::RunStatus::Active {
-            return Err(ReplayError::InvalidTransition);
-        }
-        let ceiling = if hook.idle {
-            hook.invocation.active_ceiling_ms
-        } else {
-            None
-        };
-        if outcome.boundary_active_ms.is_some() != ceiling.is_some()
-            || outcome
-                .boundary_active_ms
-                .zip(ceiling)
-                .is_some_and(|(active, ceiling)| active > ceiling)
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
-        hook.outcome = Some(outcome.clone());
-        run.lifecycle_hook_sequence = Some(prior);
-        if let Some(active) = outcome.boundary_active_ms {
-            let goal = current
-                .goals
-                .iter_mut()
-                .find(|goal| {
-                    goal.status == GoalStatus::Running && goal.run_ids.last() == Some(&run_id)
-                })
-                .ok_or(ReplayError::InvalidTransition)?;
-            goal.active_ms = goal
-                .active_ms
-                .checked_add(active)
-                .ok_or(ReplayError::InvalidTransition)?;
-            goal.active_ceiling_ms = 0;
-        }
-        return Ok(());
+        return finish_lifecycle(current, run_id, agent_run_id, outcome, prior);
     }
     let previous = current.previous_subject_sequence();
     let run = active_run(current, run_id)?;
@@ -207,6 +125,105 @@ pub(super) fn finished(
     view.outcome = Some(outcome.clone());
     if observed {
         tool.hook_sequence = Some(prior);
+    }
+    Ok(())
+}
+
+fn hook_rejected(
+    tool: &crate::session::ToolView,
+    hook: &HookInvocation,
+    agent_run_id: AgentRunId,
+    state_allows: bool,
+) -> bool {
+    let post = hook.event == HookEvent::PostToolUse;
+    let finished_restriction = tool.hooks.iter().any(|view| {
+        view.outcome.as_ref().is_none_or(|outcome| {
+            outcome.result.restriction(&tool.intent.call)
+                == crate::tools::permissions::Decision::Deny
+                || outcome.observation.stops_run()
+        })
+    });
+    let same_event = tool
+        .hooks
+        .iter()
+        .filter(|view| view.invocation.event == hook.event)
+        .count();
+    !state_allows
+        || tool.intent.call.is_internal()
+        || tool.intent.agent_run_id != agent_run_id
+        || hook.subject_digest != tool.intent.digest()
+        || hook.intent.policy_digest != tool.intent.policy_digest
+        || hook.intent.workspace_device != tool.intent.workspace_device
+        || hook.intent.workspace_inode != tool.intent.workspace_inode
+        || hook.intent.id == tool.intent.id
+        || same_event >= crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
+        || post
+            && tool
+                .hooks
+                .iter()
+                .rev()
+                .find(|view| view.invocation.event == hook.event)
+                .is_some_and(|view| {
+                    (hook.group, hook.handler) <= (view.invocation.group, view.invocation.handler)
+                })
+        || finished_restriction
+        || tool
+            .hooks
+            .iter()
+            .any(|view| view.invocation.intent.id == hook.intent.id)
+}
+
+fn finish_lifecycle(
+    current: &mut SessionView,
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+    outcome: &HookOutcome,
+    prior: u64,
+) -> Result<(), ReplayError> {
+    let run = current
+        .runs
+        .iter_mut()
+        .find(|run| run.id == run_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let hook = run
+        .lifecycle_hooks
+        .last_mut()
+        .ok_or(ReplayError::InvalidTransition)?;
+    if hook.invocation.intent != outcome.observation.intent
+        || hook.invocation.intent.agent_run_id != agent_run_id
+        || outcome.result != HookResult::for_event(hook.invocation.event, &outcome.observation)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if !hook.idle && run.status != crate::session::RunStatus::Active {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let ceiling = if hook.idle {
+        hook.invocation.active_ceiling_ms
+    } else {
+        None
+    };
+    if outcome.boundary_active_ms.is_some() != ceiling.is_some()
+        || outcome
+            .boundary_active_ms
+            .zip(ceiling)
+            .is_some_and(|(active, ceiling)| active > ceiling)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    hook.outcome = Some(outcome.clone());
+    run.lifecycle_hook_sequence = Some(prior);
+    if let Some(active) = outcome.boundary_active_ms {
+        let goal = current
+            .goals
+            .iter_mut()
+            .find(|goal| goal.status == GoalStatus::Running && goal.run_ids.last() == Some(&run_id))
+            .ok_or(ReplayError::InvalidTransition)?;
+        goal.active_ms = goal
+            .active_ms
+            .checked_add(active)
+            .ok_or(ReplayError::InvalidTransition)?;
+        goal.active_ceiling_ms = 0;
     }
     Ok(())
 }

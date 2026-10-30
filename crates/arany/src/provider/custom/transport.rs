@@ -90,17 +90,7 @@ impl CustomTransport {
             return Err(TransportError::InvalidOutcome);
         }
         let conversation = render::conversation(request).map_err(|_| TransportError::Rejected)?;
-        let mut body = match self.protocol {
-            CustomProtocol::OpenaiResponses => match effort {
-                Some(value) => wire::run_body_with_effort(request, &conversation, value),
-                None => wire::run_body(request, &conversation),
-            },
-            CustomProtocol::AnthropicMessages => {
-                messages::run_body_with_optional_effort(request, &conversation, effort)
-            }
-            CustomProtocol::OpenaiChatCompletions => chat::run_body(request, &conversation, effort),
-        }
-        .map_err(|_| TransportError::Rejected)?;
+        let mut body = self.run_body(request, &conversation, effort)?;
         let received = if stream && !matches!(self.protocol, CustomProtocol::OpenaiChatCompletions)
         {
             body["stream"] = Value::Bool(true);
@@ -109,9 +99,53 @@ impl CustomTransport {
         } else {
             self.send(body).await?
         };
-        let response = match self.protocol {
+        let response = self.decode_run(request, &conversation, &received, stream)?;
+        if !valid_usage(response.usage, request.max_output_tokens) {
+            self.log_messages_failure(
+                crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
+                received.counts,
+            );
+            return Err(TransportError::InvalidOutcome);
+        }
+        if response.reflects_secret(&self.key) {
+            self.log_messages_failure(
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                received.counts,
+            );
+            return Err(TransportError::InvalidOutcome);
+        }
+        Ok(response)
+    }
+
+    fn run_body(
+        &self,
+        request: &ProviderRequest,
+        conversation: &crate::provider::conversation::Conversation,
+        effort: Option<Effort>,
+    ) -> Result<Value, TransportError> {
+        match self.protocol {
+            CustomProtocol::OpenaiResponses => match effort {
+                Some(value) => wire::run_body_with_effort(request, conversation, value),
+                None => wire::run_body(request, conversation),
+            },
+            CustomProtocol::AnthropicMessages => {
+                messages::run_body_with_optional_effort(request, conversation, effort)
+            }
+            CustomProtocol::OpenaiChatCompletions => chat::run_body(request, conversation, effort),
+        }
+        .map_err(|_| TransportError::Rejected)
+    }
+
+    fn decode_run(
+        &self,
+        request: &ProviderRequest,
+        conversation: &crate::provider::conversation::Conversation,
+        received: &TransportResponse,
+        stream: bool,
+    ) -> Result<ProviderResponse, TransportError> {
+        match self.protocol {
             CustomProtocol::OpenaiResponses => {
-                let scope = wire::RunScope::new(request, &conversation, &self.key);
+                let scope = wire::RunScope::new(request, conversation, &self.key);
                 if stream {
                     wire::decode_streamed_run(&received.bytes, &scope)
                         .map_err(|_| ProviderError::InvalidOutcome)
@@ -158,22 +192,7 @@ impl CustomTransport {
             } else {
                 TransportError::InvalidOutcome
             }
-        })?;
-        if !valid_usage(response.usage, request.max_output_tokens) {
-            self.log_messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
-                received.counts,
-            );
-            return Err(TransportError::InvalidOutcome);
-        }
-        if response.reflects_secret(&self.key) {
-            self.log_messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                received.counts,
-            );
-            return Err(TransportError::InvalidOutcome);
-        }
-        Ok(response)
+        })
     }
 
     pub(super) async fn compact(
@@ -401,24 +420,60 @@ impl CustomTransport {
         &self,
         response: &mut reqwest::Response,
     ) -> Result<TransportResponse, TransportError> {
+        self.check_response_head(response).await?;
+        let status = response.status().as_u16();
+        let bytes = super::super::read_identity_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|error| {
+                self.log_messages_failure(
+                    if matches!(error, ProviderError::PartialTransport) {
+                        crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
+                    } else {
+                        crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope
+                    },
+                    status_counts(status, 0),
+                );
+                match error {
+                    ProviderError::Unavailable => TransportError::Unavailable,
+                    ProviderError::PartialTransport => TransportError::PartialTransport,
+                    _ => TransportError::InvalidOutcome,
+                }
+            })?;
+        if matches!(self.protocol, CustomProtocol::AnthropicMessages) {
+            crate::provider::parse_response_json(&bytes).map_err(|_| {
+                self.log_messages_failure(
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
+                    status_counts(status, bytes.len()),
+                );
+                TransportError::InvalidOutcome
+            })?;
+        }
+        if raw_reflects_secret(&bytes, &self.key) {
+            self.log_messages_failure(
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                status_counts(status, bytes.len()),
+            );
+            return Err(TransportError::InvalidOutcome);
+        }
+        Ok(TransportResponse {
+            counts: status_counts(status, bytes.len()),
+            bytes,
+        })
+    }
+
+    async fn check_response_head(
+        &self,
+        response: &mut reqwest::Response,
+    ) -> Result<(), TransportError> {
         if response.url().as_str() != self.endpoint {
             self.log_messages_failure(
                 crate::provider::diagnostics::SubscriptionFailureStage::Destination,
-                crate::provider::diagnostics::StreamCounts {
-                    http_status: Some(response.status().as_u16()),
-                    ..Default::default()
-                },
+                status_counts(response.status().as_u16(), 0),
             );
             return Err(TransportError::InvalidOutcome);
         }
         if let Some(stage) = response_failure_stage(true, response.status()) {
-            self.log_messages_failure(
-                stage,
-                crate::provider::diagnostics::StreamCounts {
-                    http_status: Some(response.status().as_u16()),
-                    ..Default::default()
-                },
-            );
+            self.log_messages_failure(stage, status_counts(response.status().as_u16(), 0));
             return Err(status_failure(response).await);
         }
         if matches!(self.protocol, CustomProtocol::OpenaiChatCompletions)
@@ -435,59 +490,15 @@ impl CustomTransport {
         {
             return Err(TransportError::InvalidOutcome);
         }
-        let status = response.status().as_u16();
-        let bytes = super::super::read_identity_body(response, MAX_RESPONSE_BYTES)
-            .await
-            .map_err(|error| {
-                self.log_messages_failure(
-                    if matches!(error, ProviderError::PartialTransport) {
-                        crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
-                    } else {
-                        crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope
-                    },
-                    crate::provider::diagnostics::StreamCounts {
-                        http_status: Some(status),
-                        ..Default::default()
-                    },
-                );
-                match error {
-                    ProviderError::Unavailable => TransportError::Unavailable,
-                    ProviderError::PartialTransport => TransportError::PartialTransport,
-                    _ => TransportError::InvalidOutcome,
-                }
-            })?;
-        if matches!(self.protocol, CustomProtocol::AnthropicMessages) {
-            crate::provider::parse_response_json(&bytes).map_err(|_| {
-                self.log_messages_failure(
-                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
-                    crate::provider::diagnostics::StreamCounts {
-                        bytes: bytes.len(),
-                        http_status: Some(status),
-                        ..Default::default()
-                    },
-                );
-                TransportError::InvalidOutcome
-            })?;
-        }
-        if raw_reflects_secret(&bytes, &self.key) {
-            self.log_messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                crate::provider::diagnostics::StreamCounts {
-                    bytes: bytes.len(),
-                    http_status: Some(status),
-                    ..Default::default()
-                },
-            );
-            return Err(TransportError::InvalidOutcome);
-        }
-        Ok(TransportResponse {
-            counts: crate::provider::diagnostics::StreamCounts {
-                bytes: bytes.len(),
-                http_status: Some(status),
-                ..Default::default()
-            },
-            bytes,
-        })
+        Ok(())
+    }
+}
+
+fn status_counts(status: u16, bytes: usize) -> crate::provider::diagnostics::StreamCounts {
+    crate::provider::diagnostics::StreamCounts {
+        bytes,
+        http_status: Some(status),
+        ..Default::default()
     }
 }
 
