@@ -43,36 +43,7 @@ pub(in crate::terminal) fn draw_session_picker_frame(
     if area.height >= 6
         && let Some(item) = items.get(selected)
     {
-        let short = area.width < FULL_LAYOUT_WIDTH;
-        let created = if short {
-            item.created_at.get(..10).unwrap_or(&item.created_at)
-        } else {
-            &item.created_at
-        };
-        let used = if short {
-            item.last_activity_at
-                .get(..10)
-                .unwrap_or(&item.last_activity_at)
-        } else {
-            &item.last_activity_at
-        };
-        let details = [
-            if short {
-                format!("Made {created}")
-            } else {
-                format!("Created: {created} UTC")
-            },
-            if short {
-                format!("Used {used}")
-            } else {
-                format!("Last activity: {used} UTC")
-            },
-            crate::presentation::session_access_label(&item.defaults).to_owned(),
-            item.defaults
-                .model
-                .clone()
-                .unwrap_or_else(|| "Default model".into()),
-        ];
+        let details = session_details(item, area.width);
         for (offset, detail) in details.iter().enumerate() {
             frame.render_widget(
                 Paragraph::new(safe_truncate(detail, usize::from(area.width))),
@@ -81,15 +52,7 @@ pub(in crate::terminal) fn draw_session_picker_frame(
         }
     }
     if armed && area.height >= 2 {
-        let hint = if area.width < 20 {
-            "Up/Dn Enter Esc"
-        } else if area.width < 24 {
-            "Up/Dn Enter:go Esc"
-        } else if area.width < FULL_LAYOUT_WIDTH {
-            "Up/Dn Enter:resume Esc"
-        } else {
-            "Up/Down select · Enter resume · Esc close"
-        };
+        let hint = session_picker_hint(area.width);
         frame.render_widget(
             Paragraph::new(safe_truncate(hint, usize::from(area.width))),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
@@ -123,33 +86,7 @@ pub(in crate::terminal) fn draw_quick_actions_frame(
         Paragraph::new("Quick actions").style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let labels = if area.width < 24 {
-        ["Models", "Agents", "Resume", "Setup", "Usage"]
-    } else if area.width < FULL_LAYOUT_WIDTH {
-        [
-            "Models · choose",
-            "Agents · inspect",
-            if has_draft {
-                "Resume · draft"
-            } else {
-                "Resume · choose"
-            },
-            "Setup · account",
-            "Usage · inspect",
-        ]
-    } else {
-        [
-            "Models · choose a model",
-            "Agents · inspect work",
-            if has_draft {
-                "Resume · finish draft first"
-            } else {
-                "Resume · conversation"
-            },
-            "Setup · connect an account",
-            "Usage · reported tokens",
-        ]
-    };
+    let labels = quick_action_labels(has_draft, area.width);
     let visible = usize::from(area.height.saturating_sub(2));
     let first = window_start(Some(selected), visible).min(labels.len().saturating_sub(visible));
     for (index, label) in labels.into_iter().enumerate().skip(first).take(visible) {
@@ -164,23 +101,7 @@ pub(in crate::terminal) fn draw_quick_actions_frame(
         );
     }
     if armed && area.height >= 2 {
-        let hint = if selected == 2 && has_draft {
-            if area.width < 20 {
-                "Draft first Esc"
-            } else if area.width < 24 {
-                "Submit draft · Esc"
-            } else if area.width < FULL_LAYOUT_WIDTH {
-                "Submit draft · Esc back"
-            } else {
-                "Submit or clear draft · Esc return"
-            }
-        } else if area.width < 20 {
-            "1-5 Enter Esc"
-        } else if area.width < FULL_LAYOUT_WIDTH {
-            "1-5 Enter:open Esc"
-        } else {
-            "1-5 or Up/Down · Enter open · Esc return"
-        };
+        let hint = quick_actions_hint(selected, has_draft, area.width);
         frame.render_widget(
             Paragraph::new(safe_truncate(hint, usize::from(area.width))),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
@@ -389,22 +310,7 @@ pub(in crate::terminal) fn draw_help_frame(
         let Some(entry) = help_entry(index) else {
             break;
         };
-        let command = if area.width < 24 {
-            format!("/{}", entry.name)
-        } else {
-            format!(
-                "/{}{}",
-                entry.name,
-                entry
-                    .argument
-                    .map_or_else(String::new, |argument| format!(" {argument}"))
-            )
-        };
-        let line = if area.width >= 50 {
-            format!("{command} · {}", entry.description)
-        } else {
-            command
-        };
+        let line = help_line(&entry, area.width);
         frame.render_widget(
             Paragraph::new(numbered_line(
                 index,
@@ -460,4 +366,118 @@ pub(in crate::terminal) fn session_picker_index(
     let offset = usize::from(row - area.top() - 1);
     let index = window_start(Some(selected), visible_rows).saturating_add(offset);
     (index < count).then_some(index)
+}
+
+fn session_details(item: &SessionListItem, width: u16) -> [String; 4] {
+    let short = width < FULL_LAYOUT_WIDTH;
+    let created = if short {
+        item.created_at.get(..10).unwrap_or(&item.created_at)
+    } else {
+        &item.created_at
+    };
+    let used = if short {
+        item.last_activity_at
+            .get(..10)
+            .unwrap_or(&item.last_activity_at)
+    } else {
+        &item.last_activity_at
+    };
+    [
+        if short {
+            format!("Made {created}")
+        } else {
+            format!("Created: {created} UTC")
+        },
+        if short {
+            format!("Used {used}")
+        } else {
+            format!("Last activity: {used} UTC")
+        },
+        crate::presentation::session_access_label(&item.defaults).to_owned(),
+        item.defaults
+            .model
+            .clone()
+            .unwrap_or_else(|| "Default model".into()),
+    ]
+}
+
+fn session_picker_hint(width: u16) -> &'static str {
+    if width < 20 {
+        "Up/Dn Enter Esc"
+    } else if width < 24 {
+        "Up/Dn Enter:go Esc"
+    } else if width < FULL_LAYOUT_WIDTH {
+        "Up/Dn Enter:resume Esc"
+    } else {
+        "Up/Down select · Enter resume · Esc close"
+    }
+}
+
+fn quick_action_labels(has_draft: bool, width: u16) -> [&'static str; 5] {
+    if width < 24 {
+        ["Models", "Agents", "Resume", "Setup", "Usage"]
+    } else if width < FULL_LAYOUT_WIDTH {
+        [
+            "Models · choose",
+            "Agents · inspect",
+            if has_draft {
+                "Resume · draft"
+            } else {
+                "Resume · choose"
+            },
+            "Setup · account",
+            "Usage · inspect",
+        ]
+    } else {
+        [
+            "Models · choose a model",
+            "Agents · inspect work",
+            if has_draft {
+                "Resume · finish draft first"
+            } else {
+                "Resume · conversation"
+            },
+            "Setup · connect an account",
+            "Usage · reported tokens",
+        ]
+    }
+}
+
+fn quick_actions_hint(selected: usize, has_draft: bool, width: u16) -> &'static str {
+    if selected == 2 && has_draft {
+        if width < 20 {
+            "Draft first Esc"
+        } else if width < 24 {
+            "Submit draft · Esc"
+        } else if width < FULL_LAYOUT_WIDTH {
+            "Submit draft · Esc back"
+        } else {
+            "Submit or clear draft · Esc return"
+        }
+    } else if width < 20 {
+        "1-5 Enter Esc"
+    } else if width < FULL_LAYOUT_WIDTH {
+        "1-5 Enter:open Esc"
+    } else {
+        "1-5 or Up/Down · Enter open · Esc return"
+    }
+}
+
+fn help_line(entry: &super::super::commands::HelpEntry, width: u16) -> String {
+    let command = if width < 24 {
+        format!("/{}", entry.name)
+    } else {
+        format!(
+            "/{}{}",
+            entry.name,
+            entry
+                .argument
+                .map_or_else(String::new, |argument| format!(" {argument}"))
+        )
+    };
+    if width >= 50 {
+        format!("{command} · {}", entry.description)
+    } else {
+        command
+    }
 }
