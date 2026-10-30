@@ -145,12 +145,6 @@ async fn pick_session_inline(
             .await
             .map_err(|error| error.to_string())?
         {
-            TerminalInput::Up => selected = selected.saturating_sub(1),
-            TerminalInput::Down => selected = (selected + 1).min(items.len() - 1),
-            TerminalInput::PageUp => selected = selected.saturating_sub(10),
-            TerminalInput::PageDown => selected = (selected + 10).min(items.len() - 1),
-            TerminalInput::Home => selected = 0,
-            TerminalInput::End => selected = items.len() - 1,
             TerminalInput::PointerMove { column, row } => {
                 if let Some(index) =
                     terminal.session_picker_target(column, row, selected, items.len())
@@ -189,7 +183,11 @@ async fn pick_session_inline(
                 return Ok(PickerChoice::Closed);
             }
             TerminalInput::Shutdown(signal) => return Ok(PickerChoice::Shutdown(signal)),
-            _ => {}
+            input => {
+                if let Some(next) = input.step_selection(selected, items.len() - 1) {
+                    selected = next;
+                }
+            }
         }
     }
 }

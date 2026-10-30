@@ -1014,14 +1014,6 @@ async fn browse_inline(
                 catalog_state = refresh.request();
                 refresh_error = None;
             }
-            TerminalInput::Up => selected = selected.saturating_sub(1),
-            TerminalInput::Down => selected = (selected + 1).min(visible.len().saturating_sub(1)),
-            TerminalInput::PageUp => selected = selected.saturating_sub(10),
-            TerminalInput::PageDown => {
-                selected = (selected + 10).min(visible.len().saturating_sub(1))
-            }
-            TerminalInput::Home => selected = 0,
-            TerminalInput::End => selected = visible.len().saturating_sub(1),
             direction @ (TerminalInput::Left | TerminalInput::Right) => {
                 if let Some(index) = visible.get(selected) {
                     let choices = effort_choices(profile, &items[*index], exact_custom);
@@ -1052,7 +1044,12 @@ async fn browse_inline(
                 return Ok(Choice::Closed);
             }
             TerminalInput::Shutdown(signal) => return Ok(Choice::Shutdown(signal)),
-            _ => {}
+            input => {
+                if let Some(next) = input.step_selection(selected, visible.len().saturating_sub(1))
+                {
+                    selected = next;
+                }
+            }
         }
         if let Some(index) = visible.get(selected) {
             anchor.clone_from(&items[*index].id);

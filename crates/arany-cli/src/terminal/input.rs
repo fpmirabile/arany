@@ -110,6 +110,20 @@ impl TerminalInput {
         let index = usize::try_from(character.to_digit(10)?.checked_sub(1)?).ok()?;
         (index < count).then_some(index)
     }
+
+    // Arrow, page and Home/End keys move a selection within `0..=last`, a page per selector height.
+    #[must_use]
+    pub fn step_selection(self, selected: usize, last: usize) -> Option<usize> {
+        Some(match self {
+            Self::Up => selected.saturating_sub(1),
+            Self::Down => (selected + 1).min(last),
+            Self::PageUp => selected.saturating_sub(super::view::SELECTOR_ROWS),
+            Self::PageDown => (selected + super::view::SELECTOR_ROWS).min(last),
+            Self::Home => 0,
+            Self::End => last,
+            _ => return None,
+        })
+    }
 }
 
 pub(super) enum TerminalReader {
@@ -1048,6 +1062,24 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
         KeyCode::Enter => Some(TerminalInput::Submit),
         KeyCode::Esc => Some(TerminalInput::Escape),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+impl TerminalReader {
+    // No reader loop answers this admission barrier, so arming a dialog fails.
+    pub(super) fn closed_for_test() -> Self {
+        Self::Lines(LineReader {
+            receiver: mpsc::channel(1).1,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            pending: VecDeque::new(),
+            remaining_bytes: MAX_DRAFT_BYTES,
+            chat: false,
+            child: false,
+            epoch: 0,
+            admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
+        })
     }
 }
 

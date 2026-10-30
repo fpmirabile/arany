@@ -2867,6 +2867,21 @@ impl AttachedTerminal {
         Ok(true)
     }
 
+    // A failed admission barrier closes the dialog, so no unarmed dialog keeps input.
+    async fn open_dialog(
+        &mut self,
+        mut draw: impl FnMut(&mut Self) -> Result<(), TerminalError>,
+        close: impl FnOnce(&mut Self),
+    ) -> Result<(), TerminalError> {
+        self.begin_dialog();
+        draw(self)?;
+        if let Err(error) = self.arm_dialog().await {
+            close(self);
+            return Err(error);
+        }
+        draw(self)
+    }
+
     fn draw_dialog(
         &mut self,
         session: Option<&SessionView>,
@@ -3697,7 +3712,6 @@ impl AttachedTerminal {
                 .write_usage(&mut io::stderr(), &pages)
                 .map_err(TerminalError::Io);
         }
-        self.begin_dialog();
         self.panels.help_selected = Some(0);
         self.panels.usage_panel = Some(UsagePanel {
             pages,
@@ -3708,9 +3722,8 @@ impl AttachedTerminal {
             rows: 0,
             visible: 0,
         });
-        self.draw_help(0, session)?;
-        self.arm_dialog().await?;
-        self.draw_help(0, session)
+        self.open_dialog(|terminal| terminal.draw_help(0, session), Self::close_help)
+            .await
     }
 
     pub async fn open_help(&mut self, session: &SessionView) -> Result<(), TerminalError> {
@@ -3720,11 +3733,9 @@ impl AttachedTerminal {
                 .write_help(&mut io::stderr())
                 .map_err(TerminalError::Io);
         }
-        self.begin_dialog();
         self.panels.help_selected = Some(0);
-        self.draw_help(0, session)?;
-        self.arm_dialog().await?;
-        self.draw_help(0, session)
+        self.open_dialog(|terminal| terminal.draw_help(0, session), Self::close_help)
+            .await
     }
 
     #[must_use]
@@ -3754,36 +3765,32 @@ impl AttachedTerminal {
                     panel.page = (panel.page + 1).min(panel.pages.len() - 1);
                     *selected = 0;
                 }
-                TerminalInput::Up | TerminalInput::PointerScrollUp { .. } => {
-                    *selected = selected.saturating_sub(1)
-                }
-                TerminalInput::Down | TerminalInput::PointerScrollDown { .. } => {
+                TerminalInput::PointerScrollUp { .. } => *selected = selected.saturating_sub(1),
+                TerminalInput::PointerScrollDown { .. } => {
                     *selected = (*selected + 1).min(max_scroll)
                 }
-                TerminalInput::PageUp => *selected = selected.saturating_sub(10),
-                TerminalInput::PageDown => *selected = (*selected + 10).min(max_scroll),
-                TerminalInput::Home => *selected = 0,
-                TerminalInput::End => *selected = max_scroll,
                 TerminalInput::Escape
                 | TerminalInput::Submit
                 | TerminalInput::Interrupt
                 | TerminalInput::EndOfInput => self.close_help(),
-                _ => {}
+                input => {
+                    if let Some(next) = input.step_selection(*selected, max_scroll) {
+                        *selected = next;
+                    }
+                }
             }
             return;
         }
         match input {
-            TerminalInput::Up => *selected = selected.saturating_sub(1),
-            TerminalInput::Down => *selected = (*selected + 1).min(help_len() - 1),
-            TerminalInput::PageUp => *selected = selected.saturating_sub(10),
-            TerminalInput::PageDown => *selected = (*selected + 10).min(help_len() - 1),
-            TerminalInput::Home => *selected = 0,
-            TerminalInput::End => *selected = help_len() - 1,
             TerminalInput::Escape
             | TerminalInput::Submit
             | TerminalInput::Interrupt
             | TerminalInput::EndOfInput => self.close_help(),
-            _ => {}
+            input => {
+                if let Some(next) = input.step_selection(*selected, help_len() - 1) {
+                    *selected = next;
+                }
+            }
         }
     }
 
@@ -3918,14 +3925,18 @@ impl AttachedTerminal {
         locked: bool,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
-        self.begin_dialog();
         self.agent_panel = Some(AgentPanel::new(locked));
-        self.draw_agents(view)?;
-        if let Err(error) = self.arm_dialog().await {
-            let _ = self.close_agents();
-            return Err(error);
-        }
-        self.draw_agents(view)
+        self.admit_agents(view).await
+    }
+
+    async fn admit_agents(&mut self, view: &SessionView) -> Result<(), TerminalError> {
+        self.open_dialog(
+            |terminal| terminal.draw_agents(view),
+            |terminal| {
+                let _ = terminal.close_agents();
+            },
+        )
+        .await
     }
 
     #[must_use]
@@ -3997,15 +4008,7 @@ impl AttachedTerminal {
         match update {
             PanelUpdate::Unchanged => Ok(None),
             PanelUpdate::Redraw => self.draw_agents(view).map(|()| None),
-            PanelUpdate::Rearm => {
-                self.begin_dialog();
-                self.draw_agents(view)?;
-                if let Err(error) = self.arm_dialog().await {
-                    let _ = self.close_agents();
-                    return Err(error);
-                }
-                self.draw_agents(view).map(|()| None)
-            }
+            PanelUpdate::Rearm => self.admit_agents(view).await.map(|()| None),
             PanelUpdate::Closed => self.close_agents().map(|()| None),
             PanelUpdate::Open(run, agent) => {
                 self.close_agents()?;
@@ -4638,6 +4641,32 @@ mod terminal_lifecycle_tests {
                 .collect::<Vec<_>>();
             assert_eq!(positions.len(), order.len());
             assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
+    #[tokio::test]
+    async fn help_and_usage_close_when_dialog_admission_fails() {
+        let view = crate::presentation::team_view();
+        for usage in [false, true] {
+            let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+            terminal.mode = TerminalMode::Fullscreen;
+            let backend =
+                TerminalBackend::failing_lifecycle_writer(80, 24, Vec::new(), Rc::default());
+            terminal.owned.terminal = Some(Terminal::new(backend).expect("test terminal"));
+            terminal.owned.input = Some(super::input::TerminalReader::closed_for_test());
+
+            let opened = if usage {
+                terminal.open_usage(&view, false, None).await
+            } else {
+                terminal.open_help(&view).await
+            };
+
+            assert!(
+                matches!(opened, Err(TerminalError::InputClosed)),
+                "usage: {usage}"
+            );
+            assert!(!terminal.help_open(), "usage: {usage}");
+            assert!(terminal.panels.usage_panel.is_none(), "usage: {usage}");
         }
     }
 
