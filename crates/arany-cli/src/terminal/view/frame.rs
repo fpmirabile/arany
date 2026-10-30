@@ -82,37 +82,23 @@ pub(in crate::terminal) fn draw_frame(
 ) {
     draw_frame_with_history(
         frame,
-        model,
-        composer,
-        notice,
-        ComposerHints::new(palette, composer.newline_hint(KeyboardSupport::Legacy)),
-        &[],
-        None,
+        FrameContent {
+            model,
+            composer,
+            notice,
+            hints: ComposerHints::new(palette, composer.newline_hint(KeyboardSupport::Legacy)),
+            history_rows: &[],
+            history_status: None,
+        },
     );
 }
 
 #[cfg(test)]
 pub(in crate::terminal) fn draw_frame_with_history(
     frame: &mut Frame,
-    model: &PresentationModel,
-    composer: &Composer,
-    notice: Option<&str>,
-    hints: ComposerHints<'_>,
-    history_rows: &[HistoryRow],
-    history_status: Option<&str>,
+    content: FrameContent<'_>,
 ) -> Rect {
-    draw_frame_with_history_and_chips(
-        frame,
-        FrameContent {
-            model,
-            composer,
-            notice,
-            hints,
-            history_rows,
-            history_status,
-        },
-    )
-    .history_area
+    draw_frame_with_history_and_chips(frame, content).history_area
 }
 
 #[derive(Default)]

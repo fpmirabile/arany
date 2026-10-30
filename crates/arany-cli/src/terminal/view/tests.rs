@@ -278,20 +278,22 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
             .draw(|frame| {
                 draw_frame_with_history(
                     frame,
-                    &model,
-                    &Composer::default(),
-                    None,
-                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                    &[HistoryRow {
-                        spans: Vec::new(),
-                        slash_cells: 0,
-                        text: "You:".into(),
-                        speaker: MessageKind::User,
-                        heading: true,
-                        matched: false,
-                        selected: None,
-                    }],
-                    None,
+                    FrameContent {
+                        model: &model,
+                        composer: &Composer::default(),
+                        notice: None,
+                        hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                        history_rows: &[HistoryRow {
+                            spans: Vec::new(),
+                            slash_cells: 0,
+                            text: "You:".into(),
+                            speaker: MessageKind::User,
+                            heading: true,
+                            matched: false,
+                            selected: None,
+                        }],
+                        history_status: None,
+                    },
                 );
             })
             .expect("history frame");
@@ -675,12 +677,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         .draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                &rows,
-                Some("History · Ctrl+L live"),
+                FrameContent {
+                    model: &model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                    history_rows: &rows,
+                    history_status: Some("History · Ctrl+L live"),
+                },
             );
         })
         .expect("history frame");
@@ -737,12 +741,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         wide.draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &wide_model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color }, "\\ then Enter"),
-                &rows,
-                Some("History · Ctrl+L live"),
+                FrameContent {
+                    model: &wide_model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                    history_rows: &rows,
+                    history_status: Some("History · Ctrl+L live"),
+                },
             );
         })
         .expect("wide history frame");
@@ -757,12 +763,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         wide.draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &wide_model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color }, "\\ then Enter"),
-                &feedback_rows,
-                Some("History · Ctrl+L live"),
+                FrameContent {
+                    model: &wide_model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                    history_rows: &feedback_rows,
+                    history_status: Some("History · Ctrl+L live"),
+                },
             );
         })
         .expect("wide error frame");
@@ -789,12 +797,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         .draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color: true }, "\\ then Enter"),
-                &rows,
-                None,
+                FrameContent {
+                    model: &model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: true }, "\\ then Enter"),
+                    history_rows: &rows,
+                    history_status: None,
+                },
             );
         })
         .expect("colored history frame");
@@ -811,12 +821,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .expect("narrow history frame");
@@ -877,12 +889,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &conversation,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &conversation,
+                            history_status: None,
+                        },
                     );
                 })
                 .expect("conversation frame");
@@ -1544,12 +1558,14 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();

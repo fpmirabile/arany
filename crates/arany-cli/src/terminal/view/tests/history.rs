@@ -62,12 +62,14 @@ fn narrow_classic_history_cue_keeps_export_action_visible() {
         .draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                &[],
-                Some(status),
+                FrameContent {
+                    model: &model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                    history_rows: &[],
+                    history_status: Some(status),
+                },
             );
         })
         .expect("narrow history status");
@@ -91,12 +93,14 @@ fn fullscreen_history_cue_stays_visible_behind_a_long_state() {
             .draw(|frame| {
                 draw_frame_with_history(
                     frame,
-                    &model,
-                    &Composer::default(),
-                    None,
-                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                    &[],
-                    Some("History · Ctrl+L live"),
+                    FrameContent {
+                        model: &model,
+                        composer: &Composer::default(),
+                        notice: None,
+                        hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                        history_rows: &[],
+                        history_status: Some("History · Ctrl+L live"),
+                    },
                 );
             })
             .expect("status frame");
@@ -176,12 +180,14 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -214,12 +220,14 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -244,12 +252,14 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -278,12 +288,14 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -354,12 +366,14 @@ fn command_row_frames_show_first_script_line_and_nonzero_counters() {
                     .draw(|frame| {
                         draw_frame_with_history(
                             frame,
-                            &model,
-                            &Composer::default(),
-                            None,
-                            ComposerHints::new(Palette { color }, "\\ then Enter"),
-                            &rows,
-                            None,
+                            FrameContent {
+                                model: &model,
+                                composer: &Composer::default(),
+                                notice: None,
+                                hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                                history_rows: &rows,
+                                history_status: None,
+                            },
                         );
                     })
                     .unwrap();

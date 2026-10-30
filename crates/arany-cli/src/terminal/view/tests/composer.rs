@@ -140,15 +140,17 @@ fn newline_hint_recommends_a_received_preference_with_the_portable_fallback() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &composer,
-                        None,
-                        ComposerHints::new(
-                            Palette { color: false },
-                            composer.newline_hint(KeyboardSupport::Disambiguated),
-                        ),
-                        &[],
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &composer,
+                            notice: None,
+                            hints: ComposerHints::new(
+                                Palette { color: false },
+                                composer.newline_hint(KeyboardSupport::Disambiguated),
+                            ),
+                            history_rows: &[],
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -1030,15 +1032,17 @@ fn empty_composer_names_agent_keys_only_when_the_run_has_children() {
             .draw(|frame| {
                 draw_frame_with_history(
                     frame,
-                    &model,
-                    &composer,
-                    None,
-                    ComposerHints::new(
-                        Palette { color: false },
-                        composer.newline_hint(KeyboardSupport::Legacy),
-                    ),
-                    &[],
-                    None,
+                    FrameContent {
+                        model: &model,
+                        composer: &composer,
+                        notice: None,
+                        hints: ComposerHints::new(
+                            Palette { color: false },
+                            composer.newline_hint(KeyboardSupport::Legacy),
+                        ),
+                        history_rows: &[],
+                        history_status: None,
+                    },
                 );
             })
             .unwrap();
