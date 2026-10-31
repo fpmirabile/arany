@@ -21,14 +21,14 @@ A spec is the maintained contract for one product domain: what a user or caller 
 
 Terminal, Tools, Execution and Provider are folders whose README lists one file per topic; the other domains are single files.
 
-Every spec is edited under the [security](../../agents/security.md) and [testing](../../agents/testing.md) rules. Every product domain has a spec; `agents/` holds working practice only, and tests are the only evidence for a spec. Avoid empty domain files.
+Every product domain has one nonempty spec, edited under the [security](../../agents/security.md) and [testing](../../agents/testing.md) rules; `agents/` holds working practice only, and tests are the only evidence for a spec.
 
 ## Maintain a contract
 
-1. Behavior work starts from the owning contract: read it and name the successful path and the meaningful rejection, failure or recovery behavior you change or add. The request and recorded decisions set scope; clarify only material unspecified behavior.
+1. Behavior work starts from the owning contract: name the successful path and the meaningful rejection, failure or recovery behavior you change or add. The request and recorded decisions set scope; clarify only material unspecified behavior.
 2. Edit the contract only when agreed behavior, a limit, compatibility or recovery changed or was missing. A refactor, or a fix that restores specified behavior, needs no spec edit. Label accepted-but-unimplemented behavior and link its task. Proposals stay in `planning/`; open verification stays in `NEXT_STEPS.md`.
 3. An edit adds or replaces the owning sentence or section; it never restates behavior, a bound or a rationale another passage owns. Name the edited contract in the PR; a spec that grows for a refactor is a review finding.
-4. Specs carry no scenario tables, test names or evidence links: the tests that prove a rule are found from the code. They also carry no per-version migration narratives ("N → M" steps) and no plan slice IDs, and they link a guarantee another passage owns instead of restating it. [Testing rules](../../agents/testing.md) decide when a new test is justified. Check local links after editing.
+4. Specs carry no scenario tables, test names or evidence links: the tests that prove a rule are found from the code. They also carry no per-version migration narratives ("N → M" steps) or plan slice IDs. [Testing rules](../../agents/testing.md) decide when a new test is justified. Check local links after editing.
 
 When contract, code and tests disagree, name the discrepancy and resolve it at the owner; neither an old research recommendation nor current faulty behavior silently overrides an agreed spec. Surface a conflict that recorded decisions cannot settle before changing the contract. Create a new spec only when a real behavior change or an overloaded contract earns it; replace normative copies with links, update the domain index, the AGENTS.md loading trigger and inbound links together, and close the execution plan under the [planning lifecycle](../../planning/README.md#lifecycle).
 
@@ -44,7 +44,7 @@ Use these sections when they have substance; short prose or tables suffice:
 - **Behavior:** observable success, ordering, rejection, cancellation and recovery, one rule per sentence.
 - **Limits and compatibility:** bounds whose meaning is public, overflow behavior and explicit non-claims. Reference code or configuration for incidental constants. Link a bound with an exported Rust owner to its row in [the generated limits table](./limits.md), which `arany generate-limits` writes and is read-only.
 
-Specs state requirements, not verification status: never keep a pass/fail or completed-work ledger in a spec. Native platforms, live Providers and human accessibility need their own evidence, tracked in `NEXT_STEPS.md`, before a support claim. Describe semantics, not private function names or test helpers.
+Specs state only what a user, client or model can observe and rely on: behavior, asks and refusals, limits, user-visible errors, recovery and replay outcomes, wire, record and config formats, and security guarantees. Implementation detail that code or tests pin (internal processes, step ordering, types, function names, debug logging, OS mechanics, private layouts) stays out. Specs state requirements, never a pass/fail or completed-work ledger. Native platforms, live Providers and human accessibility need their own evidence, tracked in `NEXT_STEPS.md`, before a support claim. Describe semantics, not private function names or test helpers.
 
 ### Generated bounds and disambiguation
 
