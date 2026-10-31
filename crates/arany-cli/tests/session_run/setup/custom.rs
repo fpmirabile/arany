@@ -8,7 +8,7 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
     pty.send_and_wait(b"2\r", b"Input:\r\n");
     let saved_at = add_custom_route(&mut pty, b"1\r", b"3\r");
     pty.acknowledge_linear_pages((saved_at, b"empty Enter selects 1. first-route"));
-    // Without a conformance check the save result is one acknowledgment (terminal.md, Custom routes).
+    // Without a conformance check the save result is one acknowledgment (terminal/setup-and-accounts.md, Custom routes).
     assert!(
         String::from_utf8_lossy(&pty.transcript[saved_at..])
             .contains("Saved; select it to use this route"),

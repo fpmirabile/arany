@@ -9,9 +9,9 @@ transport, thread and turn projection, and JSON Schema export. The server runs
 The server sends one-use human approval requests and negotiates exact-session scope for eligible primary host commands. Linux and macOS use the same loop; native evidence and remaining work are in [NEXT_STEPS](../../NEXT_STEPS.md#pursue-in-order).
 
 [Session](./session.md) owns durable Session identity and replay,
-[execution](./execution.md) owns committed Runs and Events,
-[Goals](./goals.md) owns budgets and recovery, and [Tools](./tools.md) owns
-authority and approval scopes. [Terminal](./terminal.md) owns `exec` and
+[execution](./execution/README.md) owns committed Runs and Events,
+[Goals](./goals.md) owns budgets and recovery, and [Tools](./tools/README.md) owns
+authority and approval scopes. [Terminal](./terminal/README.md) owns `exec` and
 `show` output. Protocol serialization adds no authority or Engine policy.
 
 The in-process transport uses bounded channels without newline framing and
@@ -22,7 +22,7 @@ live approval mode. These typed inputs are internal to the binary; JSON-RPC,
 repository content and child agents cannot construct them or gain terminal
 approval authority. Provider and Tool admission still fail closed before a Run.
 
-Headless `exec` uses the same connection with its admitted Provider bundle and full Run request, including a request for a new Session, which the Engine creates during ordinary admission, never ahead of a refusal. It has no human approval channel or provisional display, receives canonical Events and the typed settlement without the terminal's wire projections, and follows the [headless host policy](./tools.md#primary-host-commands).
+Headless `exec` uses the same connection with its admitted Provider bundle and full Run request, including a request for a new Session, which the Engine creates during ordinary admission, never ahead of a refusal. It has no human approval channel or provisional display, receives canonical Events and the typed settlement without the terminal's wire projections, and follows the [headless host policy](./tools/host-commands.md#primary-host-commands).
 
 The terminal submits through the Server's turn-start flow. Its controls use
 request/reply messages on the connection's inbound channel, including before
@@ -42,7 +42,7 @@ bounds; only provisional display notifications may drop under backpressure.
 Each inbound stage uses the inbound capacity and each outbound stage uses the
 outbound capacity in the limits table, including the terminal client's deferred
 notification queue; typed replies use one-use channels. The client applies
-committed Events in the terminal's [bounded bursts](./terminal.md#conversation-progress-and-history)
+committed Events in the terminal's [bounded bursts](./terminal/conversation.md#conversation-progress-and-history)
 before polling input again. Provisional display uses the terminal output queue directly and drops when it is full.
 Control requests remain serviceable while output waits. Shutdown drains queued
 notifications under the shared shutdown grace, then cancels remaining tasks.
@@ -94,18 +94,18 @@ journal format. JSON is data; clients must render untrusted content inertly.
 | `-32000` | Engine admission failure | EngineError variant in camelCase; the closed vocabulary is exported as `$defs.Reason` |
 | `-32001` | Provider selection or routing failure | `providerUnavailable`, `providerRejected`, `invalidSelection` |
 
-A pending or Uncertain [Provider setup edit](./execution.md#admission-persistence-and-recovery)
+A pending or Uncertain [Provider setup edit](./execution/admission-and-recovery.md#admission-persistence-and-recovery)
 refuses `turn/start`, `goal/resume` and `thread/resume` with `-32000` and
 `data.reason:"providerSetupBlocked"`, including for an already loaded thread.
 The refusal appends no Events and makes no Provider calls. Inspect the saved
 setup state and start a new Session before submitting more work.
 
-`goalIncludesUnavailable` reports a continuation or resume whose admitted include list is unknown ([Goals](./goals.md#budget-continuation) owns the rule). `goalInputTooLarge` reports an objective plus includes exceeding the serialized Goal admission envelope, before any Event or Provider call. Raw Event subscriptions expose the required nullable `GoalStarted.include_paths` field and its payload version, as [Execution](./execution.md#admission-persistence-and-recovery) defines.
+`goalIncludesUnavailable` reports a continuation or resume whose admitted include list is unknown ([Goals](./goals.md#budget-continuation) owns the rule). `goalInputTooLarge` reports an objective plus includes exceeding the serialized Goal admission envelope, before any Event or Provider call. Raw Event subscriptions expose the required nullable `GoalStarted.include_paths` field and its payload version, as [Execution](./execution/admission-and-recovery.md#admission-persistence-and-recovery) defines.
 
 Engine errors use their compiled Display message. A failed accepted turn is
 represented by `turn/completed` with status `failed` and compiled recovery
 guidance in `error.message`, never a JSON-RPC error. Cancellation is
-`interrupted`. An unknown Tool effect is [Uncertain](./execution.md#effect-outcomes)
+`interrupted`. An unknown Tool effect is [Uncertain](./execution/events-and-outcomes.md#effect-outcomes)
 and projects `uncertain`, never succeeded or failed. If an Engine error
 leaves an accepted submission without a committed terminal Run, the process
 exits unsuccessfully with Session-history recovery guidance rather than
@@ -156,7 +156,7 @@ committed sequence to the selected Workspace. They confer no access authority.
 If the anchor changes, restart discovery without a cursor; new activity before
 the anchor appears on a fresh first page. A page is not a retained snapshot.
 
-Listing resolves Workspace membership from each Session's first Event only, then replays only that Workspace's returned Sessions (with their fork sources), newest first; other Workspaces' history is never replayed. A page stops early, with a cursor, once replayed Events reach the [Session discovery bound](./execution.md#persistence-bounds) (the first Session is always returned), so a page may hold fewer than `limit` entries; only `nextCursor:null` ends the list. Discovery beyond the [discovery head limit](./execution.md#persistence-bounds) fails `tooManySessions`. A listing reads one global Event watermark and every later statement at or below it, using only index seeks and ranges of at most 256 raw rows, without a table scan or SQLite sort. No read lock is held across decode or replay, so Engine appends are never blocked, Sessions and fork sources are read at one watermark, and `updatedAt` and cursors match it. Memory holds at most one 256-row chunk per open lineage lane. Each read statement waits at most 2 seconds for a committing writer's lock; writers keep 250 ms. On `SQLITE_BUSY`, watermark capture, head discovery and each page read each allow at most three retries (four attempts) after releasing all statements and discarding incomplete results, keeping the captured watermark and bounds; appends and other effects are never retried. Exhaustion fails the listing with the retryable `store` error "history is busy with a committing write; retry the listing", never a partial page.
+Listing resolves Workspace membership from each Session's first Event only, then replays only that Workspace's returned Sessions (with their fork sources), newest first; other Workspaces' history is never replayed. A page stops early, with a cursor, once replayed Events reach the [Session discovery bound](./execution/persistence.md#persistence-bounds) (the first Session is always returned), so a page may hold fewer than `limit` entries; only `nextCursor:null` ends the list. Discovery beyond the [discovery head limit](./execution/persistence.md#persistence-bounds) fails `tooManySessions`. A listing reads one global Event watermark and every later statement at or below it, using only index seeks and ranges of at most 256 raw rows, without a table scan or SQLite sort. No read lock is held across decode or replay, so Engine appends are never blocked, Sessions and fork sources are read at one watermark, and `updatedAt` and cursors match it. Memory holds at most one 256-row chunk per open lineage lane. Each read statement waits at most 2 seconds for a committing writer's lock; writers keep 250 ms. On `SQLITE_BUSY`, watermark capture, head discovery and each page read each allow at most three retries (four attempts) after releasing all statements and discarding incomplete results, keeping the captured watermark and bounds; appends and other effects are never retried. Exhaustion fails the listing with the retryable `store` error "history is busy with a committing write; retry the listing", never a partial page.
 A result that cannot fit the line cap fails `contextTooLarge` without
 partial output. Unsupported sorting, filtering and archival options refuse as
 unknown parameters.
@@ -186,26 +186,26 @@ receipt refusal leaves the connection open.
 
 ## Rewind
 
-`thread_rewind_v2` advertises two idle, loaded-thread methods. They call the same Engine as the [terminal](./terminal.md#rewind); [Tools](./tools.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
+`thread_rewind_v2` advertises two idle, loaded-thread methods. They call the same Engine as the [terminal](./terminal/commands.md#rewind); [Tools](./tools/changesets-and-checkpoints.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
 
 | Method | Params | Result |
 |---|---|---|
 | `thread/rewind/preview` | `{threadId,turnId}`; turnId identifies the selected Run, or the UUID of a Before rewind checkpoint | `{checkpoint:{kind:"run"\|"rewind",id,sequence},restore:["both"\|"conversation"\|"code"],files:[{path,state,added,removed}],blockers,nonRewindable:[{sequence,effect}],previewToken}` |
 | `thread/rewind` | `{threadId,previewToken,restore:"code"\|"conversation"\|"both",kept?:[path],overwrite?:[path],confirmOverwrite?:bool}` | `{rewind:{id:string\|null,outcome,conflicts,conflictCount},thread?,conversation?:{threadId:string\|null,prompt:string\|null,imagesOmitted},notices:[string]}` |
 
-Preview performs no publication or fork. Restore choices contain eligible modes, in terminal order; conversation stays available across unknown code outcomes or read-only access. Files use the closed camelCase states restore, delete, recreate, drifted, historyDrift, unavailable, unsafe, outsideGrant and kept. Added/removed counts use the [terminal comparison convention](./terminal.md#rewind), or null for binary/unavailable comparisons. Blockers are uncertainPublication, noWriteGrant or guardUnavailable; non-rewindable effects are host, git, unguardedCommand, mcp, cache or directory. The host marker covers the human-approved Git remote effects specified by [Tools](./tools.md#human-approved-host-git). Paths and text remain untrusted JSON data; clients render them inertly. Diff content is not sent on this surface.
+Preview performs no publication or fork. Restore choices contain eligible modes, in terminal order; conversation stays available across unknown code outcomes or read-only access. Files use the closed camelCase states restore, delete, recreate, drifted, historyDrift, unavailable, unsafe, outsideGrant and kept. Added/removed counts use the [terminal comparison convention](./terminal/commands.md#rewind), or null for binary/unavailable comparisons. Blockers are uncertainPublication, noWriteGrant or guardUnavailable; non-rewindable effects are host, git, unguardedCommand, mcp, cache or directory. The host marker covers the human-approved Git remote effects specified by [Tools](./tools/git.md#human-approved-host-git). Paths and text remain untrusted JSON data; clients render them inertly. Diff content is not sent on this surface.
 
-One opaque, one-use preview token is retained per connection; any new preview replaces it, and it is bound to thread, checkpoint, exact head/prefix, Engine plan and observed file states. It remains confirmable while live and unchanged. A new submission, unsubscribe or connection close discards it. Stale, foreign-thread, replaced or reused tokens return `previewChanged`; no persistent token or renewed authority survives restart. Mutation consumes the token, including a refusal after admission. Live file/grant/blob/enforcement admission is rechecked by the Engine. Kept/overwrite selections follow the [Tools rewind limits](./tools.md#checkpoints-and-rewind); overflow is `invalidParams` before effects. Re-previewing a selection must retain the original observed states, so an edit after preview returns `previewChanged` rather than adopting a new overwrite precondition.
+One opaque, one-use preview token is retained per connection; any new preview replaces it, and it is bound to thread, checkpoint, exact head/prefix, Engine plan and observed file states. It remains confirmable while live and unchanged. A new submission, unsubscribe or connection close discards it. Stale, foreign-thread, replaced or reused tokens return `previewChanged`; no persistent token or renewed authority survives restart. Mutation consumes the token, including a refusal after admission. Live file/grant/blob/enforcement admission is rechecked by the Engine. Kept/overwrite selections follow the [Tools rewind limits](./tools/changesets-and-checkpoints.md#checkpoints-and-rewind); overflow is `invalidParams` before effects. Re-previewing a selection must retain the original observed states, so an edit after preview returns `previewChanged` rather than adopting a new overwrite precondition.
 
-The parent client is the explicit human confirmation channel. A `thread/rewind` request confirms exactly the previewed plan and named keep selection. Any overwrite selection additionally requires `confirmOverwrite:true`; omitted/false returns `overwriteConfirmationRequired` without consuming the token or writing. The client must present the listed paths, saved-current-content warning and a separate explicit overwrite decision, with Cancel initially selected, as the terminal does. This is never AI approval or automatic permission-mode approval. A restricted adapter such as ACP returns humanConfirmationRequired; it cannot inherit this capability as an automatic mutation path. Code admission follows the [Tools rewind policy](./tools.md#checkpoints-and-rewind); blocked publications return `rewindBlocked`.
+The parent client is the explicit human confirmation channel. A `thread/rewind` request confirms exactly the previewed plan and named keep selection. Any overwrite selection additionally requires `confirmOverwrite:true`; omitted/false returns `overwriteConfirmationRequired` without consuming the token or writing. The client must present the listed paths, saved-current-content warning and a separate explicit overwrite decision, with Cancel initially selected, as the terminal does. This is never AI approval or automatic permission-mode approval. A restricted adapter such as ACP returns humanConfirmationRequired; it cannot inherit this capability as an automatic mutation path. Code admission follows the [Tools rewind policy](./tools/changesets-and-checkpoints.md#checkpoints-and-rewind); blocked publications return `rewindBlocked`.
 
 Code outcomes are restored, conflict, denied, failed, cancelled or uncertain. Conflict returns the bounded conflict list and total; notices include capture/pruning and unknown-outcome guidance. Raw subscriptions carry the canonical rewind Events. Existing turn/item notifications are unchanged. Both mode restores code before forking and preserves its receipt with a `Code restored; conversation unchanged` notice on later fork failure or cancellation. Conversation-only restoration has a null rewind ID and creates no Workspace rewind Events. A durable fork appears in thread and is loaded with the source execution configuration; the response precedes thread/started. Restoring the first prompt returns conversation.threadId null and no thread: the client opens an unsaved conversation, retaining the returned draft, and uses thread/start only on explicit submission. Conversation restoration returns the complete canonical prompt up to the [64 KiB](./limits.md#max_user_message_bytes) objective bound; images remain omitted and are identified by `imagesOmitted`. Source history and Goal budgets remain intact.
 
-An active submission or another request during publication returns busy; an unknown loaded ID returns threadNotLoaded. An invalid checkpoint is invalidParams. Code refusals use rewindBlocked, previewChanged or rewindTooLarge; lineage overflow uses conversationRewindLimit. No method retries. Input EOF or process shutdown cancels an in-flight publication and uses the existing shutdown grace, retaining only committed outcomes. Responses and previews obey the 1 MiB<!-- unrelated-bound: Serve protocol line cap --> line bound; a maximal receipt reservation rejects an oversized request ID before any effect or fork. The single pending Engine preview retains files and comparison versions only within the [Tool action, comparison and transfer limits](./tools.md#checkpoints-and-rewind).
+An active submission or another request during publication returns busy; an unknown loaded ID returns threadNotLoaded. An invalid checkpoint is invalidParams. Code refusals use rewindBlocked, previewChanged or rewindTooLarge; lineage overflow uses conversationRewindLimit. No method retries. Input EOF or process shutdown cancels an in-flight publication and uses the existing shutdown grace, retaining only committed outcomes. Responses and previews obey the 1 MiB<!-- unrelated-bound: Serve protocol line cap --> line bound; a maximal receipt reservation rejects an oversized request ID before any effect or fork. The single pending Engine preview retains files and comparison versions only within the [Tool action, comparison and transfer limits](./tools/changesets-and-checkpoints.md#checkpoints-and-rewind).
 
 ## Notifications and items
 
-The raw Event catalog includes `ToolPreflightRefused`; its typed cause and fixed reason follow the [execution contract](./execution.md#accepted-outcomes). An unstarted refused proposal creates no Tool item; the failed turn retains its terminal failure feedback.
+The raw Event catalog includes `ToolPreflightRefused`; its typed cause and fixed reason follow the [execution contract](./execution/events-and-outcomes.md#accepted-outcomes). An unstarted refused proposal creates no Tool item; the failed turn retains its terminal failure feedback.
 
 All live facts come from committed Events on `RunHandle.events` or the single
 process-wide `Engine::subscribe()` tap for raw subscriptions. Provisional
@@ -232,13 +232,13 @@ or `{type:"waiting",intentId:UUID|null}`. Preview fields copy the bounded Engine
 hint exactly; null withdraws a preview or capacity wait. Clients render these
 untrusted values inertly and clear them when the turn settles. The notifications
 carry no authority, are not journaled or replayed, and never become receipt facts.
-Opting in enables the Engine's [durable display checkpoints](./terminal.md#terminal-continuity-and-provisional-text):
+Opting in enables the Engine's [durable display checkpoints](./terminal/conversation.md#terminal-continuity-and-provisional-text):
 chunk-sized non-tentative answer text, public commentary and eligible published
 completion or cancellation tails append canonical `AssistantDisplayRecorded`
 Events, which survive strict replay regardless of notification delivery.
 Incomplete text stays qualified and never becomes an accepted Message, Provider
 history or compaction input. Unpublished transport-buffer tails follow the
-[Provider cancellation rule](./provider.md#streaming-and-provisional-text).
+[Provider cancellation rule](./provider/encoding-and-streaming.md#streaming-and-provisional-text).
 Streaming deltas are not persisted; Arany keeps bounded intermediate
 checkpoints for crash and cancellation recovery. Latest preview and wait values
 coalesce independently. Delivery is attempted once without waiting; a full queue
@@ -258,7 +258,7 @@ without stopping its Goal. Otherwise it is one of:
   explicit resume.
 - `cancelled` or `stoppedByHook`.
 - For a Run with no terminal receipt: `uncertain`, `goalExhausted` or
-  `interrupted`, following [accepted outcomes](./execution.md#accepted-outcomes).
+  `interrupted`, following [accepted outcomes](./execution/events-and-outcomes.md#accepted-outcomes).
 - `{reason:"failed",failure}` with the journal's snake_case `RunFailure`. A
   failure on the last permitted call is not budget exhaustion.
 
@@ -283,7 +283,7 @@ cursor from skipping unreturned history. Slow clients never hold Journal appends
 An individual Event that cannot fit a live line emits `events/resync` with
 `missed:1` and disables that subscription; replay refuses it with `contextTooLarge`.
 
-Raw subscription pages and `events/committed` forward canonical journal Events of every kind unchanged. This includes `SupervisorVerdictRecorded` with its `features` and `evidence` (counts, sequences and closed enums, never paths or content), unlike the further-reduced [terminal](./terminal.md#conversation-progress-and-history) and [OTLP](./telemetry.md#spans) projections. Its kind is in the closed Event vocabulary; its payload is the journal's open object, bounded by the [execution format](./execution.md#persistence-bounds). It creates no item or approval request, and observers neither recompute verdicts nor change Run control.
+Raw subscription pages and `events/committed` forward canonical journal Events of every kind unchanged. This includes `SupervisorVerdictRecorded` with its `features` and `evidence` (counts, sequences and closed enums, never paths or content), unlike the further-reduced [terminal](./terminal/conversation.md#conversation-progress-and-history) and [OTLP](./telemetry.md#spans) projections. Its kind is in the closed Event vocabulary; its payload is the journal's open object, bounded by the [execution format](./execution/persistence.md#persistence-bounds). It creates no item or approval request, and observers neither recompute verdicts nor change Run control.
 
 Times are committed Event timestamps, never a presentation clock. Item IDs are
 `<runId>:user`, `<runId>:answer`, or the immutable Tool intent UUID.
@@ -345,7 +345,7 @@ primary host command, the request additionally carries
 `availableDecisions:["accept","acceptForSession","decline","cancel"]`.
 `acceptForSession` translates to the Engine's exact-command live-session grant;
 every reuse still has a fresh immutable intent and committed verdict referencing
-the original human decision. The [Tools scope contract](./tools.md#primary-host-commands)
+the original human decision. The [Tools scope contract](./tools/host-commands.md#primary-host-commands)
 owns eligibility, bounds and expiry. Subsequent turns on the same live binding
 may reuse it; explicit thread/Goal resume, reconnect, restart and fork cannot.
 Clients without this capability receive once/decline/cancel only. A session reply
@@ -357,7 +357,7 @@ Arany journals a separate bounded scope grant rather than renewing the old inten
 An in-process attached-terminal caller selects its full human approval channel
 in Server configuration, never through client capabilities or model input.
 Its eligible requests additionally offer `allowPrefixInFolder`, mapping to the
-existing typed `ToolApprovals` reply and [attached prefix rules](./tools.md#remembered-host-prefixes).
+existing typed `ToolApprovals` reply and [attached prefix rules](./tools/host-commands.md#remembered-host-prefixes).
 Only offered scopes are accepted, bound to the pending immutable approval.
 `allowAutoEdits:true`, when present on that channel, permits the existing
 file-edit affordance: update the mode through `thread/settings/update`, then
@@ -382,7 +382,7 @@ cancellation. A connected slow client alone does not expire an already enqueued 
 requests cannot authorize an effect, even if the request was already queued to the client.
 At most one approval is published per connection; the Engine inbox has one
 bounded ingress slot. Child-request allowance and withdrawal follow the
-[Tools approval rules](./tools.md#folder-trust-and-approvals). Stdio and ACP
+[Tools approval rules](./tools/trust-and-approvals.md#folder-trust-and-approvals). Stdio and ACP
 refuse an excess ask without evicting or renewing the first; the Terminal
 channel retains it in the bounded inbox until the open dialog resolves.
 
@@ -399,14 +399,14 @@ cancellation, Policy, one-use grants and Guard admission still apply.
 | Encoded or decoded line, including newline when present | 1 MiB<!-- unrelated-bound: Serve protocol line cap -->; reader discards overflow through its newline and emits `-32600`, null ID, `messageTooLarge`; malformed input emits `-32700`, null ID; the next valid line remains usable. Outbound serialization stops at the bound. |
 | `initialize.clientInfo` strings | 256 UTF-8 bytes each; invalid params. |
 | Notification opt-outs | At most 32; invalid params. |
-| Turn input | At least one input item, at most one text of [64 KiB](./limits.md#max_user_message_bytes); base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
+| Turn input | At least one input item, at most one text of [64 KiB](./limits.md#max_user_message_bytes); base64-encoded images follow the [terminal image contract](./terminal/drafts-and-paste.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
 | Pending inbound requests | 64 at the reader plus at most 64 deferred messages while sending output; reader buffer 64 KiB<!-- unrelated-bound: protocol reader buffer -->. Output waits still accept EOF, matching interruption/unsubscribe and approval replies. Deferred-input overflow cancels the Run and fails the connection. Cancellation or shutdown with output still full drops the blocked presentation operation, settles the Engine and exits with Session-history recovery guidance; ready output still drains normally. |
 | Outbound queue | 256; committed follower waits and Journal lag is reported through `events/resync`; see [`turn/display` behavior](#notifications-and-items) for provisional hint coalescing and drop rules. |
 | Loaded threads / active submissions / published approval requests | 64 / 1 / 1; `threadLimit` / `busy` / [channel-specific approval backpressure](#server-requests); loaded threads are never evicted. Reloading a known thread consumes no extra slot; unsubscribe frees one after cancellation settles. |
 | Session list page / cursor | 1–100 entries (default 50) / 128 UTF-8 bytes; invalid limits/cursors refuse with invalidParams. The whole response must fit 1 MiB<!-- unrelated-bound: Serve protocol response line -->. |
 | Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
 | Steering and resume input | One text of at most [64 KiB](./limits.md#max_user_message_bytes), bounded further by the [`8 KiB`](./limits.md#max_steering_note_bytes) per-Run note budget for `turn/steer`; invalid params otherwise. |
-| Event replay backlog / page | Strict Store replay is bounded by the [Session Event cap](./execution.md#persistence-bounds), including inherited history; exceeding that existing bound fails closed with `store`. Each response contains at most 1,000 Events and fits 1 MiB<!-- unrelated-bound: Serve protocol response line --> including envelope, request ID and newline; byte overflow shortens the page and count overflow continues via `nextSince`. An Event that cannot fit alone fails `contextTooLarge`. No partial oversized response is sent. |
+| Event replay backlog / page | Strict Store replay is bounded by the [Session Event cap](./execution/persistence.md#persistence-bounds), including inherited history; exceeding that existing bound fails closed with `store`. Each response contains at most 1,000 Events and fits 1 MiB<!-- unrelated-bound: Serve protocol response line --> including envelope, request ID and newline; byte overflow shortens the page and count overflow continues via `nextSince`. An Event that cannot fit alone fails `contextTooLarge`. No partial oversized response is sent. |
 | Raw live subscriptions / tap backlog | At most one cursor per loaded thread (64 total); the single process-wide tap retains 256 Events. Overflow emits `events/resync` with the prior cursor and disables the cursors until re-subscribe, without blocking commits or silently completing missing history. |
 | Shutdown grace | 3 seconds total after EOF, input/output failure or a stop signal, covering Run cancellation, Engine closure and output draining; timeout exits 1 with `Run may be interrupted; check Session history`. |
 
@@ -430,6 +430,6 @@ versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
 covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v2`, `provisional_display_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
-pre-beta; stored formats follow the [incompatible history contract](./execution.md#incompatible-history).
+pre-beta; stored formats follow the [incompatible history contract](./execution/persistence.md#incompatible-history).
 `events_subscribe_v2` identifies the current raw Event vocabulary for backlog
-pages and committed notifications, following the [committed Event contract](./execution.md#committed-event-stream).
+pages and committed notifications, following the [committed Event contract](./execution/events-and-outcomes.md#committed-event-stream).

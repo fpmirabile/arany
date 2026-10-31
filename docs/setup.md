@@ -2,7 +2,7 @@
 
 This guide explains account setup and everyday recovery. The [credential
 contract](./specs/credentials.md) owns account scope and storage; the [terminal
-contract](./specs/terminal.md) owns interaction. [Provider spec](./specs/provider.md)
+contract](./specs/terminal/README.md) owns interaction. [Provider spec](./specs/provider/README.md)
 and [ChatGPT spec](./specs/chatgpt.md) retain route and OAuth admission.
 
 ## Start an attached conversation
@@ -56,7 +56,7 @@ available commands. The draft is limited to 8 KiB of UTF-8; invalid or oversized
 insertions reject without submitting a truncated task. Clipboard PNGs are
 limited to four images totaling 192 KiB. Original images remain in private
 history and JSONL exports; human history shows metadata. See [paste and
-attachments](./specs/terminal.md#paste-and-attachments) for transport, privacy and
+attachments](./specs/terminal/drafts-and-paste.md#paste-and-attachments) for transport, privacy and
 model limitations.
 
 Fullscreen, the default chat view, provides managed history with a visible
@@ -65,7 +65,7 @@ composer. Classic inserts confirmed turns into native scrollback; choose it with
 or `/transcript` shows Tool details and public commentary. Visual streaming is
 provisional: interrupted saved prefixes remain incomplete and
 outside later model context. `--screen-reader` uses linear confirmed output.
-[Terminal continuity](./specs/terminal.md#terminal-continuity-and-provisional-text)
+[Terminal continuity](./specs/terminal/conversation.md#terminal-continuity-and-provisional-text)
 owns these distinctions and recovery limits.
 
 ## Connect or recover a ChatGPT account
@@ -127,7 +127,7 @@ conversations and derived Provider evidence in that StateRoot, preserving
 accounts, model choices and folder trust. Unsafe files or active/concurrent use
 refuse reset. No reset converts unsupported records or automatically resubmits an
 objective. See [credential recovery](./specs/credentials.md#storage-replacement-and-recovery)
-and [history recovery](./specs/terminal.md#setup-and-account-choices).
+and [history recovery](./specs/terminal/setup-and-accounts.md#setup-and-account-choices).
 
 ## Customize the working-style prompts
 
@@ -159,7 +159,7 @@ An Anthropic API key not limited to one Console workspace needs an explicit
 `ANTHROPIC_WORKSPACE_ID` alongside the environment key. A workspace-scoped key
 may omit it. Saved-account setup instead asks Key scoped to workspace or Choose
 API workspace; saved selections never inherit ambient workspace variables.
-The [Provider account spec](./specs/provider.md#native-models-and-accounts)
+The [Provider account spec](./specs/provider/selection.md#native-models-and-accounts)
 owns workspace validation and admission.
 
 ## OpenAI-compatible and Anthropic custom routes
@@ -174,9 +174,9 @@ file this version cannot read is archived at startup; recreate the profiles.
 
 Arany runs no conformance pre-check: it
 sends no request you did not ask for, and every Run validates each real response
-([custom routes](./specs/provider.md#custom-destinations-and-routing)).
+([custom routes](./specs/provider/routing-and-usage.md#custom-destinations-and-routing)).
 If AI Tool review is needed, select a native review route in
-[provider-routing.json](./specs/provider.md#per-role-selection-and-fallback);
+[provider-routing.json](./specs/provider/selection.md#per-role-selection-and-fallback);
 text compaction does not attest a strict review verdict.
 
 This complete document admits a local llama.cpp or vLLM server exposing
@@ -246,11 +246,7 @@ Vendor notes:
   subscription quota to approved tools. Never substitute a plan key, Compatible
   key, ZCode OAuth identity or another client's User-Agent.
 
-The [dated vendor research](./research/deepseek-kimi-glm-providers-2026-10.md)
-owns the source review for
-[Kimi](./research/deepseek-kimi-glm-providers-2026-10.md#kimi-platform-api-and-code-subscription)
-and [GLM](./research/deepseek-kimi-glm-providers-2026-10.md#glm-standard-api-key-subscription-excluded);
-[next steps](../NEXT_STEPS.md#daily-use-first) own live billing, compatibility and
+[Next steps](../NEXT_STEPS.md#daily-use-first) own live billing, compatibility and
 native evidence.
 
 ## Select a private roster preset
@@ -261,7 +257,7 @@ Create a private `provider-roster.json` in the State directory outside the Works
 {"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-6.1-sol","effort":"medium","account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}
 ```
 
-With the selected route's existing credentials available, use `arany --profile coding` or `arany exec --profile coding "Inspect this project"`. Review the complete billing/route manifest; all candidates must admit before project input. Remove any competing `provider-routing.json` source explicitly. The [Provider contract](./specs/provider.md#named-roster-presets) owns the format, bounds and current fixed-role delivery boundary; this example makes no live-model support claim.
+With the selected route's existing credentials available, use `arany --profile coding` or `arany exec --profile coding "Inspect this project"`. Review the complete billing/route manifest; all candidates must admit before project input. Remove any competing `provider-routing.json` source explicitly. The [Provider contract](./specs/provider/selection.md#named-roster-presets) owns the format, bounds and current fixed-role delivery boundary; this example makes no live-model support claim.
 
 ## Headless ChatGPT use and optional diagnostics
 

@@ -2,8 +2,8 @@
 
 The explicitly ignored `guard_runs::linux_tool_latency_corpus` reports single-Read,
 four-Read-step, admitted in-process Edit and guarded native no-op Command rows offline.
-This is measurement evidence for [Tools](../../../../docs/specs/tools.md)
-and [Execution](../../../../docs/specs/execution.md#committed-event-stream), not a
+This is measurement evidence for [Tools](../../../../docs/specs/tools/README.md)
+and [Execution](../../../../docs/specs/execution/events-and-outcomes.md#committed-event-stream), not a
 new runtime deadline, CLI reporting feature or native support claim.
 
 ## Measurement
@@ -29,8 +29,7 @@ objective is compared under the [owner procedure](#owner-procedure). Denial,
 failure, cancellation or uncertainty is retained as a non-success sample: the
 invocation stops without retry and contributes no duration, percentile or verdict.
 A missing acknowledgement is retained as an incomplete sample and likewise
-contributes nothing. A missed target requires diagnosis, not a higher threshold. [The decision register](../../../../docs/research/next-step-decision-register.md#d-23--tool-latency-measures-durable-acknowledgement)
-owns the rationale and peer comparison.
+contributes nothing. A missed target requires diagnosis, not a higher threshold.
 
 ## Bounds and retained evidence
 
@@ -56,7 +55,7 @@ set `CARGO_TARGET_DIR`. The corpus refuses debug execution, unsupported hosts an
 tmpfs evidence storage. A missing prerequisite is a failed invocation.
 
 Review the selected revision's native namespace bootstrap and obtain its required
-host authorization before running Command. The [namespace-entry contract](../../../../docs/specs/tools.md#ubuntu-namespace-entry-diagnosis)
+host authorization before running Command. The [namespace-entry contract](../../../../docs/specs/tools/native-guard.md#ubuntu-namespace-entry-diagnosis)
 owns the administrator prerequisite, including executable-specific profiles on
 restricted Ubuntu hosts. The owner runs any required exact administrator commands
 by hand; this corpus never changes host policy. Installing Bubblewrap alone is

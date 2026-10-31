@@ -1004,7 +1004,7 @@ fn trust_record_recovery_archives_refused_records_and_stops_on_unsafe_ones() {
                 pty.send(b"\x1b[B\r");
             }
             // The record is archived before any setup step and named in the startup notice
-            // (terminal.md, attached startup), which the chat shows after the trust choice.
+            // (terminal/setup-and-accounts.md, attached startup), which the chat shows after the trust choice.
             Case::Refused(_) => {
                 wait(&mut pty, "Do you trust this folder?");
                 assert!(

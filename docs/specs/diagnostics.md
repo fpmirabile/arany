@@ -1,6 +1,6 @@
 # Local development diagnostics
 
-This contract owns activation, privacy, retention and safe failure metadata. [Execution](./execution.md) owns outcome acceptance; [next steps](../../NEXT_STEPS.md) owns remaining checks. Editing practice: [diagnosing failures](../../agents/testing.md#diagnosing-failures).
+This contract owns activation, privacy, retention and safe failure metadata. [Execution](./execution/README.md) owns outcome acceptance; [next steps](../../NEXT_STEPS.md) owns remaining checks. Editing practice: [diagnosing failures](../../agents/testing.md#diagnosing-failures).
 
 `provider::diagnostics` builds Provider failure, stream, response-shape, Tool-argument-shape and context-exhaustion records, which Provider producers and the Engine submit as inert bounded records to the shared sink. Root diagnostics owns activation, locking, sanitization, record bounds, file admission and append.
 
@@ -48,4 +48,4 @@ Debug credential callers also report a validated native Keychain refusal categor
 
 One no-follow, single-link, owner-checked `0600` file is capped at 256 KiB; each record is capped at 24 KiB. At capacity the next record truncates older diagnostics. Busy locks, unsafe files or storage errors discard diagnostics without changing the Run result; the file is best-effort and not crash-durable. File modes neither encrypt it nor exclude another same-user or privileged process. Records are never sent over the network or printed into chat, stdout, stderr or JSONL. Help, version, `show`, the credential helper and the Tool Guard do not enable it.
 
-Subscription media compatibility, item reconciliation and strict final-outcome acceptance belong to [execution](./execution.md#accepted-outcomes); diagnostics cannot relax them. Log records cannot reconstruct a historical response or establish the cause of a live failure.
+Subscription media compatibility, item reconciliation and strict final-outcome acceptance belong to [execution](./execution/events-and-outcomes.md#accepted-outcomes); diagnostics cannot relax them. Log records cannot reconstruct a historical response or establish the cause of a live failure.

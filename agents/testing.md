@@ -1,6 +1,6 @@
 # Testing
 
-Load when adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the rationale; this file is the working contract.
+Load when adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). This file is the working contract.
 
 ## Load for the affected task
 

@@ -17,7 +17,7 @@ From defects this repository actually shipped:
 
 ## Session and reducer
 
-`crates/arany/src/session/`: an Event payload change follows the [versioning rule](../docs/specs/execution.md#incompatible-history). Reducer validation stays exact: flag loosened checks and confirm each new acceptance is limited to the intended actor and state. Fork projection and replay never depend on parent Events after the fork point.
+`crates/arany/src/session/`: an Event payload change follows the [versioning rule](../docs/specs/execution/persistence.md#incompatible-history). Reducer validation stays exact: flag loosened checks and confirm each new acceptance is limited to the intended actor and state. Fork projection and replay never depend on parent Events after the fork point.
 
 ## Engine
 

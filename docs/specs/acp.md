@@ -2,7 +2,7 @@
 
 ## Scope and related contracts
 
-This contract owns `arany acp`, an ACP v1 subprocess on stdio: core turns, guarded Tools, one-use permissions, rich prompts, stored Session load and resume, closure and discovery, live approval modes, budget stop reasons and committed Goal plans. [Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown; [Session](./session.md), [Goals](./goals.md), [execution](./execution.md) and [Tools](./tools.md) own Engine policy. ACP only translates the serve vocabulary; it adds no execution runtime or library protocol dependency. Native editor support needs user evidence in [NEXT_STEPS](../../NEXT_STEPS.md).
+This contract owns `arany acp`, an ACP v1 subprocess on stdio: core turns, guarded Tools, one-use permissions, rich prompts, stored Session load and resume, closure and discovery, live approval modes, budget stop reasons and committed Goal plans. [Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown; [Session](./session.md), [Goals](./goals.md), [execution](./execution/README.md) and [Tools](./tools/README.md) own Engine policy. ACP only translates the serve vocabulary; it adds no execution runtime or library protocol dependency. Native editor support needs user evidence in [NEXT_STEPS](../../NEXT_STEPS.md).
 
 Arany executes locally instead of delegating to the editor's filesystem or terminal. It sends only the final committed answer, never Provider deltas, because chunks cannot be retracted after a failed Provider validation. The hand-written wire subset is checked against the [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
 
@@ -16,7 +16,7 @@ a conflicting explicit tuple. Collaboration and maximum children use `exec`
 defaults and bounds. `--state-dir` selects State. Tools stay off unless `--tools`
 opts into the existing private Tool grant and serve admission, including native
 Guard availability. No client capability or `_meta` supplies authority. Human-only
-approvals are unavailable under the [Tools contract](./tools.md#modes-and-approval-decisions): a human-only Ask sends no permission request, dispatches nothing and records `unavailable_approval`. Host commands run only through an eligible admitted user-owned host-prefix allow rule in default or dontAsk, without a permission request. Every other host ask, including all of auto and acceptEdits, is denied immediately, and client approvals add no host authority. [Git hooks](./tools.md#git-hooks) consent is terminal-only: ACP uses a trusted folder's saved answer and never asks through `session/request_permission`, because client policy never authorizes host execution; with no saved answer hooks stay off and Git write results carry the notice to accept them in the terminal.
+approvals are unavailable under the [Tools contract](./tools/permissions.md#modes-and-approval-decisions): a human-only Ask sends no permission request, dispatches nothing and records `unavailable_approval`. Host commands run only through an eligible admitted user-owned host-prefix allow rule in default or dontAsk, without a permission request. Every other host ask, including all of auto and acceptEdits, is denied immediately, and client approvals add no host authority. [Git hooks](./tools/git.md#git-hooks) consent is terminal-only: ACP uses a trusted folder's saved answer and never asks through `session/request_permission`, because client policy never authorizes host execution; with no saved answer hooks stay off and Git write results carry the notice to accept them in the terminal.
 
 TTY stdin or stdout is refused before State admission, exit 2 with
 `error: acp requires piped stdin and stdout`. Authority configuration, State,
@@ -88,7 +88,7 @@ value. Reloading while that Session's mode change awaits acknowledgment returns
 a pending permission request is neither resolved nor withdrawn, its intent stays
 fixed, and its eventual one-use verdict is journaled normally.
 
-Neither setter widens a settings Ask or Deny under the [Tools mode composition](./tools.md#modes-and-approval-decisions).
+Neither setter widens a settings Ask or Deny under the [Tools mode composition](./tools/permissions.md#modes-and-approval-decisions).
 A mode changes approval handling only, never the CLI-admitted Tool grant:
 `auto` cannot enable Tools without `--tools`, expand paths or commands,
 change Provider selection or budgets, or enable human-only approvals.
@@ -115,7 +115,7 @@ projection and the client's original cwd spelling for display locations.
 An unfinished Run stays interrupted. The user update's `_meta["arany.turnId"]`
 and `_meta["arany.turnStatus"]` carry the historical Run ID and serve status;
 `_meta["arany.images"]` carries image metadata only, never reconstructed pixels.
-Unfinished intents replay as [Uncertain](./execution.md#effect-outcomes) with the
+Unfinished intents replay as [Uncertain](./execution/events-and-outcomes.md#effect-outcomes) with the
 live Tools' unknown-outcome text and metadata. No observation, answer or completion is
 invented, and replay appends no Events. A later plain prompt starts a new Goal in the
 same Session with fresh Run admission, as on serve; it never resumes an interrupted Goal.
@@ -138,7 +138,7 @@ instructions or trust.
 PNG images require `mimeType:"image/png"` and base64 `data`; an image `uri` is
 ignored. Image-only prompts are accepted. Conversion reuses serve's text,
 base64, count and aggregate-byte admission; serve's existing image path checks
-PNG structure and bounds under the [terminal image contract](./terminal.md#paste-and-attachments).
+PNG structure and bounds under the [terminal image contract](./terminal/drafts-and-paste.md#paste-and-attachments).
 Other content types and overflow reject the whole prompt with invalid-params.
 
 Budget-stop prompt results retain their existing `max_tokens` or `max_turn_requests` reason and add `_meta["arany.budgetRefusal"]` (the committed canonical record, or null when unavailable) and `_meta["arany.status"]` (the shared bounded Arany status). Loaded history carries the same fields on its existing user-message update; no assistant message is fabricated. These follow the [Goal refusal contract](./goals.md#budget-refusal-feedback) and preserve unknown-effect/cancellation precedence.
@@ -164,7 +164,7 @@ for access.
 
 `item/completed` becomes `tool_call_update`: success is `completed`; declined
 and failed dispositions are `failed`, with the disposition named in fenced
-content. An [Uncertain](./execution.md#effect-outcomes) outcome is `failed` with `_meta["arany.status"]:"uncertain"`
+content. An [Uncertain](./execution/events-and-outcomes.md#effect-outcomes) outcome is `failed` with `_meta["arany.status"]:"uncertain"`
 and the text: "Outcome unknown: Arany could not confirm whether this effect
 happened. It was not retried; inspect the Workspace before continuing." A first
 observed terminal item is a self-contained `tool_call` with its final status;
@@ -195,7 +195,7 @@ withdrawn and cancelled IDs change nothing. ACP request IDs are independent of b
 client request IDs and internal serve IDs. `allow_always` is never offered, and `reject_once` is an option kind, not an accepted ID.
 Ordinary client decisions are user-configured verdicts; ACP cannot attest a
 human gesture, so human-only requests follow the
-[Tools contract](./tools.md#modes-and-approval-decisions). Eligible host-prefix reuse follows the same Engine authority path and emits committed unguarded Tool updates and Goal evidence; neither `allow_once` nor `allow_always` creates host authority or a remembered rule. All normal Policy,
+[Tools contract](./tools/permissions.md#modes-and-approval-decisions). Eligible host-prefix reuse follows the same Engine authority path and emits committed unguarded Tool updates and Goal evidence; neither `allow_once` nor `allow_always` creates host authority or a remembered rule. All normal Policy,
 one-use grant, journal and Guard checks still apply.
 
 Cancellation, Tool completion or serve withdrawal retire the pending
@@ -203,7 +203,7 @@ permission and queue `$/cancel_request` for its ACP ID if it was sent. Serve
 owns withdrawal independently of outbound capacity. A primary permission has no
 wall-clock expiry once enqueued; a still-connected slow client remains
 answerable. A client may receive an already withdrawn request or delayed withdrawal, and cannot
-authorize it. Child-request withdrawal follows the [Tools approval rules](./tools.md#folder-trust-and-approvals); `$/cancel_request` follows the committed withdrawal. An oversized
+authorize it. Child-request withdrawal follows the [Tools approval rules](./tools/trust-and-approvals.md#folder-trust-and-approvals); `$/cancel_request` follows the committed withdrawal. An oversized
 permission or a full/closed ACP output queue records unavailable approval
 without sending or truncating its intent
 or approval lines. Enqueue is attempted once, with no retry, and its ID is
@@ -311,7 +311,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Pending translations | 64, with 61 available to client requests and three reserved for control, plan subscription and reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Close frees a slot after cancellation settles. |
 | Prompt blocks / aggregate text after rich-content conversion | 64 / [64 KiB](./limits.md#max_user_message_bytes) UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
-| Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal.md#paste-and-attachments) image limits; reject overflow without truncation. |
+| Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal/drafts-and-paste.md#paste-and-attachments) image limits; reject overflow without truncation. |
 | Session list | Serve default page size and cursor/line bounds; no client page-size option is advertised. |
 | Mode selectors | One config selector and exactly three mode values; no client-supplied selector list is retained. Setters share the 61 client-request slots, 64 Sessions and line cap; invalid values refuse without changing state. |
 | Tool content / title | 64 KiB<!-- unrelated-bound: ACP Tool content projection --> / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
