@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.linux_arm64 }}-${{ inputs.linux_native_advanced }}
   cancel-in-progress: true
 
 env:
