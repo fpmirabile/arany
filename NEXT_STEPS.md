@@ -15,7 +15,7 @@ Done when a normal engineering day in this repository (explore, multi-file edits
 
 1. **Linux Workspace overlays.** Done when the unreachable Linux primary selected-copy path (`SELECTION_READY`, copy baseline and capture) is gone, and stock Ubuntu 24.04 with the executable profiles and an unrestricted distribution both pass the [Ubuntu procedure](./docs/specs/tools/native-guard.md#ubuntu-namespace-entry-diagnosis) and the [offline Cargo journey](./crates/arany-cli/tests/session_run/tools/native_exec.rs).
 2. **`cargo test` here inside the Guard.** Done when an attached session runs `cargo test --workspace` with `resource_class: "build"` to an executed test count on a native Mac and on Linux. Socket-dependent tests stay ignored until a local test IPC capability exists ([commands](./docs/specs/tools/commands-and-cache.md#commands)).
-3. **PATH directories and command tools.** Done when granted `PATH` directories and manager roots work on restricted Ubuntu, the [user-program journey](./crates/arany-cli/tests/session_run/tools_macos/user_programs.rs) passes on the owner's Mac, and a Prefix wrapper runs guarded and on the host ([command tools](./docs/specs/tools/hooks.md#hook-execution)).
+3. **PATH directories and command tools.** Done when granted `PATH` directories and manager roots work on restricted Ubuntu, and the owner's own Prefix wrapper runs guarded and on the host (synthetic cases are in [prefix.rs](./crates/arany-cli/tests/guard_runs/permissions/hooks/command_tools/prefix.rs)) ([command tools](./docs/specs/tools/hooks.md#hook-execution)).
 4. **Named-host latency.** Done when the owner runs the [corpus procedure](./crates/arany-cli/tests/guard_runs/latency.md#owner-procedure) on the named host and keeps its reports.
 
 ### Pursue, in order
