@@ -156,17 +156,18 @@ struct IssuerReply {
 
 const MAX_PEER_CONNECTIONS: usize = 10;
 const PEER_IO_SECONDS: u64 = 20;
+const PEER_ACCEPT_SECONDS: u64 = 60;
 const HTTPS_PEER: &str = r#"
 import socket, ssl, sys
 address, port = sys.argv[1].rsplit(':', 1)
-limit, connections, deadline = map(int, sys.argv[2:])
+limit, connections, deadline, accept_deadline = map(int, sys.argv[2:])
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain('/fixture/server.pem', '/fixture/server.key')
 listener = socket.socket()
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind((address, int(port)))
 listener.listen()
-listener.settimeout(deadline)
+listener.settimeout(accept_deadline)
 sys.stdout.buffer.write(b'READY\n')
 sys.stdout.buffer.flush()
 def message(stream):
@@ -215,6 +216,7 @@ fn tls_server(address: &str) -> Child {
             &MAX_REQUEST_BYTES.to_string(),
             &MAX_PEER_CONNECTIONS.to_string(),
             &PEER_IO_SECONDS.to_string(),
+            &PEER_ACCEPT_SECONDS.to_string(),
         ])
         .env_clear()
         .current_dir("/fixture")
@@ -295,10 +297,10 @@ fn issuer(reply: Receiver<IssuerReply>, revoke: bool, exchanges: usize, renew: b
             assert!(discovery.starts_with(b"GET /.well-known/openid-configuration HTTP/1.1\r\n"));
             send_json(
                 &mut input,
-                br#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/oauth/revoke"}"#,
+                br#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/api/accounts/oauth/revoke"}"#,
             );
             let revoke = read_request(&mut output);
-            assert!(revoke.starts_with(b"POST /oauth/revoke HTTP/1.1\r\n"));
+            assert!(revoke.starts_with(b"POST /api/accounts/oauth/revoke HTTP/1.1\r\n"));
             let end = revoke
                 .windows(4)
                 .position(|part| part == b"\r\n\r\n")
@@ -688,7 +690,7 @@ fn run_isolated(test_name: &str, stage: &str) {
         .args([
             "-k",
             "2s",
-            "60s",
+            &format!("{PEER_ACCEPT_SECONDS}s"),
             "/usr/bin/unshare",
             "--map-auto",
             "--map-user",

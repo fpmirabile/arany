@@ -8,7 +8,7 @@ const DISCOVERY_ENDPOINT: &str = "https://auth.openai.com/.well-known/openid-con
 const MAX_DISCOVERY_BYTES: usize = 16 * 1024;
 const MAX_REVOKE_FORM_BYTES: usize = 25 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
-const REVOCATION_PATH: &str = "/oauth/revoke";
+const REVOCATION_PATH: &str = "/api/accounts/oauth/revoke";
 const REVOKE_ATTEMPTS: u64 = 3;
 const REVOKE_BACKOFF_MS: u64 = 200;
 const REVOKE_JITTER_MS: u8 = 100;
@@ -306,11 +306,11 @@ mod tests {
             let revoke = if matches!(case, Case::OffOrigin) {
                 "https://other.example/revoke".to_owned()
             } else if matches!(case, Case::EndpointQuery) {
-                format!("{origin}/oauth/revoke?capture=token")
+                format!("{origin}/api/accounts/oauth/revoke?capture=token")
             } else if matches!(case, Case::WrongPath) {
                 format!("{origin}/not-revocation")
             } else {
-                format!("{origin}/oauth/revoke")
+                format!("{origin}/api/accounts/oauth/revoke")
             };
             let metadata = serde_json::to_vec(&serde_json::json!({
                 "issuer": issuer,
@@ -383,7 +383,7 @@ mod tests {
                 requests.push(request(&mut discovery).await);
                 let metadata = serde_json::to_vec(&serde_json::json!({
                     "issuer": ISSUER,
-                    "revocation_endpoint": format!("{origin}/oauth/revoke")
+                    "revocation_endpoint": format!("{origin}/api/accounts/oauth/revoke")
                 }))
                 .expect("discovery JSON");
                 reply(
@@ -478,7 +478,7 @@ mod tests {
             assert!(!discovery.contains("synthetic-refresh"));
             if let Some(revoke) = requests.get(1) {
                 let revoke = std::str::from_utf8(revoke).expect("revoke request ASCII");
-                assert!(revoke.starts_with("POST /oauth/revoke HTTP/1.1\r\n"));
+                assert!(revoke.starts_with("POST /api/accounts/oauth/revoke HTTP/1.1\r\n"));
                 let form = revoke.split("\r\n\r\n").nth(1).expect("revoke form");
                 let fields = url::form_urlencoded::parse(form.as_bytes())
                     .into_owned()

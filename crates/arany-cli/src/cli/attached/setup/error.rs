@@ -149,4 +149,18 @@ mod tests {
             Err(SetupError::Recoverable(_))
         ));
     }
+
+    #[test]
+    fn chatgpt_unknown_refresh_outcome_is_uncertain() {
+        let error = chatgpt::AuthorizationError::RefreshOutcomeUnknown;
+        assert!(chatgpt_edit_is_uncertain(&error));
+        assert!(matches!(
+            SetupError::chatgpt_authorization(error),
+            SetupError::Uncertain(_)
+        ));
+        assert!(matches!(
+            SetupError::chatgpt_removal(chatgpt::AuthorizationError::RefreshOutcomeUnknown),
+            SetupError::Presentation(message) if message.contains("uncertain")
+        ));
+    }
 }

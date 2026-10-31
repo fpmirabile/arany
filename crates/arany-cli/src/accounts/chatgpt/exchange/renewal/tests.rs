@@ -177,7 +177,7 @@ async fn consumed_refresh_with_a_lost_reply_or_unavailable_keys_reports_unknown(
     });
     let result = refresh_at(&saved_credentials(), endpoints).await;
     assert!(
-        matches!(result, Err(error) if error.to_string().contains("unknown")),
+        matches!(result, Err(AuthorizationError::RefreshOutcomeUnknown)),
         "a consumed refresh with a lost reply must remain unknown"
     );
     tokio::time::timeout(Duration::from_secs(5), peer)
@@ -190,7 +190,7 @@ async fn consumed_refresh_with_a_lost_reply_or_unavailable_keys_reports_unknown(
     let (endpoints, peer) = issuer(replies).await;
     let result = refresh_at(&saved_credentials(), endpoints).await;
     assert!(
-        matches!(result, Err(error) if error.to_string().contains("unknown")),
+        matches!(result, Err(AuthorizationError::RefreshOutcomeUnknown)),
         "keys unavailable after renewal must remain unknown"
     );
     let requests = tokio::time::timeout(Duration::from_secs(5), peer)
