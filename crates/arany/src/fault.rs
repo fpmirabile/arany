@@ -410,6 +410,8 @@ mod injection {
         SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
         SandboxUnavailable(std::path::PathBuf),
+        #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+        MaskScanRefused(std::path::PathBuf),
         GuardReceipt(uuid::Uuid),
         GuardUnavailable(String),
         GuardLimit(String),
@@ -632,6 +634,18 @@ mod injection {
         /// Admits every later Run of `workspace` as if the platform had no sandbox.
         pub fn make_sandbox_unavailable(workspace: &std::path::Path) {
             plan().push(Fault::SandboxUnavailable(workspace.to_owned()));
+        }
+
+        /// Treats every later scan of `root` for protected names as over its entry bound.
+        pub fn refuse_mask_scan(root: &std::path::Path) {
+            plan().push(Fault::MaskScanRefused(root.to_owned()));
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn mask_scan_refused(root: &std::path::Path) -> bool {
+            plan()
+                .iter()
+                .any(|fault| matches!(fault, Fault::MaskScanRefused(path) if path == root))
         }
 
         pub(crate) fn sandbox_unavailable(workspace: &std::path::Path) -> bool {

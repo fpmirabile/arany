@@ -1337,9 +1337,7 @@ impl ToolRuntime {
         else {
             return Ok(Vec::new());
         };
-        let protected = self.protected_roots();
-        let protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        request
+        let new = request
             .paths
             .iter()
             .map(Path::new)
@@ -1350,6 +1348,14 @@ impl ToolRuntime {
                     .iter()
                     .any(|grant| grant.path == *path)
             })
+            .collect::<Vec<_>>();
+        // The Guard process holds the admitted grants already and never resolves the account root.
+        if new.is_empty() {
+            return Ok(Vec::new());
+        }
+        let protected = self.protected_roots();
+        let protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        new.into_iter()
             .map(|path| guard_settings::admit_read(path, &protected))
             .collect()
     }
@@ -1407,12 +1413,16 @@ impl ToolRuntime {
         &self,
         call: &ToolCall,
     ) -> Result<std::borrow::Cow<'_, Config>, ToolError> {
-        let requested = self.requested_reads(call)?;
-        if requested.is_empty() {
+        let mut grants = self.config.runtime_grants.clone();
+        grants.extend(self.requested_reads(call)?);
+        if call.is_process() {
+            grants = guard::mask_grants(grants);
+        }
+        if grants == self.config.runtime_grants {
             return Ok(std::borrow::Cow::Borrowed(&self.config));
         }
         let mut config = self.config.clone();
-        config.runtime_grants.extend(requested);
+        config.runtime_grants = grants;
         Ok(std::borrow::Cow::Owned(config))
     }
 

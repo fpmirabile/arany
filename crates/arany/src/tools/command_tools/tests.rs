@@ -20,6 +20,7 @@ pub(super) fn fixture(root: &Path) -> (StateRoot, std::path::PathBuf, String, Ru
         device: metadata.dev(),
         inode: metadata.ino(),
         root: None,
+        masks: Vec::new(),
     };
     let state = StateRoot::admit(&root.join("state")).unwrap();
     let metadata = workspace.metadata().unwrap();

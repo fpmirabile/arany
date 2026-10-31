@@ -433,6 +433,7 @@ mod tests {
                 changeset: Default::default(),
                 selection: None,
                 network_refusals: Vec::new(),
+                hidden_grants: Vec::new(),
             })
             .unwrap(),
             approval_cause: None,

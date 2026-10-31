@@ -98,6 +98,7 @@ fn command(f: &mut Fixture) -> EffectIntent {
         changeset: CommandChangeset::default(),
         selection: None,
         network_refusals: Vec::new(),
+        hidden_grants: Vec::new(),
     };
     f.observed(
         &intent,

@@ -445,10 +445,32 @@ impl ProfileKind {
     }
 }
 
+// A case-insensitive POSIX regex alternation of exactly the names `validate::forbidden` accepts.
+fn protected_pattern() -> String {
+    let letters = |name: &str| {
+        name.chars()
+            .map(|c| {
+                if c.is_ascii_alphabetic() {
+                    format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+                } else {
+                    format!("[{c}]")
+                }
+            })
+            .collect::<String>()
+    };
+    crate::validate::FORBIDDEN_NAMES
+        .iter()
+        .map(|name| letters(name))
+        .chain(std::iter::once(format!("{}[^/]*", letters(".env."))))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 struct SeatbeltProfile {
     text: String,
     kind: ProfileKind,
     proxy_port: Option<u16>,
+    masked: Vec<PathBuf>,
 }
 
 impl SeatbeltProfile {
@@ -461,6 +483,7 @@ impl SeatbeltProfile {
             text: profile(&rules, kind.denied_syscalls()),
             kind,
             proxy_port: None,
+            masked: Vec::new(),
         }
     }
 
@@ -509,6 +532,35 @@ impl SeatbeltProfile {
             if let Some(root) = &grant.root {
                 self.grant(operations, "subpath", &root.path)?;
             }
+            if grant.kind == RuntimeKind::ExtraRead {
+                self.masked.push(grant.path.clone());
+            }
+        }
+        Ok(())
+    }
+
+    // Seatbelt applies the last matching rule, so these denies follow every allow.
+    fn mask_protected(&mut self) -> Result<(), ToolError> {
+        let names = protected_pattern();
+        for root in std::mem::take(&mut self.masked) {
+            let root = quoted(&root)?;
+            let root = &root[1..root.len() - 1];
+            if root.contains(['\\', '"']) {
+                return Err(ToolError::Path);
+            }
+            let escaped: String = root
+                .chars()
+                .map(|c| {
+                    if "^$.|?*+()[]{}".contains(c) {
+                        format!("\\{c}")
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            self.text.push_str(&format!(
+                "(deny file-read* file-map-executable process-exec (regex #\"^{escaped}/(.*/)?({names})(/.*)?$\"))\n"
+            ));
         }
         Ok(())
     }
@@ -764,6 +816,7 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     verify_runtime_mounts(&task.config.runtime_grants)?;
     *stage = super::BootstrapStage::Capabilities;
     profile.protect_guard(&task.guard_executable)?;
+    profile.mask_protected()?;
     profile.install()?;
     Ok(root)
 }
@@ -1074,9 +1127,12 @@ impl Task {
         intent: &EffectIntent,
         cache: Option<super::BuildCacheTransfer>,
     ) -> Result<Self, ToolError> {
+        let config = runtime.process_config(&intent.call)?;
         Ok(Self {
             command_deadline: None,
-            config: runtime.process_config(&intent.call)?.into_owned(),
+            policy_grants: matches!(config, std::borrow::Cow::Owned(_))
+                .then(|| runtime.config.runtime_grants.clone()),
+            config: config.into_owned(),
             intent: intent.clone(),
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1238,6 +1294,14 @@ async fn worker_receipt(
     })
 }
 
+type WorkerPlacement<'a> = (
+    &'a Path,
+    Option<[u8; 8]>,
+    Option<u16>,
+    Option<&'a Path>,
+    Option<Vec<crate::tools::toolchains::RuntimeGrant>>,
+);
+
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -1245,15 +1309,11 @@ async fn execute_worker(
     scope: &mut unit::Scope,
     control: &mut tokio::net::unix::OwnedWriteHalf,
     receive_go: tokio::sync::oneshot::Receiver<()>,
-    (root, command_deadline, proxy_port, editor_tree): (
-        &Path,
-        Option<[u8; 8]>,
-        Option<u16>,
-        Option<&Path>,
-    ),
+    (root, command_deadline, proxy_port, editor_tree, policy_grants): WorkerPlacement<'_>,
 ) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let mut task = Task::new(runtime, intent, None)?;
+    task.policy_grants = policy_grants;
     task.editor_tree = editor_tree.map(Path::to_owned);
     task.command_deadline = command_deadline;
     task.proxy_port = proxy_port;
@@ -1507,6 +1567,7 @@ mod tests {
                     inode,
                 }
             }),
+            masks: Vec::new(),
         }
     }
 
@@ -1724,6 +1785,7 @@ mod tests {
         let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
+            policy_grants: None,
             command_deadline: None,
             definition: None,
             handover: None,

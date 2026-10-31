@@ -83,6 +83,7 @@
 | <a id="max_link_target_grants"></a>[`MAX_LINK_TARGET_GRANTS`](#max_link_target_grants) | 16 | roots | `crates/arany/src/tools/toolchains.rs` |
 | <a id="max_link_scan_entries"></a>[`MAX_LINK_SCAN_ENTRIES`](#max_link_scan_entries) | 16384 | directory entries | `crates/arany/src/tools/toolchains.rs` |
 | <a id="max_discovery_path_entries"></a>[`MAX_DISCOVERY_PATH_ENTRIES`](#max_discovery_path_entries) | 32 | entries | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_read_folder_entries"></a>[`MAX_READ_FOLDER_ENTRIES`](#max_read_folder_entries) | 4096 | entries | `crates/arany/src/tools/guard_settings.rs` |
 | <a id="max_saved_read_grants"></a>[`MAX_SAVED_READ_GRANTS`](#max_saved_read_grants) | 32 | directories | `crates/arany/src/tools/guard_settings.rs` |
 | <a id="max_run_read_grants"></a>[`MAX_RUN_READ_GRANTS`](#max_run_read_grants) | 16 | directories | `crates/arany/src/tools/guard_settings.rs` |
 | <a id="max_additional_reads_per_call"></a>[`MAX_ADDITIONAL_READS_PER_CALL`](#max_additional_reads_per_call) | 4 | directories | `crates/arany/src/tools/process.rs` |

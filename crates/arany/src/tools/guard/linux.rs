@@ -5,6 +5,7 @@ use super::{
 };
 use crate::tools::Cancellation;
 use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
+use crate::tools::toolchains::GrantMask;
 use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
     MAX_CHANGESET_SERIALIZED_BYTES, MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES, ToolCall, ToolLimits,
@@ -21,6 +22,7 @@ use tokio::process::Command;
 
 pub(super) mod bridge;
 mod cpu;
+pub(super) mod masks;
 pub(super) mod overlay;
 pub(super) mod supervisor;
 mod system;
@@ -28,6 +30,8 @@ pub(super) use system::targets as system_targets;
 
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
+// An empty read-only directory mask needs only its root inode.
+const MASK_TMPFS_BYTES: &str = "4096";
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
 const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
@@ -72,7 +76,7 @@ const LINUX_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-no-host-worksp
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v27:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
+    let mut bytes = b"arany-guard-v28:read-only-masks-over-protected-names-beneath-broad-grants;build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(cpu::contract().as_bytes());
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&overlay::cache::HANDOFF_BYTES.to_le_bytes());
@@ -662,6 +666,7 @@ struct UnitFilesystem<'a> {
     seed_dir: &'a cap_std::fs::Dir,
     runtime_directories: Vec<PathBuf>,
     mounts: Vec<(PathBuf, PathBuf)>,
+    masks: Vec<GrantMask>,
     proxy_socket: Option<&'a Path>,
 }
 
@@ -679,6 +684,7 @@ fn unit_command(
         seed_dir,
         runtime_directories,
         mounts,
+        masks,
         proxy_socket,
     } = filesystem;
     let phase_limits = &intent.limits;
@@ -761,6 +767,17 @@ fn unit_command(
     }
     for (source, target) in mounts {
         command.args(["--ro-bind"]).arg(source).arg(target);
+    }
+    for mask in masks {
+        if mask.directory {
+            command
+                .args(["--size", MASK_TMPFS_BYTES, "--tmpfs"])
+                .arg(&mask.path)
+                .arg("--remount-ro")
+                .arg(&mask.path);
+        } else {
+            command.args(["--ro-bind", "/dev/null"]).arg(&mask.path);
+        }
     }
     if let Some(socket) = proxy_socket {
         command
@@ -1026,6 +1043,7 @@ fn task_bytes(
     parent_namespaces: profile::Namespaces,
     command_deadline: Option<tokio::time::Instant>,
 ) -> Result<Vec<u8>, ToolError> {
+    let config = runtime.process_config(&intent.call)?;
     encode_task(&Task {
         command_deadline: command_deadline
             .map(super::selection_phase::encode_deadline)
@@ -1035,7 +1053,9 @@ fn task_bytes(
             .handover
             .as_ref()
             .and_then(|_| super::transfer::handover_ref(intent)),
-        config: runtime.process_config(&intent.call)?.into_owned(),
+        policy_grants: matches!(config, std::borrow::Cow::Owned(_))
+            .then(|| runtime.config.runtime_grants.clone()),
+        config: config.into_owned(),
         intent: intent.clone(),
         cache,
         hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1062,7 +1082,7 @@ pub(super) async fn execute_inner(
     let (preparation_deadline, go_deadline, deadline) =
         action_deadlines(active_window, intent, capacity_started);
     crate::tools::fs::validate_workspace(runtime)?;
-    let ((runtime_directories, mounts), runtime_path) = process_mounts(runtime, intent)?;
+    let process = process_mounts(runtime, intent)?;
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let (mut cache, launch) =
         overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
@@ -1076,12 +1096,13 @@ pub(super) async fn execute_inner(
         launch,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
-        runtime_directories,
-        mounts,
+        runtime_directories: process.runtime.0,
+        mounts: process.runtime.1,
+        masks: process.masks,
         proxy_socket: proxy.as_ref().map(crate::tools::network::Proxy::socket),
     };
     let (mut command, _executable) =
-        unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
+        unit_command(runtime, intent, &unit.name, &process.path, filesystem)?;
     let parent_namespaces = profile::Namespaces::read()?;
     super::cache_directory::started(cache.as_ref(), permit.id)?;
     permit.launching()?;
@@ -1191,7 +1212,7 @@ pub(super) async fn execute_inner(
         ),
     ))
     .await;
-    finish_proxy(proxy, settled).await
+    masks::notice(finish_proxy(proxy, settled).await?, &process.hidden)
 }
 
 // A launcher killed mid-renewal still lets the renewal settle, so its outcome is recorded.
@@ -1324,18 +1345,53 @@ fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
 
 type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
 
+struct ProcessMounts {
+    runtime: RuntimeMounts,
+    path: String,
+    masks: Vec<GrantMask>,
+    // Approved read folders withheld from this command because their first level outgrew its bound.
+    hidden: Vec<PathBuf>,
+}
+
 fn process_mounts(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-) -> Result<(RuntimeMounts, String), ToolError> {
+) -> Result<ProcessMounts, ToolError> {
     let config = runtime.process_config(&intent.call)?;
     let grants = if intent.call.is_process() {
         config.runtime_grants.as_slice()
     } else {
         &[]
     };
-    let mounts = runtime_mounts(grants, intent.limits.cache_bytes > 0)?;
-    Ok((mounts, super::runtime_path(grants)?))
+    let hidden = if intent.call.is_process() {
+        runtime
+            .config
+            .runtime_grants
+            .iter()
+            .cloned()
+            .chain(runtime.requested_reads(&intent.call)?)
+            .filter(|grant| {
+                grant.kind == crate::tools::toolchains::RuntimeKind::ExtraRead
+                    && !grants.iter().any(|kept| kept.path == grant.path)
+            })
+            .map(|grant| grant.path)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(ProcessMounts {
+        runtime: runtime_mounts(grants, intent.limits.cache_bytes > 0)?,
+        path: super::runtime_path(grants)?,
+        masks: grant_masks(grants),
+        hidden,
+    })
+}
+
+fn grant_masks(grants: &[super::super::toolchains::RuntimeGrant]) -> Vec<GrantMask> {
+    grants
+        .iter()
+        .flat_map(|grant| grant.masks.iter().cloned())
+        .collect()
 }
 
 fn mount_plan(
@@ -1474,13 +1530,19 @@ pub(super) fn verify_runtime_mounts(
     let system = std::iter::once(PathBuf::from(RUNTIME_ROOT))
         .chain(system::mounted())
         .collect::<Vec<_>>();
+    let masks = grant_masks(grants)
+        .into_iter()
+        .map(|mask| mask.path)
+        .collect::<Vec<_>>();
     let targets = mount_plan(grants, cache_enabled)?
         .into_iter()
         .map(|(_, target, _)| target)
         .chain(system.iter().cloned())
+        .chain(masks.iter().cloned())
         .collect::<Vec<_>>();
     verify_mount_entries(&mounts, &targets)?;
-    verify_read_only(&mounts, &system)
+    verify_read_only(&mounts, &system)?;
+    verify_read_only(&mounts, &masks)
 }
 
 fn verify_read_only(mounts: &[MountInfoEntry], targets: &[PathBuf]) -> Result<(), ToolError> {
@@ -2246,6 +2308,7 @@ mod tests {
                 seed_dir: &seed,
                 runtime_directories: Vec::new(),
                 mounts: Vec::new(),
+                masks: Vec::new(),
                 proxy_socket: None,
             },
         )
@@ -2427,6 +2490,7 @@ mod tests {
                 device: 1,
                 inode: 2,
             }),
+            masks: Vec::new(),
         };
         assert_eq!(
             mount_plan(&[shim], false).unwrap(),
@@ -3186,6 +3250,7 @@ mod tests {
             device: metadata.dev(),
             inode: metadata.ino(),
             root: None,
+            masks: Vec::new(),
         };
         grant.validate_shape().unwrap();
         let grant_path = fixture.path().join("grant.json");

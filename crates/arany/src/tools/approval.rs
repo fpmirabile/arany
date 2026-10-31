@@ -29,8 +29,15 @@ impl ApprovalMode {
     }
 
     pub(crate) fn asks(self, call: &ToolCall) -> bool {
+        use super::permissions::{auto_approved_edit, protected_publication};
         let facts = call.facts();
-        facts.asks_approval && (self != Self::AutoEdits || !facts.typed_edit())
+        match self {
+            Self::AutoEdits => facts.asks_approval && !facts.typed_edit(),
+            Self::Auto => {
+                facts.asks_approval && !auto_approved_edit(call) || protected_publication(call)
+            }
+            Self::Request => facts.asks_approval,
+        }
     }
 }
 
@@ -324,16 +331,25 @@ mod tests {
     }
 
     #[test]
-    fn modes_only_preapprove_typed_file_edits_in_auto_edits() {
+    fn edit_modes_preapprove_typed_workspace_edits_except_protected_paths_in_auto() {
         let cases = [
-            (ToolCall::Mkdir { path: "d".into() }, [true, false, true]),
+            (ToolCall::Mkdir { path: "d".into() }, [true, false, false]),
+            // Auto approval still reviews a protected path.
+            (
+                ToolCall::Write {
+                    path: "AGENTS.md".into(),
+                    expected_digest: None,
+                    content: "x".into(),
+                },
+                [true, false, true],
+            ),
             (
                 ToolCall::Write {
                     path: "a".into(),
                     expected_digest: None,
                     content: "x".into(),
                 },
-                [true, false, true],
+                [true, false, false],
             ),
             (
                 ToolCall::Edit {
@@ -342,7 +358,7 @@ mod tests {
                     old: "x".into(),
                     new: "y".into(),
                 },
-                [true, false, true],
+                [true, false, false],
             ),
             (
                 ToolCall::ApplyChangeset {

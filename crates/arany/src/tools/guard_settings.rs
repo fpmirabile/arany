@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const MAX_SAVED_READ_GRANTS: usize = 32;
+// The Linux Guard reads at most this many first-level entries of an approved folder per command.
+pub(crate) const MAX_READ_FOLDER_ENTRIES: usize = 4096;
 // Directories a human allowed once stay granted for the rest of that Run.
 pub const MAX_RUN_READ_GRANTS: usize = 16;
 
@@ -163,6 +165,7 @@ pub(crate) fn admit_read(path: &Path, protected: &[&Path]) -> Result<RuntimeGran
         device,
         inode,
         root: None,
+        masks: Vec::new(),
     };
     grant.validate_shape()?;
     if path.components().any(|part| {

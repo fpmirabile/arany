@@ -430,6 +430,7 @@ pub(super) fn fit_selected_command(
         serde_json::to_string(&CommandResult {
             selection: Some(selection),
             network_refusals: Vec::new(),
+            hidden_grants: Vec::new(),
             exit_code,
             stdout: out.into(),
             stderr: err.into(),

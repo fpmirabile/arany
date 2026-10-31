@@ -128,6 +128,9 @@ struct Task {
     #[serde(deserialize_with = "Option::deserialize")]
     command_deadline: Option<[u8; 8]>,
     config: Config,
+    // The Run's grants when this command's grants differ; the intent's policy digest pins them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_grants: Option<Vec<RuntimeGrant>>,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,6 +355,18 @@ impl Task {
         }
     }
 
+    fn policy_digest(&self) -> Result<[u8; 32], ToolError> {
+        let Some(grants) = &self.policy_grants else {
+            return Ok(self.config.digest());
+        };
+        validate_selection(grants)?;
+        Ok(Config {
+            runtime_grants: grants.clone(),
+            ..self.config.clone()
+        }
+        .digest())
+    }
+
     fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
         #[cfg(target_os = "macos")]
         if !self.intent.call.is_process() && self.system_programs.is_some() {
@@ -365,6 +380,13 @@ impl Task {
             self.system_programs.as_ref(),
         )
     }
+}
+
+// The grants one command runs with; only Linux hides protected names beneath approved folders.
+pub(super) fn mask_grants(grants: Vec<RuntimeGrant>) -> Vec<RuntimeGrant> {
+    #[cfg(target_os = "linux")]
+    let grants = linux::masks::mask(grants);
+    grants
 }
 
 pub(super) fn intent_enforcement_digest(
@@ -796,6 +818,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 config: runtime
                     .process_config(&intent.call)
                     .map_or_else(|_| runtime.config.clone(), std::borrow::Cow::into_owned),
+                policy_grants: Some(runtime.config.runtime_grants.clone()),
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1440,7 +1463,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     }
     if !task.intent.valid()
         || task.intent.call.facts().site != Site::Guard
-        || task.intent.policy_digest != task.config.digest()
+        || task.intent.policy_digest != task.policy_digest()?
         || !(super::command_tools::prefix::allowed(&task.config, &task.intent)
             || task.handover.is_some() && task.config.write)
         || task.intent.enforcement_digest != task.enforcement_digest()?
@@ -2004,6 +2027,7 @@ mod tests {
             device: 1,
             inode: 1,
             root: None,
+            masks: Vec::new(),
         };
         let args = ["build".into(), "--jobs=3".into()];
         for selected in [false, true] {
@@ -2136,6 +2160,7 @@ mod tests {
         };
         let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
+            policy_grants: None,
             command_deadline: None,
             config,
             intent: intent(call),
@@ -2204,6 +2229,7 @@ mod tests {
         let task = |config: Config| Task {
             command_deadline: None,
             config,
+            policy_grants: None,
             intent: intent(call.clone()),
             cache: None,
             hook_stdin: None,
@@ -2234,6 +2260,7 @@ mod tests {
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
         let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
+            policy_grants: None,
             command_deadline: None,
             config,
             intent: intent(ToolCall::Write {
@@ -2838,6 +2865,7 @@ mod tests {
             device: 1,
             inode: 2,
             root: None,
+            masks: Vec::new(),
         }
     }
 
@@ -3108,6 +3136,7 @@ mod tests {
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         }]);
         let file = intent(ToolCall::Read {
             path: "selected.txt".into(),
@@ -3202,6 +3231,7 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
+                policy_grants: None,
                 command_deadline: None,
                 definition: None,
                 handover: None,

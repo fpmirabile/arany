@@ -163,6 +163,9 @@ pub struct CommandResult {
     pub selection: Option<CommandSelectionSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_refusals: Vec<NetworkRefusal>,
+    // Approved read folders withheld from this command because their first level outgrew its bound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_grants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -240,6 +243,7 @@ impl CommandResult {
         self.changeset.valid()
             && self.selection.is_none_or(CommandSelectionSummary::valid)
             && self.network_valid()
+            && self.hidden_grants.len() <= super::toolchains::MAX_RUNTIME_GRANTS
             && self.stdout_total.valid_for(&self.stdout)
             && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
@@ -2621,6 +2625,7 @@ mod unguarded_vocabulary_tests {
             output: serde_json::to_string(&CommandResult {
                 selection: Some(Default::default()),
                 network_refusals: Vec::new(),
+                hidden_grants: Vec::new(),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),

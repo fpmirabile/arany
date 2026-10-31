@@ -24,7 +24,7 @@ use crate::{
         MAX_QUERY_BYTES, MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES,
         NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
         command_tools::{MAX_COMMAND_TOOL_CANDIDATES, MAX_COMMAND_TOOLS},
-        guard_settings::{MAX_RUN_READ_GRANTS, MAX_SAVED_READ_GRANTS},
+        guard_settings::{MAX_READ_FOLDER_ENTRIES, MAX_RUN_READ_GRANTS, MAX_SAVED_READ_GRANTS},
         permissions::MAX_CONFIG_BYTES,
         toolchains::{
             MAX_DISCOVERY_PATH_ENTRIES, MAX_LINK_SCAN_ENTRIES, MAX_LINK_TARGET_GRANTS,
@@ -537,6 +537,12 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: MAX_DISCOVERY_PATH_ENTRIES as u64,
             unit: "entries",
             owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_READ_FOLDER_ENTRIES",
+            value: MAX_READ_FOLDER_ENTRIES as u64,
+            unit: "entries",
+            owner: "crates/arany/src/tools/guard_settings.rs",
         },
         Limit {
             name: "MAX_SAVED_READ_GRANTS",

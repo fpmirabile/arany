@@ -1421,6 +1421,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         };
         let proxy_port = task.proxy_port;
         let editor_tree = task.editor_tree.clone();
+        let policy_grants = task.policy_grants.clone();
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
@@ -1561,6 +1562,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         command_deadline,
                         proxy_port,
                         editor_tree.as_deref(),
+                        policy_grants,
                     ),
                 )
                 .await
@@ -2349,6 +2351,7 @@ done
                 device: node_device,
                 inode: node_inode,
                 root: None,
+                masks: Vec::new(),
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::CargoCache,
@@ -2358,6 +2361,7 @@ done
                 device: cache_device,
                 inode: cache_inode,
                 root: None,
+                masks: Vec::new(),
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::NpmCache,
@@ -2367,6 +2371,7 @@ done
                 device: npm_cache_device,
                 inode: npm_cache_inode,
                 root: None,
+                masks: Vec::new(),
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::PipHttpCache,
@@ -2376,6 +2381,7 @@ done
                 device: pip_cache_device,
                 inode: pip_cache_inode,
                 root: None,
+                masks: Vec::new(),
             },
         ];
         let process_enforcement_digest = super::super::super::macos_runtime_enforcement_digest(
@@ -2566,6 +2572,7 @@ done
             device: metadata.dev(),
             inode: metadata.ino(),
             root: None,
+            masks: Vec::new(),
         };
         let target = std::fs::canonicalize(&mountpoint).unwrap();
         assert!(
@@ -3650,6 +3657,7 @@ int main(int argc, char **argv) {
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
+                    policy_grants: None,
                     command_deadline: None,
                     definition: None,
                     handover: None,

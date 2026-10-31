@@ -424,7 +424,9 @@ impl PermissionConfig {
             return (Decision::Deny, PermissionSource::Mode);
         }
         // Only work outside the sandbox asks; auto reviews what no user rule decided.
-        let auto_review = self.mode == PermissionMode::Auto && facts.asks_approval;
+        let auto_edit = self.mode == PermissionMode::Auto && auto_approved_edit(call);
+        let auto_review = self.mode == PermissionMode::Auto
+            && (facts.asks_approval && !auto_edit || protected_publication(call));
         // User allow rules resolve before any mode or review, but never cover host work; its
         // typed and remembered prefixes are the user's allows there.
         let host = call.is_unguarded() || call.is_host();
@@ -452,6 +454,7 @@ impl PermissionConfig {
             if auto_review {
                 Decision::Ask
             } else if !facts.asks_approval
+                || auto_edit
                 || (self.mode == PermissionMode::AcceptEdits && facts.typed_edit())
             {
                 Decision::Allow
@@ -976,6 +979,102 @@ impl Rule {
             _ => path_of(call).is_some_and(|path| path_matches(pattern, path, decision)),
         }
     }
+}
+
+// Configuration and instruction paths agents and tools read: Auto approval never approves a write
+// there unreviewed.
+const PROTECTED_DIRECTORIES: [&str; 11] = [
+    ".git",
+    ".config/git",
+    ".vscode",
+    ".idea",
+    ".husky",
+    ".cargo",
+    ".devcontainer",
+    ".yarn",
+    ".mvn",
+    ".claude",
+    ".agents",
+];
+const PROTECTED_FILES: [&str; 37] = [
+    ".gitconfig",
+    ".gitmodules",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_aliases",
+    ".bash_logout",
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    ".zlogin",
+    ".zlogout",
+    ".profile",
+    ".envrc",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".pnp.cjs",
+    ".pnp.loader.mjs",
+    ".pnpmfile.cjs",
+    "bunfig.toml",
+    ".bunfig.toml",
+    ".bazelrc",
+    ".bazelversion",
+    ".bazeliskrc",
+    ".pre-commit-config.yaml",
+    "lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yml",
+    ".lefthook.yaml",
+    "gradle-wrapper.properties",
+    "maven-wrapper.properties",
+    ".devcontainer.json",
+    ".ripgreprc",
+    "pyrightconfig.json",
+    ".mcp.json",
+    ".claude.json",
+];
+const PROTECTED_INSTRUCTIONS: [&str; 3] = ["AGENTS.md", "AGENTS.override.md", "CLAUDE.md"];
+
+pub(crate) fn protected_path(path: &str) -> bool {
+    let components: Vec<&str> = path.split('/').collect();
+    components
+        .last()
+        .is_some_and(|name| PROTECTED_FILES.contains(name) || PROTECTED_INSTRUCTIONS.contains(name))
+        || PROTECTED_DIRECTORIES.iter().any(|directory| {
+            let parts: Vec<&str> = directory.split('/').collect();
+            components
+                .windows(parts.len())
+                .any(|window| window == parts.as_slice())
+        })
+}
+
+fn written_paths(call: &ToolCall) -> Option<Vec<&str>> {
+    match call {
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => Some(vec![source.as_str(), destination.as_str()]),
+        ToolCall::ApplyChangeset {
+            source:
+                crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
+        } => Some(call.changeset_paths()),
+        _ if call.facts().typed_edit() => path_of(call).map(|path| vec![path]),
+        _ => None,
+    }
+}
+
+pub(crate) fn auto_approved_edit(call: &ToolCall) -> bool {
+    written_paths(call)
+        .is_some_and(|paths| !paths.is_empty() && !paths.iter().any(|path| protected_path(path)))
+}
+
+pub(crate) fn protected_publication(call: &ToolCall) -> bool {
+    matches!(call, ToolCall::ApplyChangeset { .. })
+        && written_paths(call).is_some_and(|paths| paths.iter().any(|path| protected_path(path)))
 }
 
 fn path_of(call: &ToolCall) -> Option<&str> {

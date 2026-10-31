@@ -109,6 +109,19 @@ pub fn save_custom_profiles(state_dir: &std::path::Path, profiles: &[crate::Cust
         .expect("valid custom profiles");
 }
 
+pub fn with_additional_reads(mut call: crate::ToolCall, paths: &[&str]) -> crate::ToolCall {
+    if let crate::ToolCall::Command {
+        additional_reads, ..
+    } = &mut call
+    {
+        *additional_reads = Some(Box::new(crate::tools::types::ReadRequest {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            justification: "Read the shared folder".into(),
+        }));
+    }
+    call
+}
+
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }

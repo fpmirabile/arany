@@ -78,7 +78,7 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
     for (mode, decisions) in [
         ("default", [Allow, Ask, Allow, Ask]),
         ("acceptEdits", [Allow, Allow, Allow, Ask]),
-        ("auto", [Allow, Ask, Allow, Ask]),
+        ("auto", [Allow, Allow, Allow, Ask]),
         ("plan", [Allow, Deny, Deny, Deny]),
         ("dontAsk", [Allow, Deny, Allow, Deny]),
     ] {
@@ -2829,4 +2829,63 @@ fn web_fetch_domain_rules_allow_ask_and_deny_by_host() {
         );
         assert!(parsed.is_err(), "{rule}");
     }
+}
+
+#[test]
+fn auto_approves_workspace_edits_except_protected_paths() {
+    let auto = config(json!({"defaultMode":"auto"}));
+    assert_eq!(
+        auto.evaluate(&write("src/a.rs")),
+        (Decision::Allow, PermissionSource::Mode, None)
+    );
+    for path in [
+        "AGENTS.md",
+        "docs/CLAUDE.md",
+        ".claude/agents/reader.md",
+        "web/.vscode/settings.json",
+        "home/.config/git/config",
+        ".husky/pre-commit",
+        "lefthook.yml",
+    ] {
+        assert_eq!(
+            auto.evaluate(&write(path)),
+            (
+                Decision::Ask,
+                PermissionSource::Mode,
+                Some(ApprovalMode::Auto)
+            ),
+            "{path}"
+        );
+    }
+    let moved = ToolCall::Move {
+        source: "src/a.rs".into(),
+        destination: ".cargo/config.toml".into(),
+        expected_digest: Some("a".repeat(64)),
+    };
+    assert_eq!(auto.evaluate(&moved).0, Decision::Ask);
+    let publication = |path: &str| ToolCall::ApplyChangeset {
+        source: crate::session::worker::ChangesetSource::CommandReceipt {
+            source_intent_digest: [1; 32],
+            changeset: CommandChangeset {
+                files: vec![FileChange {
+                    path: path.into(),
+                    before: None,
+                    after: Some(FileVersion::from_bytes(b"x", false)),
+                }],
+            },
+        },
+    };
+    assert_eq!(auto.evaluate(&publication("src/a.rs")).0, Decision::Allow);
+    assert_eq!(
+        auto.evaluate(&publication("AGENTS.md")),
+        (
+            Decision::Ask,
+            PermissionSource::Mode,
+            Some(ApprovalMode::Auto)
+        )
+    );
+    assert_eq!(
+        config(json!({})).evaluate(&publication("AGENTS.md")).0,
+        Decision::Allow
+    );
 }

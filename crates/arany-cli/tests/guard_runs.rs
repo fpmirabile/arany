@@ -1553,7 +1553,10 @@ async fn tool_step_events(
     .expect("Tool Run");
     if setup.write && outcome.run.status == RunStatus::Finished {
         assert_eq!(
-            std::fs::read(workspace.join("notes/new.txt")).expect("unplanned Write published"),
+            ["notes/new.txt", "notes/AGENTS.md"]
+                .iter()
+                .find_map(|path| std::fs::read(workspace.join(path)).ok())
+                .expect("unplanned Write published"),
             b"New"
         );
     }
@@ -1726,13 +1729,14 @@ async fn primary_tool_step_events_match_the_snapshot() {
     let git = arany::ToolCall::GitStatus {
         path: "notes".into(),
     };
-    let write = || {
+    let write_to = |path: &str| {
         tool_outcome(arany::ToolCall::Write {
-            path: "notes/new.txt".into(),
+            path: path.into(),
             expected_digest: None,
             content: "New".into(),
         })
     };
+    let write = || write_to("notes/new.txt");
     let granted = |approvals| StepSetup {
         write: true,
         approvals,
@@ -1780,8 +1784,9 @@ async fn primary_tool_step_events_match_the_snapshot() {
         ),
         (
             "reviewed mutation",
+            // Auto approval reviews only protected paths among Workspace edits.
             vec![
-                write(),
+                write_to("notes/AGENTS.md"),
                 ProviderOutcome::Review(arany::ReviewVerdict::Approve),
                 finish("answer"),
             ],
@@ -2115,7 +2120,7 @@ mod goals {
             let (outcome, input_tokens, output_tokens) = match request.phase {
                 AgentPhase::RootPlan => (
                     crate::tool_outcome(arany::ToolCall::Write {
-                        path: "notes/a.txt".into(),
+                        path: "notes/AGENTS.md".into(),
                         expected_digest: None,
                         content: "x".into(),
                     }),
@@ -2178,7 +2183,7 @@ mod goals {
         .expect("exhaustion ends the Run as a durable failure");
         assert_eq!(outcome.run.status, RunStatus::Failed);
         assert!(
-            !workspace.join("notes/a.txt").exists(),
+            !workspace.join("notes/AGENTS.md").exists(),
             "the exact-cap Tool was not dispatched"
         );
         engine.close().await.expect("engine shutdown");
@@ -2353,11 +2358,11 @@ mod goals {
         let pause = steering.clone();
         let provider = ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(change_facts_plan(
-                "notes/facts.txt",
+                "notes/AGENTS.md",
                 "changed",
             )),
             crate::tool_outcome(arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 expected_digest: None,
                 content: "changed".into(),
             }),
@@ -2416,9 +2421,9 @@ mod goals {
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(change_facts_plan("notes/a.txt", "x")),
+            arany::test_support::scenario::plan_outcome(change_facts_plan("notes/AGENTS.md", "x")),
             crate::tool_outcome(arany::ToolCall::Write {
-                path: "notes/a.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 expected_digest: None,
                 content: "x".into(),
             }),
@@ -2698,7 +2703,7 @@ mod routing {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
         let state = temp.path().join("state");
         let write = arany::ToolCall::Write {
-            path: "notes/result.txt".into(),
+            path: "notes/AGENTS.md".into(),
             expected_digest: None,
             content: "done".into(),
         };
@@ -2712,7 +2717,7 @@ mod routing {
             command_timeout_ms: None,
             budget: arany::GoalBudget::default(),
             success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                path: "notes/result.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 content: "done".into(),
             },
         };
@@ -2797,7 +2802,7 @@ mod routing {
             1
         );
         assert_eq!(
-            std::fs::read_to_string(workspace.join("notes/result.txt")).unwrap(),
+            std::fs::read_to_string(workspace.join("notes/AGENTS.md")).unwrap(),
             "done"
         );
     }

@@ -1090,10 +1090,10 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     let pause = steering.clone();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+            arany::test_support::scenario::plan_outcome(super::budgets::protected_facts_plan()),
             crate::tool_outcome(facts_read()),
             crate::tool_outcome(arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 expected_digest: None,
                 content: "v2".into(),
             }),
@@ -1116,10 +1116,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
-        "v1"
-    );
+    assert!(!workspace.join("notes/AGENTS.md").exists());
     let (events, _) = replayed(&state_path, outcome.session_id).await;
     let verdicts: Vec<_> = events
         .iter()

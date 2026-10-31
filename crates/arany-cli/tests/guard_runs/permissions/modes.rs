@@ -119,7 +119,7 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
         ),
         (
             json!({"permissions":{"defaultMode":"auto"}}),
-            "edit",
+            "protected_edit",
             arany::ApprovalMode::Auto,
             false,
             true,
@@ -247,9 +247,6 @@ async fn permission_dispatch_missing_settings_preserves_existing_approval_flow()
             arany::test_support::scenario::plan_outcome(plan(&call)),
             tool_outcome(call.clone()),
         ];
-        if mode == Some(arany::ApprovalMode::Auto) {
-            outcomes.push(verdict("approve"));
-        }
         outcomes.push(finish("answer"));
         let (result, _, humans) = fixture.run(outcomes, mode, false).await;
         assert_eq!(
@@ -492,7 +489,7 @@ async fn review_approval_dispatches_within_a_short_goal_budget() {
         max_active_ms: Some(10 * 60 * 1000),
         ..budget()
     };
-    let call = call("edit");
+    let call = call("protected_edit");
     let (result, _, humans) = fixture
         .run_budgeted(
             vec![
@@ -547,7 +544,7 @@ async fn review_503_falls_back_and_the_run_completes() {
     use arany::test_support::engine::run_routed;
     use arany::test_support::routing::{input, route, routes};
     let fixture = Fixture::new(Some(&json!({"permissions":{"defaultMode":"auto"}})), true);
-    let call = call("edit");
+    let call = call("protected_edit");
     let primary = route(
         ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(plan(&call)),
@@ -620,7 +617,7 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
             settings["permissions"]["ask"] = json!(["Edit"]);
         }
         let fixture = Fixture::new(Some(&settings), true);
-        let call = call("edit");
+        let call = call("protected_edit");
         let mut outcomes = vec![
             arany::test_support::scenario::plan_outcome(plan(&call)),
             tool_outcome(call.clone()),
@@ -639,7 +636,7 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
                 .count(),
             usize::from(review.is_some())
         );
-        assert_eq!(fixture.workspace.join("notes/new.txt").exists(), approved);
+        assert_eq!(fixture.workspace.join("notes/AGENTS.md").exists(), approved);
         let (_, view) = fixture.reopen(result.session_id).await;
         let verdict = view.runs[0].tools[0].permission_verdict.as_ref().unwrap();
         assert_eq!(verdict.approved, approved);
@@ -654,7 +651,7 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
     }
     for terminal in [None, Some(arany::ApprovalMode::Auto)] {
         let fixture = Fixture::new(Some(&json!({"permissions":{"defaultMode":"auto"}})), true);
-        let call = call("edit");
+        let call = call("protected_edit");
         let mut outcomes = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
@@ -786,6 +783,47 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
                 .as_ref()
                 .unwrap()
                 .approved
+        );
+    }
+}
+
+#[tokio::test]
+async fn auto_approves_workspace_edits_and_reviews_protected_paths() {
+    for kind in ["edit", "protected_edit"] {
+        let fixture = Fixture::new(Some(&json!({"permissions":{"defaultMode":"auto"}})), true);
+        let call = call(kind);
+        let reviewed = kind == "protected_edit";
+        let mut outcomes = vec![
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
+        ];
+        if reviewed {
+            outcomes.push(verdict("approve"));
+        }
+        outcomes.push(finish("answer"));
+        let (result, requests, humans) = fixture
+            .run(outcomes, Some(arany::ApprovalMode::Auto), false)
+            .await;
+        assert_eq!(humans, 0, "{kind}");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.phase == AgentPhase::ToolReview)
+                .count(),
+            usize::from(reviewed),
+            "{kind}"
+        );
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let verdict = view.runs[0].tools[0].permission_verdict.as_ref().unwrap();
+        assert!(verdict.approved, "{kind}");
+        assert_eq!(
+            verdict.source,
+            if reviewed {
+                PermissionSource::AiReview
+            } else {
+                PermissionSource::Mode
+            },
+            "{kind}"
         );
     }
 }

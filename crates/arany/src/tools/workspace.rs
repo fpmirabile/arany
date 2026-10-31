@@ -199,12 +199,13 @@ fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
                 || validate_selection(&entry.runtime_grants).is_err()
                 // PATH directories and their link targets are granted per Run, never saved.
                 || entry.runtime_grants.iter().any(|grant| {
-                    matches!(
-                        grant.kind,
-                        super::toolchains::RuntimeKind::UserPrograms
-                            | super::toolchains::RuntimeKind::LinkTarget
-                            | super::toolchains::RuntimeKind::ExtraRead
-                    )
+                    !grant.masks.is_empty()
+                        || matches!(
+                            grant.kind,
+                            super::toolchains::RuntimeKind::UserPrograms
+                                | super::toolchains::RuntimeKind::LinkTarget
+                                | super::toolchains::RuntimeKind::ExtraRead
+                        )
                 })
         })
     {
@@ -681,6 +682,7 @@ mod tests {
                 device: 1,
                 inode: 2,
                 root: None,
+                masks: Vec::new(),
             };
             Candidate {
                 label: grant.profile_label(),
@@ -1030,6 +1032,7 @@ channel = "stable"
             device: 1,
             inode: 1,
             root: None,
+            masks: Vec::new(),
         };
         let compiler = grant(compiler, None, "/Library/Developer/CommandLineTools/usr");
         let sdk = grant(
@@ -1228,6 +1231,7 @@ channel = "stable"
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         };
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         access
@@ -1265,6 +1269,7 @@ channel = "stable"
                 device,
                 inode,
                 root: None,
+                masks: Vec::new(),
             }
         };
         let original = grant_at(&cache);
@@ -1312,6 +1317,7 @@ channel = "stable"
                     device,
                     inode,
                     root: None,
+                    masks: Vec::new(),
                 }],
             )
             .unwrap();
@@ -1350,6 +1356,7 @@ channel = "stable"
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         };
         let token = grant.token().unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
@@ -1398,6 +1405,7 @@ channel = "stable"
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         };
         let token = grant.token().unwrap();
         let mut access = WorkspacePermissions::load(&workspace, &root).unwrap();

@@ -265,6 +265,16 @@ pub(crate) struct RuntimeGrant {
     pub(crate) inode: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) root: Option<GrantRoot>,
+    // One command's hidden protected names beneath this grant; never saved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) masks: Vec<GrantMask>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GrantMask {
+    pub(crate) path: PathBuf,
+    pub(crate) directory: bool,
 }
 
 impl RuntimeGrant {
@@ -1240,6 +1250,7 @@ fn admit_directory(
         device,
         inode,
         root,
+        masks: Vec::new(),
     };
     grant.validate_shape()?;
     Ok(Some(grant))
@@ -1565,6 +1576,7 @@ mod user_environment_tests {
             device,
             inode,
             root: root.map(root_of),
+            masks: Vec::new(),
         }
     }
 

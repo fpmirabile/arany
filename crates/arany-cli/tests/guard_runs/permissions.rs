@@ -12,6 +12,8 @@ mod environment;
 mod hooks;
 #[path = "permissions/host.rs"]
 mod host;
+#[path = "permissions/masks.rs"]
+mod masks;
 #[path = "permissions/modes.rs"]
 mod modes;
 #[path = "permissions/rules.rs"]
@@ -39,6 +41,12 @@ fn call(kind: &str) -> arany::ToolCall {
         },
         "edit" => arany::ToolCall::Write {
             path: "notes/new.txt".into(),
+            expected_digest: None,
+            content: "done".into(),
+        },
+        // Auto approval reviews a Workspace edit only on a protected path.
+        "protected_edit" => arany::ToolCall::Write {
+            path: "notes/AGENTS.md".into(),
             expected_digest: None,
             content: "done".into(),
         },

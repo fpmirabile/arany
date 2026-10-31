@@ -2258,10 +2258,11 @@ async fn reviewed_write_run(
         );
     }
     let mut provider = ScriptedProvider::new(vec![
-        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        arany::test_support::scenario::plan_outcome(protected_facts_plan()),
         crate::tool_outcome(facts_read()),
+        // Auto approval reviews only protected paths among Workspace edits.
         crate::tool_outcome(arany::ToolCall::Write {
-            path: "notes/facts.txt".into(),
+            path: "notes/AGENTS.md".into(),
             expected_digest: None,
             content: "v2".into(),
         }),
@@ -2300,10 +2301,7 @@ async fn reviewed_write_run(
     )
     .await;
     engine.close().await.expect("shutdown");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
-        "v1"
-    );
+    assert!(!workspace.join("notes/AGENTS.md").exists());
     replayed(&state_path, session_id).await
 }
 
@@ -2444,4 +2442,11 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
                 .any(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
         );
     }
+}
+
+// Auto approval reviews a Workspace write only on a protected path, so the plan admits one.
+pub(super) fn protected_facts_plan() -> arany::GoalPlanContract {
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.paths.push("notes/AGENTS.md".into());
+    plan
 }
