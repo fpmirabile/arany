@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 const MAX_RECORD_BYTES: usize = 24 * 1024;
 static ROOT: OnceLock<Mutex<StateRoot>> = OnceLock::new();
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use crate::test_process;
 
 /// Enables bounded local diagnostics in debug builds after ordinary state admission.
@@ -162,6 +162,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::CancellationDrainTimeout => "CancellationDrainTimeout",
         EngineError::CoordinatorFailed => "CoordinatorFailed",
         EngineError::CancelledBeforeStart => "CancelledBeforeStart",
+        EngineError::PromptOverride(_) => "PromptOverride",
         EngineError::Store(_) => "Store",
         EngineError::Tool(_) => "Tool",
     };
@@ -203,7 +204,31 @@ pub(crate) fn record_local(record: BoundedRecord) {
     write_record(&root, record);
 }
 
+// One line per Guard unit with elapsed milliseconds per controller stage; a measure, so no call stack.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(dead_code, reason = "only the macOS controller records stage timings")
+)]
+pub(crate) fn guard_timing(call: &'static str, stages: &[(&'static str, u128)]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let mut record = BoundedRecord(String::new());
+    let _ = write!(record, "guard timing call={call}");
+    for (stage, elapsed_ms) in stages {
+        let _ = write!(record, " {stage}_ms={elapsed_ms}");
+    }
+    let _ = writeln!(record);
+    let Some(root) = ROOT.get() else { return };
+    let Ok(root) = root.try_lock() else { return };
+    write_record_with(&root, record, false);
+}
+
 fn write_record(root: &StateRoot, details: BoundedRecord) {
+    write_record_with(root, details, true);
+}
+
+fn write_record_with(root: &StateRoot, details: BoundedRecord, call_stack: bool) {
     let mut record = BoundedRecord(String::new());
     let _ = writeln!(
         record,
@@ -216,6 +241,10 @@ fn write_record(root: &StateRoot, details: BoundedRecord) {
         .unwrap_or_default()
         .as_millis();
     let _ = writeln!(record, "unix_ms={timestamp} pid={}", std::process::id());
+    if !call_stack {
+        let _ = root.append_development_diagnostic(record.0.as_bytes());
+        return;
+    }
     let mut trace = BoundedRecord(String::new());
     let _ = write!(trace, "{}", std::backtrace::Backtrace::force_capture());
     let _ = writeln!(
@@ -259,7 +288,7 @@ impl Write for BoundedRecord {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use crate::provider::diagnostics::{
         StreamCounts, SubscriptionFailureStage, ToolArgumentShape, failure_record,
@@ -323,7 +352,7 @@ mod tests {
         const CANARY: &str = "private-diagnostic-canary-do-not-record";
         let call = crate::tools::ToolCall::Edit {
             path: CANARY.into(),
-            expected_digest: CANARY.into(),
+            expected_digest: Some(CANARY.into()),
             old: CANARY.into(),
             new: CANARY.into(),
         };
@@ -366,6 +395,15 @@ mod tests {
             ),
         );
         tool_failure("host", &crate::tools::ToolError::Operation);
+        let before_timing = std::fs::read_to_string(&path).unwrap().len();
+        guard_timing("command", &[("connect", 3), ("ready", 41)]);
+        let timing = std::fs::read_to_string(&path)
+            .unwrap()
+            .split_off(before_timing);
+        if cfg!(debug_assertions) {
+            assert!(timing.contains("guard timing call=command connect_ms=3 ready_ms=41\n"));
+            assert!(!timing.contains("call stack"));
+        }
         record_development_failure(DevelopmentFailure::ProviderAdmission);
         engine_failure(&crate::engine::EngineError::Store(
             crate::store::StoreError::Io(std::io::Error::other(CANARY)),
@@ -375,22 +413,15 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             record: crate::session::ProviderCallRecord {
-                rate_limits: None,
-                delegation: None,
                 phase: crate::provider::AgentPhase::RootSynthesis,
                 disposition: crate::session::ProviderCallDisposition::Rejected,
                 response_id: Some(CANARY.into()),
-                input_tokens: None,
-                output_tokens: None,
-                wire_provenance: None,
                 refusal: Some(crate::session::ProposalRefusal {
                     operation: "arany_write".into(),
                     cause: crate::session::ProposalRefusalCause::PlanInvalid,
                 }),
                 failure_reason: Some(crate::provider::ProviderFailureReason::ProposalRefused),
-                requested_tools: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                ..crate::test_support::provider_call_record()
             },
         });
         event_failure(&crate::session::Event::ToolFinished {

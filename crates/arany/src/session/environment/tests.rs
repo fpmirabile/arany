@@ -20,7 +20,7 @@ pub(crate) fn intent() -> EnvironmentCaptureIntent {
 fn append(events: &mut Vec<EventEnvelope>, session: SessionId, record: EnvironmentCaptureEvent) {
     let event = Event::HostEnvironmentCapture { record };
     let payload = event.payload().unwrap();
-    let decoded = Event::decode(event.kind(), event.version(), &payload, None, None).unwrap();
+    let decoded = Event::decode(event.kind(), &payload, None, None).unwrap();
     assert_eq!(decoded, event);
     events.push(EventEnvelope {
         sequence: events.len() as u64 + 1,

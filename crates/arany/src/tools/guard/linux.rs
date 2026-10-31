@@ -5,6 +5,7 @@ use super::{
 };
 use crate::tools::Cancellation;
 use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
+use crate::tools::toolchains::GrantMask;
 use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
     MAX_CHANGESET_SERIALIZED_BYTES, MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES, ToolCall, ToolLimits,
@@ -21,11 +22,16 @@ use tokio::process::Command;
 
 pub(super) mod bridge;
 mod cpu;
+pub(super) mod masks;
 pub(super) mod overlay;
 pub(super) mod supervisor;
+mod system;
+pub(super) use system::targets as system_targets;
 
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
+// An empty read-only directory mask needs only its root inode.
+const MASK_TMPFS_BYTES: &str = "4096";
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
 const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
@@ -70,17 +76,21 @@ const LINUX_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-no-host-worksp
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v26:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v28:read-only-masks-over-protected-names-beneath-broad-grants;build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(cpu::contract().as_bytes());
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&overlay::cache::HANDOFF_BYTES.to_le_bytes());
     bytes.extend_from_slice(&supervisor::MAX_PIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_REWIND_CONTRACT);
+    bytes.extend_from_slice(b";system-entries-root-owned-ro-bind-or-verbatim-link-attested-ro");
+    for target in system::targets() {
+        bytes.extend_from_slice(target.as_bytes());
+        bytes.push(b';');
+    }
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
-    bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
     bytes.extend_from_slice(&profile::profile_digest(profile::Routing::Offline)?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -656,6 +666,7 @@ struct UnitFilesystem<'a> {
     seed_dir: &'a cap_std::fs::Dir,
     runtime_directories: Vec<PathBuf>,
     mounts: Vec<(PathBuf, PathBuf)>,
+    masks: Vec<GrantMask>,
     proxy_socket: Option<&'a Path>,
 }
 
@@ -673,6 +684,7 @@ fn unit_command(
         seed_dir,
         runtime_directories,
         mounts,
+        masks,
         proxy_socket,
     } = filesystem;
     let phase_limits = &intent.limits;
@@ -726,15 +738,15 @@ fn unit_command(
         );
     command.arg(format!("--property=RuntimeMaxSec={}ms", service_runtime_ms));
     launch.append(&mut command, &executable_path)?;
-    let native = intent.call.is_git() || super::super::discovery::possible(&intent.call);
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
         .collect::<Vec<_>>();
+    // An editor command runs directly in its editor's private workspace.
     let workspace_mount = if let Some(overlay) = &launch.overlay {
         Some(overlay.workspace_mount(seed_path))
     } else {
-        native.then(|| (runtime.workspace.clone(), intent.call.mutates()))
+        runtime.editor_tree(intent).map(|tree| (tree, true))
     };
     profile_arguments(
         &mut command,
@@ -755,6 +767,17 @@ fn unit_command(
     }
     for (source, target) in mounts {
         command.args(["--ro-bind"]).arg(source).arg(target);
+    }
+    for mask in masks {
+        if mask.directory {
+            command
+                .args(["--size", MASK_TMPFS_BYTES, "--tmpfs"])
+                .arg(&mask.path)
+                .arg("--remount-ro")
+                .arg(&mask.path);
+        } else {
+            command.args(["--ro-bind", "/dev/null"]).arg(&mask.path);
+        }
     }
     if let Some(socket) = proxy_socket {
         command
@@ -943,7 +966,7 @@ fn prepare_seed(
     let (path, directory) = permit.prepare_seed(
         &workspace,
         &guard_config(runtime, intent),
-        intent.call.is_process() && !primary_command(intent),
+        intent.call.is_process() && !primary_command(intent) && !intent.target.editor(),
     )?;
     Ok((path, directory))
 }
@@ -1020,6 +1043,7 @@ fn task_bytes(
     parent_namespaces: profile::Namespaces,
     command_deadline: Option<tokio::time::Instant>,
 ) -> Result<Vec<u8>, ToolError> {
+    let config = runtime.process_config(&intent.call)?;
     encode_task(&Task {
         command_deadline: command_deadline
             .map(super::selection_phase::encode_deadline)
@@ -1029,7 +1053,9 @@ fn task_bytes(
             .handover
             .as_ref()
             .and_then(|_| super::transfer::handover_ref(intent)),
-        config: runtime.config.clone(),
+        policy_grants: matches!(config, std::borrow::Cow::Owned(_))
+            .then(|| runtime.config.runtime_grants.clone()),
+        config: config.into_owned(),
         intent: intent.clone(),
         cache,
         hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1056,14 +1082,7 @@ pub(super) async fn execute_inner(
     let (preparation_deadline, go_deadline, deadline) =
         action_deadlines(active_window, intent, capacity_started);
     crate::tools::fs::validate_workspace(runtime)?;
-    let runtime_grants = if intent.call.is_process() {
-        runtime.config.runtime_grants.as_slice()
-    } else {
-        &[]
-    };
-    let (runtime_directories, mounts) =
-        runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
-    let runtime_path = super::runtime_path(runtime_grants)?;
+    let process = process_mounts(runtime, intent)?;
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let (mut cache, launch) =
         overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
@@ -1077,12 +1096,13 @@ pub(super) async fn execute_inner(
         launch,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
-        runtime_directories,
-        mounts,
+        runtime_directories: process.runtime.0,
+        mounts: process.runtime.1,
+        masks: process.masks,
         proxy_socket: proxy.as_ref().map(crate::tools::network::Proxy::socket),
     };
     let (mut command, _executable) =
-        unit_command(runtime, intent, &unit.name, &runtime_path, filesystem)?;
+        unit_command(runtime, intent, &unit.name, &process.path, filesystem)?;
     let parent_namespaces = profile::Namespaces::read()?;
     super::cache_directory::started(cache.as_ref(), permit.id)?;
     permit.launching()?;
@@ -1132,7 +1152,11 @@ pub(super) async fn execute_inner(
         } else {
             None
         };
-        let mut stdin = overlay::selected(intent, &runtime.config).then_some(stdin);
+        let overlay = overlay::selected(intent, &runtime.config);
+        let cache_view = cache
+            .as_ref()
+            .is_some_and(|cache| cache.directory.is_some());
+        let mut stdin = (overlay || cache_view).then_some(stdin);
         let capture = Box::pin(async {
             let (mut observation, mut candidate) = receive_result(
                 &mut stdout,
@@ -1163,14 +1187,12 @@ pub(super) async fn execute_inner(
             {
                 return Err(ToolError::Operation);
             }
-            if (cache.is_some() || overlay::selected(intent, &runtime.config))
-                && !read_capped(&mut stdout, 1).await?.is_empty()
-            {
+            if (cache.is_some() || overlay) && !read_capped(&mut stdout, 1).await?.is_empty() {
                 return Err(ToolError::Operation);
             }
             Ok((observation, candidate))
         });
-        super::discovery_work(intent, capture).await
+        capture.await
     });
     let result = tokio::select! {
         biased;
@@ -1186,12 +1208,11 @@ pub(super) async fn execute_inner(
         result,
         (
             &mut cache,
-            super::super::discovery::possible(&intent.call)
-                || (intent.call.is_web() && cancellation.is_cancelled()),
+            intent.call.is_web() && cancellation.is_cancelled(),
         ),
     ))
     .await;
-    finish_proxy(proxy, settled).await
+    masks::notice(finish_proxy(proxy, settled).await?, &process.hidden)
 }
 
 // A launcher killed mid-renewal still lets the renewal settle, so its outcome is recorded.
@@ -1280,10 +1301,8 @@ fn proxy_for(
 
 const PREPARATION_ROOT: &str = "/prepared";
 
-const PROFILE_MOUNT_TARGETS: [&str; 14] = [
+const PROFILE_MOUNT_TARGETS: [&str; 12] = [
     RUNTIME_ROOT,
-    "/lib",
-    "/lib64",
     "/proc",
     "/dev",
     "/scratch",
@@ -1297,13 +1316,14 @@ const PROFILE_MOUNT_TARGETS: [&str; 14] = [
     "/arany",
 ];
 
-fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
+pub(super) fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
     if PROFILE_MOUNT_TARGETS
-        .iter()
+        .into_iter()
+        .chain(system::targets())
         .chain([
-            &PREPARATION_ROOT,
-            &crate::tools::network::PROXY_SOCKET_TARGET,
-            &crate::tools::network::WEB_CA_TARGET,
+            PREPARATION_ROOT,
+            crate::tools::network::PROXY_SOCKET_TARGET,
+            crate::tools::network::WEB_CA_TARGET,
         ])
         .map(Path::new)
         .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))
@@ -1324,6 +1344,55 @@ fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
 }
 
 type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
+
+struct ProcessMounts {
+    runtime: RuntimeMounts,
+    path: String,
+    masks: Vec<GrantMask>,
+    // Approved read folders withheld from this command because their first level outgrew its bound.
+    hidden: Vec<PathBuf>,
+}
+
+fn process_mounts(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<ProcessMounts, ToolError> {
+    let config = runtime.process_config(&intent.call)?;
+    let grants = if intent.call.is_process() {
+        config.runtime_grants.as_slice()
+    } else {
+        &[]
+    };
+    let hidden = if intent.call.is_process() {
+        runtime
+            .config
+            .runtime_grants
+            .iter()
+            .cloned()
+            .chain(runtime.requested_reads(&intent.call)?)
+            .filter(|grant| {
+                grant.kind == crate::tools::toolchains::RuntimeKind::ExtraRead
+                    && !grants.iter().any(|kept| kept.path == grant.path)
+            })
+            .map(|grant| grant.path)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(ProcessMounts {
+        runtime: runtime_mounts(grants, intent.limits.cache_bytes > 0)?,
+        path: super::runtime_path(grants)?,
+        masks: grant_masks(grants),
+        hidden,
+    })
+}
+
+fn grant_masks(grants: &[super::super::toolchains::RuntimeGrant]) -> Vec<GrantMask> {
+    grants
+        .iter()
+        .flat_map(|grant| grant.masks.iter().cloned())
+        .collect()
+}
 
 fn mount_plan(
     grants: &[super::super::toolchains::RuntimeGrant],
@@ -1405,17 +1474,14 @@ fn profile_arguments(
         "--ro-bind",
         RUNTIME_ROOT,
         RUNTIME_ROOT,
-        "--symlink",
-        "usr/lib",
-        "/lib",
-        "--symlink",
-        "usr/lib64",
-        "/lib64",
         "--proc",
         "/proc",
         "--dev",
         "/dev",
     ]);
+    for entry in system::entries(Path::new("/"), system::root_owner()) {
+        entry.arguments(command);
+    }
     command
         .args(["--size"])
         .arg(limits.scratch_bytes.to_string())
@@ -1461,11 +1527,34 @@ pub(super) fn verify_runtime_mounts(
     cache_enabled: bool,
 ) -> Result<(), ToolError> {
     let mounts = read_mountinfo()?;
+    let system = std::iter::once(PathBuf::from(RUNTIME_ROOT))
+        .chain(system::mounted())
+        .collect::<Vec<_>>();
+    let masks = grant_masks(grants)
+        .into_iter()
+        .map(|mask| mask.path)
+        .collect::<Vec<_>>();
     let targets = mount_plan(grants, cache_enabled)?
         .into_iter()
         .map(|(_, target, _)| target)
+        .chain(system.iter().cloned())
+        .chain(masks.iter().cloned())
         .collect::<Vec<_>>();
-    verify_mount_entries(&mounts, &targets)
+    verify_mount_entries(&mounts, &targets)?;
+    verify_read_only(&mounts, &system)?;
+    verify_read_only(&mounts, &masks)
+}
+
+fn verify_read_only(mounts: &[MountInfoEntry], targets: &[PathBuf]) -> Result<(), ToolError> {
+    for target in targets {
+        if !mounts
+            .iter()
+            .any(|mount| mount.path == *target && mount_option_count(&mount.options, b"ro") == 1)
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    Ok(())
 }
 
 fn read_mountinfo() -> Result<Vec<MountInfoEntry>, ToolError> {
@@ -1483,6 +1572,11 @@ fn read_mountinfo() -> Result<Vec<MountInfoEntry>, ToolError> {
 
 pub(super) fn verify_copy_mount(project_bytes: u64) -> Result<(), ToolError> {
     verify_copy_entries(&read_mountinfo()?, project_bytes)
+}
+
+// An editor workspace is one bind of its private directory, with no submounts.
+pub(super) fn verify_editor_mount() -> Result<(), ToolError> {
+    verify_mount_entries(&read_mountinfo()?, &[PathBuf::from("/workspace")])
 }
 
 fn verify_copy_entries(mounts: &[MountInfoEntry], project_bytes: u64) -> Result<(), ToolError> {
@@ -2055,6 +2149,7 @@ mod tests {
             "/usr",
             "/usr/local/node",
             "/lib/x",
+            "/etc/ssl/certs",
             "/dev/shm",
             "/scratch/rust",
             "/workspace",
@@ -2086,26 +2181,6 @@ mod tests {
             (
                 serde_json::json!({"operation":"command","program":"sh","args":[],"cwd":"."}),
                 None,
-            ),
-            (
-                serde_json::json!({"operation":"list","path":"."}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"search","path":".","query":"needle"}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"glob","pattern":"**/*.rs"}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"git_status","path":"."}),
-                Some("--ro-bind"),
-            ),
-            (
-                serde_json::json!({"operation":"git_commit","message":"synthetic","paths":["selected.txt"],"staged":false}),
-                Some("--bind"),
             ),
             (
                 serde_json::json!({"operation":"mkdir","path":"synthetic"}),
@@ -2203,7 +2278,7 @@ mod tests {
         let seed = crate::tools::fs::open_directory(fixture.path()).unwrap();
         let mut runtime = crate::tools::tests::in_process_runtime(
             fixture.path(),
-            serde_json::json!({"version":1,"workspace_paths":[root],"write":true,
+            serde_json::json!({"workspace_paths":[root],"write":true,
                 "commands":[],"skills":[],"mcp":[]}),
         );
         runtime.guard_executable = fixture.path().join("arany-guard");
@@ -2213,15 +2288,17 @@ mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            serde_json::from_value(call).unwrap(),
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                serde_json::from_value(call).unwrap(),
+            )
+            .unwrap();
         unit_command(
             &runtime,
             &intent,
-            "arany-discovery-profile",
+            "arany-native-profile",
             "/usr/bin:/bin",
             UnitFilesystem {
                 command_deadline: super::super::selection_phase::command_deadline(&intent),
@@ -2231,6 +2308,7 @@ mod tests {
                 seed_dir: &seed,
                 runtime_directories: Vec::new(),
                 mounts: Vec::new(),
+                masks: Vec::new(),
                 proxy_socket: None,
             },
         )
@@ -2266,169 +2344,20 @@ mod tests {
             let destinations = mount_destinations(&arguments);
             assert_eq!(
                 destinations.len(),
-                PROFILE_MOUNT_TARGETS.len(),
+                PROFILE_MOUNT_TARGETS.len()
+                    + system::entries(Path::new("/"), system::root_owner()).len(),
                 "{destinations:?}"
             );
             for destination in destinations {
                 assert!(
                     PROFILE_MOUNT_TARGETS
-                        .iter()
+                        .into_iter()
+                        .chain(system::targets())
                         .any(|fixed| Path::new(&destination).starts_with(fixed)),
                     "{destination}"
                 );
             }
         }
-    }
-
-    #[test]
-    #[cfg_attr(not(arany_ci), ignore = "native Linux Git namespace isolation")]
-    fn native_git_launch_keeps_workspace_read_only_and_host_home_absent() {
-        use crate::test_process::BoundedOutput;
-
-        let _native_gate = crate::test_process::NATIVE_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let fixture = tempfile::tempdir().unwrap();
-        let workspace = fixture.path().join("workspace");
-        let home = fixture.path().join("home");
-        let seed = fixture.path().join("seed");
-        for directory in [&workspace, &home, &seed, &seed.join("workspace")] {
-            std::fs::create_dir(directory).unwrap();
-        }
-        let host_config = home.join(".gitconfig");
-        let config_bytes = b"[user]\n\tname = Synthetic Host\n";
-        std::fs::write(&host_config, config_bytes).unwrap();
-        assert_eq!(std::fs::read(&host_config).unwrap(), config_bytes);
-        let git = crate::tools::git::discover().expect("pinned Git");
-        let initialized = std::process::Command::new(&git.executable)
-            .args(["init", "--quiet", "--initial-branch=main"])
-            .current_dir(&workspace)
-            .env_clear()
-            .env("HOME", &home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
-            .unwrap();
-        assert!(initialized.status.success(), "pinned Git baseline");
-        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
-            std::fs::write(&path, b"allowed\n").unwrap();
-            assert_eq!(std::fs::read(&path).unwrap(), b"allowed\n");
-        }
-
-        let mut command = Command::new(BWRAP_TEST_LAUNCH[0]);
-        command.args(&BWRAP_TEST_LAUNCH[1..]);
-        profile_arguments(
-            &mut command,
-            "/usr/bin:/bin",
-            &seed,
-            &[],
-            Some((&workspace, false)),
-            &ToolLimits::default(),
-            None,
-        );
-        command
-            .args(["--ro-bind"])
-            .arg(std::env::current_exe().unwrap())
-            .arg("/arany");
-        command
-            .args(["--setenv", "ARANY_TEST_GIT_HOST_CONFIG"])
-            .arg(&host_config)
-            .args(["--setenv", "ARANY_TEST_GIT_PIN"])
-            .arg(serde_json::to_string(&git).unwrap())
-            .args(["--setenv", "ARANY_TEST_GIT_PARENT_NAMESPACES"])
-            .arg(serde_json::to_string(&profile::Namespaces::read().unwrap()).unwrap())
-            .args([
-                "--chdir",
-                "/",
-                "--",
-                "/arany",
-                "--exact",
-                "tools::guard::linux::tests::native_git_launch_probe",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env_clear();
-        let output = command
-            .into_std()
-            .bounded_output_for(Duration::from_secs(40), 32 * 1024)
-            .expect("native Git namespace probe");
-        assert!(
-            output.status.success(),
-            "Git namespace probe: {:?}; stdout={:?}; stderr={:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        crate::test_process::assert_single_test_completed(&output.stdout, "Git namespace probe");
-        assert!(output.stderr.is_empty());
-        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
-            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
-        }
-        assert_eq!(std::fs::read(host_config).unwrap(), config_bytes);
-    }
-
-    #[test]
-    #[ignore = "isolated Linux Git namespace probe"]
-    fn native_git_launch_probe() {
-        let host_config =
-            std::env::var_os("ARANY_TEST_GIT_HOST_CONFIG").expect("private synthetic host config");
-        let git = serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PIN").unwrap()).unwrap();
-        let parent =
-            serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
-                .unwrap();
-        assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        harden(profile::Routing::Offline).expect("production Guard hardening");
-        let own = thread_status(Path::new("/proc/thread-self/status"))
-            .unwrap()
-            .expect("the caller's own status");
-        verify_hardened_status(&own).unwrap();
-        for path in ["/workspace/a.txt", "/workspace/.git/write-probe"] {
-            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
-            assert_eq!(
-                std::fs::write(path, b"forbidden")
-                    .unwrap_err()
-                    .raw_os_error(),
-                Some(nix::libc::EROFS),
-                "Git Workspace bind must be read-only: {path}"
-            );
-        }
-        assert_eq!(
-            std::fs::File::open(host_config).unwrap_err().raw_os_error(),
-            Some(nix::libc::ENOENT),
-            "synthetic host HOME/.gitconfig must be absent from the Git namespace"
-        );
-        let view = Path::new("/scratch").join(crate::tools::git::VIEW);
-        std::fs::create_dir(&view).unwrap();
-        std::fs::write(view.join("write-probe"), b"allowed\n").unwrap();
-        assert_eq!(
-            std::fs::read(view.join("write-probe")).unwrap(),
-            b"allowed\n"
-        );
-        std::fs::remove_dir_all(view).unwrap();
-        let output = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(crate::tools::git::execute(
-                crate::tools::git::GitReadRequest {
-                    workspace: Path::new("/workspace"),
-                    scratch: Path::new("/scratch"),
-                    git: &git,
-                    call: &ToolCall::GitStatus { path: ".".into() },
-                    hidden: &Default::default(),
-                    max_bytes: 16 * 1024,
-                    runtime: Duration::from_secs(20),
-                },
-            ))
-            .unwrap();
-        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert!(output.get("failed").is_none(), "{output}");
-        assert!(
-            output["entries"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!({"path": "a.txt", "state": "??"}))
-        );
     }
 
     #[test]
@@ -2514,6 +2443,15 @@ mod tests {
         );
 
         let shared_root = b"1 0 8:1 / / rw shared:1 - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust ro - ext4 /dev/root ro\n";
+        assert!(verify_read_only(&valid, std::slice::from_ref(&target)).is_ok());
+        let writable = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust rw - ext4 /dev/root ro\n";
+        assert!(
+            verify_read_only(
+                &parse_mountinfo(writable).unwrap(),
+                std::slice::from_ref(&target)
+            )
+            .is_err()
+        );
         assert!(
             verify_mount_entries(
                 &parse_mountinfo(shared_root).unwrap(),
@@ -2544,7 +2482,7 @@ mod tests {
             kind: RuntimeKind::ManagerShims,
             manager: RuntimeManager::Rustup,
             version: None,
-            path: PathBuf::from("/usr/local/Cellar/rustup/1.0/bin"),
+            path: PathBuf::from("/usr/local/Cellar/rustup/1.0/libexec/bin"),
             device: 1,
             inode: 1,
             root: Some(GrantRoot {
@@ -2552,6 +2490,7 @@ mod tests {
                 device: 1,
                 inode: 2,
             }),
+            masks: Vec::new(),
         };
         assert_eq!(
             mount_plan(&[shim], false).unwrap(),
@@ -3257,6 +3196,7 @@ mod tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             };
             let grants = std::slice::from_ref(&grant);
             let mut stage = super::super::BootstrapStage::Workspace;
@@ -3310,6 +3250,7 @@ mod tests {
             device: metadata.dev(),
             inode: metadata.ino(),
             root: None,
+            masks: Vec::new(),
         };
         grant.validate_shape().unwrap();
         let grant_path = fixture.path().join("grant.json");

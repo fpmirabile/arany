@@ -8,6 +8,18 @@ static DECODE_SLOT: Semaphore = Semaphore::const_new(1);
 
 type DecodeResult = (u64, Option<Vec<u8>>);
 
+// The pointer's image hover: chip hit areas, the hovered image, its preview placement and Sixel state.
+#[derive(Default)]
+pub(in crate::terminal) struct GraphicsHover {
+    pub(in crate::terminal) chip_areas: Vec<(usize, ratatui::layout::Rect)>,
+    pub(in crate::terminal) image: Option<usize>,
+    pub(in crate::terminal) pointer: Option<ratatui::layout::Position>,
+    pub(in crate::terminal) changed: bool,
+    pub(in crate::terminal) placement: Option<GraphicsPlacement>,
+    pub(in crate::terminal) digest: Option<[u8; 32]>,
+    pub(in crate::terminal) sixel: SixelPreview,
+}
+
 pub(in crate::terminal) fn preview_interior(
     protocol: Option<GraphicsProtocol>,
     published: Option<GraphicsPlacement>,

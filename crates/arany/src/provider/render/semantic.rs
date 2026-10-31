@@ -105,7 +105,7 @@ pub fn input(wire: &Value) -> Value {
     if let Some(policy) = instructions
         .split("Pinned collaboration policy: ")
         .nth(1)
-        .and_then(|rest| rest.strip_suffix('.'))
+        .and_then(|rest| rest.split("\n\n").next()?.strip_suffix('.'))
     {
         semantic["collaboration"] = serde_json::from_str(policy).unwrap_or(Value::Null);
     }
@@ -127,8 +127,21 @@ pub fn tool_results(wire: &Value) -> Vec<Value> {
         .into_iter()
         .flatten()
         .filter(|item| item["type"] == "function_call_output")
-        .map(|item| serde_json::from_str(item["output"].as_str().unwrap()).unwrap())
+        .map(|item| {
+            without_harness(serde_json::from_str(item["output"].as_str().unwrap()).unwrap())
+        })
         .collect()
+}
+
+// Responses folds step harness facts into the last result; the projection compares only the result.
+fn without_harness(mut output: Value) -> Value {
+    let Some(fields) = output.as_object_mut() else {
+        return output;
+    };
+    if fields.remove("harness").is_some() && fields.len() == 1 && fields.contains_key("result") {
+        return fields.remove("result").unwrap_or_default();
+    }
+    output
 }
 
 pub fn responses_output(value: &Value) -> Value {

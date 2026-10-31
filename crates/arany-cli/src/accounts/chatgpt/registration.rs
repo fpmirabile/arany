@@ -1,5 +1,5 @@
 use super::{AuthorizationAttempt, AuthorizationError, account};
-use arany::{RecordFormat, RecordKind, RecordStep, StateRoot};
+use arany::{RecordFormat, RecordKind, StateRoot};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::{Uuid, Variant, Version};
@@ -7,36 +7,17 @@ use uuid::{Uuid, Variant, Version};
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
-    schema: u8,
     host_id: Uuid,
 }
 
 pub(crate) const CHATGPT_REGISTRATION: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptRegistration,
-    field: "schema",
-    floor: 1,
-    current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_host,
-    }],
     accepts: |bytes| Record::decode(bytes).is_ok(),
 };
 
-fn migrate_host(mut record: serde_json::Value) -> Option<serde_json::Value> {
-    let object = record.as_object_mut()?;
-    let client = object.remove("issued_client_id")?;
-    if !client.is_null() && !super::valid_client_id(client.as_str()?) {
-        return None;
-    }
-    object.insert("schema".into(), 2.into());
-    Some(record)
-}
-
 impl Record {
     fn validate(&self) -> Result<(), AuthorizationError> {
-        if self.schema != 2
-            || self.host_id.get_version() != Some(Version::Random)
+        if self.host_id.get_version() != Some(Version::Random)
             || self.host_id.get_variant() != Variant::RFC4122
         {
             return Err(AuthorizationError::InvalidIdentity);
@@ -67,7 +48,7 @@ pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), Authorization
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
     // Without State there is no saved host or registration to validate.
     let Some(state) =
-        crate::files::open_optional_state(&path).map_err(|_| AuthorizationError::Unavailable)?
+        arany::StateRoot::open_optional(&path).map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
     };
@@ -75,7 +56,8 @@ pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), Authorization
         .with_account_replacement_lock(workspace, || {
             let host = account::saved_host_at(&state)?;
             let bytes = state
-                .read_current(&CHATGPT_REGISTRATION)
+                .record(CHATGPT_REGISTRATION.kind)
+                .read()
                 .map_err(|_| AuthorizationError::Unavailable)?;
             match bytes {
                 Some(bytes) => {
@@ -109,7 +91,8 @@ impl Registration {
             .with_account_replacement_lock(workspace, || {
                 let saved_host = account::saved_host_at(state)?;
                 if let Some(bytes) = state
-                    .read_current(&CHATGPT_REGISTRATION)
+                    .record(CHATGPT_REGISTRATION.kind)
+                    .read()
                     .map_err(|_| AuthorizationError::Unavailable)?
                 {
                     let record = Record::decode(&bytes)?;
@@ -126,7 +109,6 @@ impl Registration {
                 random[6] = random[6] & 0x0f | 0x40;
                 random[8] = random[8] & 0x3f | 0x80;
                 let record = Record {
-                    schema: 2,
                     host_id: Uuid::from_bytes(random),
                 };
                 state
@@ -148,7 +130,8 @@ impl Registration {
 
 pub(super) fn verify_host_at(state: &StateRoot, host_id: Uuid) -> Result<(), AuthorizationError> {
     let Some(bytes) = state
-        .read_current(&CHATGPT_REGISTRATION)
+        .record(CHATGPT_REGISTRATION.kind)
+        .read()
         .map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
@@ -196,26 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn migrated_host_survives_reopen_without_an_issued_client() {
+    fn host_survives_reopen_and_signs_in_through_the_public_client() {
         let (_temp, workspace, state) = workspace_and_state();
-        let host_id = super::super::fixture_host_id();
-        let legacy = serde_json::json!({
-            "schema": 1, "host_id": host_id, "issued_client_id": "oaiapp_retired",
-        });
-        state
-            .record(RecordKind::ChatgptRegistration)
-            .replace(&serde_json::to_vec(&legacy).unwrap())
-            .unwrap();
         let registration = Registration::at(&state, &workspace).unwrap();
-        assert_eq!(registration.host_id(), host_id);
-        let bytes = state
-            .record(RecordKind::ChatgptRegistration)
-            .read()
-            .unwrap()
-            .unwrap();
-        let current: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(current["schema"], 2);
-        assert!(current.get("issued_client_id").is_none());
+        let host_id = registration.host_id();
+        assert_eq!(host_id.get_version(), Some(Version::Random));
         let reopened = StateRoot::open_existing(state.path()).unwrap();
         assert_eq!(
             Registration::at(&reopened, &workspace).unwrap().host_id(),
@@ -237,7 +205,7 @@ mod tests {
         let (_temp, workspace, state) = workspace_and_state();
         state
             .record(RecordKind::ChatgptRegistration)
-            .replace(b"{\"schema\":2}")
+            .replace(b"{\"host_id\":null}")
             .expect("synthetic malformed record");
         assert!(matches!(
             Registration::at(&state, &workspace),
@@ -245,7 +213,6 @@ mod tests {
         ));
 
         let record = Record {
-            schema: 2,
             host_id: Uuid::parse_str("123e4567-e89b-42d3-a456-426614174000").unwrap(),
         };
         let mut missing = serde_json::to_value(&record).unwrap();

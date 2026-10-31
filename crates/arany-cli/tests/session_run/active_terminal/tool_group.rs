@@ -75,7 +75,7 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     StateRoot::admit(&state).unwrap();
     crate::private_file(
         &state.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["src",".agents/skills"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["src",".agents/skills"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
     let port = {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -147,27 +147,16 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     });
 
     let command = "stty rows 24 cols 80; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools read; exit $?";
-    let mut attached = Command::new("/usr/bin/script");
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut attached = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, command)
+        .session(&state, &workspace)
         .env("PATH", "/usr/bin:/bin")
         .env("LD_PRELOAD", &tls.shim)
         .env("ARANY_TEST_TLS_PORT", port.to_string())
         .env("SSL_CERT_FILE", &tls.ca)
         .env("OPENAI_API_KEY", "synthetic-native-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().unwrap());
+        .spawn();
     let input = Arc::new(Mutex::new(attached.child().stdin.take().unwrap()));
-    let mut output = attached.child().stdout.take().unwrap();
+    let mut output = crate::product::Blocking(attached.child().stdout.take().unwrap());
     let reader_input = Arc::clone(&input);
     let (done, finished) = mpsc::channel();
     let reader = thread::spawn(move || {

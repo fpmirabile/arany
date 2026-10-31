@@ -123,5 +123,5 @@ invocations; the ordinary temporary-path aliases fail private-state admission.
 [Native test and CI reproduction notes](../agents/references/testing-details.md#local-verification-and-ci)
 explain additional prerequisites, fixture isolation and activation of checks
 ignored locally. [Testing rules](../agents/testing.md#evidence-lanes) define what a
-local run establishes. Live Provider checks require separate deliberate usage
+local run establishes. Live Provider Runs require separate deliberate usage
 authorization.

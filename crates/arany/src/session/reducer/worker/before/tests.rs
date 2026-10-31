@@ -84,7 +84,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             expected_digest: None,
             content: "new".into(),
         },
-        EffectTarget::Workspace,
+        f.editor_workspace(),
     );
     f.started(&intent);
     f.push(Event::ToolStarted {
@@ -198,7 +198,6 @@ fn refused(f: &Fixture, event: Event, name: &str) {
     if let Ok(payload) = event.payload() {
         let decoded = Event::decode(
             event.kind(),
-            event.version(),
             &payload,
             envelope.run_id,
             envelope.agent_run_id,

@@ -305,8 +305,10 @@ impl PermissionSettings {
             state,
             workspace,
             self.folder,
-            Some(self.digest),
-            false,
+            SaveBasis {
+                expected: self.digest,
+                existing_only: false,
+            },
             Edit::Network(edit),
         )
     }
@@ -325,8 +327,10 @@ impl PermissionSettings {
             state,
             workspace,
             self.folder,
-            Some(self.digest),
-            false,
+            SaveBasis {
+                expected: self.digest,
+                existing_only: false,
+            },
             Edit::Host(edit),
         )
     }
@@ -358,8 +362,10 @@ impl PermissionSettings {
             state,
             Path::new(rule.workspace()),
             identity,
-            Some(expected),
-            false,
+            SaveBasis {
+                expected,
+                existing_only: false,
+            },
             Edit::Host(HostPrefixEdit::Insert(Box::new(rule.clone()))),
         )?
         .digest
@@ -377,8 +383,10 @@ impl PermissionSettings {
             state,
             workspace,
             self.folder,
-            Some(self.digest),
-            false,
+            SaveBasis {
+                expected: self.digest,
+                existing_only: false,
+            },
             Edit::Typed(edit),
         )
     }
@@ -395,8 +403,10 @@ impl PermissionSettings {
             state,
             workspace,
             admitted,
-            Some(expected),
-            true,
+            SaveBasis {
+                expected,
+                existing_only: true,
+            },
             Edit::Typed(TypedPrefixEdit::Insert {
                 prefix,
                 decision: Decision::Allow,
@@ -601,14 +611,22 @@ fn edit_typed(
     Ok(())
 }
 
+struct SaveBasis {
+    expected: Option<[u8; 32]>,
+    existing_only: bool,
+}
+
 fn save(
     state: &StateRoot,
     workspace: &Path,
     identity: crate::session::WorkspaceIdentity,
-    expected: Option<Option<[u8; 32]>>,
-    existing_only: bool,
+    basis: SaveBasis,
     edit: Edit,
 ) -> Result<PermissionSettings, SettingsError> {
+    let SaveBasis {
+        expected,
+        existing_only,
+    } = basis;
     state
         .with_account_replacement_lock(workspace, || {
             if crate::tools::workspace_identity(workspace).map_err(|_| SettingsError::Folder)?
@@ -620,7 +638,7 @@ fn save(
             if existing_only && bytes.is_none() {
                 return Err(SettingsError::Conflict);
             }
-            if expected.is_some_and(|expected| expected != bytes.as_deref().map(digest)) {
+            if expected != bytes.as_deref().map(digest) {
                 return Err(SettingsError::Conflict);
             }
             let current = PermissionSettings::from_bytes(bytes.as_deref(), identity)?;
@@ -632,35 +650,7 @@ fn save(
                 Edit::Typed(edit) => edit_typed(&mut entries, edit, workspace, identity)?,
                 Edit::Network(edit) => edit_network(&mut network, edit)?,
             }
-            let mut document = match &bytes {
-                Some(bytes) => crate::tools::parse_json(bytes, MAX_CONFIG_BYTES)
-                    .map_err(|_| SettingsError::Invalid)?,
-                None => json!({"permissions": {"defaultMode": "default"}}),
-            };
-            let root = document.as_object_mut().ok_or(SettingsError::Invalid)?;
-            let permissions = root
-                .entry("permissions")
-                .or_insert_with(|| Value::Object(Map::new()))
-                .as_object_mut()
-                .ok_or(SettingsError::Invalid)?;
-            rewrite_network(permissions, &network)?;
-            if entries.is_empty() {
-                permissions.remove("typedPrefixes");
-            } else {
-                permissions.insert("typedPrefixes".into(), rows(&entries));
-            }
-            if host.is_empty() {
-                permissions.remove("hostPrefixes");
-            } else {
-                permissions.insert(
-                    "hostPrefixes".into(),
-                    serde_json::to_value(&host).map_err(|_| SettingsError::Invalid)?,
-                );
-            }
-            let updated = serde_json::to_vec(&document).map_err(|_| SettingsError::Invalid)?;
-            if updated.len() > MAX_CONFIG_BYTES {
-                return Err(SettingsError::Invalid);
-            }
+            let updated = rewritten(bytes.as_deref(), &entries, &host, &network)?;
             let parsed = PermissionSettings::from_bytes(Some(&updated), identity)?;
             if parsed.entries != entries || parsed.host != host || parsed.network != network {
                 return Err(SettingsError::Invalid);
@@ -678,6 +668,45 @@ fn save(
             StoreError::AccountBusy => SettingsError::Busy,
             _ => SettingsError::Invalid,
         })?
+}
+
+fn rewritten(
+    bytes: Option<&[u8]>,
+    entries: &[TypedRule],
+    host: &[super::HostPrefixRule],
+    network: &[NetworkDomainEntry],
+) -> Result<Vec<u8>, SettingsError> {
+    let mut document = match bytes {
+        Some(bytes) => {
+            crate::tools::parse_json(bytes, MAX_CONFIG_BYTES).map_err(|_| SettingsError::Invalid)?
+        }
+        None => json!({"permissions": {"defaultMode": "default"}}),
+    };
+    let root = document.as_object_mut().ok_or(SettingsError::Invalid)?;
+    let permissions = root
+        .entry("permissions")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or(SettingsError::Invalid)?;
+    rewrite_network(permissions, network)?;
+    if entries.is_empty() {
+        permissions.remove("typedPrefixes");
+    } else {
+        permissions.insert("typedPrefixes".into(), rows(entries));
+    }
+    if host.is_empty() {
+        permissions.remove("hostPrefixes");
+    } else {
+        permissions.insert(
+            "hostPrefixes".into(),
+            serde_json::to_value(host).map_err(|_| SettingsError::Invalid)?,
+        );
+    }
+    let updated = serde_json::to_vec(&document).map_err(|_| SettingsError::Invalid)?;
+    if updated.len() > MAX_CONFIG_BYTES {
+        return Err(SettingsError::Invalid);
+    }
+    Ok(updated)
 }
 
 fn rows(entries: &[TypedRule]) -> Value {
@@ -699,7 +728,7 @@ fn rows(entries: &[TypedRule]) -> Value {
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

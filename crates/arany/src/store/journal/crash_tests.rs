@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::{
-    AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, RunConfig, RunDisposition, RunId,
-    RunStatus, WorkspaceIdentity,
+    AgentDisposition, AgentRole, AgentRunId, RunConfig, RunDisposition, RunId, RunStatus,
+    WorkspaceIdentity,
 };
 use crate::store::Store;
 use std::{
@@ -91,34 +91,9 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
             Event::RunStarted {
                 run_id,
                 config: RunConfig {
-                    supervisor: None,
-                    worker_policy: None,
-                    agent_definitions: None,
-                    roster: None,
-                    providers: None,
-                    provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
                     model: "test-model".into(),
-                    effort: None,
-                    custom_profile_provenance: None,
-                    saved_api_account_id: None,
-                    chatgpt_provenance: None,
-                    output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-                    context_window_tokens: None,
-                    policy: CollaborationPolicy::Single,
-                    output_token_cap: 4096,
-                    provider_concurrency: 1,
-                    workspace_device: 1,
                     workspace_inode: 1,
-                    user_instruction_digest: None,
-                    instruction_sources: Vec::new(),
-                    launch_directory: String::new(),
-                    include_digests: Vec::new(),
-                    history_run_ids: Vec::new(),
-                    excluded_history_runs: 0,
-                    context_usage: None,
-                    compaction_event_sequence: None,
-                    compaction_content_digest: None,
-                    tool_policy: None,
+                    ..crate::test_support::run_config()
                 },
                 active_deadline_ms: None,
             },
@@ -170,43 +145,17 @@ fn crash_append_child() {
     let store = Store::open(StateRoot::open_existing(&state).expect("existing State"))
         .expect("crash child Store");
     runtime().block_on(async {
-        if let Some(path) = std::env::var_os("ARANY_TEST_CRASH_EVENT") {
-            let value: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            if let Some(id) = value.get("check_id") {
-                let id = serde_json::from_value(id.clone()).unwrap();
-                let op = if let Some(digest) = value.get("evidence_digest") {
-                    crate::journal::check::CheckOp::PublishChatgpt {
-                        id,
-                        digest: serde_json::from_value(digest.clone()).unwrap(),
-                    }
-                } else if let Some(record) = value.get("record") {
-                    crate::journal::check::CheckOp::PublishProvider {
-                        id,
-                        record: serde_json::from_value(record.clone()).unwrap(),
-                    }
-                } else {
-                    crate::journal::check::CheckOp::Append {
-                        id,
-                        event: serde_json::from_value(value["event"].clone()).unwrap(),
-                    }
-                };
-                store.check(op).await.expect("acknowledged check Event");
-                return;
-            }
-        }
         store
             .append(
                 session_id,
                 if let Some(path) = std::env::var_os("ARANY_TEST_CRASH_EVENT") {
-                    let (kind, version, payload, run, actor): (
+                    let (kind, payload, run, actor): (
                         String,
-                        i64,
                         String,
                         Option<RunId>,
                         Option<AgentRunId>,
                     ) = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-                    Event::decode(&kind, version, &payload, run, actor).unwrap()
+                    Event::decode(&kind, &payload, run, actor).unwrap()
                 } else {
                     terminal_event(run_id)
                 },
@@ -374,14 +323,7 @@ fn worker_process_death_preserves_exact_recovery_prefixes() {
             let (run, actor) = event.scope();
             std::fs::write(
                 &event_path,
-                serde_json::to_vec(&(
-                    event.kind(),
-                    event.version(),
-                    event.payload().unwrap(),
-                    run,
-                    actor,
-                ))
-                .unwrap(),
+                serde_json::to_vec(&(event.kind(), event.payload().unwrap(), run, actor)).unwrap(),
             )
             .unwrap();
             kill_at_append(&state, f.session, f.run, &marker, stage, Some(&event_path));
@@ -447,14 +389,7 @@ fn rewind_process_death_preserves_exact_recovery_prefixes() {
             let (run, actor) = event.scope();
             std::fs::write(
                 &event_path,
-                serde_json::to_vec(&(
-                    event.kind(),
-                    event.version(),
-                    event.payload().unwrap(),
-                    run,
-                    actor,
-                ))
-                .unwrap(),
+                serde_json::to_vec(&(event.kind(), event.payload().unwrap(), run, actor)).unwrap(),
             )
             .unwrap();
             kill_at_append(&state, f.session, f.run, &marker, stage, Some(&event_path));
@@ -555,14 +490,7 @@ async fn observation_crash_prefix(api: bool) {
             let (run, actor) = event.scope();
             std::fs::write(
                 &event_path,
-                serde_json::to_vec(&(
-                    event.kind(),
-                    event.version(),
-                    event.payload().unwrap(),
-                    run,
-                    actor,
-                ))
-                .unwrap(),
+                serde_json::to_vec(&(event.kind(), event.payload().unwrap(), run, actor)).unwrap(),
             )
             .unwrap();
             kill_at_append(
@@ -616,183 +544,6 @@ async fn observation_crash_prefix(api: bool) {
 }
 
 #[test]
-#[cfg_attr(not(arany_ci), ignore)]
-fn provider_check_process_death_never_completes_unconfirmed_publication() {
-    use crate::journal::check::{
-        CheckDisposition, CheckEvent, CheckJournal, CheckOp,
-        tests::{fixture, start_fixture},
-    };
-    use crate::provider::evidence::ProviderEvidenceRecord;
-    for index in [2, 3, 8, 9] {
-        for stage in ["before", "after"] {
-            let temp = tempfile::tempdir().unwrap();
-            let state = temp.path().join("state");
-            let marker = temp.path().join("stage");
-            let event_path = temp.path().join("check.json");
-            let (id, mut events) = fixture();
-            let now = crate::journal::check::now_ms().unwrap();
-            let record = ProviderEvidenceRecord {
-                name: "local".into(),
-                digest: [1; 32],
-                addresses: vec!["127.0.0.1:9321".parse().unwrap()],
-                checked_at_ms: now,
-                expires_at_ms: now + 60_000,
-            };
-            let digest = crate::store::check::provider_digest(&record).unwrap();
-            events[8] = CheckEvent::ProviderCheckEvidenceStarted {
-                digest,
-                snapshot: record.digest,
-            };
-            events[9] = CheckEvent::ProviderCheckFinished {
-                disposition: CheckDisposition::Succeeded,
-                evidence: Some(digest),
-            };
-            let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
-            runtime().block_on(async {
-                store
-                    .check(CheckOp::Start {
-                        retained: None,
-                        id,
-                        start: start_fixture(),
-                    })
-                    .await
-                    .unwrap();
-                for event in &events[2..index] {
-                    store
-                        .check(CheckOp::Append {
-                            id,
-                            event: event.clone(),
-                        })
-                        .await
-                        .unwrap();
-                }
-                store.close().await.unwrap();
-            });
-            let packet = if index == 9 {
-                serde_json::json!({"check_id":id,"record":record})
-            } else {
-                serde_json::json!({"check_id":id,"event":events[index]})
-            };
-            std::fs::write(&event_path, serde_json::to_vec(&packet).unwrap()).unwrap();
-            kill_at_append(
-                &state,
-                SessionId::new(),
-                RunId::new(),
-                &marker,
-                stage,
-                Some(&event_path),
-            );
-            let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
-            runtime().block_on(async {
-                let view = store.load_check(id).await.unwrap().unwrap();
-                let success = index == 9 && stage == "after";
-                assert_eq!(view.events, index + usize::from(stage == "after"));
-                assert_eq!(
-                    view.replay_disposition(),
-                    if success {
-                        CheckDisposition::Succeeded
-                    } else {
-                        CheckDisposition::Uncertain
-                    }
-                );
-                assert_eq!(
-                    store.load_provider_evidence("local".into()).await.unwrap(),
-                    success.then_some(record)
-                );
-                store.close().await.unwrap();
-                let next =
-                    CheckJournal::start(StateRoot::open_existing(&state).unwrap(), start_fixture())
-                        .await
-                        .unwrap();
-                assert_eq!(next.view().completed_calls, 0);
-                next.close().await.unwrap();
-            });
-        }
-    }
-}
-
-#[test]
-#[cfg_attr(not(arany_ci), ignore)]
-fn chatgpt_check_process_death_never_acknowledges_an_unfinished_external_publication() {
-    use crate::journal::check::{
-        CheckDisposition, CheckEvent, CheckJournal, CheckOp, tests::chatgpt_fixture,
-    };
-    for index in [1, 2, 3, 4, 10, 11] {
-        for stage in ["before", "after"] {
-            let temp = tempfile::tempdir().unwrap();
-            let state = temp.path().join("state");
-            let marker = temp.path().join("stage");
-            let packet_path = temp.path().join("check.json");
-            let (id, events) = chatgpt_fixture();
-            let CheckEvent::ProviderCheckStarted { start } = events[0].clone() else {
-                unreachable!()
-            };
-            let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
-            runtime().block_on(async {
-                store
-                    .check(CheckOp::Start {
-                        id,
-                        start: start.clone(),
-                        retained: Some(Vec::new()),
-                    })
-                    .await
-                    .unwrap();
-                for event in &events[1..index] {
-                    store
-                        .check(CheckOp::Append {
-                            id,
-                            event: event.clone(),
-                        })
-                        .await
-                        .unwrap();
-                }
-                store.close().await.unwrap();
-            });
-            let packet = if index == events.len() - 1 {
-                serde_json::json!({"check_id":id,"evidence_digest":vec![3; 32]})
-            } else {
-                serde_json::json!({"check_id":id,"event":events[index]})
-            };
-            std::fs::write(&packet_path, serde_json::to_vec(&packet).unwrap()).unwrap();
-            kill_at_append(
-                &state,
-                SessionId::new(),
-                RunId::new(),
-                &marker,
-                stage,
-                Some(&packet_path),
-            );
-            let root = StateRoot::open_existing(&state).unwrap();
-            let success = index == events.len() - 1 && stage == "after";
-            assert_eq!(
-                root.check_evidence_valid(id, [1; 32], [3; 32]).unwrap(),
-                success
-            );
-            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-            runtime().block_on(async {
-                let view = store.load_check(id).await.unwrap().unwrap();
-                assert_eq!(view.events, index + usize::from(stage == "after"));
-                assert_eq!(
-                    view.replay_disposition(),
-                    if success {
-                        CheckDisposition::Succeeded
-                    } else {
-                        CheckDisposition::Uncertain
-                    }
-                );
-                store.close().await.unwrap();
-                let next = CheckJournal::start(StateRoot::open_existing(&state).unwrap(), start)
-                    .await
-                    .unwrap();
-                assert_eq!(next.view().completed_calls, 0);
-                next.close().await.unwrap();
-            });
-            assert!(!root.check_evidence_valid(id, [1; 32], [3; 32]).unwrap());
-        }
-    }
-}
-
-#[test]
 fn host_verdict_process_death_reopens_without_outcome_or_retry() {
     let f = crate::session::host_protocol_fixture();
     let temp = tempfile::tempdir().unwrap();
@@ -810,14 +561,7 @@ fn host_verdict_process_death_reopens_without_outcome_or_retry() {
     let (run, actor) = verdict.scope();
     std::fs::write(
         &event_path,
-        serde_json::to_vec(&(
-            verdict.kind(),
-            verdict.version(),
-            verdict.payload().unwrap(),
-            run,
-            actor,
-        ))
-        .unwrap(),
+        serde_json::to_vec(&(verdict.kind(), verdict.payload().unwrap(), run, actor)).unwrap(),
     )
     .unwrap();
     kill_at_append(

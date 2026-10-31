@@ -88,6 +88,24 @@ class SpecBounds(unittest.TestCase):
                 result = self.run_cli(text)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_domain_folder_files_link_the_parent_limits_table(self):
+        folder = self.spec_dir / "tools"
+        folder.mkdir()
+        for text, code in (
+            ("[64 KiB](../limits.md#max_tool_result_bytes)", 0),
+            ("[64 KiB](./limits.md#max_tool_result_bytes)", 1),
+            ("The response is limited to 64 KiB.", 1),
+        ):
+            with self.subTest(text=text):
+                (folder / "git.md").write_text(text + "\n", encoding="utf-8")
+                result = self.run_cli("A bounded Tool result.\n")
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code:
+                    self.assertIn("docs/specs/tools/git.md:1: restates generated bound 64 KiB", result.stderr)
+        result = self.run_cli("[64 KiB](../limits.md#max_tool_result_bytes)")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("docs/specs/tools.md:1: restates generated bound 64 KiB", result.stderr)
+
     def test_link_to_different_limit_or_page_does_not_exempt_a_pair(self):
         for text, diagnostic in (
             ("[64 KiB](./limits.md#max_read_page_lines)", "generated limit label 64 KiB does not match max_read_page_lines"),

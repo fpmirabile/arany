@@ -71,14 +71,19 @@ async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths(
 
 #[tokio::test]
 async fn long_read_only_goal_compacts_only_an_acknowledged_run_prefix() {
-    compact_read_only_goal_prefix("Inspect the bounded file in pages").await;
+    compact_read_only_goal_prefix(
+        "Inspect the bounded file in pages",
+        true,
+        GOAL_COMPACTION_WINDOW_TOKENS,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn prose_objective_at_the_limit_compacts_its_read_only_goal_prefix() {
     // Prose escapes about 1x; the pinned objective and the first turn each carry it once.
     let prose = "Review the module and keep its contract. ".repeat(1_600);
-    compact_read_only_goal_prefix(&prose[..64 * 1024]).await;
+    compact_read_only_goal_prefix(&prose[..64 * 1024], false, PROSE_COMPACTION_WINDOW_TOKENS).await;
 }
 
 #[tokio::test]
@@ -86,6 +91,8 @@ async fn user_and_project_guidance_stay_first_in_the_goal_compaction_input() {
     compact_with_guidance(
         "Inspect the bounded file in pages",
         ("User rule.", "Project rule."),
+        true,
+        GOAL_COMPACTION_WINDOW_TOKENS,
     )
     .await;
 }
@@ -93,14 +100,31 @@ async fn user_and_project_guidance_stay_first_in_the_goal_compaction_input() {
 #[tokio::test]
 async fn escape_heavy_guidance_does_not_refuse_goal_compaction() {
     let hostile = "\"\\\u{1}".repeat(21_000);
-    compact_with_guidance("Inspect the bounded file in pages", (&hostile, &hostile)).await;
+    compact_with_guidance(
+        "Inspect the bounded file in pages",
+        (&hostile, &hostile),
+        false,
+        GOAL_COMPACTION_WINDOW_TOKENS,
+    )
+    .await;
 }
 
-async fn compact_read_only_goal_prefix(objective: &str) {
-    compact_with_guidance(objective, ("", "")).await;
+// The ChatGPT route that reports the window reports plan windows.
+fn compaction_sample(index: usize) -> arany::RateLimits {
+    plan_sample(1000 + index as i64)
 }
 
-async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
+async fn compact_read_only_goal_prefix(objective: &str, cleared: bool, window_tokens: u32) {
+    compact_with_guidance(objective, ("", ""), cleared, window_tokens).await;
+}
+
+// `cleared`: whether clearing frees enough to run before the summary.
+async fn compact_with_guidance(
+    objective: &str,
+    (user, project): (&str, &str),
+    cleared: bool,
+    window_tokens: u32,
+) {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
@@ -138,22 +162,25 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
             wire_provenance: None,
         })
     };
-    let mut provider = ScriptedProvider::new(outcomes).with_compactions(
-        std::iter::once(Ok(CompactionResponse {
-            summary: String::new(),
-            response_id: None,
-            usage: arany::Usage {
-                input_tokens: None,
-                output_tokens: Some(8),
-                ..Default::default()
-            },
-            wire_provenance: None,
-        }))
-        .chain((1..READS).map(|_| good_compaction()))
-        .collect(),
-    );
+    let mut provider = ScriptedProvider::new(outcomes)
+        .with_compactions(
+            std::iter::once(Ok(CompactionResponse {
+                summary: String::new(),
+                response_id: None,
+                usage: arany::Usage {
+                    input_tokens: None,
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
+                wire_provenance: None,
+            }))
+            .chain((1..READS).map(|_| good_compaction()))
+            .collect(),
+        )
+        .with_context_window(window_tokens)
+        .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32]);
     let samples = provider.compact_rate_limits.get_mut().unwrap();
-    samples.extend((0..READS).map(|index| Some(api_sample(1000 + index as i64))));
+    samples.extend((0..READS).map(|index| Some(compaction_sample(index))));
     let requests = Arc::clone(&provider.requests);
     let compaction_requests = Arc::clone(&provider.compact_requests);
     let provider = Arc::new(provider);
@@ -170,7 +197,7 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
         let config = state_path.join("tools.json");
         std::fs::write(
             &config,
-            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
         )
         .expect("Tool configuration");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
@@ -235,7 +262,10 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
         let input: serde_json::Value =
             serde_json::from_str(&turn.assistant).expect("bounded compaction context JSON");
         let observations = input["tool_observations"].as_array().unwrap();
-        assert!(observations.iter().any(|result| result["cleared"] == true));
+        assert_eq!(
+            observations.iter().any(|result| result["cleared"] == true),
+            cleared
+        );
         assert!(
             observations
                 .iter()
@@ -376,12 +406,9 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
         .expect("closed replay validates active prefixes")
         .expect("Session");
     for (index, (_, record)) in compacted.iter().enumerate() {
-        assert_eq!(record.rate_limits, Some(api_sample(1000 + index as i64)));
+        assert_eq!(record.rate_limits, Some(compaction_sample(index)));
     }
-    let group = &view.usage.api_limits[0];
-    assert_eq!(group.role, arany::ProviderRole::Compaction);
-    let latest = api_sample(1000 + (compacted.len() - 1) as i64);
-    assert_eq!(group.rows, latest.api.unwrap().rows);
+    assert!(view.usage.api_limits.is_empty());
     assert_eq!(
         view.usage
             .groups
@@ -1533,8 +1560,11 @@ async fn interrupted_compaction_sample(sample: arany::RateLimits, append_failure
     let failing = Arc::new(failing);
     let fallback =
         Arc::new(ScriptedProvider::new(vec![]).with_profile("openai", "compact-fallback"));
-    let primary =
-        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("openai", "primary"));
+    let primary = Arc::new(
+        ScriptedProvider::new(paged_read_outcomes())
+            .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32])
+            .with_context_window(SMALL_WINDOW_TOKENS),
+    );
     let mut bindings = AdmittedProviders::single(primary.clone());
     bindings.roles.compaction = vec![failing.clone(), fallback.clone()];
     let engine = facts_engine(

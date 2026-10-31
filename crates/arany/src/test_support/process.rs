@@ -9,6 +9,13 @@ use std::{
 /// Serializes heavy native gates that share one test binary.
 pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
+// Optimized builds refuse the variable and isolate a spawned product's account root themselves.
+pub fn account_fixture(
+    root: impl AsRef<std::ffi::OsStr>,
+) -> Option<(&'static str, std::ffi::OsString)> {
+    cfg!(debug_assertions).then(|| ("ARANY_TEST_ACCOUNT_ROOT", root.as_ref().to_owned()))
+}
+
 pub fn isolate_host_authentication(command: &mut Command, home: &std::path::Path) {
     let home = std::fs::canonicalize(home).expect("physical fixture home");
     command
@@ -403,7 +410,6 @@ pub fn file_output(command: &mut Command, input: Option<&[u8]>) -> Output {
 }
 
 /// Opens a PTY whose master and slave close on exec; returns `(master, slave)`.
-#[cfg(unix)]
 pub fn cloexec_pty(geometry: Option<&nix::pty::Winsize>) -> (std::fs::File, std::fs::File) {
     let pty = nix::pty::openpty(geometry, None).unwrap();
     let pair = (
@@ -451,7 +457,6 @@ pub fn assert_single_test_completed(stdout: &[u8], context: &str) {
     );
 }
 
-#[cfg(unix)]
 pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
     let settings = nix::sys::termios::tcgetattr(terminal).expect("native terminal settings");
     #[cfg(target_os = "macos")]
@@ -465,7 +470,6 @@ pub fn terminal_settings(terminal: impl AsFd) -> nix::sys::termios::Termios {
     settings
 }
 
-#[cfg(unix)]
 pub fn capture_terminal(
     child: &mut Child,
     terminal: std::fs::File,
@@ -569,7 +573,6 @@ fn drain(pipe: &mut Option<impl Read>, bytes: &mut Vec<u8>, cap: usize, channel:
     }
 }
 
-#[cfg(unix)]
 pub fn wait_readable(fd: impl AsFd) {
     use rustix::event::{PollFd, PollFlags, Timespec};
     let timeout = Timespec {

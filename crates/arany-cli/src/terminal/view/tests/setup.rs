@@ -15,12 +15,14 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
                 draw_setup_frame(
                     frame,
                     area,
-                    3,
-                    "Enter API key",
-                    "Hidden input; up to 512 ASCII characters",
-                    12,
-                    Some("Invalid key; try again"),
-                    Palette { color: false },
+                    SetupFrame {
+                        step: 3,
+                        title: "Enter API key",
+                        instruction: "Hidden input; up to 512 ASCII characters",
+                        input_chars: 12,
+                        notice: Some("Invalid key; try again"),
+                        palette: Palette { color: false },
+                    },
                 );
             })
             .expect("setup frame");
@@ -69,11 +71,13 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
                             draw_setup_text_frame(
                                 frame,
                                 area,
-                                "API workspace ID",
-                                "From Claude Console",
-                                &draft,
-                                Some("Error: retry"),
-                                Palette { color },
+                                SetupTextFrame {
+                                    title: "API workspace ID",
+                                    instruction: "From Claude Console",
+                                    draft: &draft,
+                                    notice: Some("Error: retry"),
+                                    palette: Palette { color },
+                                },
                             );
                         })
                         .expect("visible workspace field");
@@ -177,12 +181,14 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                     draw_setup_choices_frame(
                         frame,
                         area,
-                        title,
-                        instruction,
-                        choices,
-                        selected,
-                        None,
-                        Palette { color: false },
+                        SetupChoicesFrame {
+                            title,
+                            instruction,
+                            choices,
+                            selected,
+                            notice: None,
+                            palette: Palette { color: false },
+                        },
                     )
                 })
                 .expect("setup choices");
@@ -225,12 +231,14 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
             draw_setup_frame(
                 frame,
                 area,
-                3,
-                "Enter API key",
-                "Hidden input; up to 512 ASCII characters",
-                512,
-                Some("Invalid or overlong API key"),
-                Palette { color: false },
+                SetupFrame {
+                    step: 3,
+                    title: "Enter API key",
+                    instruction: "Hidden input; up to 512 ASCII characters",
+                    input_chars: 512,
+                    notice: Some("Invalid or overlong API key"),
+                    palette: Palette { color: false },
+                },
             )
         })
         .expect("secret error frame");
@@ -259,16 +267,7 @@ fn dense_setup_choices_keep_error_feedback_and_selection_visible() {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| {
-                    draw_setup_choices_frame(
-                        frame,
-                        frame.area(),
-                        "Provider setup",
-                        "Manage access, custom routes, role routing and roster presets",
-                        &choices,
-                        selected,
-                        Some("Use Up/Down and Enter to select"),
-                        Palette { color: false },
-                    );
+                    draw_setup_choices_frame(frame, frame.area(), SetupChoicesFrame { title: "Provider setup", instruction: "Manage access, custom routes, role routing and roster presets", choices: &choices, selected, notice: Some("Use Up/Down and Enter to select"), palette: Palette { color: false } });
                 })
                 .unwrap();
             let visible = (0..height)
@@ -304,12 +303,14 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                     has_more = draw_setup_warning_frame(
                         frame,
                         area,
-                        "ChatGPT plan consent",
-                        &warning,
-                        page,
-                        false,
-                        None,
-                        Palette { color: false },
+                        SetupWarningFrame {
+                            title: "ChatGPT plan consent",
+                            warning: &warning,
+                            page,
+                            accept_selected: false,
+                            notice: None,
+                            palette: Palette { color: false },
+                        },
                     );
                 })
                 .expect("warning page");
@@ -361,12 +362,14 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
                         assert!(!draw_setup_warning_frame(
                             frame,
                             area,
-                            "ChatGPT plan consent",
-                            &warning,
-                            usize::MAX,
-                            accept,
-                            None,
-                            Palette { color }
+                            SetupWarningFrame {
+                                title: "ChatGPT plan consent",
+                                warning: &warning,
+                                page: usize::MAX,
+                                accept_selected: accept,
+                                notice: None,
+                                palette: Palette { color }
+                            }
                         ));
                     })
                     .expect("consent actions");

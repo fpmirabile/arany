@@ -11,7 +11,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use uuid::Uuid;
 
 use crate::loopback::ChildGuard;
 
@@ -259,46 +258,13 @@ fn capture_chatgpt_live(
 }
 
 #[test]
-#[ignore = "paid live ChatGPT-plan check and direct Run; requires selected account, two opt-ins, model, and effort"]
+#[ignore = "paid live ChatGPT-plan direct Run; requires selected account, two opt-ins, model, and effort"]
 fn chatgpt_plan_direct_turn_replays_exact_events() {
     let (model, effort) = selected_chatgpt_model();
     let temp = tempfile::tempdir().expect("private live root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("empty synthetic Workspace");
     let state = temp.path().join("state");
-
-    let mut check = chatgpt_live_command(&workspace);
-    check
-        .args(["provider", "check", "chatgpt"])
-        .arg(&model)
-        .args(["--effort", effort.as_str(), "--accept-cost"]);
-    let (status, output, errors) = capture_chatgpt_live(&mut check, temp.path(), "check");
-    assert!(status.success(), "ChatGPT synthetic check exited {status}");
-    assert!(errors.is_empty(), "successful check wrote stderr");
-    let lines = std::str::from_utf8(&output)
-        .expect("check output UTF-8")
-        .lines()
-        .collect::<Vec<_>>();
-    assert_eq!(lines.len(), 8, "unexpected check receipt");
-    let account_id = lines[1]
-        .strip_prefix("Account: ")
-        .expect("check account line")
-        .parse::<Uuid>()
-        .expect("checked account UUID");
-    let output = crate::check_output(
-        &output,
-        &StateRoot::account_path().unwrap(),
-        arany::CheckDisposition::Succeeded,
-    );
-    let window = lines[4];
-    assert!(window.starts_with("Context window: "));
-    let expected = format!(
-        "Provider: chatgpt\nAccount: {account_id}\nModel: {model}\nEffort: {effort}\n{window}\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
-    );
-    assert!(
-        output == expected.as_bytes(),
-        "check receipt differs from selected tuple"
-    );
 
     let objective = "Return one short sentence confirming this synthetic check.";
     let mut run = chatgpt_live_command(&workspace);
@@ -345,12 +311,11 @@ fn chatgpt_plan_direct_turn_replays_exact_events() {
         .chatgpt_provenance
         .as_ref()
         .expect("account-bound ChatGPT evidence");
-    assert_eq!(provenance.account_id, account_id);
     assert_eq!(
         provenance.admission,
         arany::ChatGptAdmission::AccountConsent
     );
-    assert_ne!(provenance.evidence_fingerprint, [0; 32]);
+    assert_ne!(provenance.admission_fingerprint, [0; 32]);
     assert_eq!(run.agents.len(), 1);
     let primary = &run.agents[0];
     assert_eq!(primary.role, AgentRole::Primary);

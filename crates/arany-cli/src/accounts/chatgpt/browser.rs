@@ -49,8 +49,6 @@ fn open_blocking(target: &str) -> Result<(), AuthorizationError> {
     };
     #[cfg(target_os = "macos")]
     let (program, args): (&str, &[&str]) = ("/usr/bin/open", &[]);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return Err(AuthorizationError::Unavailable);
 
     let mut command = Command::new(program);
     // A cold browser start runs the desktop entry itself, so it needs the display session and a system PATH.

@@ -9,7 +9,7 @@ Use principles to explain concrete change and failure risks, not to score confor
 
 ## Procedure
 
-1. Load the project's architecture and the owning spec and the tests that pin the module's invariants. For Arany, apply the [product and implementation priorities](../../../AGENTS.md#product-and-implementation-priorities), including Ponytail and OS parity. Map actual callers, source dependencies, state owners, adapters and privilege boundaries. Follow at least one complete successful operation and its failure/cancellation path before drawing conclusions.
+1. Load the project's architecture, the contract that owns the behavior and the tests that pin the module's invariants, and apply the project's implementation priorities. Map actual callers, source dependencies, state owners, adapters and privilege boundaries. Follow at least one complete successful operation and its failure/cancellation path before drawing conclusions.
 2. Apply the lenses below to that map. Record strengths as well as problems. File length, a concrete dependency or the absence of a trait is not independently a finding.
 3. For each finding, cite current file/line and caller chain, the violated contract or independent reason to change, concrete consequence, confidence, smallest repair and existing verification owner. Separate demonstrated defects, justified structural improvements and preference-only suggestions. Deduplicate symptoms with the same owner/root cause.
 4. When parallel review is requested or authorized, divide it into dependency direction, responsibility/ownership, and behavioral contracts. Reviewers first work independently; reconcile overlapping or contradictory findings against the code before assigning disjoint implementation ownership. Otherwise review sequentially.
@@ -27,7 +27,7 @@ Completion means every reported finding has a disposition and every applied chan
 - **ISP:** inspect each caller's required operations and knowledge. Prefer small domain-shaped interfaces, avoiding callers that must understand unrelated internals or supply meaningless fields. One cohesive interface need not become several traits.
 - **Component cohesion and coupling:** trace cycles, duplicated policy, shared mutable ownership and change blast radius. Treat Rust modules as boundaries even within one package. Preserve justified process/privilege boundaries. Create crates only for measured dependency, ownership or release pressure.
 
-For Arany, use the project's deep-module vocabulary alongside these lenses; it is a complementary design approach, not attributed to Martin. Concrete SQLite ownership and separate credential/Guard processes have real lifecycle and privilege reasons. Provider already has multiple adapters. Preserve these reasons unless evidence supports a better design.
+Concrete storage ownership, separate processes and existing adapters often carry real lifecycle, privilege or variation reasons; name and preserve them unless evidence supports a better design.
 
 ## Attribution
 

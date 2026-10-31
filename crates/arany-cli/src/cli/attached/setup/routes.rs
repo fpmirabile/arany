@@ -1,14 +1,11 @@
 use super::custom::{
-    CustomRouteContext, add_custom_route, check_custom_route, custom_profile_choices,
-    edit_custom_route, inspect_custom_route, remove_custom_route,
+    CustomRouteContext, add_custom_route, custom_profile_choices, edit_custom_route,
+    inspect_custom_route, remove_custom_route,
 };
 use super::{SetupError, SetupJournal, SetupSelection, choose};
 use crate::presentation::escape_terminal;
 use crate::terminal::AttachedTerminal;
-use arany::{
-    CollaborationPolicy, CustomCheckStatus, CustomProfile, Effort, ProviderKind, SessionDefaults,
-    StateRoot,
-};
+use arany::{CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionDefaults, StateRoot};
 use std::path::Path;
 
 pub(super) async fn custom_routes_setup(
@@ -22,9 +19,6 @@ pub(super) async fn custom_routes_setup(
             .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
         let (expected, profiles) =
             CustomProfile::load_all_with_snapshot(&state).map_err(SetupError::recoverable)?;
-        let statuses = CustomProfile::check_statuses(&state, &profiles)
-            .await
-            .map_err(SetupError::recoverable)?;
         let mut context = CustomRouteContext {
             state_dir,
             state: &state,
@@ -32,10 +26,10 @@ pub(super) async fn custom_routes_setup(
             profiles: &profiles,
             journal,
         };
-        match custom_route_selection(terminal, &profiles, &statuses).await? {
+        match custom_route_selection(terminal, &profiles).await? {
             None => return Ok(None),
             Some(choice) => {
-                match apply_custom_route_choice(terminal, &mut context, &statuses, choice).await? {
+                match apply_custom_route_choice(terminal, &mut context, choice).await? {
                     CustomRouteResult::Continue => {}
                     CustomRouteResult::Leave => return Ok(None),
                     CustomRouteResult::Select(selection) => return Ok(Some(selection)),
@@ -54,9 +48,8 @@ enum CustomRouteResult {
 async fn custom_route_selection(
     terminal: &mut AttachedTerminal,
     profiles: &[CustomProfile],
-    statuses: &[(String, CustomCheckStatus)],
 ) -> Result<Option<u8>, SetupError> {
-    let choices = custom_profile_choices(profiles, statuses);
+    let choices = custom_profile_choices(profiles);
     let rendered = choices
         .iter()
         .map(|(value, label)| (*value, label.as_str()))
@@ -65,7 +58,7 @@ async fn custom_route_selection(
         terminal,
         1,
         "Custom routes",
-        "Declarations are saved privately; Select and Check are separate actions",
+        "Declarations are saved privately; each Run admits the selected route",
         &rendered,
     )
     .await
@@ -74,7 +67,6 @@ async fn custom_route_selection(
 async fn apply_custom_route_choice(
     terminal: &mut AttachedTerminal,
     context: &mut CustomRouteContext<'_>,
-    statuses: &[(String, CustomCheckStatus)],
     choice: u8,
 ) -> Result<CustomRouteResult, SetupError> {
     if choice == b'a' {
@@ -93,22 +85,11 @@ async fn apply_custom_route_choice(
         return Ok(CustomRouteResult::Continue);
     };
     match action {
-        b'1' => {
-            let status = statuses
-                .iter()
-                .find(|(name, _)| name == profile.name())
-                .map(|(_, status)| *status);
-            inspect_custom_route(terminal, profile, status).await?;
-        }
+        b'1' => inspect_custom_route(terminal, profile).await?,
         b'2' => return Ok(CustomRouteResult::Select(select_custom_profile(profile))),
-        b'3' => {
-            if check_custom_route(terminal, context.state, profile).await? {
-                return Ok(CustomRouteResult::Leave);
-            }
-        }
-        b'4' => edit_custom_route(terminal, context, index, profile).await?,
-        b'5' => remove_custom_route(terminal, context, index, profile).await?,
-        b'6' => {}
+        b'3' => edit_custom_route(terminal, context, index, profile).await?,
+        b'4' => remove_custom_route(terminal, context, index, profile).await?,
+        b'5' => {}
         _ => return Err("invalid custom route action".into()),
     }
     Ok(CustomRouteResult::Continue)
@@ -129,10 +110,9 @@ async fn custom_route_action(
         &[
             (b'1', "Inspect"),
             (b'2', "Select"),
-            (b'3', "Check"),
-            (b'4', "Edit"),
-            (b'5', "Remove"),
-            (b'6', "Back"),
+            (b'3', "Edit"),
+            (b'4', "Remove"),
+            (b'5', "Back"),
         ],
     )
     .await
@@ -152,6 +132,6 @@ fn select_custom_profile(profile: &CustomProfile) -> SetupSelection {
             account_id: None,
             policy: CollaborationPolicy::default(),
         },
-        notice: "Custom route selected; the next Run rechecks exact admission".into(),
+        notice: "Custom route selected; the next Run admits its exact destination".into(),
     }
 }

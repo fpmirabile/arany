@@ -290,20 +290,21 @@ fn run(stage: &mut super::super::BootstrapStage) -> Result<(), ToolError> {
         mount_probe(probe)?;
     }
     *stage = super::super::BootstrapStage::RuntimeMounts;
-    let view = mount_view(&mut launch, &mut arguments)?;
+    let (view, cache) = mount_view(&mut launch, &mut arguments)?;
     *stage = super::super::BootstrapStage::Capabilities;
     clear_capabilities()?;
     verify_capabilities(
         &thread_status(Path::new("/proc/self/status"))?.ok_or(ToolError::ProtectionUnavailable)?,
     )?;
     *stage = super::super::BootstrapStage::LauncherReap;
-    wait_bwrap(&arguments[2..], &executable, view.as_ref())
+    wait_bwrap(&arguments[2..], &executable, view.as_ref(), cache.as_ref())
 }
 
+// The project view owns the cache view when there is one; an editor command has only the cache view.
 fn mount_view(
     launch: &mut Launch,
     arguments: &mut [std::ffi::OsString],
-) -> Result<Option<overlay::View>, ToolError> {
+) -> Result<(Option<overlay::View>, Option<overlay::cache::View>), ToolError> {
     let mut view = match launch.overlay.take() {
         Some(grant) => Some(overlay::View::mount(
             &launch.probe.as_ref().ok_or(ToolError::Configuration)?.root,
@@ -312,10 +313,13 @@ fn mount_view(
         )?),
         None => None,
     };
-    if let Some(cache) = launch.cache.take() {
-        view.as_mut()
-            .ok_or(ToolError::Configuration)?
-            .install_cache(cache.mount()?);
+    let mut cache = launch
+        .cache
+        .take()
+        .map(overlay::cache::Grant::mount)
+        .transpose()?;
+    if let (Some(view), Some(_)) = (&mut view, &cache) {
+        view.install_cache(cache.take().ok_or(ToolError::Configuration)?);
     }
     if let Some(view) = &view {
         let helper = arguments.last_mut().ok_or(ToolError::Configuration)?;
@@ -329,7 +333,7 @@ fn mount_view(
             return Err(ToolError::ProtectionUnavailable);
         }
     }
-    Ok(view)
+    Ok((view, cache))
 }
 
 fn verify_helper_mount() -> Result<(), ToolError> {
@@ -470,6 +474,7 @@ fn wait_bwrap(
     arguments: &[std::ffi::OsString],
     executable: &std::fs::File,
     view: Option<&overlay::View>,
+    cache: Option<&overlay::cache::View>,
 ) -> Result<(), ToolError> {
     use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions, pidfd_open, waitid};
     rustix::io::fcntl_setfd(executable, rustix::io::FdFlags::empty())
@@ -482,7 +487,7 @@ fn wait_bwrap(
         .args(arguments)
         .env_clear()
         .current_dir("/");
-    if view.is_some() {
+    if view.is_some() || cache.is_some() {
         command.stdin(std::process::Stdio::piped());
     }
     let mut child = command
@@ -497,6 +502,8 @@ fn wait_bwrap(
             pidfd_open(pid, PidfdFlags::empty()).map_err(|_| ToolError::ProtectionUnavailable)?;
         if let Some(view) = view {
             view.relay(&mut child.stdin.take().ok_or(ToolError::Operation)?)?;
+        } else if let Some(cache) = cache {
+            cache.relay(&mut child.stdin.take().ok_or(ToolError::Operation)?)?;
         }
         loop {
             match waitid(
@@ -520,6 +527,8 @@ fn wait_bwrap(
     }
     if let Some(view) = view {
         view.finish()?;
+    } else if let Some(cache) = cache {
+        cache.finish()?;
     }
     Ok(())
 }

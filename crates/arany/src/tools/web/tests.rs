@@ -57,7 +57,7 @@ fn host_of_a_fetch_is_its_bare_name() {
 #[test]
 fn fetch_admits_any_host_the_deny_list_leaves_and_lists_only_configured_ones() {
     let mut config: Config = serde_json::from_value(serde_json::json!({
-        "version": 1, "workspace_paths": ["."], "write": false,
+        "workspace_paths": ["."], "write": false,
         "commands": [], "skills": [], "mcp": [],
         "network": {"allow": ["*.example.com"], "deny": ["bad.example.com"]},
     }))
@@ -244,7 +244,9 @@ fn researchers_need_an_explicit_grant_and_cannot_widen_parent_domains() {
         );
     }
     let before = runtime.config.digest();
-    let mut intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), listed);
+    let mut intent = runtime
+        .intent(crate::RunId::new(), crate::AgentRunId::new(), listed)
+        .unwrap();
     runtime.bind_egress(&mut intent).unwrap();
     assert_eq!(intent.limits.network, crate::tools::NetworkGrant::Proxy);
     assert_eq!(before, runtime.config.digest());
@@ -261,7 +263,7 @@ fn remote_mcp_servers_need_exactly_one_transport_and_bind_the_proxy() {
     let parse = |mcp: serde_json::Value| {
         Config::parse(
             &serde_json::to_vec(&json!({
-                "version": 1, "workspace_paths": ["."], "write": false,
+                "workspace_paths": ["."], "write": false,
                 "commands": [], "skills": [], "mcp": mcp,
             }))
             .unwrap(),

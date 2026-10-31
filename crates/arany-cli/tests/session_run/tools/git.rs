@@ -5,8 +5,8 @@ use crate::git_journey::GitJourney;
 const GIT: &str = "/usr/bin/git";
 
 #[tokio::test]
-#[cfg_attr(not(arany_ci), ignore = "native Linux Guard typed Git reads")]
-async fn typed_git_reads_run_in_the_guard_without_repository_code() {
+#[cfg_attr(not(arany_ci), ignore = "native Linux account isolation")]
+async fn typed_git_reads_run_natively_under_the_cage() {
     if !crate::isolation::enter_native_account_isolated_test() {
         return;
     }
@@ -84,14 +84,23 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     .unwrap();
     std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
     std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
-    let gitconfig = home.join(".gitconfig");
-    let host_config = b"[status]\n\tshowUntrackedFiles = no\n";
-    std::fs::write(&gitconfig, host_config).unwrap();
+    // The user's own configuration applies natively; its fsmonitor stays off under the cage.
+    // Arany runs Git with the process HOME, which the isolated fixture points at its own home.
+    let user_home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    std::fs::write(user_home.join("ignore"), "src/new.txt\n").unwrap();
+    std::fs::write(
+        user_home.join(".gitconfig"),
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            user_home.join("ignore").display()
+        ),
+    )
+    .unwrap();
     let repository_write = workspace.join(".git/write-probe");
-    let monitor = workspace.join("src/fsmonitor");
+    let monitor = home.join("fsmonitor");
     std::fs::write(
         &monitor,
-        b"#!/usr/bin/sh\nset -eu\nprintf forbidden > src/a.txt\nprintf forbidden > .git/write-probe\nprintf 'baseline\\0/\\0'\n",
+        b"#!/usr/bin/sh\nset -eu\nprintf forbidden > .git/write-probe\nprintf 'baseline\\0/\\0'\n",
     )
     .unwrap();
     std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -101,23 +110,16 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
             .append(true)
             .open(workspace.join(".git/config"))
             .unwrap();
-        writeln!(
-            config,
-            "[core]\n\tfsmonitor = ./src/fsmonitor\n[diff]\n\texternal = /usr/bin/false\n[filter \"evil\"]\n\tclean = /usr/bin/false\n\trequired = true\n[include]\n\tpath = {}",
-            gitconfig.display()
-        )
-        .unwrap();
+        writeln!(config, "[core]\n\tfsmonitor = {}", monitor.display()).unwrap();
     }
-    // These controls prove config neutralization; the native Linux launch probe owns mount isolation.
     let plain_git = |args: &[&str]| {
         use crate::process::BoundedOutput;
         let output = std::process::Command::new(GIT)
             .args(args)
             .current_dir(&workspace)
             .env_clear()
-            .env("HOME", &home)
+            .env("HOME", &user_home)
             .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("LC_ALL", "C")
             .bounded_output_for(Duration::from_secs(20), 16 * 1024)
             .expect("plain Git attack baseline");
@@ -128,24 +130,9 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         );
         output
     };
-    assert_eq!(
-        plain_git(&["config", "--global", "--get", "status.showUntrackedFiles"]).stdout,
-        b"no\n",
-        "plain Git must read the synthetic host HOME/.gitconfig"
-    );
-    let baseline = plain_git(&["--no-optional-locks", "status", "--porcelain=v1"]);
+    plain_git(&["--no-optional-locks", "status", "--porcelain=v1"]);
     assert_eq!(std::fs::read(&repository_write).unwrap(), b"forbidden");
-    assert_eq!(
-        std::fs::read(workspace.join("src/a.txt")).unwrap(),
-        b"forbidden"
-    );
-    assert!(
-        !String::from_utf8_lossy(&baseline.stdout).contains("src/new.txt"),
-        "the synthetic host include must hide untracked files under plain Git"
-    );
     std::fs::remove_file(&repository_write).unwrap();
-    std::fs::write(workspace.join("src/a.txt"), b"delta\n").unwrap();
-    std::fs::write(workspace.join(".gitattributes"), "* filter=evil\n").unwrap();
     let before = tree_snapshot(&workspace);
 
     let state_path = temp.path().join("state");
@@ -154,21 +141,12 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         &state_path.join("permissions.json"),
         br#"{"permissions":{"deny":["Read(./denied/**)"]}}"#,
     );
-    let git = std::fs::canonicalize("/usr/bin/git").unwrap();
     let config = json!({
-        "version": 1,
         "workspace_paths": ["."],
         "write": false,
         "commands": [],
         "skills": [],
         "mcp": [],
-        "git": {
-            "name": "git",
-            "executable": git,
-            "sha256": hash(&std::fs::read(&git).unwrap()),
-            "interpreter": false,
-            "inputs": []
-        }
     });
     private_file(
         &state_path.join("tools.json"),
@@ -239,8 +217,8 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     let entries = status["entries"].as_array().unwrap();
     assert!(entries.contains(&json!({"path": "src/a.txt", "state": ".M"})));
     assert!(
-        entries.contains(&json!({"path": "src/new.txt", "state": "??"})),
-        "guarded Git must neutralize host config settings from HOME and repository includes"
+        !entries.contains(&json!({"path": "src/new.txt", "state": "??"})),
+        "native Git applies the user's configuration from HOME"
     );
     assert!(
         !outcome.run.tools[0]

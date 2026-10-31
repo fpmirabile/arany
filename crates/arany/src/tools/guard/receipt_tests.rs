@@ -2,7 +2,7 @@ use crate::tools::types::*;
 
 #[tokio::test]
 async fn cache_receipt_states_preserve_success_without_publication_uncertainty() {
-    fn make_observation(call: ToolCall, cache_requested_bytes: u64) -> ToolObservation {
+    fn make_observation(call: ToolCall, cache_requested_mebibytes: u64) -> ToolObservation {
         let mut intent = EffectIntent {
             host: None,
             wrap: None,
@@ -20,7 +20,8 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             limits: ToolLimits::default(),
             use_count: 1,
         };
-        intent.limits.cache_requested_bytes = cache_requested_bytes;
+        let cache_requested_bytes = cache_requested_mebibytes * 1024 * 1024;
+        intent.limits.cache_requested_bytes = BuildCacheSize::Bytes(cache_requested_bytes);
         intent.limits.cache_bytes = cache_requested_bytes;
         intent.limits.cache_candidate_bytes = 0;
         ToolObservation {
@@ -33,6 +34,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             output: serde_json::to_string(&super::types::CommandResult {
                 selection: Some(Default::default()),
                 network_refusals: Vec::new(),
+                hidden_grants: Vec::new(),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),
@@ -103,6 +105,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let mut observation = make_observation(call, requested);
         super::guard::publish_cache_candidate(

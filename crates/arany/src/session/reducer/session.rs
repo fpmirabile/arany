@@ -15,78 +15,94 @@ pub(super) fn apply(
             current.defaults = defaults.clone();
         }
         Event::ContextCompacted { record, active_ms } => {
-            // Inherited Runs were accepted before the fork; this Session's own Runs follow it.
-            let own_last = current
-                .runs
-                .last()
-                .filter(|run| run.accepted_sequence > current.created_sequence);
-            let mut boundary = if let Some(run) = own_last {
-                run.finished_sequence.map(|sequence| (run.id, sequence))
-            } else {
-                current
-                    .lineage
-                    .map(|lineage| (lineage.source_run_id, current.created_sequence))
-            };
-            if let Some((_, sequence)) = &mut boundary
-                && let Some(rewind) = current.rewinds.operations.last()
-            {
-                *sequence =
-                    (*sequence).max(rewind.finished_sequence.unwrap_or(rewind.started_sequence));
-            }
-            if boundary != Some((record.covered_run_id, record.covered_sequence)) {
-                return Err(ReplayError::InvalidSnapshot);
-            }
-            if !crate::session::recent_files_match(&current.runs, record) {
-                return Err(ReplayError::InvalidSnapshot);
-            }
-            if current.runs.last().is_some_and(|run| {
-                (own_last.is_some()
-                    || run
-                        .config
-                        .as_ref()
-                        .is_some_and(|config| config.roster.is_some()))
-                    && !run.compaction_matches(record)
-            }) {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let goal = current.goals.iter_mut().find(|goal| {
-                goal.status == GoalStatus::Running
-                    && goal.run_ids.last() == Some(&record.covered_run_id)
-            });
-            if goal.is_some() != active_ms.is_some() {
-                return Err(ReplayError::InvalidTransition);
-            }
-            if let (Some(goal), Some(active_ms)) = (goal, active_ms) {
-                if goal.compaction_call_reserved != Some(record.covered_run_id) {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                goal.active_ms = goal
-                    .active_ms
-                    .checked_add(*active_ms)
-                    .ok_or(ReplayError::InvalidTransition)?;
-                goal.active_ceiling_ms = 0;
-                let tokens = u64::from(record.input_tokens.unwrap_or_default())
-                    .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
-                    .and_then(|tokens| goal.known_tokens.checked_add(tokens))
-                    .ok_or(ReplayError::InvalidTransition)?;
-                goal.known_cached_tokens = goal
-                    .known_cached_tokens
-                    .checked_add(u64::from(
-                        record.cache_read_input_tokens.unwrap_or_default(),
-                    ))
-                    .ok_or(ReplayError::InvalidTransition)?;
-                goal.known_tokens = tokens;
-                goal.token_usage_unknown |=
-                    record.input_tokens.is_none() || record.output_tokens.is_none();
-                goal.compaction_call_reserved = None;
-            }
-            current.compactions.push(CompactionView {
-                event_sequence: prior,
-                record: record.clone(),
-            });
+            compacted(current, record, *active_ms, prior)?;
         }
         _ => return Err(ReplayError::InvalidTransition),
     }
+    Ok(())
+}
+
+fn compacted(
+    current: &mut SessionView,
+    record: &crate::session::CompactionRecord,
+    active_ms: Option<u64>,
+    prior: u64,
+) -> Result<(), ReplayError> {
+    // Inherited Runs were accepted before the fork; this Session's own Runs follow it.
+    let own_last = current
+        .runs
+        .last()
+        .filter(|run| run.accepted_sequence > current.created_sequence);
+    let mut boundary = if let Some(run) = own_last {
+        run.finished_sequence.map(|sequence| (run.id, sequence))
+    } else {
+        current
+            .lineage
+            .map(|lineage| (lineage.source_run_id, current.created_sequence))
+    };
+    if let Some((_, sequence)) = &mut boundary
+        && let Some(rewind) = current.rewinds.operations.last()
+    {
+        *sequence = (*sequence).max(rewind.finished_sequence.unwrap_or(rewind.started_sequence));
+    }
+    if boundary != Some((record.covered_run_id, record.covered_sequence)) {
+        return Err(ReplayError::InvalidSnapshot);
+    }
+    if !crate::session::recent_files_match(&current.runs, record) {
+        return Err(ReplayError::InvalidSnapshot);
+    }
+    if current.runs.last().is_some_and(|run| {
+        (own_last.is_some()
+            || run
+                .config
+                .as_ref()
+                .is_some_and(|config| config.roster.is_some()))
+            && !run.compaction_matches(record)
+    }) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let goal = current.goals.iter_mut().find(|goal| {
+        goal.status == GoalStatus::Running && goal.run_ids.last() == Some(&record.covered_run_id)
+    });
+    if goal.is_some() != active_ms.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if let (Some(goal), Some(active_ms)) = (goal, active_ms) {
+        charge_compaction(goal, record, active_ms)?;
+    }
+    current.compactions.push(CompactionView {
+        event_sequence: prior,
+        record: record.clone(),
+    });
+    Ok(())
+}
+
+fn charge_compaction(
+    goal: &mut crate::session::GoalView,
+    record: &crate::session::CompactionRecord,
+    active_ms: u64,
+) -> Result<(), ReplayError> {
+    if goal.compaction_call_reserved != Some(record.covered_run_id) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    goal.active_ms = goal
+        .active_ms
+        .checked_add(active_ms)
+        .ok_or(ReplayError::InvalidTransition)?;
+    goal.active_ceiling_ms = 0;
+    let tokens = u64::from(record.input_tokens.unwrap_or_default())
+        .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
+        .and_then(|tokens| goal.known_tokens.checked_add(tokens))
+        .ok_or(ReplayError::InvalidTransition)?;
+    goal.known_cached_tokens = goal
+        .known_cached_tokens
+        .checked_add(u64::from(
+            record.cache_read_input_tokens.unwrap_or_default(),
+        ))
+        .ok_or(ReplayError::InvalidTransition)?;
+    goal.known_tokens = tokens;
+    goal.token_usage_unknown |= record.input_tokens.is_none() || record.output_tokens.is_none();
+    goal.compaction_call_reserved = None;
     Ok(())
 }
 

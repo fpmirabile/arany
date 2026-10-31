@@ -12,8 +12,8 @@ use std::os::unix::fs::PermissionsExt;
 #[tokio::test]
 async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     use arany::{
-        AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, OutputTokenBound,
-        ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
+        AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ProviderCallDisposition,
+        ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionId,
     };
     let session = SessionId::new();
     let goal = arany::GoalId::new();
@@ -41,36 +41,18 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         unguarded: arany::UnguardedGrant::HumanOnly,
         child_unguarded: arany::UnguardedGrant::Denied,
         child_web: false,
+        git: None,
+        guard: arany::GuardPin {
+            mode: arany::GuardMode::Auto,
+            sandbox: true,
+            saved_reads: Vec::new(),
+        },
     };
     let config = RunConfig {
         supervisor: Some(arany::supervisor::SupervisorPolicy::all_off()),
-        worker_policy: None,
-        agent_definitions: None,
-        roster: None,
-        providers: None,
-        provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
         model: "replay-model".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
-        policy: CollaborationPolicy::Single,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        launch_directory: String::new(),
-        include_digests: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
         tool_policy: Some(Box::new(policy)),
+        ..arany::test_support::run_config()
     };
     let call = ToolCall::Command {
         program: "shell".into(),
@@ -78,6 +60,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let intent = arany::EffectIntent {
         host: None,
@@ -123,19 +106,9 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         run_id: run,
         agent_run_id: primary,
         record: ProviderCallRecord {
-            rate_limits: None,
-            delegation: None,
-            phase: AgentPhase::RootPlan,
             disposition,
-            response_id: None,
-            input_tokens: None,
-            output_tokens: None,
-            wire_provenance: None,
-            refusal: None,
-            failure_reason: None,
             requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            ..arany::test_support::provider_call_record()
         },
     };
     let prefix = [
@@ -935,6 +908,7 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let command_digest = Sha256::digest(serde_json::to_vec(&command_intent).unwrap()).into();
     let mut integration_intent = command_intent.clone();
@@ -1423,7 +1397,6 @@ pub(super) async fn native_command_changeset_corpus(
     struct CommandJourney {
         calls: Vec<ToolCall>,
         requests: Arc<Mutex<Vec<ProviderRequest>>>,
-        review: bool,
         goal_paths: Option<Vec<String>>,
         #[cfg(target_os = "macos")]
         trace_root: std::path::PathBuf,
@@ -1449,12 +1422,7 @@ pub(super) async fn native_command_changeset_corpus(
             let planned = crate::planned(&request);
 
             let mut requests = self.requests.lock().unwrap();
-            let review = request.phase == AgentPhase::ToolReview;
-            let step = requests
-                .iter()
-                .filter(|request| request.phase != AgentPhase::ToolReview)
-                .count()
-                .saturating_sub(usize::from(planned));
+            let step = requests.len().saturating_sub(usize::from(planned));
             let catalog = request
                 .input
                 .tools
@@ -1462,12 +1430,11 @@ pub(super) async fn native_command_changeset_corpus(
                 .map(|tools| serde_json::from_str::<serde_json::Value>(tools.catalog()))
                 .transpose()
                 .map_err(|_| ProviderError::InvalidOutcome)?;
-            if step > self.calls.len() || review && !self.review {
+            // A sandboxed command and its publication never reach the review.
+            if step > self.calls.len() || request.phase == AgentPhase::ToolReview {
                 return Err(ProviderError::InvalidOutcome);
             }
-            let outcome = if review {
-                ProviderOutcome::Review(arany::ReviewVerdict::Approve)
-            } else {
+            let outcome = {
                 self.calls.get(step).cloned().map_or_else(
                     || {
                         ProviderOutcome::Answer(Answer {
@@ -1529,7 +1496,7 @@ pub(super) async fn native_command_changeset_corpus(
                 )
             };
             #[cfg(target_os = "macos")]
-            if !review && self.calls.get(step).is_some() {
+            if self.calls.get(step).is_some() {
                 crate::tools::reset_tool_trace_stages(&self.trace_root);
             }
             requests.push(request);
@@ -1537,11 +1504,7 @@ pub(super) async fn native_command_changeset_corpus(
                 turn: arany::ProviderTurn::scripted(),
                 outcome,
                 response_id: None,
-                usage: arany::Usage {
-                    input_tokens: review.then_some(3),
-                    output_tokens: review.then_some(1),
-                    ..Default::default()
-                },
+                usage: arany::Usage::default(),
                 wire_provenance: None,
             })
         }
@@ -1577,7 +1540,7 @@ pub(super) async fn native_command_changeset_corpus(
             },
             None,
         ),
-        ("ai-approve", "", None),
+        ("auto", "", None),
         ("deny", "", None),
         ("drop", "", None),
         ("cancel", "", None),
@@ -1706,6 +1669,7 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else if native_setid {
             ToolCall::Command {
@@ -1714,6 +1678,7 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else if case == "partial" {
             ToolCall::Command {
@@ -1721,8 +1686,7 @@ pub(super) async fn native_command_changeset_corpus(
                 args: vec!["-c".into(), "set -eu; chmod u+w src/z; printf 'first\\n' > src/a/created; printf 'last\\n' > src/z/created; printf payload-complete".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            }
+                timeout_ms: None, additional_reads: None }
         } else if case == "large-changeset" {
             ToolCall::Command {
                 program: program.into(),
@@ -1733,6 +1697,7 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else if cfg!(target_os = "macos") && matches!(case, "symlink" | "hardlink") {
             ToolCall::Command {
@@ -1741,6 +1706,7 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else {
             ToolCall::Command {
@@ -1754,6 +1720,7 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -1764,13 +1731,11 @@ pub(super) async fn native_command_changeset_corpus(
                 args: vec!["-c".into(), "set -eu; test -x src/a-created; printf '\\000\\377' | cmp - src/a-created; test \"$(cat src/m-modified)\" = modified; test ! -e src/z-deleted; printf fresh-binary-snapshot".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            });
+                timeout_ms: None, additional_reads: None });
         }
         let provider = Arc::new(CommandJourney {
             calls,
             requests: requests.clone(),
-            review: matches!(case, "ai-approve" | "scope-auto"),
             goal_paths: matches!(case, "scope" | "scope-auto").then(|| vec!["src".into()]),
             #[cfg(target_os = "macos")]
             trace_root: root.to_path_buf(),
@@ -1786,28 +1751,29 @@ pub(super) async fn native_command_changeset_corpus(
         #[cfg(target_os = "macos")]
         crate::tools::trace_case(root, case);
         let interactive = matches!(case, "deny" | "drop" | "cancel" | "conflict");
-        let (approvals, mut inbox) =
-            ToolApprovals::new(if matches!(case, "ai-approve" | "scope-auto") {
-                ApprovalMode::Auto
-            } else {
-                ApprovalMode::Request
-            });
+        // Sandboxed commands and their changesets ask nothing; ask rules keep the human gates these cases bind.
+        if interactive {
+            crate::private_file(
+                &state_path.join("permissions.json"),
+                br#"{"permissions":{"ask":["Bash","Edit"]}}"#,
+            );
+        }
+        let (approvals, mut inbox) = ToolApprovals::new(if matches!(case, "auto" | "scope-auto") {
+            ApprovalMode::Auto
+        } else {
+            ApprovalMode::Request
+        });
         // The test holds the sender so the inbox stays open after the Run.
-        let granted = (interactive || matches!(case, "ai-approve" | "scope" | "scope-auto"))
+        let granted = (interactive || matches!(case, "auto" | "scope" | "scope-auto"))
             .then(|| approvals.clone());
         let cancellation = RunCancellation::new();
         let pending = cancellation.clone();
         let (run_done, run_done_rx) = tokio::sync::oneshot::channel();
         let decision = async {
-            if case == "scope" {
-                let command = inbox.next().await.expect("in-scope command approval");
-                assert_eq!(command.intent.call, call, "scope: command intent");
-                command.decide(true);
-            }
-            if matches!(case, "scope" | "scope-auto") {
+            if matches!(case, "auto" | "scope" | "scope-auto") {
                 tokio::select! {
                     biased;
-                    approval = inbox.next() => panic!("{case}: unexpected out-of-plan integration approval ({})", approval.is_some()),
+                    approval = inbox.next() => panic!("{case}: unexpected approval ({})", approval.is_some()),
                     _ = run_done_rx => {}
                 }
                 return;
@@ -1943,8 +1909,8 @@ pub(super) async fn native_command_changeset_corpus(
             "{case}: terminal Event"
         );
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
-        let stopped =
-            matches!(case, "cancel" | "partial") || case == "depth-33" && cfg!(target_os = "macos");
+        // A pre-dispatch Guard limit, such as macOS depth-33 selection, returns to the model.
+        let stopped = matches!(case, "cancel" | "partial");
         let criterion_unmet = matches!(
             case,
             "deny"
@@ -1991,10 +1957,6 @@ pub(super) async fn native_command_changeset_corpus(
                 2
             } else if case == "nonzero" {
                 4
-            } else if case == "ai-approve" {
-                5
-            } else if case == "scope-auto" {
-                4
             } else {
                 3
             },
@@ -2002,25 +1964,6 @@ pub(super) async fn native_command_changeset_corpus(
         );
         for request in &requests {
             assert_eq!(request.model, "changeset-model");
-            if request.phase == AgentPhase::ToolReview {
-                assert!(
-                    request.input.tools.is_none()
-                        && request.input.includes.is_empty()
-                        && request.input.images.is_empty()
-                        && request.input.history.is_empty()
-                        && request.input.child_results.is_empty()
-                        && request.input.context_summary.is_none()
-                );
-                assert_eq!(request.input.role, arany::PromptRole::ToolReview);
-                assert_eq!(request.max_output_tokens, 256);
-                let payload: serde_json::Value =
-                    serde_json::from_str(&request.input.objective).unwrap();
-                assert_eq!(
-                    payload["user_request"],
-                    "Exercise native changeset integration"
-                );
-                continue;
-            }
             assert_eq!(request.phase, AgentPhase::RootPlan);
             assert_eq!(
                 request.input.objective,
@@ -2077,42 +2020,21 @@ pub(super) async fn native_command_changeset_corpus(
                 serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
             assert_eq!(catalog["workspace_paths"], json!(["outputs", "src"]));
         }
-        if case == "ai-approve" {
-            let reviews = requests
-                .iter()
-                .filter(|request| request.phase == AgentPhase::ToolReview)
-                .collect::<Vec<_>>();
-            assert_eq!(reviews.len(), 2);
-            for (request, tool) in reviews.iter().zip(tools) {
-                let payload: serde_json::Value =
-                    serde_json::from_str(&request.input.objective).unwrap();
-                assert_eq!(
-                    payload["proposed_action"]["call"],
-                    serde_json::to_value(&tool.intent.call).unwrap()
-                );
-            }
-            let reviews = view.runs[0].agents[0]
-                .provider_calls
-                .iter()
-                .filter(|call| call.phase == AgentPhase::ToolReview)
-                .collect::<Vec<_>>();
-            assert_eq!(reviews.len(), 2);
-            assert!(reviews.iter().all(|call| call.input_tokens == Some(3)
-                && call.output_tokens == Some(1)
-                && call.disposition == arany::ProviderCallDisposition::Finished));
+        if case == "auto" {
+            assert!(
+                tools.iter().all(
+                    |tool| tool.permission_verdict.as_ref().is_none_or(
+                        |verdict| verdict.source == arany::permissions::PermissionSource::Mode
+                    )
+                ),
+                "{case}: no approval or review"
+            );
         }
-        if case == "scope-auto" {
-            let reviews = requests
-                .iter()
-                .filter(|request| request.phase == AgentPhase::ToolReview)
-                .collect::<Vec<_>>();
-            assert_eq!(reviews.len(), 1, "in-scope command gets one AI review");
-            let payload: serde_json::Value =
-                serde_json::from_str(&reviews[0].input.objective).unwrap();
+        if interactive {
             assert_eq!(
-                payload["proposed_action"]["call"],
-                serde_json::to_value(&call).unwrap(),
-                "out-of-plan integration never reaches the AI judge"
+                tools[0].permission_verdict.as_ref().unwrap().source,
+                arany::permissions::PermissionSource::Human,
+                "{case}: the ask rule's human approval"
             );
         }
         assert_eq!(
@@ -2288,7 +2210,7 @@ pub(super) async fn native_command_changeset_corpus(
             );
         } else if matches!(
             case,
-            "nonzero" | "ai-approve" | "selection" | "large-snapshot" | "depth-32"
+            "nonzero" | "auto" | "selection" | "large-snapshot" | "depth-32"
         ) || case == "depth-33" && cfg!(target_os = "linux")
         {
             if case == "nonzero" {
@@ -2381,22 +2303,30 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
     };
     private(&omitted, b"OMITTED_CONFIG_CANARY");
     symlink(&omitted, workspace.join("AGENTS.md")).unwrap();
-    for (name, bytes, expected) in [
-        ("missing", None, "tools require a private tools.json; see docs/tools.md"),
-        ("unknown", Some(b"{\"version\":1,\"workspace_paths\":[\"src\"],\"write\":false,\"commands\":[],\"skills\":[],\"mcp\":[],\"network\":true}".as_slice()), "Tool configuration is invalid or unsafe"),
-        ("duplicates", Some(b"{\"version\":1,\"version\":1}".as_slice()), "Tool configuration is invalid or unsafe"),
+    // A refused tools.json is archived at startup, so every case fails closed as missing.
+    for (name, bytes) in [
+        ("missing", None),
+        ("unknown", Some(b"{\"workspace_paths\":[\"src\"],\"write\":false,\"commands\":[],\"skills\":[],\"mcp\":[],\"network\":true}".as_slice())),
+        ("duplicates", Some(b"{\"write\":false,\"write\":false}".as_slice())),
     ] {
         let state_path = temp.path().join(format!("state-{name}"));
         StateRoot::admit(&state_path).unwrap();
         if let Some(bytes) = bytes { private(&state_path.join("tools.json"), bytes); }
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
         command.env_clear().current_dir(temp.path()).env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .envs(crate::process::account_fixture(temp.path().join("account")))
             .args(["exec", "--tools", "--provider", "openai", "--model", "gpt-5.4", "--state-dir"]).arg(&state_path)
             .arg("--workspace").arg(&workspace).arg("Must reject before hostile Workspace input");
         let output = super::process_output_before_deadline(command);
         assert_eq!(output.status.code(), Some(1), "configuration case {name}");
         assert!(output.stdout.is_empty());
-        assert_eq!(String::from_utf8(output.stderr).unwrap(), format!("error: {expected}\n"));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.ends_with("error: tools require a private tools.json; see docs/tools.md\n"), "{stderr}");
+        assert_eq!(
+            stderr.starts_with("warning: Saved records this version cannot read (tools.json) archived intact"),
+            bytes.is_some(),
+            "{stderr}"
+        );
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
         assert_eq!(std::fs::read(&omitted).unwrap(), b"OMITTED_CONFIG_CANARY");
@@ -2458,7 +2388,10 @@ async fn four_call_step_show_bytes_survive_engine_close_and_store_reopen() {
         let workspace = goals::facts_workspace(temp.path(), "four durable reads");
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
-        crate::private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        crate::private_file(
+            &state_path.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         let engine = engine::open(
             state,
             arany::EngineConfig {

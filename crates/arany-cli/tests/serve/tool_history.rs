@@ -22,6 +22,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         limits: arany::ToolLimits::default(),
         use_count: 1,
@@ -261,7 +262,6 @@ fn assert_admission_history_items(run: &arany::RunView) {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_including_uncertain()
 {
@@ -274,7 +274,7 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
     let source_root = StateRoot::admit(&source).unwrap();
     private_json(
         &source.join("tools.json"),
-        json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let engine = Engine::open(
         source_root,

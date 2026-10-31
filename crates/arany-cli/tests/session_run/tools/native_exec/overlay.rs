@@ -407,6 +407,7 @@ fn overlay_command(case: OverlayCase) -> ToolCall {
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     }
 }
 
@@ -414,6 +415,13 @@ async fn overlay_case(case: OverlayCase) {
     let fixture = overlay_fixture(case);
     let command = overlay_command(case);
     let replacement = case == OverlayCase::NarrowReplacement;
+    // Sandboxed commands ask nothing; an ask rule gives the replacement its intent before capture.
+    if replacement {
+        private_file(
+            &fixture.state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Bash"]}}"#,
+        );
+    }
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let dispatched = case
         .host_path()

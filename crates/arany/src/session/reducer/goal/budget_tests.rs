@@ -156,6 +156,67 @@ fn exhausted_goal_closes_over_a_crash_left_provider_call() {
 }
 
 #[test]
+fn refusal_over_unobserved_provider_call_is_charged_conservatively() {
+    let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+    let budget = GoalBudget {
+        max_provider_calls: Some(1),
+        ..GoalBudget::default()
+    };
+    let mut events = vec![goal_started(goal_id, budget)];
+    events.extend(start_run(
+        goal_id,
+        run_id,
+        agent_run_id,
+        config(CollaborationPolicy::Single, false),
+    ));
+    // The process died inside the only admitted provider call.
+    events.push(Event::GoalProviderCallReserved {
+        goal_id,
+        run_id,
+        agent_run_id,
+        active_ceiling_ms: 0,
+    });
+    let session = SessionId::new();
+    let mut view = SessionView::replay_open(session, &session_with(session, events))
+        .expect("crash-left replay")
+        .expect("Session exists");
+    let goal = view.goal(goal_id).expect("Goal");
+    let usage = goal.resume_usage(&view);
+    assert!(usage.token_usage_unknown);
+    assert_eq!(
+        (goal.uncertain_active_ms, goal.unsettled_active_charge_ms()),
+        (0, 0)
+    );
+    let mut refusal = goal
+        .effective_budget()
+        .refusal(usage, crate::BudgetAction::Resume)
+        .expect("the only call is charged");
+    let close = |refusal| Event::GoalFinished {
+        goal_id,
+        status: GoalStatus::Failed,
+        active_ms: 0,
+        report: GoalReport {
+            summary: "Goal budget is exhausted.".into(),
+            changes: Vec::new(),
+            evidence: Vec::new(),
+            unresolved: Vec::new(),
+            cached_input_tokens: 0,
+        },
+        exhausted: true,
+        budget_refusal: Some(refusal),
+    };
+    assert!(
+        rejected(&view, close(refusal)),
+        "unknown recovered usage is not observed"
+    );
+
+    goal.qualify_charge(&mut refusal);
+
+    assert_eq!(refusal.charge_basis, crate::BudgetChargeBasis::Conservative);
+    apply(&mut view, close(refusal)).expect("the conservative refusal closes the Goal");
+}
+
+#[test]
 fn exhausted_goal_closes_over_a_crash_left_compaction_call() {
     let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
     let budget = GoalBudget {
@@ -260,6 +321,7 @@ fn proposal_pre_hook_events(
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     events.push(Event::HookStarted {

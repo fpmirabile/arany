@@ -68,7 +68,9 @@ const UTF8_EDGE_BYTES: usize = char::MAX.len_utf8() - 1;
 pub(crate) const CUT_MARKER: &[u8] = b"\n[spill truncated]\n";
 
 pub(super) fn report_cap(intent: &super::EffectIntent) -> usize {
-    if intent.target == crate::session::worker::EffectTarget::Workspace
+    // Editor commands run in their private workspace; every other reported call targets the Workspace.
+    if (intent.target == crate::session::worker::EffectTarget::Workspace
+        || matches!(intent.call, ToolCall::Command { .. }))
         && matches!(
             intent.call,
             ToolCall::Command { .. }
@@ -119,7 +121,8 @@ impl OutputSpill {
                     | ToolCall::McpList { .. }
                     | ToolCall::WebFetch { .. }
             )
-            && observation.intent.target == crate::session::worker::EffectTarget::Workspace
+            && (observation.intent.target == crate::session::worker::EffectTarget::Workspace
+                || matches!(observation.intent.call, ToolCall::Command { .. }))
     }
 
     pub(super) fn captured(
@@ -243,28 +246,33 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = super::super::tests::in_process_runtime(
             temp.path(),
-            serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
-        let intent = runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Command {
-                program: "shell".into(),
-                args: vec![],
-                cwd: "".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "shell".into(),
+                    args: vec![],
+                    cwd: "".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         let mut stdout = super::super::output::Window::capturing(4096);
         stdout
             .push(bytes, super::super::output::DRAIN_BYTES)
             .unwrap();
         let stderr = super::super::output::Window::default();
         let output = super::super::process::fit_command(
-            Some(0),
-            &stdout,
-            &stderr,
+            crate::tools::process::CommandRun {
+                exit_code: Some(0),
+                stdout: &stdout,
+                stderr: &stderr,
+            },
             Default::default(),
             4096,
             super::super::process::Truncation::Allow,
@@ -343,8 +351,10 @@ mod tests {
         assert!(observation.spill.is_some());
         let model = super::super::types::model_observation(&observation);
         let input = super::super::permissions::post_tool_use_input(
-            "session",
-            super::super::permissions::PermissionMode::Default,
+            super::super::permissions::HookHeader {
+                session_id: "session",
+                mode: super::super::permissions::PermissionMode::Default,
+            },
             &observation.intent.call,
             observation.intent.id,
             model,
@@ -363,7 +373,7 @@ mod tests {
         std::fs::write(state.path().join("spill"), b"blocked").unwrap();
         let mut runtime = super::super::tests::in_process_runtime(
             temp.path(),
-            serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
         let mut observation = command_observation(&vec![b'!'; 8192]);
         let inline = observation.output.clone();
@@ -382,7 +392,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = super::super::tests::in_process_runtime(
             temp.path(),
-            serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            serde_json::json!({"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
         for path in [
             "spill:",
@@ -397,15 +407,17 @@ mod tests {
                 limit: None
             }));
         }
-        let intent = runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Read {
-                path: format!("spill:{}", "a".repeat(64)),
-                offset: None,
-                limit: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Read {
+                    path: format!("spill:{}", "a".repeat(64)),
+                    offset: None,
+                    limit: None,
+                },
+            )
+            .unwrap();
         let observation = runtime
             .execute(intent, super::super::Cancellation::new())
             .await;

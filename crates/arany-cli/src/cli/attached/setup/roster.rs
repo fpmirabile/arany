@@ -636,10 +636,7 @@ mod tests {
         );
         let bytes = draft.encode().unwrap().unwrap();
         let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            record["version"],
-            crate::cli::provider::roster::PROVIDER_ROSTER.current
-        );
+        assert!(record.get("version").is_none());
         assert_eq!(
             record["profiles"][0]["routes"][0]["provider"],
             serde_json::json!({"kind":"openai","custom_name":null})

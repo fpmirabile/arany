@@ -2,15 +2,12 @@ use super::acquisition::ProductGuard;
 use super::{
     redacted_tail, transcript_field, try_product_child_of_executable, tty_settings, wait_stopped,
 };
-use crate::loopback::{
-    ChildGuard, check_profile_with_binary, read_request, send_response_for, wait_product,
-    write_profile,
-};
+use crate::loopback::{read_request, send_response_for, wait_product, write_profile};
+use crate::pty::Pty;
 use arany::{StateRoot, list_sessions, resume_session};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Signal, kill_process};
 use std::{
-    io::{Read, Write},
+    io::Write,
     net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -203,36 +200,17 @@ fn read_trimmed(path: &Path) -> String {
         .to_owned()
 }
 
-fn pump_pty(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut usize,
-) {
-    loop {
-        let mut chunk = [0; 4096];
-        match output.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(count) => {
-                assert!(
-                    transcript.len() + count <= 64 * 1024,
-                    "bounded tmux PTY output"
-                );
-                transcript.extend_from_slice(&chunk[..count]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => panic!("tmux PTY read failed: {error}"),
-        }
-    }
-    let queries = transcript
+fn pump_pty(pty: &mut Pty) {
+    crate::drain_pty(&mut pty.output, &mut pty.transcript);
+    let queries = pty
+        .transcript
         .windows(4)
         .filter(|part| *part == b"\x1b[6n")
         .count();
     assert!(queries <= 32, "bounded tmux cursor queries");
-    while *answered < queries {
-        input.write_all(b"\x1b[24;1R").expect("cursor response");
-        *answered += 1;
+    while pty.answered.cursor_queries < queries {
+        pty.input.write_all(b"\x1b[24;1R").expect("cursor response");
+        pty.answered.cursor_queries += 1;
     }
 }
 
@@ -791,30 +769,20 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     assert_ne!(tty_settings(product_pid), before, "raw mode inside tmux");
 
     let command = "stty rows 24 cols 80; before=$(stty -g); printf 'OUTER_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test; exit_code=$?; after=$(stty -g); printf 'OUTER_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
-    attached
-        .env_clear()
-        .env("TERM", "xterm")
-        .env("SHELL", "/bin/sh")
-        .env("PATH", "/usr/bin:/bin")
-        .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
-        .env("ARANY_TEST_SOCKET", &server.socket)
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("tmux client PTY"));
-    let mut input = attached.child().stdin.take().expect("tmux client input");
-    let mut output = attached.child().stdout.take().expect("tmux client output");
-    let flags = fcntl_getfl(&output).expect("tmux output flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking tmux output");
-    let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut attached = Pty::new(
+        crate::product::PtyLaunch::new(crate::product::Isolation::Caller, command)
+            .term("xterm")
+            .env("PATH", "/usr/bin:/bin")
+            .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
+            .env("ARANY_TEST_SOCKET", &server.socket)
+            .current_dir(&workspace)
+            .spawn(),
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
-        if transcript
+        pump_pty(&mut attached);
+        if attached
+            .transcript
             .windows(b"Ask Arany".len())
             .any(|part| part == b"Ask Arany")
         {
@@ -823,14 +791,14 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         assert!(
             Instant::now() < deadline,
             "attached tmux composer not visible: {}",
-            redacted_tail(&transcript)
+            redacted_tail(&attached.transcript)
         );
         thread::yield_now();
     }
-    input.write_all(b"/exit\r").expect("tmux client /exit");
+    attached.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+        pump_pty(&mut attached);
         if let Ok(exit) = std::fs::read_to_string(&exit_path)
             && exit.ends_with('\n')
         {
@@ -842,8 +810,9 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+        pump_pty(&mut attached);
         if attached
+            .child
             .child()
             .try_wait()
             .expect("tmux client status")
@@ -854,11 +823,11 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         assert!(Instant::now() < deadline, "tmux client did not exit");
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = wait_product(attached.child.take());
+    pump_pty(&mut attached);
     assert!(result.status.success(), "tmux client exited cleanly");
     assert_eq!(result.stderr, b"");
-    let transcript = String::from_utf8(transcript).expect("tmux PTY UTF-8");
+    let transcript = String::from_utf8(attached.transcript).expect("tmux PTY UTF-8");
     assert_eq!(
         transcript_field(&transcript, "OUTER_BEFORE:"),
         transcript_field(&transcript, "OUTER_AFTER:"),
@@ -908,7 +877,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let (response_sender, response_ready) = mpsc::channel();
     let provider = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..5 {
+        for index in 3..5 {
             let deadline = Instant::now() + Duration::from_secs(if index == 4 { 40 } else { 10 });
             let (mut stream, _) = loop {
                 match listener.accept() {
@@ -922,11 +891,6 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             };
             let body = read_request(&mut stream);
             let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"summary"#),
                 3 => {
                     let wire: serde_json::Value =
                         serde_json::from_slice(&body).expect("run request JSON");
@@ -956,11 +920,10 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                     serde_json::json!(r#"derived summary"#)
                 }
             };
-            // Run requests (0, 1, 3) stream; summary requests (2, 4) return plain JSON.
-            send_response_for(&mut stream, index, text, matches!(index, 0 | 1 | 3));
+            // The Run request (3) streams; the summary request (4) returns plain JSON.
+            send_response_for(&mut stream, index, text, index == 3);
         }
     });
-    check_profile_with_binary(&workspace, &state, &executable);
 
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(
@@ -1655,26 +1618,13 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     let (pause_ready_sender, pause_ready) = mpsc::channel();
     let (release_sender, release_primary) = mpsc::channel::<()>();
     let (stop_sender, stop) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; 3 primary Delegate, 4 held child, 5 synthesis with the note;
-    // 6 the second primary, held until pause. Any later request is a violation.
+    // Call 3 is the primary Delegate, 4 the held child, 5 synthesis with the note and 6 the second
+    // primary, held until pause. Any later request is a violation.
     let provider = thread::spawn(move || {
-        for index in 0..7 {
+        for index in 3..7 {
             let (mut stream, input) =
                 accept_provider_request(&listener, "synthetic Provider request missing");
             match index {
-                0 => send_response_for(&mut stream, index, serde_json::json!("ok"), true),
-                1 => send_response_for(
-                    &mut stream,
-                    index,
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
-                    true,
-                ),
-                2 => send_response_for(
-                    &mut stream,
-                    index,
-                    serde_json::json!(r#"synthetic summary"#),
-                    false,
-                ),
                 3 => {
                     assert_eq!(input["objective"], "steer");
                     send_response_for(
@@ -1717,7 +1667,6 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
             .expect("bounded final accept");
         listener.accept().is_err()
     });
-    check_profile_with_binary(&workspace, &state, &executable);
 
     let wrapper = temp.path().join("tmux-pane.sh");
     std::fs::write(
@@ -1941,7 +1890,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     });
     release_sender.send(()).expect("release held primary call");
     wait_screen(&server, "goal pause notice missing", |screen| {
-        String::from_utf8_lossy(screen).contains("Goal paused; use /goal resume to continue.")
+        String::from_utf8_lossy(screen).contains("Interrupted. Send a message to continue.")
     });
     wait_screen(&server, "idle prompt after pause", |screen| {
         idle_composer(screen) && !status_row(screen).contains("Pausing at the next step")
@@ -2064,31 +2013,21 @@ fn wheel_scrolls_fullscreen_history(server: &TmuxServer, workspace: &Path) {
     );
     // A 12-row client shrinks the pane to 11 rows so the History is taller than its area.
     let command = "stty rows 12 cols 80; exec \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test";
-    let mut client = Command::new("/usr/bin/script");
-    client
-        .env_clear()
-        .env("TERM", "xterm")
-        .env("SHELL", "/bin/sh")
-        .env("PATH", "/usr/bin:/bin")
-        .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
-        .env("ARANY_TEST_SOCKET", &server.socket)
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut client = ChildGuard::new(client.spawn().expect("tmux mouse client"));
-    let mut input = client.child().stdin.take().expect("tmux client input");
-    let mut output = client.child().stdout.take().expect("tmux client output");
-    let flags = fcntl_getfl(&output).expect("tmux client output flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking tmux client output");
-    let mut transcript = Vec::new();
-    let mut answered = 0;
+    let mut client = Pty::new(
+        crate::product::PtyLaunch::new(crate::product::Isolation::Caller, command)
+            .term("xterm")
+            .env("PATH", "/usr/bin:/bin")
+            .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
+            .env("ARANY_TEST_SOCKET", &server.socket)
+            .current_dir(workspace)
+            .spawn(),
+    );
     // The client parses SGR wheel reports only after enabling them on its own terminal.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
-        if transcript
+        pump_pty(&mut client);
+        if client
+            .transcript
             .windows(b"\x1b[?1006h".len())
             .any(|part| part == b"\x1b[?1006h")
             && pane_flag(server, "#{pane_height}") == "11"
@@ -2101,15 +2040,15 @@ fn wheel_scrolls_fullscreen_history(server: &TmuxServer, workspace: &Path) {
         assert!(
             Instant::now() < deadline,
             "tmux mouse client not ready: {}",
-            redacted_tail(&transcript)
+            redacted_tail(&client.transcript)
         );
         thread::yield_now();
     }
     for (report, scrolled) in [(&b"\x1b[<64;10;3M"[..], true), (b"\x1b[<65;10;3M", false)] {
-        input.write_all(report).expect("tmux client wheel report");
+        client.send(report);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+            pump_pty(&mut client);
             if capture_pane(server).is_some_and(|screen| {
                 idle_composer(&screen) && status_row(&screen).contains("History") == scrolled
             }) {
@@ -2132,19 +2071,20 @@ fn wheel_scrolls_fullscreen_history(server: &TmuxServer, workspace: &Path) {
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     while client
+        .child
         .child()
         .try_wait()
         .expect("tmux client status")
         .is_none()
     {
-        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+        pump_pty(&mut client);
         assert!(
             Instant::now() < deadline,
             "tmux mouse client did not detach"
         );
         thread::yield_now();
     }
-    let result = wait_product(client.take());
+    let result = wait_product(client.child.take());
     assert!(result.status.success(), "tmux mouse client exited cleanly");
 }
 

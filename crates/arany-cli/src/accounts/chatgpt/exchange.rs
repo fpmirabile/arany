@@ -92,21 +92,16 @@ async fn redeem_at(
     endpoints: Endpoints,
 ) -> Result<VerifiedCredentials, AuthorizationError> {
     let client = client(endpoints.https_only)?;
-    let fields = [
-        ("grant_type", "authorization_code"),
-        ("client_id", exchange.client_id.as_str()),
-        ("code", exchange.code.as_str()),
-        ("code_verifier", exchange.verifier.as_str()),
-        ("redirect_uri", exchange.redirect_uri.as_str()),
-    ];
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in fields {
-        serializer.append_pair(name, value);
-    }
-    let body = serializer.finish();
-    if body.len() > MAX_FORM_BYTES {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
+    let body = form_body(
+        &[
+            ("grant_type", "authorization_code"),
+            ("client_id", exchange.client_id.as_str()),
+            ("code", exchange.code.as_str()),
+            ("code_verifier", exchange.verifier.as_str()),
+            ("redirect_uri", exchange.redirect_uri.as_str()),
+        ],
+        MAX_FORM_BYTES,
+    )?;
     let requested_at_unix = unix_now()?;
     let token_response = client
         .post(endpoints.token)
@@ -151,6 +146,26 @@ async fn redeem_at(
         &exchange.nonce,
         now_seconds,
     )?;
+    check_selected_identity(&exchange, &identity)?;
+    Ok(VerifiedCredentials {
+        client_id: exchange.client_id,
+        host_id: exchange.host_id,
+        subject: identity.subject,
+        chatgpt_account_id: Some(identity.account_id),
+        id_token: token.id_token,
+        access_token: token.access_token,
+        refresh_token: token
+            .refresh_token
+            .ok_or(AuthorizationError::ExchangeFailed)?,
+        access_expires_at_unix: access_expiry_at(requested_at_unix, token.expires_in)?,
+    })
+}
+
+// Reauthorizing an existing account must sign in as that account.
+fn check_selected_identity(
+    exchange: &CodeExchange,
+    identity: &identity::VerifiedIdentity,
+) -> Result<(), AuthorizationError> {
     if exchange
         .expected_subject
         .as_deref()
@@ -169,18 +184,20 @@ async fn redeem_at(
             identity::IdentityFailure::AccountClaim,
         ));
     }
-    Ok(VerifiedCredentials {
-        client_id: exchange.client_id,
-        host_id: exchange.host_id,
-        subject: identity.subject,
-        chatgpt_account_id: Some(identity.account_id),
-        id_token: token.id_token,
-        access_token: token.access_token,
-        refresh_token: token
-            .refresh_token
-            .ok_or(AuthorizationError::ExchangeFailed)?,
-        access_expires_at_unix: access_expiry_at(requested_at_unix, token.expires_in)?,
-    })
+    Ok(())
+}
+
+// A form body over its bound is refused before any request.
+fn form_body(fields: &[(&str, &str)], max_bytes: usize) -> Result<String, AuthorizationError> {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in fields {
+        serializer.append_pair(name, value);
+    }
+    let body = serializer.finish();
+    if body.len() > max_bytes {
+        return Err(AuthorizationError::ExchangeFailed);
+    }
+    Ok(body)
 }
 
 async fn classify_code_error(response: Response) -> AuthorizationError {
@@ -240,25 +257,21 @@ async fn refresh_at(
 ) -> Result<VerifiedCredentials, AuthorizationError> {
     if !super::valid_client_id(&credentials.client_id)
         || credentials.host_id.is_nil()
-        || !super::bounded_graphic(&credentials.subject, 512)
-        || !bounded_token(&credentials.id_token, 16 * 1024)
-        || !bounded_token(&credentials.access_token, 16 * 1024)
-        || !bounded_token(&credentials.refresh_token, 8 * 1024)
+        || !super::bounded_graphic(&credentials.subject, super::MAX_SUBJECT_BYTES)
+        || !bounded_token(&credentials.id_token, super::MAX_ID_TOKEN_BYTES)
+        || !bounded_token(&credentials.access_token, super::MAX_ACCESS_TOKEN_BYTES)
+        || !bounded_token(&credentials.refresh_token, super::MAX_REFRESH_TOKEN_BYTES)
     {
         return Err(AuthorizationError::InvalidIdentity);
     }
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (name, value) in [
-        ("grant_type", "refresh_token"),
-        ("client_id", credentials.client_id.as_str()),
-        ("refresh_token", credentials.refresh_token.as_str()),
-    ] {
-        serializer.append_pair(name, value);
-    }
-    let body = serializer.finish();
-    if body.len() > MAX_REFRESH_FORM_BYTES {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
+    let body = form_body(
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", credentials.client_id.as_str()),
+            ("refresh_token", credentials.refresh_token.as_str()),
+        ],
+        MAX_REFRESH_FORM_BYTES,
+    )?;
     let client = client(endpoints.https_only)?;
     let requested_at_unix = unix_now()?;
     let response = client
@@ -349,7 +362,7 @@ fn validate_reply(token: &TokenReply) -> Result<(), AuthorizationError> {
         token.expires_in,
         token.scope.as_deref(),
     )?;
-    if !bounded_token(&token.id_token, 16 * 1024) {
+    if !bounded_token(&token.id_token, super::MAX_ID_TOKEN_BYTES) {
         return Err(AuthorizationError::ExchangeFailed);
     }
     Ok(())
@@ -365,8 +378,8 @@ fn validate_token_fields(
     let scope = scope.unwrap_or("");
     if token_type.is_some_and(|kind| kind != "Bearer")
         || !(1..=7200).contains(&expires_in)
-        || !bounded_token(access_token, 16 * 1024)
-        || refresh_token.is_none_or(|token| !bounded_token(token, 8 * 1024))
+        || !bounded_token(access_token, super::MAX_ACCESS_TOKEN_BYTES)
+        || refresh_token.is_none_or(|token| !bounded_token(token, super::MAX_REFRESH_TOKEN_BYTES))
         || scope.len() > super::MAX_SCOPE_BYTES
         || !scope
             .bytes()

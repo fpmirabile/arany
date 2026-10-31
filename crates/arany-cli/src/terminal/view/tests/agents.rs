@@ -21,11 +21,13 @@ fn agent_picker_windows_rows_and_shows_search_feedback_without_false_focus() {
                 draw_agent_inspector_frame(
                     frame,
                     frame.area(),
-                    model,
-                    0,
-                    true,
-                    notice,
-                    Palette { color: false },
+                    AgentInspectorFrame {
+                        model,
+                        scroll: 0,
+                        armed: true,
+                        notice,
+                        palette: Palette { color: false },
+                    },
                 );
             })
             .expect("picker frame");
@@ -87,11 +89,13 @@ fn agent_picker_reserves_all_ten_choice_rows_before_short_detail() {
             draw_agent_inspector_frame(
                 frame,
                 frame.area(),
-                &model,
-                0,
-                true,
-                None,
-                Palette { color: false },
+                AgentInspectorFrame {
+                    model: &model,
+                    scroll: 0,
+                    armed: true,
+                    notice: None,
+                    palette: Palette { color: false },
+                },
             );
         })
         .expect("picker frame");
@@ -136,11 +140,13 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
                 draw_agent_inspector_frame(
                     frame,
                     bottom_area(frame.area(), 14),
-                    &model,
-                    0,
-                    true,
-                    None,
-                    Palette { color: false },
+                    AgentInspectorFrame {
+                        model: &model,
+                        scroll: 0,
+                        armed: true,
+                        notice: None,
+                        palette: Palette { color: false },
+                    },
                 )
             })
             .expect("agent frame");
@@ -184,11 +190,13 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
             draw_agent_inspector_frame(
                 frame,
                 bottom_area(frame.area(), 14),
-                &model,
-                0,
-                true,
-                None,
-                Palette { color: false },
+                AgentInspectorFrame {
+                    model: &model,
+                    scroll: 0,
+                    armed: true,
+                    notice: None,
+                    palette: Palette { color: false },
+                },
             )
         })
         .expect("narrow agent frame");
@@ -215,11 +223,11 @@ fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
                             label: "child 2",
                             draft: Some(&composer),
                             editable,
+                            armed: true,
+                            notice: Some("draft retained"),
+                            fullscreen: true,
+                            palette: Palette { color: false },
                         },
-                        true,
-                        Some("draft retained"),
-                        true,
-                        Palette { color: false },
                     )
                 })
                 .unwrap();

@@ -58,6 +58,8 @@ pub(crate) use remote::{MAX_MCP_RESPONSE_BYTES, execute as execute_remote};
 
 pub(crate) const FRAME_BYTES: usize = 128 * 1024;
 const VERSION: &str = "2025-11-25";
+const MAX_CONTENT_ITEMS: usize = 64;
+const MAX_RESOURCE_URI_BYTES: usize = 2048;
 
 // One JSON-RPC message per call in each direction; the transports differ only in framing.
 trait Wire {
@@ -264,39 +266,8 @@ async fn converse<W: Wire>(
             None => false,
             Some(value) => value.as_bool().ok_or(ToolError::Operation)?,
         };
-        let content = reply["content"]
-            .as_array()
-            .filter(|items| items.len() <= 64)
-            .ok_or(ToolError::Operation)?;
-        let mut normalized = Vec::new();
-        for item in content {
-            match item["type"].as_str() {
-                Some("text") => {
-                    let text = item["text"].as_str().ok_or(ToolError::Operation)?;
-                    normalized.push(json!({"type":"text","text":text}));
-                }
-                Some("resource_link") => {
-                    let uri = item["uri"]
-                        .as_str()
-                        .filter(|uri| uri.len() <= 2048)
-                        .ok_or(ToolError::Operation)?;
-                    normalized.push(json!({"type":"resource_link","uri":uri,"fetch":"not authorized or performed"}));
-                }
-                _ => return Err(ToolError::Operation),
-            }
-        }
-        let structured = reply.get("structuredContent");
-        if structured.is_some_and(|value| !value.is_object()) {
-            return Err(ToolError::Operation);
-        }
-        if !is_error
-            && let Some(output) = definition.get("outputSchema")
-            && !structured.is_some_and(|value| {
-                compile_schema(output).is_ok_and(|validator| validator.is_valid(value))
-            })
-        {
-            return Err(ToolError::Operation);
-        }
+        let normalized = normalized_content(&reply)?;
+        let structured = structured_content(&reply, definition, is_error)?;
         fit_result(
             json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}),
             result_bytes,
@@ -307,14 +278,61 @@ async fn converse<W: Wire>(
     .unwrap_or(Err(ToolError::Timeout(String::new())))
 }
 
+fn normalized_content(reply: &Value) -> Result<Vec<Value>, ToolError> {
+    let content = reply["content"]
+        .as_array()
+        .filter(|items| items.len() <= MAX_CONTENT_ITEMS)
+        .ok_or(ToolError::Operation)?;
+    let mut normalized = Vec::new();
+    for item in content {
+        match item["type"].as_str() {
+            Some("text") => {
+                let text = item["text"].as_str().ok_or(ToolError::Operation)?;
+                normalized.push(json!({"type":"text","text":text}));
+            }
+            Some("resource_link") => {
+                let uri = item["uri"]
+                    .as_str()
+                    .filter(|uri| uri.len() <= MAX_RESOURCE_URI_BYTES)
+                    .ok_or(ToolError::Operation)?;
+                normalized.push(
+                    json!({"type":"resource_link","uri":uri,"fetch":"not authorized or performed"}),
+                );
+            }
+            _ => return Err(ToolError::Operation),
+        }
+    }
+    Ok(normalized)
+}
+
+fn structured_content<'a>(
+    reply: &'a Value,
+    definition: &Value,
+    is_error: bool,
+) -> Result<Option<&'a Value>, ToolError> {
+    let structured = reply.get("structuredContent");
+    if structured.is_some_and(|value| !value.is_object()) {
+        return Err(ToolError::Operation);
+    }
+    if !is_error
+        && let Some(output) = definition.get("outputSchema")
+        && !structured.is_some_and(|value| {
+            compile_schema(output).is_ok_and(|validator| validator.is_valid(value))
+        })
+    {
+        return Err(ToolError::Operation);
+    }
+    Ok(structured)
+}
+
 pub(super) async fn execute(
     call: &ToolCall,
     config: &Config,
     root: &Path,
-    cache_enabled: bool,
-    result_bytes: usize,
+    limits: &super::types::ToolLimits,
     captured: &std::sync::Mutex<Option<Vec<u8>>>,
 ) -> Result<String, ToolError> {
+    let (cache_enabled, result_bytes) = (limits.cache_bytes > 0, limits.result_bytes as usize);
     let name = match call {
         ToolCall::McpList { server } | ToolCall::McpCall { server, .. } => server,
         _ => return Err(ToolError::Operation),
@@ -330,9 +348,11 @@ pub(super) async fn execute(
         &server.args,
         "",
         root,
-        &config.runtime_grants,
-        cache_enabled,
-        &super::types::ToolLimits::default(),
+        super::guard::PayloadEnvironment {
+            runtime_grants: &config.runtime_grants,
+            cache_enabled,
+            limits: &super::types::ToolLimits::default(),
+        },
     )?;
     command.envs(&config.locale);
     command.stdin(Stdio::piped());

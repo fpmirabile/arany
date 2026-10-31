@@ -417,7 +417,7 @@ async fn load_replays_tool_results_and_interrupted_intents_without_execution() {
     )
     .unwrap();
     let tools_path = source.join("tools.json");
-    std::fs::write(&tools_path, serde_json::to_vec(&json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap()).unwrap();
+    std::fs::write(&tools_path, serde_json::to_vec(&json!({"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap()).unwrap();
     std::fs::set_permissions(&tools_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let provider = Arc::new(
         ScriptedProvider::new(vec![

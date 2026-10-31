@@ -351,7 +351,7 @@ fn mcp_fixture(mode: Mode) -> McpFixture {
 fn write_token(port: u16, access: &str, expires_at: u64) {
     // The test Engine pins this isolated account root on open, so the grant must be saved there first.
     let root = StateRoot::admit(arany::test_support::isolate_account_root()).unwrap();
-    let record = json!({"schema":1,"servers":{"remote":{
+    let record = json!({"servers":{"remote":{
         "url": format!("http://127.0.0.1:{port}/mcp"),
         "client_id": "fixture-client",
         "token_endpoint": format!("http://127.0.0.1:{port}/token"),
@@ -391,7 +391,7 @@ async fn run_remote_until(
     private_file(&workspace.join("src/current.txt"), b"current");
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let config = json!({"version":1,"workspace_paths":["src"],"write":false,
+    let config = json!({"workspace_paths":["src"],"write":false,
         "commands":[],"skills":[],"mcp":[{"name":"remote","tools":["echo"],
         "url": format!("http://127.0.0.1:{port}/mcp"), "auth": "oauth"}]});
     private_file(
@@ -721,7 +721,7 @@ async fn remote_mcp_is_refused_to_researchers_without_touching_credentials() {
     private_file(&workspace.join("src/current.txt"), b"current");
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    let config = json!({"version":1,"workspace_paths":["src"],"write":false,
+    let config = json!({"workspace_paths":["src"],"write":false,
         "commands":[],"skills":[],"mcp":[{"name":"remote","tools":["echo"],
         "url": format!("http://127.0.0.1:{}/mcp", server.port), "auth": "oauth"}]});
     private_file(
@@ -1043,7 +1043,7 @@ async fn remote_mcp_login_and_logout_commands_run_the_full_oauth_flow() {
         std::fs::create_dir_all(&workspace).unwrap();
         let state_path = temp.path().join("state");
         StateRoot::admit(&state_path).unwrap();
-        let config = json!({"version":1,"workspace_paths":["."],"write":false,
+        let config = json!({"workspace_paths":["."],"write":false,
             "commands":[],"skills":[],"mcp":[{"name":"remote","tools":["echo"],
             "url": format!("http://127.0.0.1:{}/mcp", server.port), "auth": "oauth"}]});
         private_file(

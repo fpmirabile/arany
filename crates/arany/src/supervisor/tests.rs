@@ -292,6 +292,7 @@ fn supervisor_editor_command_outcomes_ignore_sequences_and_keep_the_exit_class()
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         observation.attestation = None;
         observation.disposition = ToolDisposition::Succeeded;
@@ -304,6 +305,7 @@ fn supervisor_editor_command_outcomes_ignore_sequences_and_keep_the_exit_class()
             changeset: Default::default(),
             selection: None,
             network_refusals: Vec::new(),
+            hidden_grants: Vec::new(),
         })
         .unwrap();
         subject(&view.runs[0], fixture.child, &envelope, 1)

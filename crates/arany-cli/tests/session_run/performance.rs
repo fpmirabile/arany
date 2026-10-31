@@ -1,4 +1,4 @@
-use super::loopback::{check_profile, read_request, send_response, wait_product, write_profile};
+use super::loopback::{read_request, send_response, wait_product, write_profile};
 use arany::{
     CollaborationPolicy, RunId, RunStatus, SessionId, SessionView, StateRoot, Store,
     create_session, rename_session,
@@ -176,7 +176,7 @@ fn team_two_process_latency_on_named_host() {
         listener.local_addr().expect("Provider address").port(),
     );
     let server = thread::spawn(move || {
-        for index in 0..3 + (TEAM_WARMUPS + TEAM_SAMPLES) * 4 {
+        for index in 0..(TEAM_WARMUPS + TEAM_SAMPLES) * 4 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -193,18 +193,8 @@ fn team_two_process_latency_on_named_host() {
                 serde_json::from_slice(&body).expect("synthetic Responses request");
             assert_eq!(wire["model"], "model-1");
             let input: serde_json::Value = crate::semantic::input(&wire);
-            let text = if index < 3 {
-                match index {
-                    0 => {
-                        serde_json::json!("ok")
-                    }
-                    1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                    }
-                    _ => serde_json::json!(r#"synthetic summary"#),
-                }
-            } else {
-                let phase = (index - 3) % 4;
+            let text = {
+                let phase = index % 4;
                 assert_eq!(
                     input["phase"],
                     ["root_plan", "child_work", "child_work", "root_synthesis"][phase]
@@ -231,7 +221,6 @@ fn team_two_process_latency_on_named_host() {
             send_response(&mut stream, index, text);
         }
     });
-    check_profile(&workspace, &state);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -288,7 +277,7 @@ fn team_two_process_latency_on_named_host() {
             .parse::<RunId>()
             .expect("Run ID");
         assert_eq!(lines[2], "Status: finished");
-        assert_eq!(lines[3], "Provider: custom verified");
+        assert_eq!(lines[3], "Provider: custom");
         let events = runtime
             .block_on(observer.load_session(session_id))
             .expect("committed Events");

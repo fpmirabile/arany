@@ -13,7 +13,7 @@ pub const CAPABILITIES: &[&str] = &[
     "interrupt_receipt_v1",
     "approvals_v2",
     "host_command_session_approval_v1",
-    "events_subscribe_v2",
+    "events_subscribe_v3",
     "receipt_get_v1",
     "thread_fork_v1",
     "turn_steer_v1",
@@ -114,6 +114,7 @@ pub struct RewindNonRewindable {
 #[serde(rename_all = "camelCase")]
 pub enum RewindEffect {
     Host,
+    Git,
     UnguardedCommand,
     Mcp,
     Cache,
@@ -812,6 +813,36 @@ pub struct DisplayPreview {
     pub commentary: Vec<String>,
     pub commentary_limited: bool,
     pub tentative: bool,
+}
+
+impl From<&arany::DisplayUpdate> for DisplayPreview {
+    fn from(update: &arany::DisplayUpdate) -> Self {
+        Self {
+            agent_run_id: update.agent_run_id,
+            call_index: update.call_index,
+            answer: update.text.answer.clone(),
+            commentary: update.text.commentary.clone(),
+            commentary_limited: update.text.commentary_limited,
+            tentative: update.text.tentative,
+        }
+    }
+}
+
+impl DisplayPreview {
+    #[must_use]
+    pub fn into_update(self, run_id: RunId) -> arany::DisplayUpdate {
+        arany::DisplayUpdate {
+            run_id,
+            agent_run_id: self.agent_run_id,
+            call_index: self.call_index,
+            text: std::sync::Arc::new(arany::PreviewText {
+                answer: self.answer,
+                commentary: self.commentary,
+                commentary_limited: self.commentary_limited,
+                tentative: self.tentative,
+            }),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]

@@ -163,12 +163,10 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: actor,
             record: ProviderCallRecord {
-                rate_limits: None,
                 delegation,
                 phase,
                 disposition,
                 requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
-                response_id: None,
                 input_tokens: matches!(
                     disposition,
                     ProviderCallDisposition::Finished
@@ -185,11 +183,7 @@ impl Fixture {
                         | ProviderCallDisposition::PlanRecorded
                 )
                 .then_some(0),
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
-                wire_provenance: None,
-                refusal: None,
-                failure_reason: None,
+                ..crate::test_support::provider_call_record()
             },
         });
     }
@@ -207,7 +201,7 @@ impl Fixture {
                 expected_digest: None,
                 content: "new".into(),
             },
-            EffectTarget::Workspace,
+            self.editor_workspace(),
         );
         self.started(&intent);
         if self.events.iter().any(|e| matches!(e, Event::RunStarted { config, .. } if config.tool_policy.as_ref().unwrap().permissions_digest.is_some())) {
@@ -216,12 +210,52 @@ impl Fixture {
         self.observed(&intent, ToolDisposition::Succeeded, Some(Attestation::for_site(&intent)),
             &serde_json::json!({"sha256":crate::validate::hex_digest(b"new"),"bytes":3,"executable":false,"before":null}).to_string());
     }
+    pub(crate) fn editor_workspace(&self) -> EffectTarget {
+        EffectTarget::EditorWorkspace {
+            assignment_id: self.child,
+            device: 1,
+            inode: 9,
+        }
+    }
+    pub(crate) fn integrated_change(&self) -> EditorChange {
+        EditorChange {
+            path: self.changes.files[0].path.clone(),
+            before: None,
+            after: Some(crate::session::rewind::FileState {
+                sha256: crate::validate::hex_digest(b"new"),
+                bytes: 3,
+                executable: false,
+            }),
+        }
+    }
     fn finish_worker(&mut self) -> u64 {
+        let change = self.integrated_change();
+        self.finish_worker_with(vec![change])
+    }
+    // The editor's answer, then its one integration of the workspace into the Workspace.
+    pub(crate) fn finish_worker_with(&mut self, files: Vec<EditorChange>) -> u64 {
         self.call(
             self.child,
             AgentPhase::ChildWork,
             ProviderCallDisposition::Finished,
             None,
+        );
+        let integration = self.intent(
+            self.child,
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            },
+            EffectTarget::Workspace,
+        );
+        self.started(&integration);
+        if self.events.iter().any(|e| matches!(e, Event::RunStarted { config, .. } if config.tool_policy.as_ref().unwrap().permissions_digest.is_some())) {
+            allow_permission(self, &integration);
+        }
+        self.observed(
+            &integration,
+            ToolDisposition::Succeeded,
+            Some(Attestation::for_site(&integration)),
+            r#"{"applied":1}"#,
         );
         self.push(Event::AgentFinished {
             run_id: self.run,
@@ -307,8 +341,8 @@ impl Fixture {
                 recent_files: Vec::new(),
                 provider: "openai".into(),
                 model: "gpt-5.4".into(),
-                prompt_version: 1,
-                schema_version: 1,
+                prompt: crate::provider::EffectivePrompts::default()
+                    .pin(crate::provider::PromptFile::Compaction),
                 compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,
                 source_tokens_estimate: 1,
@@ -408,7 +442,6 @@ fn fixture_with_grant(
         AgentRunId::new(),
     );
     let definition = crate::tools::definitions::AgentDefinition {
-        version: 1,
         name: "editor".into(),
         description: "Edit".into(),
         tools: Some(definition_tools),
@@ -450,32 +483,10 @@ fn fixture_with_grant(
             digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
             files,
         }),
-        roster: None,
-        providers: None,
-        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
-        model: "gpt-5.4".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
         policy: CollaborationPolicy::Team {
             max_active_children: 8,
         },
-        output_token_cap: 4096,
         provider_concurrency: 4,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        launch_directory: String::new(),
-        include_digests: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
         tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
             host_epoch: None,
             command_tools_digest: None,
@@ -488,7 +499,14 @@ fn fixture_with_grant(
             unguarded: crate::tools::UnguardedGrant::HumanOnly,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
+            git: None,
+            guard: crate::tools::GuardPin {
+                mode: crate::tools::GuardMode::Auto,
+                sandbox: true,
+                saved_reads: Vec::new(),
+            },
         })),
+        ..crate::test_support::run_config()
     };
     let mut f = Fixture {
         session,
@@ -692,6 +710,7 @@ pub(crate) fn host_protocol_fixture() -> Fixture {
     intent.host = Some(crate::HostIntent {
         source_oid: "1".repeat(40),
         refspec: format!("{}:refs/heads/main", "1".repeat(40)),
+        destination: "https://github.com/example/project.git".into(),
     });
     intent.limits.network = crate::NetworkGrant::Host;
     f.started(&intent);
@@ -845,6 +864,113 @@ fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
             expected
         );
     }
+}
+
+fn host_editor_fixture(sandbox: bool, epoch: uuid::Uuid) -> Fixture {
+    let mut f = fixture_with_grant(
+        vec!["command".into(), "read".into(), "write".into()],
+        vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Command],
+        None,
+    );
+    for event in &mut f.events {
+        match event {
+            Event::RunStarted { config, .. } => {
+                let policy = config.tool_policy.as_mut().unwrap();
+                policy.host_epoch = Some(epoch);
+                policy.guard.sandbox = sandbox;
+                if !sandbox {
+                    policy.child_unguarded = crate::tools::UnguardedGrant::HumanOnly;
+                }
+            }
+            Event::AgentSpawned {
+                grant: Some(ChildGrant::EditOnly { unguarded }),
+                ..
+            } => *unguarded = crate::tools::UnguardedGrant::HumanOnly,
+            Event::GoalPlanContractRecorded { contract, .. } => {
+                contract.commands = vec!["sh".into()];
+            }
+            _ => {}
+        }
+    }
+    f
+}
+
+#[test]
+fn editor_host_commands_need_a_run_without_a_sandbox_and_a_per_call_verdict() {
+    use crate::tools::permissions::{Decision, HostApproval, PermissionSource, PermissionVerdict};
+    let epoch = uuid::Uuid::now_v7();
+    let sandboxed = host_editor_fixture(true, epoch);
+    assert!(
+        SessionView::replay_open(sandboxed.session, &sandboxed.envelopes()).is_err(),
+        "a sandboxed Run never spawns a host-capable editor"
+    );
+    let mut f = host_editor_fixture(false, epoch);
+    f.view();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let mut intent = f.intent(
+        f.child,
+        ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            justification: "Run the exact host command".into(),
+            prefix_rule: None,
+        },
+        f.editor_workspace(),
+    );
+    intent.host_command = Some(crate::tools::types::test_host_pin());
+    f.started(&intent);
+    let verdict = |source: PermissionSource, session: bool, source_intent: Option<[u8; 32]>| {
+        Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
+            run_id: f.run,
+            agent_run_id: f.child,
+            verdict: Some(PermissionVerdict {
+                host: Some(HostApproval {
+                    rule: None,
+                    epoch,
+                    session,
+                    source_intent,
+                }),
+                intent_digest: intent.digest(),
+                decision: if source == PermissionSource::Human {
+                    Decision::Ask
+                } else {
+                    Decision::Allow
+                },
+                mode: None,
+                basis: if source == PermissionSource::Human {
+                    PermissionSource::Mode
+                } else {
+                    source
+                },
+                source,
+                approved: true,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+        }
+    };
+    rejected(&f, verdict(PermissionSource::Human, true, None));
+    rejected(
+        &f,
+        verdict(PermissionSource::SessionApproval, false, Some([7; 32])),
+    );
+    f.push(verdict(PermissionSource::Human, false, None));
+    f.observed(
+        &intent,
+        ToolDisposition::Succeeded,
+        Some(Attestation::for_site(&intent)),
+        r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#,
+    );
+    f.view();
 }
 
 pub(crate) fn completed_fixture() -> Fixture {

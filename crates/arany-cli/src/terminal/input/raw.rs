@@ -325,168 +325,17 @@ impl Decoder {
 
     pub(super) fn feed(&mut self, byte: u8, now: Instant) -> Option<ReaderEvent> {
         match &mut self.mode {
-            Mode::Key => match byte {
-                b'\x1b' => {
-                    self.mode = Mode::Escape;
-                    self.started = Some(now);
-                    self.sequence.push(byte);
-                    None
-                }
-                b'\r' => key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
-                b'\t' => key(KeyCode::Tab, KeyModifiers::NONE, KeyEventKind::Press),
-                b'\x7f' | b'\x08' => {
-                    key(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Press)
-                }
-                1..=26 => key(
-                    KeyCode::Char(char::from(b'a' + byte - 1)),
-                    KeyModifiers::CONTROL,
-                    KeyEventKind::Press,
-                ),
-                b' '..=b'~' => key(
-                    KeyCode::Char(char::from(byte)),
-                    KeyModifiers::NONE,
-                    KeyEventKind::Press,
-                ),
-                0xc2..=0xf4 => {
-                    self.started = Some(now);
-                    self.sequence.push(byte);
-                    self.mode = Mode::Utf8 {
-                        length: utf8_length(byte),
-                        alt: false,
-                    };
-                    None
-                }
-                _ => None,
-            },
-            Mode::Escape => match byte {
-                b'\r' => {
-                    self.reset();
-                    key(KeyCode::Enter, KeyModifiers::ALT, KeyEventKind::Press)
-                }
-                b'[' | b'O' => {
-                    self.sequence.push(byte);
-                    self.mode = if byte == b'[' { Mode::Csi } else { Mode::Ss3 };
-                    None
-                }
-                b']' | b'P' | b'_' | b'^' => {
-                    self.sequence.clear();
-                    self.mode = Mode::ControlString {
-                        escape: false,
-                        apc: byte == b'_',
-                        malformed: false,
-                    };
-                    None
-                }
-                b'\x1b' => {
-                    self.started = Some(now);
-                    key(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press)
-                }
-                0xc2..=0xf4 => {
-                    self.sequence.clear();
-                    self.sequence.push(byte);
-                    self.mode = Mode::Utf8 {
-                        length: utf8_length(byte),
-                        alt: true,
-                    };
-                    None
-                }
-                b' '..=b'~' => {
-                    self.reset();
-                    key(
-                        KeyCode::Char(char::from(byte)),
-                        KeyModifiers::ALT,
-                        KeyEventKind::Press,
-                    )
-                }
-                _ => {
-                    self.reset();
-                    None
-                }
-            },
+            Mode::Key => self.feed_key(byte, now),
+            Mode::Escape => self.feed_escape(byte, now),
             Mode::Utf8 { length, alt } => {
-                self.sequence.push(byte);
-                if self.sequence.len() < *length {
-                    return None;
-                }
-                let event = (!*alt)
-                    .then(|| std::str::from_utf8(&self.sequence).ok()?.chars().next())
-                    .flatten()
-                    .and_then(|character| {
-                        key(
-                            KeyCode::Char(character),
-                            KeyModifiers::NONE,
-                            KeyEventKind::Press,
-                        )
-                    });
-                self.reset();
-                event
+                let (length, alt) = (*length, *alt);
+                self.feed_utf8(byte, length, alt)
             }
-            Mode::Csi | Mode::Ss3 => {
-                if self.sequence.len() == MAX_KEY_SEQUENCE_BYTES {
-                    self.sequence.clear();
-                    self.mode = Mode::SkipCsi;
-                } else {
-                    self.sequence.push(byte);
-                    if self.sequence == b"\x1b[M" {
-                        self.mode = Mode::Mouse;
-                        return None;
-                    }
-                    if self.sequence == b"\x1b[<" {
-                        self.mode = Mode::MouseRecord { malformed: false };
-                        return None;
-                    }
-                    if self.sequence == b"\x1b[200~" {
-                        self.sequence.clear();
-                        self.mode = Mode::Paste(Paste::default());
-                        return None;
-                    }
-                    if (b'@'..=b'~').contains(&byte) {
-                        let event = sequence_event(&self.sequence);
-                        self.reset();
-                        return self.count_click(event, now);
-                    }
-                }
-                if byte.is_ascii_control() || (b'@'..=b'~').contains(&byte) {
-                    self.reset();
-                }
-                None
-            }
-            Mode::Mouse => {
-                self.sequence.push(byte);
-                if self.sequence.len() < 6 {
-                    return None;
-                }
-                let event = self.sequence[3].checked_sub(32).and_then(|button| {
-                    mouse(
-                        button.into(),
-                        self.sequence[4].checked_sub(32)?.into(),
-                        self.sequence[5].checked_sub(32)?.into(),
-                        false,
-                    )
-                });
-                self.reset();
-                self.count_click(event, now)
-            }
+            Mode::Csi | Mode::Ss3 => self.feed_csi(byte, now),
+            Mode::Mouse => self.feed_mouse(byte, now),
             Mode::MouseRecord { malformed } => {
-                if matches!(byte, b'M' | b'm') {
-                    let event = if *malformed {
-                        None
-                    } else {
-                        self.sequence.push(byte);
-                        sequence_event(&self.sequence)
-                    };
-                    self.reset();
-                    return self.count_click(event, now);
-                }
-                // Nothing inside a record reaches the key path; the record deadline ends an unterminated one.
-                if self.sequence.len() < MAX_MOUSE_RECORD_BYTES
-                    && (byte.is_ascii_digit() || byte == b';')
-                {
-                    self.sequence.push(byte);
-                } else {
-                    *malformed = true;
-                }
-                None
+                let malformed = *malformed;
+                self.feed_mouse_record(byte, malformed, now)
             }
             Mode::SkipCsi => {
                 if byte.is_ascii_control() || (b'@'..=b'~').contains(&byte) {
@@ -499,28 +348,8 @@ impl Decoder {
                 apc,
                 malformed,
             } => {
-                if *escape && byte == b'\\' {
-                    let reply = (*apc && !*malformed && self.sequence == b"Gi=31;OK")
-                        .then_some(ReaderEvent::GraphicsReply);
-                    self.reset();
-                    reply
-                } else if byte == b'\x07' {
-                    self.reset();
-                    None
-                } else {
-                    if *escape {
-                        *malformed = true;
-                    }
-                    if *apc && byte != b'\x1b' {
-                        if self.sequence.len() < MAX_GRAPHICS_REPLY_BYTES {
-                            self.sequence.push(byte);
-                        } else {
-                            *malformed = true;
-                        }
-                    }
-                    *escape = byte == b'\x1b';
-                    None
-                }
+                let state = (*escape, *apc, *malformed);
+                self.feed_control_string(byte, state)
             }
             Mode::Paste(paste) => {
                 if !paste.feed(byte) {
@@ -537,6 +366,214 @@ impl Decoder {
                 }))
             }
         }
+    }
+
+    fn feed_key(&mut self, byte: u8, now: Instant) -> Option<ReaderEvent> {
+        match byte {
+            b'\x1b' => {
+                self.mode = Mode::Escape;
+                self.started = Some(now);
+                self.sequence.push(byte);
+                None
+            }
+            b'\r' => key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
+            b'\t' => key(KeyCode::Tab, KeyModifiers::NONE, KeyEventKind::Press),
+            b'\x7f' | b'\x08' => key(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Press),
+            1..=26 => key(
+                KeyCode::Char(char::from(b'a' + byte - 1)),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            b' '..=b'~' => key(
+                KeyCode::Char(char::from(byte)),
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            ),
+            0xc2..=0xf4 => {
+                self.started = Some(now);
+                self.sequence.push(byte);
+                self.mode = Mode::Utf8 {
+                    length: utf8_length(byte),
+                    alt: false,
+                };
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn feed_escape(&mut self, byte: u8, now: Instant) -> Option<ReaderEvent> {
+        match byte {
+            b'\r' => {
+                self.reset();
+                key(KeyCode::Enter, KeyModifiers::ALT, KeyEventKind::Press)
+            }
+            b'[' | b'O' => {
+                self.sequence.push(byte);
+                self.mode = if byte == b'[' { Mode::Csi } else { Mode::Ss3 };
+                None
+            }
+            b']' | b'P' | b'_' | b'^' => {
+                self.sequence.clear();
+                self.mode = Mode::ControlString {
+                    escape: false,
+                    apc: byte == b'_',
+                    malformed: false,
+                };
+                None
+            }
+            b'\x1b' => {
+                self.started = Some(now);
+                key(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press)
+            }
+            0xc2..=0xf4 => {
+                self.sequence.clear();
+                self.sequence.push(byte);
+                self.mode = Mode::Utf8 {
+                    length: utf8_length(byte),
+                    alt: true,
+                };
+                None
+            }
+            b' '..=b'~' => {
+                self.reset();
+                key(
+                    KeyCode::Char(char::from(byte)),
+                    KeyModifiers::ALT,
+                    KeyEventKind::Press,
+                )
+            }
+            _ => {
+                self.reset();
+                None
+            }
+        }
+    }
+
+    fn feed_utf8(&mut self, byte: u8, length: usize, alt: bool) -> Option<ReaderEvent> {
+        self.sequence.push(byte);
+        if self.sequence.len() < length {
+            return None;
+        }
+        let event = (!alt)
+            .then(|| std::str::from_utf8(&self.sequence).ok()?.chars().next())
+            .flatten()
+            .and_then(|character| {
+                key(
+                    KeyCode::Char(character),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Press,
+                )
+            });
+        self.reset();
+        event
+    }
+
+    fn feed_csi(&mut self, byte: u8, now: Instant) -> Option<ReaderEvent> {
+        if self.sequence.len() == MAX_KEY_SEQUENCE_BYTES {
+            self.sequence.clear();
+            self.mode = Mode::SkipCsi;
+        } else {
+            self.sequence.push(byte);
+            if self.sequence == b"\x1b[M" {
+                self.mode = Mode::Mouse;
+                return None;
+            }
+            if self.sequence == b"\x1b[<" {
+                self.mode = Mode::MouseRecord { malformed: false };
+                return None;
+            }
+            if self.sequence == b"\x1b[200~" {
+                self.sequence.clear();
+                self.mode = Mode::Paste(Paste::default());
+                return None;
+            }
+            if (b'@'..=b'~').contains(&byte) {
+                let event = sequence_event(&self.sequence);
+                self.reset();
+                return self.count_click(event, now);
+            }
+        }
+        if byte.is_ascii_control() || (b'@'..=b'~').contains(&byte) {
+            self.reset();
+        }
+        None
+    }
+
+    fn feed_mouse(&mut self, byte: u8, now: Instant) -> Option<ReaderEvent> {
+        self.sequence.push(byte);
+        if self.sequence.len() < 6 {
+            return None;
+        }
+        let event = self.sequence[3].checked_sub(32).and_then(|button| {
+            mouse(
+                button.into(),
+                self.sequence[4].checked_sub(32)?.into(),
+                self.sequence[5].checked_sub(32)?.into(),
+                false,
+            )
+        });
+        self.reset();
+        self.count_click(event, now)
+    }
+
+    fn feed_mouse_record(
+        &mut self,
+        byte: u8,
+        malformed: bool,
+        now: Instant,
+    ) -> Option<ReaderEvent> {
+        if matches!(byte, b'M' | b'm') {
+            let event = if malformed {
+                None
+            } else {
+                self.sequence.push(byte);
+                sequence_event(&self.sequence)
+            };
+            self.reset();
+            return self.count_click(event, now);
+        }
+        // Nothing inside a record reaches the key path; the record deadline ends an unterminated one.
+        if self.sequence.len() < MAX_MOUSE_RECORD_BYTES && (byte.is_ascii_digit() || byte == b';') {
+            self.sequence.push(byte);
+        } else {
+            self.mode = Mode::MouseRecord { malformed: true };
+        }
+        None
+    }
+
+    // OSC, DCS, APC and PM strings end at ST or BEL; only a kitty graphics OK reply is reported.
+    fn feed_control_string(
+        &mut self,
+        byte: u8,
+        (escape, apc, mut malformed): (bool, bool, bool),
+    ) -> Option<ReaderEvent> {
+        if escape && byte == b'\\' {
+            let reply = (apc && !malformed && self.sequence == b"Gi=31;OK")
+                .then_some(ReaderEvent::GraphicsReply);
+            self.reset();
+            return reply;
+        }
+        if byte == b'\x07' {
+            self.reset();
+            return None;
+        }
+        if escape {
+            malformed = true;
+        }
+        if apc && byte != b'\x1b' {
+            if self.sequence.len() < MAX_GRAPHICS_REPLY_BYTES {
+                self.sequence.push(byte);
+            } else {
+                malformed = true;
+            }
+        }
+        self.mode = Mode::ControlString {
+            escape: byte == b'\x1b',
+            apc,
+            malformed,
+        };
+        None
     }
 }
 

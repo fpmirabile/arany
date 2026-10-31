@@ -416,9 +416,7 @@ pub fn collect_storage(
     let _inventory = inventory_guard(&INVENTORY)?;
     collect(
         workspace,
-        selected,
-        default,
-        account,
+        [selected, default, account],
         cancelled,
         MAX_ENTRIES,
         DEADLINE,
@@ -436,9 +434,7 @@ fn inventory_guard(inventory: &Mutex<()>) -> Result<MutexGuard<'_, ()>, StorageE
 
 fn collect(
     workspace: &Path,
-    selected: &Path,
-    default: &Path,
-    account: &Path,
+    [selected, default, account]: [&Path; 3],
     cancelled: &AtomicBool,
     entries: usize,
     timeout: Duration,
@@ -462,94 +458,18 @@ fn collect(
         .map_err(|_| StorageError::WorkspaceUnavailable)?;
     scan.workspace =
         identity(&dir_metadata(&workspace).map_err(|_| StorageError::WorkspaceUnavailable)?);
-    let mut opened: Vec<(StorageCategory, Option<PrivateDirectory>)> = Vec::new();
-    for (name, path) in [
+    let opened: Vec<_> = [
         ("Selected StateRoot", selected),
         ("Default StateRoot", default),
         ("Account root", account),
-    ] {
-        let mut row = StorageCategory::new(name);
-        let directory = if scan.check().is_err() {
-            row.partial(StorageReason::Deadline);
-            None
-        } else if path.as_os_str().len() > MAX_PATH_BYTES || path.components().count() > MAX_DEPTH {
-            row.partial(StorageReason::RootPathLimit);
-            None
-        } else {
-            match private_fs::open_directory_checked(path, false, || {
-                scan.check().map_err(|_| {
-                    private_fs::Error::Io(std::io::Error::from(std::io::ErrorKind::Interrupted))
-                })
-            }) {
-                Ok(directory) => {
-                    if directory.ancestors.contains(&scan.workspace) {
-                        row.status = StorageStatus::Unavailable;
-                        row.reason = Some(StorageReason::WorkspaceOverlap);
-                        None
-                    } else if let Ok(metadata) = dir_metadata(&directory.dir) {
-                        if scan.roots.insert(identity(&metadata)) {
-                            row.path = Some(directory.path.clone());
-                            Some(directory)
-                        } else {
-                            row.reason = Some(StorageReason::DuplicateRoot);
-                            None
-                        }
-                    } else {
-                        row.status = StorageStatus::Unavailable;
-                        row.reason = Some(StorageReason::RootMetadataUnavailable);
-                        None
-                    }
-                }
-                Err(private_fs::Error::Io(error))
-                    if error.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    row.status = StorageStatus::Absent;
-                    None
-                }
-                Err(_) if scan.check().is_err() => {
-                    row.partial(StorageReason::Deadline);
-                    None
-                }
-                Err(_) => {
-                    row.status = StorageStatus::Unavailable;
-                    row.reason = Some(StorageReason::RootUnavailable);
-                    None
-                }
-            }
-        };
-        opened.push((row, directory));
-    }
+    ]
+    .into_iter()
+    .map(|(name, path)| open_root(&mut scan, name, path))
+    .collect();
     let mut categories = Vec::new();
     let mut subtotal = StorageUsage::default();
     for (row, directory) in opened {
-        let mut rows = [
-            row,
-            StorageCategory::new("Private build cache"),
-            StorageCategory::new("Output spill"),
-        ];
-        rows[Category::BuildCache as usize].status = StorageStatus::Absent;
-        rows[Category::OutputSpill as usize].status = StorageStatus::Absent;
-        if let Some(directory) = directory {
-            let path_bytes = directory.path.as_os_str().len();
-            let result = scan.entry(path_bytes).and_then(|()| {
-                scan.walk(
-                    &directory.dir,
-                    &mut rows,
-                    Walk {
-                        category: Category::Records,
-                        depth: 0,
-                        path_bytes,
-                    },
-                )
-            });
-            if let Err(reason) = result {
-                rows[Category::Records as usize].partial(reason);
-            }
-            if let Err(reason) = recheck_root(&directory, || scan.check()) {
-                rows[Category::Records as usize].partial(reason);
-            }
-        }
-        for (index, mut row) in rows.into_iter().enumerate() {
+        for (index, mut row) in scan_root(&mut scan, row, directory).into_iter().enumerate() {
             if subtotal.add(row.usage).is_err() {
                 row.partial(StorageReason::ByteOverflow);
             }
@@ -568,6 +488,96 @@ fn collect(
         categories,
         subtotal,
     })
+}
+
+fn open_root(
+    scan: &mut Scan<'_>,
+    name: &'static str,
+    path: &Path,
+) -> (StorageCategory, Option<PrivateDirectory>) {
+    let mut row = StorageCategory::new(name);
+    let directory = if scan.check().is_err() {
+        row.partial(StorageReason::Deadline);
+        None
+    } else if path.as_os_str().len() > MAX_PATH_BYTES || path.components().count() > MAX_DEPTH {
+        row.partial(StorageReason::RootPathLimit);
+        None
+    } else {
+        match private_fs::open_directory_checked(path, false, || {
+            scan.check().map_err(|_| {
+                private_fs::Error::Io(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            })
+        }) {
+            Ok(directory) => {
+                if directory.ancestors.contains(&scan.workspace) {
+                    row.status = StorageStatus::Unavailable;
+                    row.reason = Some(StorageReason::WorkspaceOverlap);
+                    None
+                } else if let Ok(metadata) = dir_metadata(&directory.dir) {
+                    if scan.roots.insert(identity(&metadata)) {
+                        row.path = Some(directory.path.clone());
+                        Some(directory)
+                    } else {
+                        row.reason = Some(StorageReason::DuplicateRoot);
+                        None
+                    }
+                } else {
+                    row.status = StorageStatus::Unavailable;
+                    row.reason = Some(StorageReason::RootMetadataUnavailable);
+                    None
+                }
+            }
+            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                row.status = StorageStatus::Absent;
+                None
+            }
+            Err(_) if scan.check().is_err() => {
+                row.partial(StorageReason::Deadline);
+                None
+            }
+            Err(_) => {
+                row.status = StorageStatus::Unavailable;
+                row.reason = Some(StorageReason::RootUnavailable);
+                None
+            }
+        }
+    };
+    (row, directory)
+}
+
+fn scan_root(
+    scan: &mut Scan<'_>,
+    row: StorageCategory,
+    directory: Option<PrivateDirectory>,
+) -> [StorageCategory; 3] {
+    let mut rows = [
+        row,
+        StorageCategory::new("Private build cache"),
+        StorageCategory::new("Output spill"),
+    ];
+    rows[Category::BuildCache as usize].status = StorageStatus::Absent;
+    rows[Category::OutputSpill as usize].status = StorageStatus::Absent;
+    if let Some(directory) = directory {
+        let path_bytes = directory.path.as_os_str().len();
+        let result = scan.entry(path_bytes).and_then(|()| {
+            scan.walk(
+                &directory.dir,
+                &mut rows,
+                Walk {
+                    category: Category::Records,
+                    depth: 0,
+                    path_bytes,
+                },
+            )
+        });
+        if let Err(reason) = result {
+            rows[Category::Records as usize].partial(reason);
+        }
+        if let Err(reason) = recheck_root(&directory, || scan.check()) {
+            rows[Category::Records as usize].partial(reason);
+        }
+    }
+    rows
 }
 
 fn recheck_root(
@@ -746,9 +756,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let report = collect(
             &workspace,
-            &state,
-            &state,
-            &account,
+            [&state, &state, &account],
             &cancelled,
             MAX_ENTRIES,
             DEADLINE,
@@ -835,9 +843,7 @@ mod tests {
                 .expect("unreadable macOS record");
             let report = collect(
                 &workspace,
-                &state,
-                &state,
-                &account,
+                [&state, &state, &account],
                 &cancelled,
                 MAX_ENTRIES,
                 DEADLINE,
@@ -879,9 +885,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let report = collect(
             &workspace,
-            &selected,
-            &default,
-            &missing,
+            [&selected, &default, &missing],
             &cancelled,
             MAX_ENTRIES,
             DEADLINE,
@@ -906,7 +910,11 @@ mod tests {
             assert_eq!(row.usage.files, 0);
         }
         let limited = collect(
-            &workspace, &selected, &default, &missing, &cancelled, 2, DEADLINE,
+            &workspace,
+            [&selected, &default, &missing],
+            &cancelled,
+            2,
+            DEADLINE,
         )
         .expect("shared entry bound");
         assert!(!limited.complete());
@@ -943,9 +951,7 @@ mod tests {
             }
             let report = collect(
                 &workspace,
-                &state,
-                &state,
-                &state,
+                [&state, &state, &state],
                 &AtomicBool::new(false),
                 MAX_ENTRIES,
                 DEADLINE,
@@ -1066,9 +1072,7 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let without_spill = collect(
             &workspace,
-            &state,
-            &state,
-            &missing,
+            [&state, &state, &missing],
             &cancelled,
             MAX_ENTRIES,
             DEADLINE,
@@ -1097,9 +1101,7 @@ mod tests {
         .expect("nonblocking special object");
         let report = collect(
             &workspace,
-            &state,
-            &state,
-            &missing,
+            [&state, &state, &missing],
             &cancelled,
             MAX_ENTRIES,
             DEADLINE,
@@ -1137,7 +1139,11 @@ mod tests {
         );
         for (entries, timeout) in [(1, DEADLINE), (MAX_ENTRIES, Duration::ZERO)] {
             let report = collect(
-                &workspace, &state, &state, &missing, &cancelled, entries, timeout,
+                &workspace,
+                [&state, &state, &missing],
+                &cancelled,
+                entries,
+                timeout,
             )
             .expect("limited report");
             assert!(!report.complete());
@@ -1178,9 +1184,7 @@ mod tests {
         assert_eq!(
             collect(
                 &workspace,
-                &state,
-                &state,
-                &missing,
+                [&state, &state, &missing],
                 &cancelled,
                 MAX_ENTRIES,
                 DEADLINE
@@ -1197,9 +1201,7 @@ mod tests {
         cancelled.store(false, Ordering::Release);
         let absent = collect(
             &workspace,
-            &missing,
-            &missing,
-            &missing,
+            [&missing, &missing, &missing],
             &cancelled,
             MAX_ENTRIES,
             DEADLINE,
@@ -1221,9 +1223,7 @@ mod tests {
         );
         let overlap = collect(
             &workspace,
-            &workspace,
-            &missing,
-            &missing,
+            [&workspace, &missing, &missing],
             &cancelled,
             MAX_ENTRIES,
             DEADLINE,

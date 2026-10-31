@@ -232,7 +232,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events:Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"payload":payload,"created_at_ms":0
     })).collect();
     adapter
         .respond(json!({"events":events,"nextSince":null}))
@@ -537,7 +537,7 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     for (name, value) in [
         (
             "tools.json",
-            json!({"version":1,"workspace_paths":if write {json!(["."])} else {json!(["facts.txt"])},"write":write || hook_ask,"commands":commands,"skills":[],"mcp":[]}),
+            json!({"workspace_paths":if write {json!(["."])} else {json!(["facts.txt"])},"write":write || hook_ask,"commands":commands,"skills":[],"mcp":[]}),
         ),
         ("permissions.json", permissions),
     ] {
@@ -897,8 +897,8 @@ fn admitted_host_prefixes_follow_h1_without_acp_permission_requests() {
             for (mode, rule, restriction, allowed) in [
                 ("default", true, None, true),
                 ("dontAsk", true, None, true),
-                ("auto", true, None, false),
-                ("acceptEdits", true, None, false),
+                ("auto", true, None, true),
+                ("acceptEdits", true, None, true),
                 ("default", false, None, false),
                 ("default", true, Some("ask"), false),
                 ("dontAsk", true, Some("ask"), false),

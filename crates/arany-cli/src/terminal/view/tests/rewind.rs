@@ -6,7 +6,7 @@ fn rewind_frame_corpus_keeps_every_panel_state_inert_and_paged_at_all_widths() {
         escape_terminal,
         rewind::{KEEP, OVERWRITE},
     };
-    use crate::terminal::rewind::draw_rewind_frame;
+    use crate::terminal::rewind::{RewindFrame, draw_rewind_frame};
     let cases = [
         (
             "Checkpoints",
@@ -99,12 +99,14 @@ fn rewind_frame_corpus_keeps_every_panel_state_inert_and_paged_at_all_widths() {
                         more = draw_rewind_frame(
                             frame,
                             area,
-                            title,
-                            &lines,
-                            &choices,
-                            0,
-                            page,
-                            Palette { color: false },
+                            RewindFrame {
+                                title,
+                                lines: &lines,
+                                choices: &choices,
+                                selected: 0,
+                                page,
+                                palette: Palette { color: false },
+                            },
                         )
                     })
                     .unwrap();

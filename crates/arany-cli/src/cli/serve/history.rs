@@ -9,6 +9,84 @@ use serde_json::Value;
 use std::{collections::BTreeMap, future::Future, path::Path, task::Poll};
 use tokio::sync::mpsc;
 
+pub(super) struct Context<'a> {
+    pub engine: &'a Engine,
+    pub state: &'a Path,
+    pub outbound: &'a mpsc::Sender<Message>,
+    pub opt_out: &'a [String],
+}
+
+async fn receipt_get(
+    state: &Path,
+    threads: &Threads,
+    request: Request,
+) -> Result<Option<Value>, Fault> {
+    let input: ReceiptGetParams = params(request.params)?;
+    require_thread(threads, input.thread_id)?;
+    let view = threads::load_view(state, input.thread_id).await?;
+    let goal = view
+        .goals
+        .iter()
+        .find(|goal| goal.id == input.goal_id)
+        .ok_or_else(|| Fault::engine(EngineError::GoalUnavailable))?;
+    let result = receipt(goal);
+    bounded_result(request.id, result)
+}
+
+// Forking checks the reply fits before the fork commits, then announces the new thread.
+async fn fork(
+    context: Context<'_>,
+    threads: &mut Threads,
+    request: Request,
+) -> Result<Option<Value>, Fault> {
+    let input: ThreadForkParams = params(request.params)?;
+    let mut loaded = require_thread(threads, input.thread_id)?.clone();
+    threads.check_capacity(None)?;
+    let (workspace, _) =
+        crate::cli::admit_workspace(Some(input.cwd.into()), Some(context.state.into()))
+            .map_err(|_| Fault::params())?;
+    let placeholder = ThreadResult {
+        thread: Thread {
+            id: input.thread_id,
+            title: "\u{1}".repeat(arany::MAX_SESSION_TITLE_BYTES),
+            workspace: workspace.to_string_lossy().into_owned(),
+            created_at_ms: i64::MIN,
+            forked_from_id: Some(input.thread_id),
+            goal: None,
+        },
+    };
+    if encode_line(&response(request.id.clone(), &placeholder)).is_err() {
+        return Err(Fault::engine(EngineError::ContextTooLarge));
+    }
+    let id = context
+        .engine
+        .fork_session(input.thread_id, workspace.clone(), input.title)
+        .await
+        .map_err(Fault::engine)?;
+    let view = threads::load_view(context.state, id).await?;
+    let created = threads::created_at_ms(context.state, id).await?;
+    let result = ThreadResult {
+        thread: threads::thread(&view, created, &workspace),
+    };
+    let reply = response(request.id, &result);
+    if encode_line(&reply).is_err() {
+        return Err(Fault::engine(EngineError::ContextTooLarge));
+    }
+    loaded.workspace = workspace;
+    threads.map.insert(id, loaded);
+    send(context.outbound, reply)
+        .await
+        .map_err(|_| Fault::engine(EngineError::CoordinatorFailed))?;
+    emit(
+        context.outbound,
+        context.opt_out,
+        notification("thread/started", result),
+    )
+    .await
+    .map_err(|_| Fault::engine(EngineError::CoordinatorFailed))?;
+    Ok(None)
+}
+
 #[derive(Default)]
 pub(super) struct History {
     cursors: BTreeMap<SessionId, u64>,
@@ -21,93 +99,45 @@ impl History {
 
     pub async fn dispatch(
         &mut self,
-        engine: &Engine,
-        state: &Path,
+        context: Context<'_>,
         threads: &mut Threads,
         request: Request,
-        outbound: &mpsc::Sender<Message>,
-        opt_out: &[String],
     ) -> Result<Option<Value>, Fault> {
         match request.method.as_str() {
-            "events/subscribe" => {
-                let input: EventsSubscribeParams = params(request.params)?;
-                require_thread(threads, input.thread_id)?;
-                let store = threads::read_store(state)?;
-                let result = store.load_session(input.thread_id).await;
-                let closed = store.close().await;
-                let events = result.map_err(EngineError::from).map_err(Fault::engine)?;
-                closed.map_err(EngineError::from).map_err(Fault::engine)?;
-                let head = events.last().map_or(0, |event| event.sequence);
-                if input.since > head {
-                    return Err(Fault::params());
-                }
-                let result = event_page(&request.id, &events, input.since)?;
-                if result.next_since.is_none() {
-                    self.cursors.insert(input.thread_id, head);
-                } else {
-                    self.cursors.remove(&input.thread_id);
-                }
-                Ok(Some(
-                    serde_json::to_value(result).expect("typed Event page"),
-                ))
-            }
-            "receipt/get" => {
-                let input: ReceiptGetParams = params(request.params)?;
-                require_thread(threads, input.thread_id)?;
-                let view = threads::load_view(state, input.thread_id).await?;
-                let goal = view
-                    .goals
-                    .iter()
-                    .find(|goal| goal.id == input.goal_id)
-                    .ok_or_else(|| Fault::engine(EngineError::GoalUnavailable))?;
-                let result = receipt(goal);
-                bounded_result(request.id, result)
-            }
-            "thread/fork" => {
-                let input: ThreadForkParams = params(request.params)?;
-                let mut loaded = require_thread(threads, input.thread_id)?.clone();
-                threads.check_capacity(None)?;
-                let (workspace, _) =
-                    crate::cli::admit_workspace(Some(input.cwd.into()), Some(state.into()))
-                        .map_err(|_| Fault::params())?;
-                let placeholder = ThreadResult {
-                    thread: Thread {
-                        id: input.thread_id,
-                        title: "\u{1}".repeat(128),
-                        workspace: workspace.to_string_lossy().into_owned(),
-                        created_at_ms: i64::MIN,
-                        forked_from_id: Some(input.thread_id),
-                        goal: None,
-                    },
-                };
-                if encode_line(&response(request.id.clone(), &placeholder)).is_err() {
-                    return Err(Fault::engine(EngineError::ContextTooLarge));
-                }
-                let id = engine
-                    .fork_session(input.thread_id, workspace.clone(), input.title)
-                    .await
-                    .map_err(Fault::engine)?;
-                let view = threads::load_view(state, id).await?;
-                let created = threads::created_at_ms(state, id).await?;
-                let result = ThreadResult {
-                    thread: threads::thread(&view, created, &workspace),
-                };
-                let reply = response(request.id, &result);
-                if encode_line(&reply).is_err() {
-                    return Err(Fault::engine(EngineError::ContextTooLarge));
-                }
-                loaded.workspace = workspace;
-                threads.map.insert(id, loaded);
-                send(outbound, reply)
-                    .await
-                    .map_err(|_| Fault::engine(EngineError::CoordinatorFailed))?;
-                emit(outbound, opt_out, notification("thread/started", result))
-                    .await
-                    .map_err(|_| Fault::engine(EngineError::CoordinatorFailed))?;
-                Ok(None)
-            }
+            "events/subscribe" => self.subscribe(context.state, threads, request).await,
+            "receipt/get" => receipt_get(context.state, threads, request).await,
+            "thread/fork" => fork(context, threads, request).await,
             _ => unreachable!("history method dispatched by server"),
         }
+    }
+
+    // A subscription replays the committed page and follows live Events once it reaches the head.
+    async fn subscribe(
+        &mut self,
+        state: &Path,
+        threads: &Threads,
+        request: Request,
+    ) -> Result<Option<Value>, Fault> {
+        let input: EventsSubscribeParams = params(request.params)?;
+        require_thread(threads, input.thread_id)?;
+        let store = threads::read_store(state)?;
+        let result = store.load_session(input.thread_id).await;
+        let closed = store.close().await;
+        let events = result.map_err(EngineError::from).map_err(Fault::engine)?;
+        closed.map_err(EngineError::from).map_err(Fault::engine)?;
+        let head = events.last().map_or(0, |event| event.sequence);
+        if input.since > head {
+            return Err(Fault::params());
+        }
+        let result = event_page(&request.id, &events, input.since)?;
+        if result.next_since.is_none() {
+            self.cursors.insert(input.thread_id, head);
+        } else {
+            self.cursors.remove(&input.thread_id);
+        }
+        Ok(Some(
+            serde_json::to_value(result).expect("typed Event page"),
+        ))
     }
 
     pub async fn drain(

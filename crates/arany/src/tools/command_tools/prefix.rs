@@ -92,6 +92,7 @@ fn wrapped(call: &ToolCall, tool: &CommandTool) -> ToolCall {
             cwd: cwd.clone(),
             resource_class: *resource_class,
             timeout_ms: *timeout_ms,
+            additional_reads: None,
         },
         ToolCall::CommandUnguarded {
             cwd, justification, ..
@@ -196,6 +197,7 @@ impl ToolRuntime {
             if intent.call.is_unguarded() {
                 intent.host_command = self
                     .intent(intent.run_id, intent.agent_run_id, intent.call.clone())
+                    .expect("a host command requests no Guard read directories")
                     .host_command;
             }
         }
@@ -233,6 +235,7 @@ fn sample() -> ToolCall {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     }
 }
 

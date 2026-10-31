@@ -1,21 +1,5 @@
 use super::build_jobs::cores;
-use super::{Preferences, Setting};
-use serde_json::Value;
-
-pub(super) fn with_default(mut record: Value) -> Option<Value> {
-    let resources = record
-        .get_mut("preferences")?
-        .get_mut("resources")?
-        .as_object_mut()?;
-    if resources.contains_key("build_cpu_cores") {
-        return None;
-    }
-    resources.insert("build_cpu_cores".into(), Value::Null);
-    record
-        .as_object_mut()?
-        .insert("version".into(), super::UI_PREFERENCES_VERSION.into());
-    Some(record)
-}
+use super::{Preferences, Setting, SettingInput};
 
 fn display(preferences: &Preferences) -> String {
     let requested = preferences.resources.build_cpu_cores;
@@ -34,6 +18,7 @@ fn display(preferences: &Preferences) -> String {
 pub(super) const SETTING: Setting = Setting {
     label: "Build CPU cores",
     hint: "automatic or 1..cores; Linux quota",
+    input: SettingInput::Typed,
     value: display,
     apply: |preferences, raw| {
         let raw = if raw == display(preferences) {
@@ -61,6 +46,9 @@ pub(super) const SETTING: Setting = Setting {
             Some(value) if !forward && value > 1 => Some(value - 1),
             Some(_) => None,
         };
+    },
+    reset: |preferences, default| {
+        preferences.resources.build_cpu_cores = default.resources.build_cpu_cores
     },
     guidance: None,
 };

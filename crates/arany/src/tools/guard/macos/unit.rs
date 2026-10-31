@@ -1,10 +1,8 @@
 use super::super::selection_phase::{primary_command, selection_limits};
-use super::super::{BootstrapFailure, GitStage, GuardStage, Task, read_line_capped};
+use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
-use super::git_write::GitLink;
 use super::storage::{
-    cleanup_storage, cleanup_storage_until, prepare_command_storage, read_record, storage_mounted,
-    write_record,
+    cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
 };
 use super::{
     CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, TEARDOWN_WAIT, bootstrap, ffi,
@@ -14,7 +12,10 @@ use crate::private_fs::{PrivateDirectory, open_directory};
 use crate::tools::Cancellation;
 use crate::tools::guard::transfer::WORKER_PREPARATION_MS;
 use crate::tools::process::MAX_ARGUMENT_BYTES;
-use crate::tools::types::{CommandResult, ToolDisposition, ToolLimits, ToolResourceClass};
+use crate::tools::types::{
+    CommandResult, GUARD_DISK_EVICTION_BYTES, GUARD_DISK_RESERVE_BYTES, ToolDisposition,
+    ToolLimits, ToolResourceClass,
+};
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
@@ -42,6 +43,7 @@ const HOST_PROCESS_CAP: usize = 65_536;
 const JOB_BYTES_CAP: usize = 128 * 1024;
 const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
+const EVICTION_RETRY: Duration = Duration::from_secs(1);
 pub(super) const UNIT_ROOT_PARENT: &str = "/private/tmp";
 const UNIT_ROOT_PREFIX: &str = "arany-u-";
 
@@ -63,7 +65,6 @@ const WORKER_OUTPUT: &str = "worker.output";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recovery {
-    version: u32,
     root: (u64, u64),
     boot: uuid::Uuid,
     supervisor: Option<Identity>,
@@ -71,8 +72,7 @@ struct Recovery {
 
 fn recovery(directory: &PrivateDirectory) -> Result<Recovery, ToolError> {
     let record: Recovery = read_record(&directory.dir, RECOVERY_RECORD)?;
-    if record.version != 1
-        || record.boot.is_nil()
+    if record.boot.is_nil()
         || record.root != crate::tools::fs::identity(&directory.dir)?
         || record.supervisor.is_some_and(|identity| {
             identity.pid <= 1
@@ -168,6 +168,7 @@ pub(super) struct Scope {
     timebase: ffi::Timebase,
     capture_cpu: Option<(Identity, u128)>,
     limits: ToolLimits,
+    disk: Option<cap_std::fs::Dir>,
     pub(super) teardown: Option<tokio::time::Instant>,
 }
 
@@ -190,12 +191,19 @@ impl Scope {
             timebase,
             capture_cpu: None,
             limits: ToolLimits::default(),
+            disk: None,
             teardown: None,
         })
     }
 
     fn apply_limits(&mut self, limits: ToolLimits) {
         self.limits = limits;
+    }
+
+    // Backstop for every unit kind; the command worker stops its payload earlier, at the full reserve.
+    fn watch_disk(&mut self, root: &Path) -> Result<(), ToolError> {
+        self.disk = Some(crate::tools::fs::open_directory(root)?);
+        Ok(())
     }
 
     fn members(&mut self) -> Result<Vec<Identity>, ToolError> {
@@ -227,15 +235,6 @@ impl Scope {
         Ok(members)
     }
 
-    pub(super) fn holds_only(&mut self, member: Identity) -> Result<bool, ToolError> {
-        let members = self.members()?;
-        Ok(matches!(members.as_slice(), [only] if only.same_process(member)))
-    }
-
-    pub(super) fn is_empty(&mut self) -> Result<bool, ToolError> {
-        Ok(self.members()?.is_empty())
-    }
-
     fn begin_capture(&mut self, limits: &ToolLimits) -> Result<(), ToolError> {
         let members = self.members()?;
         let [supervisor] = members.as_slice() else {
@@ -265,6 +264,11 @@ impl Scope {
     }
 
     pub(super) fn check_resources(&mut self) -> Result<(), ToolError> {
+        if let Some(disk) = &self.disk
+            && super::storage::free_bytes(disk)? < GUARD_DISK_RESERVE_BYTES / 2
+        {
+            return Err(ToolError::Limit);
+        }
         let mut memory = 0_u64;
         let mut threads = 0_u64;
         for member in self.members()? {
@@ -474,7 +478,7 @@ async fn recover_root(root: &Path) -> Result<(), ToolError> {
             Scope::new(supervisor.coalition)?.stop(None).await?;
         }
     }
-    cleanup_storage(root).await?;
+    cleanup_storage(root)?;
     remove_root(root, &directory)?;
     if root.exists() {
         return Err(ToolError::Operation);
@@ -567,22 +571,30 @@ async fn manager(
     }
 }
 
+async fn accept_supervisor(
+    stream: tokio::net::UnixStream,
+    launched: &Identity,
+) -> Result<(tokio::net::UnixStream, Identity), ToolError> {
+    let stream = stream.into_std().map_err(|_| ToolError::Operation)?;
+    let pid = peer(&stream)?;
+    let child = identity(pid)?;
+    if child.pid != launched.pid
+        || child.unique_id != launched.unique_id
+        || child.coalition != launched.coalition
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let stream = tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
+    let mut stream = BufReader::new(stream);
+    let received: Identity = serde_json::from_slice(&read_line_capped(&mut stream, 512).await?)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    if received != child {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok((stream.into_inner(), child))
+}
+
 impl Unit {
-    pub(super) fn take_capacity(&mut self) -> Result<super::super::admission::Permit, ToolError> {
-        self._permit.take().ok_or(ToolError::Configuration)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn fixture_witness(&self) -> Result<(PathBuf, u32), ToolError> {
-        Ok((self.root.clone(), self.supervisor()?.pid))
-    }
-
-    pub(super) fn supervisor(&self) -> Result<Identity, ToolError> {
-        recovery(&self._directory)?
-            .supervisor
-            .ok_or(ToolError::ProtectionUnavailable)
-    }
-
     #[cfg(test)]
     async fn new(fixture: &Path) -> Result<Self, ToolError> {
         let directory =
@@ -652,7 +664,6 @@ impl Unit {
             &unit._directory.dir,
             RECOVERY_RECORD,
             &Recovery {
-                version: 1,
                 root: crate::tools::fs::identity(&unit._directory.dir)?,
                 boot: ffi::boot_session()?,
                 supervisor: None,
@@ -775,27 +786,12 @@ impl Unit {
         scope.apply_limits(limits);
         self.scope = Some(scope);
         let (stream, _) = listener.accept().await.map_err(|_| ToolError::Operation)?;
-        let stream = stream.into_std().map_err(|_| ToolError::Operation)?;
-        let pid = peer(&stream)?;
-        let child = identity(pid)?;
-        if child.pid != launched.pid
-            || child.unique_id != launched.unique_id
-            || child.coalition != launched.coalition
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let stream = tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
-        let mut stream = BufReader::new(stream);
-        let received: Identity = serde_json::from_slice(&read_line_capped(&mut stream, 512).await?)
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if received != child {
-            return Err(ToolError::ProtectionUnavailable);
-        }
+        let (stream, child) = accept_supervisor(stream, &launched).await?;
         let record = recovery(&self._directory)?;
         if record.boot != ffi::boot_session()? || record.supervisor != Some(child) {
             return Err(ToolError::ProtectionUnavailable);
         }
-        Ok(stream.into_inner())
+        Ok(stream)
     }
 
     fn worker_output(&self) -> Vec<u8> {
@@ -828,7 +824,7 @@ impl Unit {
         cleanup?;
         removal?;
         let capture = FixtureSpan::begin(FixtureStage::ControllerStorage);
-        cleanup_storage(&self.root).await?;
+        cleanup_storage(&self.root)?;
         capture.complete();
         self.stopped = true;
         Ok(())
@@ -836,11 +832,7 @@ impl Unit {
 }
 
 fn remove_root(root: &Path, admitted: &PrivateDirectory) -> Result<(), ToolError> {
-    if storage_mounted(root)?
-        || ffi::mounts()?
-            .iter()
-            .any(|(_, target)| target.starts_with(root))
-    {
+    if storage_mounted(root)? {
         return Err(ToolError::ProtectionUnavailable);
     }
     let current = open_directory(root, false).map_err(|_| ToolError::Path)?;
@@ -923,58 +915,6 @@ fn action_deadlines(
     (preparation_deadline, go_deadline, completion_deadline)
 }
 
-#[cfg(any(test, feature = "test-support"))]
-fn git_storage_fault(
-    root: &Path,
-    volumes: &[cap_std::fs::Dir],
-    intent: &EffectIntent,
-) -> Result<(), ToolError> {
-    use crate::fault::GitStorageFault;
-    use std::io::Write as _;
-    let Ok(injection) = std::fs::read(root.join(crate::tools::GIT_STORAGE_FAULT)) else {
-        return Ok(());
-    };
-    let (fault, refusal_evidence): (GitStorageFault, PathBuf) =
-        serde_json::from_slice(&injection).map_err(|_| ToolError::Configuration)?;
-    let canary = || {
-        (std::fs::read(root.join(crate::tools::GIT_STORAGE_CANARY))
-            .ok()
-            .as_deref()
-            == Some(b"control".as_slice()))
-        .then_some(())
-        .ok_or(ToolError::Configuration)
-    };
-    match fault {
-        GitStorageFault::Refuse => {
-            super::storage::verify_git_storage(root)?;
-            canary()?;
-            let evidence =
-                serde_json::to_vec(&(intent.id, root)).map_err(|_| ToolError::Configuration)?;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(refusal_evidence)
-                .and_then(|mut file| file.write_all(&evidence))
-                .map_err(|_| ToolError::Operation)?;
-            Err(ToolError::ProtectionUnavailable)
-        }
-        GitStorageFault::Exhaust => {
-            super::storage::exhaust_git_storage(volumes.first().ok_or(ToolError::Operation)?)
-                .map_err(|_| ToolError::Operation)?;
-            canary()
-        }
-    }
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn git_storage_fault(
-    _root: &Path,
-    _volumes: &[cap_std::fs::Dir],
-    _intent: &EffectIntent,
-) -> Result<(), ToolError> {
-    Ok(())
-}
-
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -986,355 +926,52 @@ pub(super) async fn execute(
         () = cancellation.cancelled() => return Err(ToolError::Operation),
         unit = Unit::admit(runtime, intent) => unit?,
     };
-    run_unit(
-        runtime,
-        intent,
-        cancellation,
-        dispatched,
-        admitted,
-        &mut GitLink::default(),
-    )
-    .await
+    run_unit(runtime, intent, cancellation, dispatched, admitted).await
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) async fn run_unit(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     mut cancellation: Cancellation,
     dispatched: &AtomicBool,
     admitted: (Unit, Option<crate::tools::ActiveToolWindow>),
-    link: &mut GitLink,
 ) -> Result<ToolObservation, ToolError> {
     let (mut unit, active_window) = admitted;
-    let git_stage = link.stage;
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
-    if git_stage != Some(GitStage::Publish) {
-        crate::fault::git_storage(&unit.root, &intent.call).map_err(|_| ToolError::Operation)?;
-    }
-    let mut cache = super::super::build_cache_session(runtime, intent)?;
-    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    super::storage::require_disk_reserve(&unit._directory.dir)?;
     let active_window = super::super::selection_phase::command_window(intent, active_window);
     let proxy = proxy_for(runtime, intent)?;
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
-    let go_cancellation = cancellation.clone();
-    let execution = async {
-        let capture = FixtureSpan::begin(FixtureStage::Connect);
-        let mut stream = BufReader::new(
-            tokio::time::timeout(CONNECT_DEADLINE, unit.connect(runtime))
-                .await
-                .map_err(|_| ToolError::GuardRejected(GuardStage::ConnectionDeadline))??,
-        );
-        capture.complete();
-        let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
-        let primary_command = primary_command(intent);
-        let payload_phase = AtomicBool::new(false);
-        let selecting = AtomicBool::new(false);
-        let watcher = Mutex::new(Scope::new(
-            unit.scope
-                .as_ref()
-                .ok_or(ToolError::ProtectionUnavailable)?
-                .coalition,
-        )?);
-        let phases = async {
-            let mut task = Task::new(runtime, intent, cache_transfer)?;
-            task.git_stage = git_stage;
-            task.proxy_port = proxy.as_ref().map(crate::tools::network::Proxy::port);
-            #[cfg(any(test, feature = "test-support"))]
-            {
-                task.git_fault = crate::fault::git_write::take_mode(
-                    &intent.call,
-                    git_stage == Some(GitStage::Plan),
-                );
-            }
-            let task = super::super::encode_task(&task)?;
-            let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
-                stream
-                    .get_mut()
-                    .write_all(&task)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                read_line_capped(&mut stream, 2048).await
-            })
-            .await
-            .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
-            let mut cache_sent = false;
-            let mut image_sent = false;
-            for _ in 0..2 {
-                if bytes == b"CACHE_READY\n" && !cache_sent {
-                    cache_sent = true;
-                    let session = cache.as_ref().ok_or(ToolError::Operation)?;
-                    let transfer_deadline =
-                        super::super::cache_transfer_deadline(intent, Some(go_deadline));
-                    tokio::time::timeout_at(
-                        transfer_deadline,
-                        super::super::send_cache_archive(stream.get_mut(), &session.lease),
-                    )
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-                    bytes =
-                        tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                            .await
-                            .map_err(|_| {
-                                ToolError::GuardRejected(GuardStage::PreparationDeadline)
-                            })??;
-                } else if bytes == b"WORKER_READY\n" && !image_sent {
-                    image_sent = true;
-                    let input = runtime
-                        .handover
-                        .as_deref()
-                        .ok_or(ToolError::Configuration)?;
-                    tokio::time::timeout_at(
-                        go_deadline,
-                        crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
-                    )
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-                    bytes =
-                        tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                            .await
-                            .map_err(|_| ToolError::Limit)??;
-                } else {
-                    break;
-                }
-            }
-            if primary_command && bytes != b"SELECT_READY\n" {
-                return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
-                    .map_or(ToolError::Configuration, ToolError::GuardBootstrap));
-            }
-            let command_deadline = if bytes == b"SELECT_READY\n" {
-                // The command runtime starts at selection, after storage and cache preparation.
-                let command_deadline = super::super::selection_phase::command_deadline(intent)
-                    .ok_or(ToolError::Configuration)?;
-                selecting.store(true, Ordering::Release);
-                stream
-                    .get_mut()
-                    .write_all(b"SELECT\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                stream
-                    .get_mut()
-                    .write_all(&super::super::selection_phase::encode_deadline(
-                        command_deadline,
-                    )?)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                let deadline = command_deadline.min(go_deadline);
-                let mut selection_cancel = go_cancellation.clone();
-                super::super::selection_phase::wait(
-                    deadline,
-                    &mut selection_cancel,
-                    super::super::selection_phase::receive(&mut stream, deadline),
-                )
-                .await?;
-                selecting.store(false, Ordering::Release);
-                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-                Some(command_deadline)
-            } else {
-                None
-            };
-            if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
-                return Err(ToolError::GuardBootstrap(failure));
-            }
-            let ready = super::super::parse_ready(&bytes, intent)?;
-            if identity(ready.pid)?.coalition
-                != unit
-                    .scope
-                    .as_ref()
-                    .ok_or(ToolError::ProtectionUnavailable)?
-                    .coalition
-            {
-                return Err(ToolError::ProtectionUnavailable);
-            }
-            unit.scope
-                .as_mut()
-                .ok_or(ToolError::ProtectionUnavailable)?
-                .check_resources()
-                .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
-            capture.complete();
-            let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
-            if git_stage == Some(GitStage::Publish) {
-                link.feed_publisher(stream.get_mut()).await?;
-            }
-            if git_stage == Some(GitStage::Plan) {
-                if go_cancellation.is_cancelled() {
-                    return Err(ToolError::Operation);
-                }
-            } else {
-                super::super::selection_phase::before_dispatch(
-                    runtime,
-                    intent,
-                    active_window,
-                    command_deadline,
-                    &go_cancellation,
-                )
-                .await?;
-            }
-            #[cfg(any(test, feature = "test-support"))]
-            if git_stage == Some(GitStage::Publish) {
-                super::git_write::fixture_gate(
-                    intent,
-                    crate::fault::git_write::GitWriteStage::BeforeGo,
-                    &unit,
-                )
-                .await?;
-            }
-            payload_phase.store(true, Ordering::Release);
-            if git_stage != Some(GitStage::Plan) {
-                dispatched.store(true, Ordering::Release);
-            }
-            let observation = async {
-                super::git_write::send_go(stream.get_mut(), intent, &unit, git_stage).await?;
-                if git_stage != Some(GitStage::Plan) {
-                    crate::fault::guard_dispatched(intent);
-                    crate::fault::guard_dispatch_gate(intent).await;
-                }
-                if primary_command {
-                    use tokio::io::AsyncBufReadExt;
-                    if stream
-                        .fill_buf()
-                        .await
-                        .map_err(|_| ToolError::Operation)?
-                        .first()
-                        == Some(&b'C')
-                    {
-                        let marker = read_line_capped(&mut stream, 64).await?;
-                        if marker != b"CAPTURE_READY\n" {
-                            return Err(ToolError::Operation);
-                        }
-                        watcher
-                            .lock()
-                            .map_err(|_| ToolError::ProtectionUnavailable)?
-                            .begin_capture(&intent.limits)?;
-                        selecting.store(true, Ordering::Release);
-                        payload_phase.store(false, Ordering::Release);
-                        let (deadline, report_deadline) =
-                            super::super::selection_phase::capture_deadlines(completion_deadline)?;
-                        stream
-                            .get_mut()
-                            .write_all(b"CAPTURE\n")
-                            .await
-                            .map_err(|_| ToolError::Operation)?;
-                        stream
-                            .get_mut()
-                            .write_all(&super::super::selection_phase::encode_deadline(deadline)?)
-                            .await
-                            .map_err(|_| ToolError::Operation)?;
-                        let done = tokio::time::timeout_at(
-                            report_deadline,
-                            read_line_capped(&mut stream, 64),
-                        )
-                        .await
-                        .map_err(|_| ToolError::Timeout(String::new()))??;
-                        if done != b"CAPTURE_DONE\n" {
-                            return Err(ToolError::Operation);
-                        }
-                        selecting.store(false, Ordering::Release);
-                        payload_phase.store(true, Ordering::Release);
-                    }
-                }
-                let capture_result = async {
-                    if let Some(session) = cache.as_ref() {
-                        let observation =
-                            super::super::read_observation_line(&mut stream, intent).await?;
-                        let update_deadline = super::super::cache_transfer_deadline(
-                            intent,
-                            active_window.map(|window| window.completion_deadline),
-                        );
-                        let candidate = match tokio::time::timeout_at(
-                            update_deadline,
-                            super::super::receive_cache_candidate(&mut stream, &session.lease),
-                        )
-                        .await
-                        {
-                            Ok(Ok(candidate)) => candidate,
-                            Ok(Err(_)) | Err(_) => super::super::CacheCandidate::Uncertain,
-                        };
-                        if candidate == super::super::CacheCandidate::Uncertain {
-                            return Ok((observation, candidate));
-                        }
-                        let cache_status = tokio::time::timeout_at(
-                            completion_deadline,
-                            read_line_capped(&mut stream, 32),
-                        )
-                        .await
-                        .map_err(|_| ToolError::Limit)??;
-                        match cache_status.as_slice() {
-                            b"CACHE_DONE\n" => {}
-                            b"CACHE_FAILED\n" => {
-                                let failure = tokio::time::timeout_at(
-                                    completion_deadline,
-                                    read_line_capped(&mut stream, 256),
-                                )
-                                .await
-                                .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
-                                .ok()
-                                .and_then(|bytes| {
-                                    serde_json::from_slice::<BootstrapFailure>(&bytes).ok()
-                                });
-                                return Err(failure.map_or(
-                                    ToolError::GuardRejected(GuardStage::StorageCleanup),
-                                    ToolError::GuardBootstrap,
-                                ));
-                            }
-                            _ => return Err(ToolError::Operation),
-                        }
-                        Ok((observation, candidate))
-                    } else if git_stage == Some(GitStage::Plan) {
-                        super::git_write::relay_plan(&mut stream, intent, &mut unit, link)
-                            .await
-                            .map(|observation| {
-                                (observation, super::super::CacheCandidate::Received)
-                            })
-                    } else if crate::tools::discovery::possible(&intent.call) {
-                        super::super::read_discovery_report(&mut stream, intent)
-                            .await
-                            .map(|observation| {
-                                (observation, super::super::CacheCandidate::Received)
-                            })
-                    } else {
-                        super::super::read_worker_report(&mut stream, intent)
-                            .await
-                            .map(|observation| {
-                                (observation, super::super::CacheCandidate::Received)
-                            })
-                    }
-                };
-                capture_result.await
-            };
-            let observation = observation.await;
-            capture.complete();
-            observation
-        };
-        tokio::pin!(phases);
-        let mut samples = tokio::time::interval(super::SUPERVISION_INTERVAL);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut phases => break result,
-                _ = samples.tick() => {
-                    if !payload_phase.load(Ordering::Acquire) {
-                        let checked = watcher
-                            .lock()
-                            .map_err(|_| ToolError::ProtectionUnavailable)
-                            .and_then(|mut watcher| {
-                                let limits = if selecting.load(Ordering::Acquire) {
-                                    selection_limits(&intent.limits)
-                                } else {
-                                    intent.limits.clone()
-                                };
-                                watcher.apply_limits(limits);
-                                watcher.check_resources()
-                            });
-                        if let Err(error) = checked { break Err(error); }
-                    }
-                }
-            }
-        }
+    let cache = clone_cache(
+        super::super::cache_directory::session(runtime, intent, preparation_deadline).await?,
+        &unit,
+        intent,
+    )?;
+    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    let timings = StageTimer::new();
+    let control = UnitControl {
+        runtime,
+        intent,
+        active_window,
+        preparation_deadline,
+        go_deadline,
+        completion_deadline,
+        go_cancellation: cancellation.clone(),
+        dispatched,
+        timings: &timings,
+        cached: cache.is_some(),
     };
+    let eviction = runtime
+        .cache_state
+        .clone()
+        .map(|state| tokio::spawn(evict_near_reserve(state, unit.root.clone())));
+    let execution = control_unit(
+        &control,
+        &mut unit,
+        cache_transfer,
+        proxy.as_ref().map(crate::tools::network::Proxy::port),
+    );
     let result = if let Some(window) = active_window {
         tokio::select! {
             biased;
@@ -1348,35 +985,448 @@ pub(super) async fn run_unit(
             result = tokio::time::timeout_at(completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
         }
     };
-    let stopped = tokio::time::timeout_at(completion_deadline, unit.stop())
+    if let Some(eviction) = eviction {
+        eviction.abort();
+    }
+    finish_unit(&control, &mut unit, proxy, cache, result).await
+}
+
+struct UnitControl<'a> {
+    runtime: &'a ToolRuntime,
+    intent: &'a EffectIntent,
+    active_window: Option<crate::tools::ActiveToolWindow>,
+    preparation_deadline: tokio::time::Instant,
+    go_deadline: tokio::time::Instant,
+    completion_deadline: tokio::time::Instant,
+    go_cancellation: Cancellation,
+    dispatched: &'a AtomicBool,
+    timings: &'a StageTimer,
+    cached: bool,
+}
+
+// Tell the resource sampler which limits the worker's current phase allows.
+#[derive(Default)]
+struct PhaseFlags {
+    payload: AtomicBool,
+    selecting: AtomicBool,
+}
+
+type UnitStream = BufReader<tokio::net::UnixStream>;
+type UnitReport = (ToolObservation, super::super::CacheCandidate);
+
+async fn control_unit(
+    control: &UnitControl<'_>,
+    unit: &mut Unit,
+    cache_transfer: Option<super::super::BuildCacheTransfer>,
+    proxy_port: Option<u16>,
+) -> Result<UnitReport, ToolError> {
+    let capture = FixtureSpan::begin(FixtureStage::Connect);
+    let mut stream = BufReader::new(
+        tokio::time::timeout(CONNECT_DEADLINE, unit.connect(control.runtime))
+            .await
+            .map_err(|_| ToolError::GuardRejected(GuardStage::ConnectionDeadline))??,
+    );
+    capture.complete();
+    control.timings.mark("connect");
+    let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
+    let flags = PhaseFlags::default();
+    let watcher = Mutex::new(Scope::new(
+        unit.scope
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .coalition,
+    )?);
+    let phases = async {
+        let mut task = Task::new(control.runtime, control.intent, cache_transfer)?;
+        task.proxy_port = proxy_port;
+        let task = super::super::encode_task(&task)?;
+        let command_deadline = ready_worker(control, &mut stream, unit, &flags, &task).await?;
+        capture.complete();
+        control.timings.mark("ready");
+        let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
+        super::super::selection_phase::before_dispatch(
+            control.runtime,
+            control.intent,
+            control.active_window,
+            command_deadline,
+            &control.go_cancellation,
+        )
+        .await?;
+        flags.payload.store(true, Ordering::Release);
+        control.dispatched.store(true, Ordering::Release);
+        let observation = observe_worker(control, &mut stream, &watcher, &flags).await;
+        capture.complete();
+        control.timings.mark("report");
+        observation
+    };
+    sample_phases(phases, &watcher, &flags, control.intent).await
+}
+
+async fn ready_worker(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    unit: &mut Unit,
+    flags: &PhaseFlags,
+    task: &[u8],
+) -> Result<Option<tokio::time::Instant>, ToolError> {
+    let (runtime, intent, go_deadline) = (control.runtime, control.intent, control.go_deadline);
+    let mut bytes = tokio::time::timeout_at(control.preparation_deadline, async {
+        stream
+            .get_mut()
+            .write_all(task)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        read_line_capped(&mut *stream, 2048).await
+    })
+    .await
+    .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
+    if bytes == b"WORKER_READY\n" {
+        let input = runtime
+            .handover
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        tokio::time::timeout_at(
+            go_deadline,
+            crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
+        )
+        .await
+        .map_err(|_| ToolError::Limit)??;
+        bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut *stream, 2048))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    }
+    if primary_command(intent) && bytes != b"SELECT_READY\n" {
+        return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
+            .map_or(ToolError::Configuration, ToolError::GuardBootstrap));
+    }
+    let command_deadline = if bytes == b"SELECT_READY\n" {
+        let (command_deadline, next) = select_command(control, stream, flags).await?;
+        bytes = next;
+        Some(command_deadline)
+    } else {
+        None
+    };
+    if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
+        return Err(ToolError::GuardBootstrap(failure));
+    }
+    let ready = super::super::parse_ready(&bytes, intent)?;
+    if identity(ready.pid)?.coalition
+        != unit
+            .scope
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .coalition
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    unit.scope
+        .as_mut()
+        .ok_or(ToolError::ProtectionUnavailable)?
+        .check_resources()
+        .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
+    Ok(command_deadline)
+}
+
+async fn select_command(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    flags: &PhaseFlags,
+) -> Result<(tokio::time::Instant, Vec<u8>), ToolError> {
+    // The command runtime starts at selection, after storage and cache preparation.
+    let command_deadline = super::super::selection_phase::command_deadline(control.intent)
+        .ok_or(ToolError::Configuration)?;
+    flags.selecting.store(true, Ordering::Release);
+    stream
+        .get_mut()
+        .write_all(b"SELECT\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    stream
+        .get_mut()
+        .write_all(&super::super::selection_phase::encode_deadline(
+            command_deadline,
+        )?)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let deadline = command_deadline.min(control.go_deadline);
+    let mut selection_cancel = control.go_cancellation.clone();
+    super::super::selection_phase::wait(
+        deadline,
+        &mut selection_cancel,
+        super::super::selection_phase::receive(&mut *stream, deadline),
+    )
+    .await?;
+    flags.selecting.store(false, Ordering::Release);
+    let bytes = tokio::time::timeout_at(control.go_deadline, read_line_capped(stream, 2048))
+        .await
+        .map_err(|_| ToolError::Limit)??;
+    Ok((command_deadline, bytes))
+}
+
+async fn observe_worker(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    watcher: &Mutex<Scope>,
+    flags: &PhaseFlags,
+) -> Result<UnitReport, ToolError> {
+    let intent = control.intent;
+    stream
+        .get_mut()
+        .write_all(b"GO\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    crate::fault::guard_dispatched(intent);
+    crate::fault::guard_dispatch_gate(intent).await;
+    if primary_command(intent) {
+        use tokio::io::AsyncBufReadExt;
+        if stream
+            .fill_buf()
+            .await
+            .map_err(|_| ToolError::Operation)?
+            .first()
+            == Some(&b'C')
+        {
+            capture_selection(control, stream, watcher, flags).await?;
+        }
+    }
+    read_report(stream, intent, control.cached, control.completion_deadline).await
+}
+
+async fn capture_selection(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    watcher: &Mutex<Scope>,
+    flags: &PhaseFlags,
+) -> Result<(), ToolError> {
+    let marker = read_line_capped(&mut *stream, 64).await?;
+    if marker != b"CAPTURE_READY\n" {
+        return Err(ToolError::Operation);
+    }
+    watcher
+        .lock()
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .begin_capture(&control.intent.limits)?;
+    flags.selecting.store(true, Ordering::Release);
+    flags.payload.store(false, Ordering::Release);
+    let (deadline, report_deadline) =
+        super::super::selection_phase::capture_deadlines(control.completion_deadline)?;
+    stream
+        .get_mut()
+        .write_all(b"CAPTURE\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    stream
+        .get_mut()
+        .write_all(&super::super::selection_phase::encode_deadline(deadline)?)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let done = tokio::time::timeout_at(report_deadline, read_line_capped(stream, 64))
+        .await
+        .map_err(|_| ToolError::Timeout(String::new()))??;
+    if done != b"CAPTURE_DONE\n" {
+        return Err(ToolError::Operation);
+    }
+    flags.selecting.store(false, Ordering::Release);
+    flags.payload.store(true, Ordering::Release);
+    Ok(())
+}
+
+async fn read_report(
+    stream: &mut UnitStream,
+    intent: &EffectIntent,
+    cached: bool,
+    completion_deadline: tokio::time::Instant,
+) -> Result<UnitReport, ToolError> {
+    if !cached {
+        return super::super::read_worker_report(stream, intent)
+            .await
+            .map(|observation| (observation, super::super::CacheCandidate::Received));
+    }
+    let observation = super::super::read_observation_line(&mut *stream, intent).await?;
+    let candidate = super::super::CacheCandidate::Received;
+    let cache_status =
+        tokio::time::timeout_at(completion_deadline, read_line_capped(&mut *stream, 32))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    match cache_status.as_slice() {
+        b"CACHE_DONE\n" => {}
+        b"CACHE_FAILED\n" => {
+            let failure =
+                tokio::time::timeout_at(completion_deadline, read_line_capped(stream, 256))
+                    .await
+                    .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<BootstrapFailure>(&bytes).ok());
+            return Err(failure.map_or(
+                ToolError::GuardRejected(GuardStage::StorageCleanup),
+                ToolError::GuardBootstrap,
+            ));
+        }
+        _ => return Err(ToolError::Operation),
+    }
+    Ok((observation, candidate))
+}
+
+async fn sample_phases(
+    phases: impl Future<Output = Result<UnitReport, ToolError>>,
+    watcher: &Mutex<Scope>,
+    flags: &PhaseFlags,
+    intent: &EffectIntent,
+) -> Result<UnitReport, ToolError> {
+    tokio::pin!(phases);
+    let mut samples = tokio::time::interval(super::SUPERVISION_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut phases => break result,
+            _ = samples.tick() => {
+                if !flags.payload.load(Ordering::Acquire) {
+                    let checked = watcher
+                        .lock()
+                        .map_err(|_| ToolError::ProtectionUnavailable)
+                        .and_then(|mut watcher| {
+                            let limits = if flags.selecting.load(Ordering::Acquire) {
+                                selection_limits(&intent.limits)
+                            } else {
+                                intent.limits.clone()
+                            };
+                            watcher.apply_limits(limits);
+                            watcher.check_resources()
+                        });
+                    if let Err(error) = checked { break Err(error); }
+                }
+            }
+        }
+    }
+}
+
+async fn finish_unit(
+    control: &UnitControl<'_>,
+    unit: &mut Unit,
+    proxy: Option<crate::tools::network::Proxy>,
+    mut cache: Option<super::super::BuildCacheSession>,
+    result: Result<UnitReport, ToolError>,
+) -> Result<ToolObservation, ToolError> {
+    let intent = control.intent;
+    let stopped = tokio::time::timeout_at(control.completion_deadline, unit.stop())
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
         .and_then(|stopped| {
             stopped.map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
         });
+    control.timings.mark("teardown");
     let refusals = crate::tools::network::Proxy::settle(proxy, stopped).await?;
-    #[cfg(any(test, feature = "test-support"))]
-    crate::fault::git_write::storage_finished(&unit.root, intent.id)
-        .map_err(|_| ToolError::Operation)?;
+    super::super::cache_directory::finished(cache.as_ref())?;
+    // The coalition is empty, so the view is quiescent until the root is removed.
+    if let Some(directory) = cache
+        .as_mut()
+        .and_then(|session| session.directory.as_mut())
+    {
+        directory.upper = cap_fs_ext::DirExt::open_dir_nofollow(&unit._directory.dir, "cache").ok();
+    }
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
-    if result.is_ok() {
-        link.release_publisher(&mut unit)?;
-    }
-    match result {
+    let result = match result {
         Ok((mut observation, candidate)) => {
             crate::tools::network::annotate(&mut observation, refusals)?;
             super::super::publish_cache_candidate(
                 &mut observation,
                 candidate,
                 cache.take(),
-                completion_deadline,
+                control.completion_deadline,
             )
             .await;
             Ok(observation)
         }
         Err(error) => Err(error),
+    };
+    super::retire_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
+    control.timings.mark("cache");
+    crate::diagnostics::guard_timing(intent.call.label(), &control.timings.stages());
+    result
+}
+
+// Frees regenerable build caches, least recently used first, before the worker reaches the reserve.
+async fn evict_near_reserve(state: std::sync::Arc<crate::store::StateRoot>, root: PathBuf) {
+    let Ok(directory) = crate::tools::fs::open_directory(&root) else {
+        return;
+    };
+    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+    loop {
+        samples.tick().await;
+        if super::storage::free_bytes(&directory)
+            .is_ok_and(|free| free >= GUARD_DISK_EVICTION_BYTES)
+        {
+            continue;
+        }
+        let state = std::sync::Arc::clone(&state);
+        let evicted = tokio::task::spawn_blocking(move || {
+            state.evict_build_caches(GUARD_DISK_EVICTION_BYTES)
+        })
+        .await;
+        // Nothing left to evict: wait before scanning the cache directory again.
+        if !matches!(evicted, Ok(Ok(free)) if free >= GUARD_DISK_EVICTION_BYTES) {
+            tokio::time::sleep(EVICTION_RETRY).await;
+        }
     }
+}
+
+struct StageTimer {
+    started: std::time::Instant,
+    stages: Mutex<Vec<(&'static str, u128)>>,
+}
+
+impl StageTimer {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            stages: Mutex::new(Vec::new()),
+        }
+    }
+
+    // Each mark records the time since the previous one.
+    fn mark(&self, stage: &'static str) {
+        let elapsed = self.started.elapsed().as_millis();
+        if let Ok(mut stages) = self.stages.lock() {
+            let previous = stages.iter().map(|(_, elapsed)| elapsed).sum::<u128>();
+            stages.push((stage, elapsed.saturating_sub(previous)));
+        }
+    }
+
+    fn stages(&self) -> Vec<(&'static str, u128)> {
+        self.stages
+            .lock()
+            .map(|stages| stages.clone())
+            .unwrap_or_default()
+    }
+}
+
+// Clones the pinned Store tree as this unit's cache view; without a same-volume clone the command runs with an empty, unpublished view.
+fn clone_cache(
+    mut cache: Option<super::super::BuildCacheSession>,
+    unit: &Unit,
+    intent: &EffectIntent,
+) -> Result<Option<super::super::BuildCacheSession>, ToolError> {
+    let Some(directory) = cache
+        .as_ref()
+        .and_then(|session| session.directory.as_ref())
+    else {
+        return Ok(cache);
+    };
+    if crate::private_fs::clone_at(&directory.lower, &unit._directory.dir, "cache").is_err() {
+        return Ok(None);
+    }
+    let permit = unit._permit.as_ref().ok_or(ToolError::Operation)?;
+    super::super::cache_directory::started(cache.as_ref(), permit.id)?;
+    unit._directory
+        .dir
+        .set_permissions(
+            "cache",
+            cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(0o700)),
+        )
+        .map_err(|_| ToolError::Path)?;
+    super::publish_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
+    Ok(cache.take())
 }
 
 fn proxy_for(
@@ -1410,7 +1460,247 @@ fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolEr
     Ok((root, stream))
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
+fn claim_supervisor(root: &PrivateDirectory, stream: &mut UnixStream) -> Result<Scope, ToolError> {
+    let parent = peer(stream)?;
+    let own = identity(std::process::id())?;
+    if identity(parent)?.coalition == own.coalition {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let scope = Scope::new(own.coalition)?;
+    let mut record = recovery(root)?;
+    if record.boot != ffi::boot_session()? || record.supervisor.is_some() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    record.supervisor = Some(own);
+    write_record(&root.dir, RECOVERY_RECORD, &record)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ToolError::Operation)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ToolError::Operation)?;
+    serde_json::to_writer(&mut *stream, &own).map_err(|_| ToolError::Operation)?;
+    stream.write_all(b"\n").map_err(|_| ToolError::Operation)?;
+    Ok(scope)
+}
+
+fn receive_task(stream: &mut UnixStream) -> Result<Task, ToolError> {
+    let task = {
+        let mut reader = std::io::BufReader::new(stream);
+        super::super::read_task(&mut reader)?
+    };
+    if task.command_deadline.is_some() {
+        return Err(ToolError::Configuration);
+    }
+    if let Some(cache) = &task.cache {
+        cache.validate(&task.intent, &task.config)?;
+    }
+    Ok(task)
+}
+
+fn receive_worker_input(
+    stream: &mut UnixStream,
+    task: &Task,
+) -> Result<Option<Vec<u8>>, ToolError> {
+    if task.handover.is_none() {
+        return Ok(None);
+    }
+    stream
+        .write_all(b"WORKER_READY\n")
+        .map_err(|_| ToolError::Operation)?;
+    let bytes = crate::tools::guard::transfer::read_frame(
+        stream,
+        crate::session::worker::WORKER_DATA_BYTES,
+    )?;
+    crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
+    Ok(Some(bytes))
+}
+
+async fn await_selection(
+    input: &mut tokio::net::unix::OwnedReadHalf,
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    limits: &crate::tools::types::ToolLimits,
+) -> Result<([u8; 8], std::time::Instant), ToolError> {
+    output
+        .write_all(b"SELECT_READY\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let mut select = [0; 7];
+    input
+        .read_exact(&mut select)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    if select != *b"SELECT\n" {
+        return Err(ToolError::Configuration);
+    }
+    let mut frame = [0; 8];
+    input
+        .read_exact(&mut frame)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let deadline = super::super::selection_phase::decode_command_deadline(frame, limits)?;
+    Ok((frame, deadline))
+}
+
+// Any other byte, or the controller closing the stream, cancels the worker.
+async fn read_go(
+    listener: GoListener,
+    go: tokio::sync::oneshot::Sender<()>,
+    watched: Cancellation,
+) {
+    let GoListener {
+        mut input,
+        capture_go,
+    } = listener;
+    let mut bytes = [0; 3];
+    if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
+        let _ = go.send(());
+        let mut capture = [0; 8];
+        if input.read_exact(&mut capture).await.is_ok() {
+            if capture == *b"CAPTURE\n" {
+                let mut frame = [0; 8];
+                if input.read_exact(&mut frame).await.is_ok()
+                    && let Ok(deadline) = super::super::selection_phase::decode_deadline(frame)
+                {
+                    let _ = capture_go.send(deadline);
+                }
+            }
+            let _ = input.read(&mut [0; 1]).await;
+        }
+    }
+    watched.cancel();
+}
+
+type CommandBefore = (
+    crate::tools::fs::command::CommandBaseline,
+    crate::tools::fs::CommandSelection,
+);
+
+fn command_baseline(root: &Path) -> Result<CommandBefore, ToolError> {
+    crate::private_fs::clone_at(
+        &crate::tools::fs::open_directory(&root.join("workspace"))?,
+        &crate::tools::fs::open_directory(root)?,
+        "base",
+    )
+    .map_err(|_| ToolError::Operation)?;
+    Ok((
+        crate::tools::fs::command_baseline(&root.join("base"), &root.join("workspace"))?,
+        crate::tools::fs::CommandSelection::read(root)?,
+    ))
+}
+
+fn capture_changeset(
+    observation: &ToolObservation,
+    (before, selection): &CommandBefore,
+    workspace: &Path,
+    capture_deadline: Option<std::time::Instant>,
+) -> Result<
+    (
+        crate::tools::CommandChangeset,
+        crate::tools::types::CommandSelectionSummary,
+    ),
+    ToolError,
+> {
+    if observation.disposition == ToolDisposition::Limit {
+        Ok((crate::tools::CommandChangeset::default(), selection.summary))
+    } else {
+        crate::tools::fs::selected_command_changeset(
+            workspace,
+            before,
+            selection,
+            capture_deadline.ok_or(ToolError::Operation)?,
+        )
+    }
+}
+
+fn record_capture(observation: &mut ToolObservation, captured: Result<String, ToolError>) {
+    match captured {
+        Ok(output) => {
+            observation.output = output;
+            if !observation.valid() {
+                observation.disposition = ToolDisposition::Limit;
+                observation.limit_cause = Some(crate::tools::LimitCause::Resource);
+                observation.enforcement_cause = None;
+                observation.spill = None;
+                observation.output = "Command changeset exceeded its reserved capacity".into();
+            }
+        }
+        Err(error) => {
+            let (disposition, _, cause, limit_cause) =
+                crate::tools::dispatch::outcome(&observation.intent, Err(error));
+            observation.disposition = disposition;
+            observation.enforcement_cause = cause;
+            observation.limit_cause = limit_cause;
+            observation.spill = None;
+            observation.output = "Command changeset could not be captured".into();
+        }
+    }
+}
+
+fn teardown_stage<T>(
+    cleanup: &Result<(), ToolError>,
+    storage_cleanup: &Result<(), ToolError>,
+    result: &Result<T, ToolError>,
+) -> Option<super::super::BootstrapStage> {
+    if cleanup.is_err() {
+        Some(super::super::BootstrapStage::ProcessStop)
+    } else if storage_cleanup.is_err() {
+        Some(super::super::BootstrapStage::StorageCleanup)
+    } else {
+        match result {
+            Err(ToolError::GuardRejected(GuardStage::LauncherReap)) => {
+                Some(super::super::BootstrapStage::LauncherReap)
+            }
+            Err(ToolError::GuardRejected(GuardStage::OutputEof)) => {
+                Some(super::super::BootstrapStage::StderrDrain)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn cache_status(result: &Result<ToolObservation, ToolError>) -> Result<Vec<u8>, ToolError> {
+    Ok(match result {
+        Ok(_) => b"CACHE_DONE\n".to_vec(),
+        Err(error) => {
+            let failure = match error {
+                ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
+                _ => serde_json::to_vec(&BootstrapFailure::at(
+                    super::super::BootstrapStage::StorageCleanup,
+                )),
+            }
+            .map_err(|_| ToolError::Operation)?;
+            [&b"CACHE_FAILED\n"[..], failure.as_slice(), &b"\n"[..]].concat()
+        }
+    })
+}
+
+fn report_bytes(
+    result: &Result<ToolObservation, ToolError>,
+    stage: &super::super::BootstrapStage,
+) -> Result<Vec<u8>, ToolError> {
+    match result {
+        Ok(observation) => crate::tools::spill::encode_report(observation),
+        Err(ToolError::GuardBootstrap(failure)) => {
+            serde_json::to_vec(failure).map_err(|_| ToolError::Operation)
+        }
+        Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone()))
+            .map_err(|_| ToolError::Operation),
+    }
+    .map_err(|_| ToolError::Operation)
+}
+
+fn report_failure(stream: &mut UnixStream, error: &ToolError, stage: super::super::BootstrapStage) {
+    let failure = match error {
+        ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
+        _ => serde_json::to_vec(&BootstrapFailure::at(stage)),
+    };
+    if let Ok(mut bytes) = failure {
+        bytes.push(b'\n');
+        let _ = stream.write_all(&bytes);
+    }
+}
+
 pub(super) fn helper_main() -> std::process::ExitCode {
     super::super::bound_worker_output();
     let mut diagnostic = None;
@@ -1422,62 +1712,31 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         let (root, mut stream) = connect_control(path)?;
         diagnostic = Some(stream.try_clone().map_err(|_| ToolError::Operation)?);
         stage = super::super::BootstrapStage::Capabilities;
-        let parent = peer(&stream)?;
-        let own = identity(std::process::id())?;
-        if identity(parent)?.coalition == own.coalition {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let mut scope = Scope::new(own.coalition)?;
-        let mut record = recovery(&root)?;
-        if record.boot != ffi::boot_session()? || record.supervisor.is_some() {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        record.supervisor = Some(own);
-        write_record(&root.dir, RECOVERY_RECORD, &record)?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|_| ToolError::Operation)?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .map_err(|_| ToolError::Operation)?;
-        serde_json::to_writer(&mut stream, &own).map_err(|_| ToolError::Operation)?;
-        stream.write_all(b"\n").map_err(|_| ToolError::Operation)?;
+        let mut scope = claim_supervisor(&root, &mut stream)?;
         stage = super::super::BootstrapStage::Admission;
-        let task = {
-            let mut reader = std::io::BufReader::new(&mut stream);
-            super::super::read_task(&mut reader)?
-        };
-        if task.command_deadline.is_some() {
-            return Err(ToolError::Configuration);
-        }
-        if let Some(cache) = &task.cache {
-            cache.validate(&task.intent, &task.config)?;
-        }
-        let git_stage = task.git_stage;
-        #[cfg(any(test, feature = "test-support"))]
-        let git_fault = task.git_fault;
+        let task = receive_task(&mut stream)?;
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let worker_input = if task.handover.is_some() {
-            stream
-                .write_all(b"WORKER_READY\n")
-                .map_err(|_| ToolError::Operation)?;
-            let bytes = crate::tools::guard::transfer::read_frame(
-                &mut stream,
-                crate::session::worker::WORKER_DATA_BYTES,
-            )?;
-            crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
-            Some(bytes)
-        } else {
-            None
-        };
+        let worker_input = receive_worker_input(&mut stream, &task)?;
         let proxy_port = task.proxy_port;
+        let editor_tree = task.editor_tree.clone();
+        let policy_grants = task.policy_grants.clone();
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
+        let mut supervised = Supervised {
+            runtime,
+            intent,
+            cached: cache.is_some(),
+            root: path.parent().ok_or(ToolError::Path)?,
+            scope,
+            proxy_port,
+            editor_tree,
+            policy_grants,
+        };
         stream
             .set_read_timeout(None)
             .map_err(|_| ToolError::Operation)?;
@@ -1492,491 +1751,357 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             .build()
             .map_err(|_| ToolError::Operation)?;
         diagnostic = None;
-        reactor.block_on(async {
-            let stream =
-                tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
-            let (mut input, mut output) = stream.into_split();
-            let cancellation = Cancellation::new();
-            let mut reader = None;
-            let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
-            let mut command_before = None;
-            let (capture_go, mut receive_capture) = tokio::sync::oneshot::channel();
-            let (plan_sender, plan_receiver) = tokio::sync::oneshot::channel();
-            let (relayed_sender, relayed_receiver) = tokio::sync::oneshot::channel();
-            let publishing = git_stage == Some(GitStage::Publish);
-            let result_cap = intent.limits.result_bytes as usize;
-            let result = async {
-                stage = super::super::BootstrapStage::Workspace;
-                let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if intent.call.is_git() && git_stage != Some(GitStage::Publish) {
-                    let root = path.parent().ok_or(ToolError::Path)?;
-                    let volumes = super::storage::prepare_git_storage(root).await?;
-                    git_storage_fault(root, &volumes, &intent)?;
-                    Some(volumes)
-                } else if intent.call.is_process() {
-                    Some(
-                        prepare_command_storage(
-                            path.parent().ok_or(ToolError::Path)?,
-                            &runtime,
-                            &intent.limits,
-                            primary_command(&intent),
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                };
-                if let Some(cache) = &cache {
-                    output
-                        .write_all(b"CACHE_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let mut length = [0; 8];
-                    input
-                        .read_exact(&mut length)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let length = u64::from_le_bytes(length);
-                    if length > cache.view_bytes {
-                        return Err(ToolError::Limit);
-                    }
-                    if length > 0 {
-                        let volumes = storage.as_ref().ok_or(ToolError::Operation)?;
-                        let mut archive = (&mut input).take(length);
-                        crate::store::restore_archive_async_with_limit(
-                            &mut archive,
-                            volumes.get(2).ok_or(ToolError::Operation)?,
-                            &cache.identity,
-                            &cache.exclusions,
-                            cache.view_bytes,
-                        )
-                        .await
-                        .map_err(super::super::map_cache_error)?;
-                        drop(archive);
-                    }
-                }
-                let command_deadline = if primary_command(&intent) {
-                    output
-                        .write_all(b"SELECT_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let mut select = [0; 7];
-                    input
-                        .read_exact(&mut select)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    if select != *b"SELECT\n" {
-                        return Err(ToolError::Configuration);
-                    }
-                    let mut frame = [0; 8];
-                    input
-                        .read_exact(&mut frame)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let deadline = super::super::selection_phase::decode_command_deadline(
-                        frame,
-                        &intent.limits,
-                    )?;
-                    let source = crate::tools::fs::open_directory(&runtime.workspace)?;
-                    let resources =
-                        crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
-                    let target = storage
-                        .as_ref()
-                        .and_then(|volumes| volumes.first())
-                        .ok_or(ToolError::Operation)?;
-                    let selected = crate::tools::fs::prepare_command(
-                        &source,
-                        target,
-                        &resources,
-                        &runtime.config,
-                        deadline,
-                    );
-                    let message = super::super::selection_phase::response(&selected);
-                    output
-                        .write_all(message)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    selected?;
-                    Some(frame)
-                } else {
-                    None
-                };
-                let (go, receive_go) = tokio::sync::oneshot::channel();
-                let watched = cancellation.clone();
-                reader = Some(tokio::spawn(async move {
-                    if publishing {
-                        match super::git_write::receive_plan(&mut input, result_cap).await {
-                            Ok(plan) => {
-                                let _ = plan_sender.send(plan);
-                            }
-                            Err(_) => {
-                                watched.cancel();
-                                return;
-                            }
-                        }
-                    }
-                    let mut bytes = [0; 3];
-                    if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
-                        let _ = go.send(());
-                        let mut capture = [0; 8];
-                        if input.read_exact(&mut capture).await.is_ok() {
-                            if capture == *b"CAPTURE\n" {
-                                let mut frame = [0; 8];
-                                if input.read_exact(&mut frame).await.is_ok()
-                                    && let Ok(deadline) =
-                                        super::super::selection_phase::decode_deadline(frame)
-                                {
-                                    let _ = capture_go.send(deadline);
-                                }
-                            } else if capture == *super::git_write::RELAYED {
-                                let _ = relayed_sender.send(());
-                            }
-                            let _ = input.read(&mut [0; 1]).await;
-                        }
-                    }
-                    watched.cancel();
-                }));
-                if primary_command(&intent) {
-                    let root = path.parent().ok_or(ToolError::Path)?;
-                    command_before = Some((
-                        crate::tools::fs::command_snapshot(&root.join("workspace"))?,
-                        crate::tools::fs::CommandSelection::read(root)?,
-                    ));
-                }
-                capture.complete();
-                stage = super::super::BootstrapStage::Capabilities;
-                super::execute_worker(
-                    &runtime,
-                    &intent,
-                    cancellation,
-                    &mut scope,
-                    &mut output,
-                    super::GoGate {
-                        receive_go,
-                        git_stage,
-                        git_input: publishing.then_some(plan_receiver),
-                        #[cfg(any(test, feature = "test-support"))]
-                        git_fault,
-                    },
-                    (
-                        path.parent().ok_or(ToolError::Path)?,
-                        command_deadline,
-                        proxy_port,
-                    ),
-                )
-                .await
-            }
-            .await;
-            let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
-            let teardown = scope
-                .teardown
-                .unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
-            let cleanup = scope.stop_until(Some(std::process::id()), teardown).await;
-            capture.finish(cleanup.is_ok());
-            let capture_started = cleanup.is_ok() && command_before.is_some() && result.is_ok();
-            let mut capture_deadline = None;
-            let capture_handshake = async {
-                if capture_started {
-                    output
-                        .write_all(b"CAPTURE_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    capture_deadline = Some(
-                        tokio::time::timeout(
-                            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
-                            &mut receive_capture,
-                        )
-                        .await
-                        .map_err(|_| ToolError::Timeout(String::new()))?
-                        .map_err(|_| ToolError::Operation)?,
-                    );
-                    scope.begin_capture(&intent.limits)?;
-                }
-                Ok(())
-            }
-            .await;
-            let mut git_frame = None;
-            let result = result.map(|mut worker| {
-                git_frame = worker.frame.take();
-                if let Err(error) = capture_handshake {
-                    let (disposition, output, cause, limit_cause) =
-                        crate::tools::dispatch::outcome(&intent, Err(error));
-                    worker.observation.disposition = disposition;
-                    worker.observation.output = output;
-                    worker.observation.spill = None;
-                    worker.observation.enforcement_cause = cause;
-                    worker.observation.limit_cause = limit_cause;
-                    command_before = None;
-                }
-                worker
-            });
-            let mut result = result.and_then(
-                |super::WorkerOutput {
-                     mut observation,
-                     windows,
-                     ..
-                 }| {
-                    observation.cache_update = if cache.is_some() {
-                        crate::tools::CacheUpdate::NotAttempted
-                    } else {
-                        crate::tools::CacheUpdate::NotApplicable
-                    };
-                    if cleanup.is_ok()
-                        && let Some((before, selection)) = &command_before
-                        && let Ok(command) =
-                            serde_json::from_str::<CommandResult>(&observation.output)
-                    {
-                        let captured = if observation.disposition == ToolDisposition::Limit {
-                            Ok((crate::tools::CommandChangeset::default(), selection.summary))
-                        } else {
-                            crate::tools::fs::selected_command_changeset(
-                                &path.parent().ok_or(ToolError::Path)?.join("workspace"),
-                                before,
-                                selection,
-                                capture_deadline.ok_or(ToolError::Operation)?,
-                            )
-                        }
-                        .and_then(|(changeset, summary)| {
-                            let windows = windows.ok_or(ToolError::Operation)?;
-                            crate::tools::process::fit_selected_command(
-                                command.exit_code,
-                                &windows.stdout,
-                                &windows.stderr,
-                                changeset,
-                                intent.limits.result_bytes as usize,
-                                if runtime.hook_stdin.is_some() {
-                                    crate::tools::process::Truncation::Refuse
-                                } else {
-                                    crate::tools::process::Truncation::Allow
-                                },
-                                summary,
-                            )
-                        });
-                        match captured {
-                            Ok(output) => {
-                                observation.output = output;
-                                if !observation.valid() {
-                                    observation.disposition = ToolDisposition::Limit;
-                                    observation.limit_cause =
-                                        Some(crate::tools::LimitCause::Resource);
-                                    observation.enforcement_cause = None;
-                                    observation.spill = None;
-                                    observation.output =
-                                        "Command changeset exceeded its reserved capacity".into();
-                                }
-                            }
-                            Err(error) => {
-                                let (disposition, _, cause, limit_cause) =
-                                    crate::tools::dispatch::outcome(
-                                        &observation.intent,
-                                        Err(error),
-                                    );
-                                observation.disposition = disposition;
-                                observation.enforcement_cause = cause;
-                                observation.limit_cause = limit_cause;
-                                observation.spill = None;
-                                observation.output =
-                                    "Command changeset could not be captured".into();
-                            }
-                        }
-                    }
-                    Ok(observation)
-                },
-            );
-            if capture_started && output.write_all(b"CAPTURE_DONE\n").await.is_err() {
-                result = Err(ToolError::Operation);
-            }
-            let mut response_sent = false;
-            let mut cache_transfer_failed = false;
-            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result) {
-                let transfer = async {
-                    let bytes = crate::tools::spill::encode_report(observation)?;
-                    output
-                        .write_all(&bytes)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    output
-                        .write_all(b"\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    response_sent = true;
-                    if cleanup.is_ok() && observation.cache_publication_eligible() {
-                        if cache.candidate_bytes == 0 {
-                            output
-                                .write_all(b"CACHE_REJECTED\n")
-                                .await
-                                .map_err(|_| ToolError::Operation)?;
-                        } else {
-                            match crate::store::archive_size_with_limit(
-                                volumes.get(2).ok_or(ToolError::Operation)?,
-                                &cache.identity,
-                                &cache.exclusions,
-                                cache.candidate_bytes,
-                            ) {
-                                Ok(size) => {
-                                    output
-                                        .write_all(b"CACHE_CANDIDATE\n")
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                    output
-                                        .write_all(&size.to_le_bytes())
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                    let captured = crate::store::capture_archive_async_with_limit(
-                                        volumes.get(2).ok_or(ToolError::Operation)?,
-                                        &cache.identity,
-                                        &cache.exclusions,
-                                        &mut output,
-                                        cache.candidate_bytes,
-                                    )
-                                    .await
-                                    .map_err(super::super::map_cache_error)?;
-                                    if captured != size {
-                                        return Err(ToolError::Operation);
-                                    }
-                                }
-                                Err(crate::store::StoreError::StorageFull) => {
-                                    output
-                                        .write_all(b"CACHE_REJECTED\n")
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                }
-                                Err(_) => {
-                                    output
-                                        .write_all(b"CACHE_FAILED\n")
-                                        .await
-                                        .map_err(|_| ToolError::Operation)?;
-                                }
-                            }
-                        }
-                    } else {
-                        output
-                            .write_all(b"CACHE_REJECTED\n")
-                            .await
-                            .map_err(|_| ToolError::Operation)?;
-                    }
-                    Ok::<(), ToolError>(())
-                }
-                .await;
-                cache_transfer_failed = transfer.is_err();
-            }
-            drop(storage);
-            let mut storage_check = None;
-            let storage_cleanup = if cleanup.is_ok() {
-                let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
-                let result =
-                    cleanup_storage_until(path.parent().ok_or(ToolError::Path)?, teardown).await;
-                capture.finish(result.is_ok());
-                result.map_err(|failed| {
-                    storage_check = Some(failed.check);
-                    failed.error
-                })
-            } else {
-                Err(ToolError::ProtectionUnavailable)
-            };
-            if cache_transfer_failed {
-                if let Some(reader) = reader {
-                    reader.abort();
-                    let _ = reader.await;
-                }
-                output.shutdown().await.map_err(|_| ToolError::Operation)?;
-                return Err(ToolError::Operation);
-            }
-            let teardown_stage = if cleanup.is_err() {
-                Some(super::super::BootstrapStage::ProcessStop)
-            } else if storage_cleanup.is_err() {
-                Some(super::super::BootstrapStage::StorageCleanup)
-            } else {
-                match &result {
-                    Err(ToolError::GuardRejected(GuardStage::LauncherReap)) => {
-                        Some(super::super::BootstrapStage::LauncherReap)
-                    }
-                    Err(ToolError::GuardRejected(GuardStage::OutputEof)) => {
-                        Some(super::super::BootstrapStage::StderrDrain)
-                    }
-                    _ => None,
-                }
-            };
-            let result = match (cleanup.and(storage_cleanup).and(result), teardown_stage) {
-                (Err(_), Some(stage)) => {
-                    let check = storage_check
-                        .filter(|_| matches!(stage, super::super::BootstrapStage::StorageCleanup));
-                    Err(ToolError::GuardBootstrap(BootstrapFailure {
-                        stage,
-                        check,
-                        detail: None,
-                        namespace_remedy: None,
-                    }))
-                }
-                (result, _) => result,
-            };
-            if response_sent {
-                let bytes = match &result {
-                    Ok(_) => b"CACHE_DONE\n".to_vec(),
-                    Err(error) => {
-                        let failure = match error {
-                            ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-                            _ => serde_json::to_vec(&BootstrapFailure::at(
-                                super::super::BootstrapStage::StorageCleanup,
-                            )),
-                        }
-                        .map_err(|_| ToolError::Operation)?;
-                        [&b"CACHE_FAILED\n"[..], failure.as_slice(), &b"\n"[..]].concat()
-                    }
-                };
-                output
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-            } else {
-                let bytes = match &result {
-                    Ok(observation) => crate::tools::spill::encode_report(observation),
-                    Err(ToolError::GuardBootstrap(failure)) => {
-                        serde_json::to_vec(failure).map_err(|_| ToolError::Operation)
-                    }
-                    Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone()))
-                        .map_err(|_| ToolError::Operation),
-                }
-                .map_err(|_| ToolError::Operation)?;
-                output
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                output
-                    .write_all(b"\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-            }
-            if result.is_ok()
-                && let Some(frame) = &git_frame
-            {
-                super::git_write::send_plan(&mut output, frame, relayed_receiver).await?;
-            }
-            // The reader owns the relay acknowledgement, so it outlives the frame send.
-            if let Some(reader) = reader {
-                reader.abort();
-                let _ = reader.await;
-            }
-            output.shutdown().await.map_err(|_| ToolError::Operation)?;
-            result.map(|_| ())
-        })
+        reactor.block_on(supervise(&mut supervised, stream, &mut stage))
     })();
     if let Err(error) = &result
         && let Some(stream) = &mut diagnostic
     {
-        let failure = match error {
-            ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-            _ => serde_json::to_vec(&BootstrapFailure::at(stage)),
-        };
-        if let Ok(mut bytes) = failure {
-            bytes.push(b'\n');
-            let _ = stream.write_all(&bytes);
-        }
+        report_failure(stream, error, stage);
     }
     if result.is_ok() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE
+    }
+}
+
+struct Supervised<'a> {
+    runtime: ToolRuntime,
+    intent: EffectIntent,
+    cached: bool,
+    root: &'a Path,
+    scope: Scope,
+    proxy_port: Option<u16>,
+    editor_tree: Option<PathBuf>,
+    policy_grants: Option<Vec<crate::tools::toolchains::RuntimeGrant>>,
+}
+
+// What the launch left behind, kept even when it failed part way.
+#[derive(Default)]
+struct Launched {
+    reader: Option<tokio::task::JoinHandle<()>>,
+    storage: Option<Vec<cap_std::fs::Dir>>,
+    command_before: Option<CommandBefore>,
+}
+
+struct GoListener {
+    input: tokio::net::unix::OwnedReadHalf,
+    capture_go: tokio::sync::oneshot::Sender<std::time::Instant>,
+}
+
+async fn supervise(
+    supervised: &mut Supervised<'_>,
+    stream: UnixStream,
+    stage: &mut super::super::BootstrapStage,
+) -> Result<(), ToolError> {
+    let stream = tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
+    let (input, mut output) = stream.into_split();
+    let mut launched = Launched::default();
+    let (capture_go, mut receive_capture) = tokio::sync::oneshot::channel();
+    let result = launch_worker(
+        supervised,
+        &mut launched,
+        stage,
+        &mut output,
+        GoListener { input, capture_go },
+    )
+    .await;
+    let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
+    let teardown = supervised
+        .scope
+        .teardown
+        .unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
+    let cleanup = supervised
+        .scope
+        .stop_until(Some(std::process::id()), teardown)
+        .await;
+    capture.finish(cleanup.is_ok());
+    let capture_started = cleanup.is_ok() && launched.command_before.is_some() && result.is_ok();
+    let (capture_handshake, capture_deadline) = if capture_started {
+        begin_capture(supervised, &mut output, &mut receive_capture).await
+    } else {
+        (Ok(()), None)
+    };
+    let mut result = result
+        .map(|worker| {
+            interrupted_capture(worker, capture_handshake, &supervised.intent, &mut launched)
+        })
+        .and_then(|worker| {
+            captured_observation(
+                supervised,
+                worker,
+                cleanup.as_ref().ok().and(launched.command_before.as_ref()),
+                capture_deadline,
+            )
+        });
+    if capture_started && output.write_all(b"CAPTURE_DONE\n").await.is_err() {
+        result = Err(ToolError::Operation);
+    }
+    let (response_sent, cache_transfer_failed) = match (supervised.cached, &result) {
+        (true, Ok(observation)) => {
+            let sent = send_report(&mut output, observation).await.is_ok();
+            (sent, !sent)
+        }
+        _ => (false, false),
+    };
+    drop(launched.storage);
+    let (storage_cleanup, storage_check) = detach_storage(supervised.root, &cleanup);
+    if cache_transfer_failed {
+        stop_reader(launched.reader).await;
+        output.shutdown().await.map_err(|_| ToolError::Operation)?;
+        return Err(ToolError::Operation);
+    }
+    let result = bootstrap_result(cleanup, storage_cleanup, result, storage_check);
+    if response_sent {
+        output
+            .write_all(&cache_status(&result)?)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+    } else {
+        send_report_line(&mut output, &report_bytes(&result, stage)?).await?;
+    }
+    stop_reader(launched.reader).await;
+    output.shutdown().await.map_err(|_| ToolError::Operation)?;
+    result.map(|_| ())
+}
+
+async fn launch_worker(
+    supervised: &mut Supervised<'_>,
+    launched: &mut Launched,
+    stage: &mut super::super::BootstrapStage,
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    mut listener: GoListener,
+) -> Result<super::WorkerOutput, ToolError> {
+    let (runtime, intent, root) = (&supervised.runtime, &supervised.intent, supervised.root);
+    *stage = super::super::BootstrapStage::Workspace;
+    let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
+    launched.storage = if intent.call.is_process() {
+        Some(prepare_command_storage(
+            root,
+            runtime,
+            &intent.limits,
+            primary_command(intent) || intent.target.editor(),
+            supervised.cached,
+        )?)
+    } else {
+        None
+    };
+    if launched.storage.is_some() {
+        supervised.scope.watch_disk(root)?;
+    }
+    let command_deadline = if primary_command(intent) {
+        let (frame, deadline) =
+            await_selection(&mut listener.input, output, &intent.limits).await?;
+        let source = crate::tools::fs::open_directory(&runtime.workspace)?;
+        let resources = crate::tools::fs::open_directory(root)?;
+        let target = launched
+            .storage
+            .as_ref()
+            .and_then(|volumes| volumes.first())
+            .ok_or(ToolError::Operation)?;
+        let selected = crate::tools::fs::prepare_command(
+            &source,
+            target,
+            &resources,
+            &runtime.config,
+            deadline,
+        );
+        let message = super::super::selection_phase::response(&selected);
+        output
+            .write_all(message)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        selected?;
+        Some(frame)
+    } else {
+        None
+    };
+    let cancellation = Cancellation::new();
+    let (go, receive_go) = tokio::sync::oneshot::channel();
+    let watched = cancellation.clone();
+    launched.reader = Some(tokio::spawn(read_go(listener, go, watched)));
+    if primary_command(intent) {
+        launched.command_before = Some(command_baseline(root)?);
+    }
+    capture.complete();
+    *stage = super::super::BootstrapStage::Capabilities;
+    super::execute_worker(
+        runtime,
+        intent,
+        cancellation,
+        super::WorkerLink {
+            scope: &mut supervised.scope,
+            control: output,
+            receive_go,
+        },
+        (
+            root,
+            command_deadline,
+            supervised.proxy_port,
+            supervised.editor_tree.as_deref(),
+            supervised.policy_grants.take(),
+        ),
+    )
+    .await
+}
+
+async fn begin_capture(
+    supervised: &mut Supervised<'_>,
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    receive_capture: &mut tokio::sync::oneshot::Receiver<std::time::Instant>,
+) -> (Result<(), ToolError>, Option<std::time::Instant>) {
+    let mut capture_deadline = None;
+    let handshake = async {
+        output
+            .write_all(b"CAPTURE_READY\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        capture_deadline = Some(
+            tokio::time::timeout(
+                Duration::from_millis(u64::from(supervised.intent.limits.runtime_ms)),
+                receive_capture,
+            )
+            .await
+            .map_err(|_| ToolError::Timeout(String::new()))?
+            .map_err(|_| ToolError::Operation)?,
+        );
+        supervised.scope.begin_capture(&supervised.intent.limits)
+    }
+    .await;
+    (handshake, capture_deadline)
+}
+
+fn interrupted_capture(
+    mut worker: super::WorkerOutput,
+    handshake: Result<(), ToolError>,
+    intent: &EffectIntent,
+    launched: &mut Launched,
+) -> super::WorkerOutput {
+    if let Err(error) = handshake {
+        let (disposition, output, cause, limit_cause) =
+            crate::tools::dispatch::outcome(intent, Err(error));
+        worker.observation.disposition = disposition;
+        worker.observation.output = output;
+        worker.observation.spill = None;
+        worker.observation.enforcement_cause = cause;
+        worker.observation.limit_cause = limit_cause;
+        launched.command_before = None;
+    }
+    worker
+}
+
+fn captured_observation(
+    supervised: &Supervised<'_>,
+    super::WorkerOutput {
+        mut observation,
+        windows,
+        ..
+    }: super::WorkerOutput,
+    command_before: Option<&CommandBefore>,
+    capture_deadline: Option<std::time::Instant>,
+) -> Result<ToolObservation, ToolError> {
+    let (runtime, intent) = (&supervised.runtime, &supervised.intent);
+    observation.cache_update = if supervised.cached {
+        crate::tools::CacheUpdate::NotAttempted
+    } else {
+        crate::tools::CacheUpdate::NotApplicable
+    };
+    if let Some(baseline) = command_before
+        && let Ok(command) = serde_json::from_str::<CommandResult>(&observation.output)
+    {
+        let captured = capture_changeset(
+            &observation,
+            baseline,
+            &supervised.root.join("workspace"),
+            capture_deadline,
+        )
+        .and_then(|(changeset, summary)| {
+            let windows = windows.ok_or(ToolError::Operation)?;
+            crate::tools::process::fit_selected_command(
+                crate::tools::process::CommandRun {
+                    exit_code: command.exit_code,
+                    stdout: &windows.stdout,
+                    stderr: &windows.stderr,
+                },
+                changeset,
+                intent.limits.result_bytes as usize,
+                if runtime.hook_stdin.is_some() {
+                    crate::tools::process::Truncation::Refuse
+                } else {
+                    crate::tools::process::Truncation::Allow
+                },
+                summary,
+            )
+        });
+        record_capture(&mut observation, captured);
+    }
+    Ok(observation)
+}
+
+async fn send_report(
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    observation: &ToolObservation,
+) -> Result<(), ToolError> {
+    let bytes = crate::tools::spill::encode_report(observation)?;
+    send_report_line(output, &bytes).await
+}
+
+async fn send_report_line(
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    bytes: &[u8],
+) -> Result<(), ToolError> {
+    output
+        .write_all(bytes)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    output
+        .write_all(b"\n")
+        .await
+        .map_err(|_| ToolError::Operation)
+}
+
+fn detach_storage(
+    root: &Path,
+    cleanup: &Result<(), ToolError>,
+) -> (Result<(), ToolError>, Option<super::super::GuardCheck>) {
+    if cleanup.is_err() {
+        return (Err(ToolError::ProtectionUnavailable), None);
+    }
+    let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
+    let result = cleanup_storage(root);
+    capture.finish(result.is_ok());
+    match result {
+        Ok(()) => (Ok(()), None),
+        Err(failed) => (Err(failed.error), Some(failed.check)),
+    }
+}
+
+async fn stop_reader(reader: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(reader) = reader {
+        reader.abort();
+        let _ = reader.await;
+    }
+}
+
+fn bootstrap_result(
+    cleanup: Result<(), ToolError>,
+    storage_cleanup: Result<(), ToolError>,
+    result: Result<ToolObservation, ToolError>,
+    storage_check: Option<super::super::GuardCheck>,
+) -> Result<ToolObservation, ToolError> {
+    let teardown_stage = teardown_stage(&cleanup, &storage_cleanup, &result);
+    match (cleanup.and(storage_cleanup).and(result), teardown_stage) {
+        (Err(_), Some(stage)) => {
+            let check = storage_check
+                .filter(|_| matches!(stage, super::super::BootstrapStage::StorageCleanup));
+            Err(ToolError::GuardBootstrap(BootstrapFailure {
+                stage,
+                check,
+                detail: None,
+                namespace_remedy: None,
+            }))
+        }
+        (result, _) => result,
     }
 }
 
@@ -1987,9 +2112,7 @@ mod tests {
         crate::tools::guard::selection_phase::tests::protocol_outcomes().await;
     }
 
-    use super::super::storage::{
-        FILL_CHUNK_BYTES, STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage,
-    };
+    use super::super::storage::prepare_storage;
     use super::super::{ProfileKind, SYS_COALITION_INFO, SYS_PERSONA, SeatbeltProfile};
     use super::*;
     use crate::tools::ToolCall;
@@ -2011,6 +2134,7 @@ mod tests {
             timebase: ffi::Timebase { numer: 3, denom: 2 },
             capture_cpu: None,
             limits: ToolLimits::default(),
+            disk: None,
             teardown: None,
         };
         assert!(scope.cpu_elapsed(supervisor, prior).unwrap() > CPU_LIMIT.as_nanos());
@@ -2074,6 +2198,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             limits: ToolLimits {
                 cache_transfer_ms: 1_000,
@@ -2166,7 +2291,7 @@ mod tests {
         enum Case {
             Missing,
             Malformed,
-            Version,
+            Unknown,
             Identity,
             Boot,
             Oversized,
@@ -2180,7 +2305,7 @@ mod tests {
         for case in [
             Case::Missing,
             Case::Malformed,
-            Case::Version,
+            Case::Unknown,
             Case::Identity,
             Case::Boot,
             Case::Oversized,
@@ -2198,17 +2323,16 @@ mod tests {
             let directory = open_directory(&root, false).unwrap();
             let lock = hold_liveness_lock(&directory).unwrap();
             let mut record = Recovery {
-                version: 1,
                 root: crate::tools::fs::identity(&directory.dir).unwrap(),
                 boot: uuid::Uuid::now_v7(),
                 supervisor: None,
             };
             match case {
-                Case::Version => record.version += 1,
                 Case::Identity => record.root.1 += 1,
                 Case::Boot => record.boot = uuid::Uuid::nil(),
                 Case::Missing
                 | Case::Malformed
+                | Case::Unknown
                 | Case::Oversized
                 | Case::Link
                 | Case::Hardlink
@@ -2218,7 +2342,14 @@ mod tests {
             match case {
                 Case::Missing => std::fs::remove_file(root.join(RECOVERY_RECORD)).unwrap(),
                 Case::Malformed => {
-                    std::fs::write(root.join(RECOVERY_RECORD), b"{\"version\":").unwrap()
+                    std::fs::write(root.join(RECOVERY_RECORD), b"{\"root\":").unwrap()
+                }
+                Case::Unknown => {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(root.join(RECOVERY_RECORD)).unwrap())
+                            .unwrap();
+                    value["version"] = 1.into();
+                    std::fs::write(root.join(RECOVERY_RECORD), value.to_string()).unwrap()
                 }
                 Case::Oversized => std::fs::write(
                     root.join(RECOVERY_RECORD),
@@ -2236,7 +2367,7 @@ mod tests {
                 Case::Hardlink => {
                     std::fs::hard_link(root.join(RECOVERY_RECORD), root.join("alias")).unwrap()
                 }
-                Case::Version | Case::Identity | Case::Boot | Case::Live => {}
+                Case::Identity | Case::Boot | Case::Live => {}
             }
             let held = if matches!(case, Case::Live) {
                 Some(lock)
@@ -2282,7 +2413,6 @@ mod tests {
             &directory.dir,
             RECOVERY_RECORD,
             &Recovery {
-                version: 1,
                 root: crate::tools::fs::identity(&directory.dir).unwrap(),
                 boot: uuid::Uuid::now_v7(),
                 supervisor: None,
@@ -2410,16 +2540,7 @@ done
         std::fs::create_dir_all(node_path.join("bin")).unwrap();
         let root = temp.path().join("command-root");
         std::fs::create_dir(&root).unwrap();
-        let reactor = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let storage = reactor.block_on(prepare_command_storage(
-            &root,
-            &runtime,
-            &ToolLimits::default(),
-            true,
-        ));
+        let storage = prepare_command_storage(&root, &runtime, &ToolLimits::default(), true, false);
         assert!(matches!(storage, Err(ToolError::ChangedInput)));
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
@@ -2518,6 +2639,7 @@ done
                 device: node_device,
                 inode: node_inode,
                 root: None,
+                masks: Vec::new(),
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::CargoCache,
@@ -2527,6 +2649,7 @@ done
                 device: cache_device,
                 inode: cache_inode,
                 root: None,
+                masks: Vec::new(),
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::NpmCache,
@@ -2536,6 +2659,7 @@ done
                 device: npm_cache_device,
                 inode: npm_cache_inode,
                 root: None,
+                masks: Vec::new(),
             },
             crate::tools::toolchains::RuntimeGrant {
                 kind: crate::tools::toolchains::RuntimeKind::PipHttpCache,
@@ -2545,6 +2669,7 @@ done
                 device: pip_cache_device,
                 inode: pip_cache_inode,
                 root: None,
+                masks: Vec::new(),
             },
         ];
         let process_enforcement_digest = super::super::super::macos_runtime_enforcement_digest(
@@ -2595,17 +2720,23 @@ done
             });
         }
         ToolRuntime {
+            git_environment: None,
+            git_hooks: None,
+            repository: None,
+            human_approvals: false,
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available: true,
-            git_writes_available: false,
-            host_authentication: Default::default(),
+            guard_mode: crate::tools::GuardMode::Auto,
+            once_reads: Default::default(),
             handover: None,
             definitions: Default::default(),
             permissions: None,
             result_filter: None,
             unguarded_rules: None,
-            context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
+            context_limit_bytes: std::sync::Arc::new(
+                crate::tools::types::MAX_TOOL_CONTEXT_BYTES.into(),
+            ),
             queue_progress: None,
             active_action_gate: None,
             checkpoint_gate: None,
@@ -2617,7 +2748,6 @@ done
             )),
             spill_access: None,
             config: crate::tools::config::Config {
-                version: 1,
                 workspace_paths,
                 write: true,
                 child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -2644,7 +2774,6 @@ done
                 }],
                 runtime_grants: runtime_grants.clone(),
                 git: None,
-                git_identity: None,
                 locale: Default::default(),
                 environment_sha256: None,
                 network: None,
@@ -2731,6 +2860,7 @@ done
             device: metadata.dev(),
             inode: metadata.ino(),
             root: None,
+            masks: Vec::new(),
         };
         let target = std::fs::canonicalize(&mountpoint).unwrap();
         assert!(
@@ -2745,6 +2875,7 @@ done
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let mut stage = super::super::super::BootstrapStage::Workspace;
         assert!(matches!(
@@ -3004,14 +3135,14 @@ int main(int argc, char **argv) {
 
     async fn verify_uncertain_storage_is_retained(fixture: &Path) {
         let mut uncertain = Unit::new(fixture).await.unwrap();
-        std::fs::write(uncertain.root.join(STORAGE_PENDING), []).unwrap();
+        std::fs::write(uncertain.root.join("scratch"), []).unwrap();
         assert!(uncertain.stop().await.is_err());
         let uncertain_root = uncertain.root.clone();
         drop(uncertain);
         assert!(uncertain_root.exists());
         crate::tools::fs::open_directory(&uncertain_root)
             .unwrap()
-            .remove_file(STORAGE_PENDING)
+            .remove_file("scratch")
             .unwrap();
         assert!(!storage_mounted(&uncertain_root).unwrap());
         crate::tools::fs::open_directory(fixture)
@@ -3024,7 +3155,7 @@ int main(int argc, char **argv) {
         let mut partial = Unit::new(fixture).await.unwrap();
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), partial.root.join("scratch")).unwrap();
-        let preparation = prepare_storage(&partial.root).await;
+        let preparation = prepare_storage(&partial.root);
         assert!(
             matches!(preparation, Err(ToolError::ChangedInput)),
             "partial native storage: {:?}",
@@ -3033,141 +3164,12 @@ int main(int argc, char **argv) {
         assert!(storage_mounted(&partial.root).unwrap());
         assert!(partial.stop().await.is_err());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
-        assert!(!partial.root.join("scratch.dmg").exists());
         std::fs::remove_file(partial.root.join("scratch")).unwrap();
         partial.stop().await.unwrap();
         assert!(!storage_mounted(&partial.root).unwrap());
         let partial_root = partial.root.clone();
         drop(partial);
         assert!(!partial_root.exists());
-    }
-
-    async fn verify_storage_ownership(fixture: &Path) {
-        use super::super::storage::ImageIdentity;
-        let mut unit = Unit::new(fixture).await.unwrap();
-        let _volumes = prepare_storage(&unit.root).await.unwrap();
-        let mut image: ImageIdentity =
-            read_record(&unit._directory.dir, "scratch.image.json").unwrap();
-        image.inode = image.inode.wrapping_add(1);
-        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
-        let mounted = ffi::mounts().unwrap();
-        assert!(
-            unit.stop().await.is_err(),
-            "a mismatched backing inode must reject before any detach"
-        );
-        assert_eq!(
-            ffi::mounts()
-                .unwrap()
-                .iter()
-                .filter(|(_, target)| target.starts_with(&unit.root))
-                .count(),
-            2
-        );
-        assert!(
-            mounted
-                .iter()
-                .filter(|(_, target)| target.starts_with(&unit.root))
-                .all(|mount| ffi::mounts().unwrap().contains(mount))
-        );
-        image.inode = image.inode.wrapping_sub(1);
-        write_record(&unit._directory.dir, "scratch.image.json", &image).unwrap();
-        use crate::test_process::BoundedOutput;
-        let unmounted = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["unmount", "-force", "-quiet"])
-            .arg(unit.root.join("workspace"))
-            .env_clear()
-            .current_dir(&unit.root)
-            .bounded_output_for(Duration::from_secs(20), 4096)
-            .unwrap();
-        assert!(unmounted.status.success(), "owned image unmount fixture");
-        assert!(
-            !ffi::mounts()
-                .unwrap()
-                .iter()
-                .any(|(_, target)| target == &unit.root.join("workspace"))
-        );
-        unit.stop().await.unwrap();
-    }
-
-    async fn verify_git_storage_exits(fixture: &Path) {
-        use super::super::storage::{
-            GIT_VOLUME, exhaust_git_storage, prepare_git_storage, verify_git_storage,
-        };
-        for exit in ["success", "exhaustion", "cancellation", "refusal"] {
-            let mut unit = Unit::new(fixture).await.unwrap();
-            std::fs::write(unit.root.join("canary"), b"control").unwrap();
-            let outside = tempfile::tempdir().unwrap();
-            let volume = if exit == "refusal" {
-                assert!(verify_git_storage(&unit.root).is_err());
-                std::os::unix::fs::symlink(outside.path(), unit.root.join(GIT_VOLUME)).unwrap();
-                let refused = prepare_git_storage(&unit.root).await;
-                assert!(
-                    matches!(refused, Err(ToolError::ChangedInput)),
-                    "{:?}",
-                    refused.err()
-                );
-                std::fs::remove_file(unit.root.join(GIT_VOLUME)).unwrap();
-                None
-            } else {
-                let volume = prepare_git_storage(&unit.root).await.unwrap();
-                verify_git_storage(&unit.root).unwrap();
-                Some(volume)
-            };
-            let names = |root: &Path| {
-                let mut names: Vec<_> = std::fs::read_dir(root)
-                    .unwrap()
-                    .map(|entry| entry.unwrap().file_name())
-                    .collect();
-                names.sort();
-                names
-            };
-            let before = names(&unit.root);
-            let view = unit.root.join(GIT_VOLUME);
-            match exit {
-                "success" => std::fs::write(view.join("probe"), b"view").unwrap(),
-                "exhaustion" => {
-                    exhaust_git_storage(&volume.as_ref().unwrap()[0]).unwrap();
-                }
-                _ => {}
-            }
-            assert_eq!(names(&unit.root), before, "{exit}: control root changed");
-            assert_eq!(
-                std::fs::read(unit.root.join("canary")).unwrap(),
-                b"control",
-                "{exit}"
-            );
-            // Production teardown runs with the volume handles still open, as on a cancelled effect.
-            unit.stop().await.unwrap();
-            assert!(!storage_mounted(&unit.root).unwrap(), "{exit}");
-            assert_eq!(
-                std::fs::read_dir(outside.path()).unwrap().count(),
-                0,
-                "{exit}"
-            );
-            drop(volume);
-        }
-    }
-
-    async fn verify_storage_free_cleanup(fixture: &Path) {
-        use crate::test_process::BoundedOutput;
-        let mut unit = Unit::new(fixture).await.unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", HELPER, "--ignored", "--nocapture"])
-            .env_clear()
-            .env("ARANY_TEST_NATIVE_UNIT_ROOT", &unit.root)
-            .env("ARANY_TEST_NATIVE_UNIT_PHASE", "storage-free-cleanup")
-            .current_dir("/")
-            .bounded_output_for(Duration::from_secs(10), 16 * 1024)
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "storage-free cleanup with hdiutil exec denied: {output:?}"
-        );
-        crate::test_process::assert_single_test_completed(
-            &output.stdout,
-            "storage-free cleanup helper",
-        );
-        unit.stop().await.unwrap();
     }
 
     async fn verify_previous_boot_never_signals() {
@@ -3188,7 +3190,6 @@ int main(int argc, char **argv) {
                 &directory.dir,
                 RECOVERY_RECORD,
                 &Recovery {
-                    version: 1,
                     root: crate::tools::fs::identity(&directory.dir).unwrap(),
                     boot: uuid::Uuid::now_v7(),
                     supervisor: Some(own),
@@ -3205,164 +3206,7 @@ int main(int argc, char **argv) {
         assert!(identity(own.pid).unwrap().same_process(own));
     }
 
-    struct DiskGate {
-        child: tokio::process::Child,
-        output: BufReader<tokio::process::ChildStdout>,
-    }
-
-    impl DiskGate {
-        async fn start(executable: &Path, action: &str, root: &Path, image: &str) -> Self {
-            let name = format!("{}-{image}", root.file_name().unwrap().to_str().unwrap());
-            let mut child = Command::new(executable)
-                .args([action, &name])
-                .env_clear()
-                .current_dir("/")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
-            let output = BufReader::new(child.stdout.take().unwrap());
-            let mut gate = Self { child, output };
-            assert_eq!(gate.message().await, b"READY\n");
-            gate
-        }
-
-        async fn message(&mut self) -> Vec<u8> {
-            tokio::time::timeout(
-                Duration::from_secs(8),
-                read_line_capped(&mut self.output, 128),
-            )
-            .await
-            .unwrap()
-            .unwrap()
-        }
-
-        async fn blocked(&mut self) -> PathBuf {
-            let message = self.message().await;
-            let device = std::str::from_utf8(&message)
-                .unwrap()
-                .trim()
-                .strip_prefix("BLOCKED ")
-                .unwrap();
-            assert!(device.starts_with("/dev/disk"));
-            device.into()
-        }
-
-        async fn release(mut self) {
-            self.child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(b"G")
-                .await
-                .unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .success()
-            );
-        }
-    }
-
-    fn disk_gate_actor(directory: &Path) -> PathBuf {
-        use crate::test_process::BoundedOutput;
-        let executable = directory.join("disk-gate");
-        let compiled = std::process::Command::new("/usr/bin/xcrun")
-            .args([
-                "--sdk",
-                "macosx",
-                "clang",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-O1",
-                "-framework",
-                "DiskArbitration",
-                "-framework",
-                "CoreFoundation",
-            ])
-            .arg(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/macos-disk-approval-gate.c"
-            ))
-            .arg("-o")
-            .arg(&executable)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", directory)
-            .env("TMPDIR", directory)
-            .current_dir(directory)
-            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
-            .unwrap();
-        assert!(
-            compiled.status.success(),
-            "disk gate compilation: {compiled:?}"
-        );
-        assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
-        executable
-    }
-
-    async fn verify_recovery_cancellation(gate: &Path, fixture: &Path) {
-        let mut unit = Unit::new(fixture).await.unwrap();
-        let _volumes = prepare_storage(&unit.root).await.unwrap();
-        let record = unit._directory.dir.read(RECOVERY_RECORD).unwrap();
-        write_record(
-            &unit._directory.dir,
-            STORAGE_PENDING,
-            &super::super::storage::PendingAttachment {
-                version: 1,
-                image: "workspace".into(),
-                boot: ffi::boot_session().unwrap(),
-                state: super::super::storage::AttachmentState::Attaching,
-            },
-        )
-        .unwrap();
-        let mut observer = DiskGate::start(gate, "unmount", &unit.root, "workspace").await;
-        rustix::fs::flock(&unit._liveness, rustix::fs::FlockOperation::Unlock).unwrap();
-        let mut recovering = Box::pin(recover_root(&unit.root));
-        let device = tokio::select! {
-            result = &mut recovering => panic!("recovery finished before native unmount gate: {result:?}"),
-            device = observer.blocked() => device,
-        };
-        assert!(
-            super::super::storage::owned_devices(&unit.root)
-                .await
-                .unwrap()
-                .contains(&device)
-        );
-        drop(recovering);
-        assert!(unit.root.exists());
-        assert_eq!(unit._directory.dir.read(RECOVERY_RECORD).unwrap(), record);
-        assert!(is_retained(&unit.root).unwrap());
-        let pending: super::super::storage::PendingAttachment =
-            read_record(&unit._directory.dir, STORAGE_PENDING).unwrap();
-        assert!(pending.state == super::super::storage::AttachmentState::Observed);
-        observer.release().await;
-        super::super::storage::detach_owned_image(&unit.root, "workspace")
-            .await
-            .unwrap();
-        assert!(
-            !super::super::storage::owned_devices(&unit.root)
-                .await
-                .unwrap()
-                .contains(&device)
-        );
-        assert!(
-            unit._directory
-                .dir
-                .symlink_metadata(STORAGE_PENDING)
-                .is_ok()
-        );
-        recover_root(&unit.root).await.unwrap();
-        assert!(!unit.root.exists());
-        unit.stopped = true;
-    }
-
-    async fn verify_controller_crash_recovery(script: &Path, gate: &Path) {
+    async fn verify_controller_crash_recovery(script: &Path) {
         struct Controller(std::process::Child);
         impl Drop for Controller {
             fn drop(&mut self) {
@@ -3424,7 +3268,6 @@ int main(int argc, char **argv) {
             limits: None,
             stopped: false,
         });
-        let mut observer = DiskGate::start(gate, "mount", &root, "scratch").await;
         stream.get_mut().write_all(b"G").await.unwrap();
         let members: Vec<Identity> = serde_json::from_slice(
             &tokio::time::timeout(Duration::from_secs(30), read_line_capped(&mut stream, 2048))
@@ -3436,24 +3279,9 @@ int main(int argc, char **argv) {
         let record = recovery(&fallback.as_ref().unwrap()._directory).unwrap();
         let coalition = record.supervisor.unwrap().coalition;
         fallback.as_mut().unwrap().scope = Some(Scope::new(coalition).unwrap());
-        let device = observer.blocked().await;
-        assert!(storage_mounted(&root).unwrap());
-        assert!(
-            super::super::storage::owned_devices(&root)
-                .await
-                .unwrap()
-                .contains(&device)
-        );
-        assert!(
-            !ffi::mounts()
-                .unwrap()
-                .iter()
-                .any(|(_, target)| target == &root.join("scratch"))
-        );
-        let pending: super::super::storage::PendingAttachment =
-            read_record(&fallback.as_ref().unwrap()._directory.dir, STORAGE_PENDING).unwrap();
-        assert_eq!(pending.image, "scratch");
-        assert!(Scope::new(coalition).unwrap().members().unwrap().len() > members.len() + 1);
+        assert!(!storage_mounted(&root).unwrap());
+        let live = Scope::new(coalition).unwrap().members().unwrap();
+        assert!(members.iter().all(|member| live.contains(member)));
         assert!(!is_retained(&root).unwrap());
         assert!(
             recover_root(&root).await.is_err(),
@@ -3470,25 +3298,9 @@ int main(int argc, char **argv) {
             "process death releases the liveness lock"
         );
         // The restarted admission path must recover storage and escaped descendants together.
-        let mut recovering = Box::pin(recover_retained_roots(
-            fixture.path(),
-            rustix::process::geteuid().as_raw(),
-        ));
-        let emptied = async {
-            let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
-            loop {
-                if Scope::new(coalition).unwrap().members().unwrap().is_empty() {
-                    break;
-                }
-                samples.tick().await;
-            }
-        };
-        tokio::select! {
-            result = &mut recovering => panic!("recovery ended before attachment gate release: {result:?}"),
-            result = tokio::time::timeout(Duration::from_secs(5), emptied) => result.unwrap(),
-        }
-        observer.release().await;
-        recovering.await.unwrap();
+        recover_retained_roots(fixture.path(), rustix::process::geteuid().as_raw())
+            .await
+            .unwrap();
         assert!(!root.exists());
         assert!(Scope::new(coalition).unwrap().members().unwrap().is_empty());
         for member in members {
@@ -3665,15 +3477,10 @@ int main(int argc, char **argv) {
             assert!(architectures.stdout.is_empty() && architectures.stderr.is_empty());
         }
         let (actor, plain, sysctl_probe, rust_probe) = native_actors(generated.path());
-        let disk_gate = disk_gate_actor(generated.path());
         verify_uncertain_storage_is_retained(generated.path()).await;
         verify_partial_storage_is_cleaned(generated.path()).await;
-        verify_storage_ownership(generated.path()).await;
-        verify_git_storage_exits(generated.path()).await;
-        verify_storage_free_cleanup(generated.path()).await;
         verify_previous_boot_never_signals().await;
-        verify_controller_crash_recovery(&plain, &disk_gate).await;
-        verify_recovery_cancellation(&disk_gate, generated.path()).await;
+        verify_controller_crash_recovery(&plain).await;
 
         let baseline = std::process::Command::new(&sysctl_probe)
             .arg("baseline")
@@ -3780,10 +3587,7 @@ int main(int argc, char **argv) {
                 phase,
                 "storage" | "storage-drop" | "command-profile" | "entitlement-profile"
             ) {
-                assert_eq!(
-                    storage_mounted(&unit.root).unwrap(),
-                    phase != "entitlement-profile"
-                );
+                assert!(!storage_mounted(&unit.root).unwrap());
                 if matches!(phase, "command-profile" | "entitlement-profile") {
                     assert!(
                         tokio::time::timeout(Duration::from_secs(20), read_capped(&mut stream, 1))
@@ -3839,7 +3643,7 @@ int main(int argc, char **argv) {
                             "native {phase} payload: {error}; {}",
                             diagnostic(&unit.root)
                         )),
-                        b"FULL\n"
+                        b"WRITTEN\n"
                     );
                 }
                 scope.check_resources().unwrap();
@@ -3849,10 +3653,7 @@ int main(int argc, char **argv) {
                 );
                 if phase != "storage-drop" {
                     scope.stop(None).await.unwrap();
-                    assert_eq!(
-                        storage_mounted(&unit.root).unwrap(),
-                        phase != "entitlement-profile"
-                    );
+                    assert!(!storage_mounted(&unit.root).unwrap());
                 }
             } else {
                 let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
@@ -3922,15 +3723,6 @@ int main(int argc, char **argv) {
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
         native_storage_stage(&phase, "helper-entered");
-        if phase == "storage-free-cleanup" {
-            let reactor = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            super::super::install_profile("(version 1)\n(allow default)\n(deny process-exec (literal \"/usr/bin/hdiutil\"))\n".into()).unwrap();
-            reactor.block_on(cleanup_storage(root)).unwrap();
-            return;
-        }
         if phase == "recovery-controller" {
             let source = std::env::var_os("ARANY_TEST_NATIVE_UNIT_WORKSPACE").unwrap();
             let reactor = tokio::runtime::Builder::new_current_thread()
@@ -4115,15 +3907,13 @@ int main(int argc, char **argv) {
             let runtime = snapshot_runtime(Path::new(&source));
             native_storage_stage(&phase, "command-storage-preparation-started");
             let limits = crate::tools::types::ToolLimits {
-                cache_requested_bytes: 0,
+                cache_requested_bytes: crate::tools::types::BuildCacheSize::DISABLED,
                 cache_bytes: 0,
                 cache_candidate_bytes: 0,
                 cache_transfer_ms: 0,
                 ..crate::tools::types::ToolLimits::default()
             };
-            let volumes = reactor
-                .block_on(prepare_command_storage(root, &runtime, &limits, false))
-                .unwrap();
+            let volumes = prepare_command_storage(root, &runtime, &limits, false, false).unwrap();
             native_storage_stage(&phase, "command-storage-preparation-finished");
             assert_eq!(volumes[0].read("selected").unwrap(), b"after typed edit");
             assert!(!volumes[0].exists("omitted"));
@@ -4155,6 +3945,7 @@ int main(int argc, char **argv) {
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
+                    policy_grants: None,
                     command_deadline: None,
                     definition: None,
                     handover: None,
@@ -4182,16 +3973,16 @@ int main(int argc, char **argv) {
                             cwd: ".".into(),
                             resource_class: None,
                             timeout_ms: None,
+                            additional_reads: None,
                         },
                         limits: limits.clone(),
                         use_count: 1,
                     },
                     workspace: runtime.workspace.clone(),
+                    editor_tree: None,
                     guard_executable: runtime.guard_executable.clone(),
                     system_programs: runtime.system_programs.as_deref().cloned(),
-                    git_stage: None,
                     proxy_port: None,
-                    git_fault: None,
                 };
                 let (mut wake_sender, mut wake_receiver) = UnixStream::pair().unwrap();
                 wake_sender.write_all(&[1]).unwrap();
@@ -4211,9 +4002,11 @@ int main(int argc, char **argv) {
                     &["shimmed".into(), outside_pid.to_string()],
                     ".",
                     root,
-                    &runtime.config.runtime_grants,
-                    false,
-                    &crate::tools::ToolLimits::default(),
+                    super::super::super::PayloadEnvironment {
+                        runtime_grants: &runtime.config.runtime_grants,
+                        cache_enabled: false,
+                        limits: &crate::tools::ToolLimits::default(),
+                    },
                 )
                 .unwrap();
                 let (probe_status, probe_stdout, probe_stderr) = reactor
@@ -4243,9 +4036,11 @@ int main(int argc, char **argv) {
                     &[],
                     ".",
                     root,
-                    &runtime.config.runtime_grants,
-                    false,
-                    &crate::tools::ToolLimits::default(),
+                    super::super::super::PayloadEnvironment {
+                        runtime_grants: &runtime.config.runtime_grants,
+                        cache_enabled: false,
+                        limits: &crate::tools::ToolLimits::default(),
+                    },
                 )
                 .unwrap();
                 let (rust_status, rust_stdout, rust_stderr) = reactor
@@ -4326,6 +4121,16 @@ int main(int argc, char **argv) {
                         .kind(),
                     std::io::ErrorKind::PermissionDenied
                 );
+                // Unit storage shares the host volume, so Seatbelt must refuse a writable alias of a readable input.
+                assert_eq!(
+                    std::fs::hard_link(
+                        root.join("runtime/inputs/shell/fixture.txt"),
+                        root.join("workspace/alias")
+                    )
+                    .unwrap_err()
+                    .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
                 assert_eq!(
                     std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                         .unwrap_err()
@@ -4360,9 +4165,11 @@ int main(int argc, char **argv) {
                         &args,
                         ".",
                         root,
-                        &runtime.config.runtime_grants,
-                        false,
-                        &crate::tools::ToolLimits::default(),
+                        super::super::super::PayloadEnvironment {
+                            runtime_grants: &runtime.config.runtime_grants,
+                            cache_enabled: false,
+                            limits: &crate::tools::ToolLimits::default(),
+                        },
                     )
                     .unwrap();
                     let (status, stdout, stderr) = reactor
@@ -4414,9 +4221,11 @@ printf 'native command success'
                     ],
                     ".",
                     root,
-                    &runtime.config.runtime_grants,
-                    false,
-                    &crate::tools::ToolLimits::default(),
+                    super::super::super::PayloadEnvironment {
+                        runtime_grants: &runtime.config.runtime_grants,
+                        cache_enabled: false,
+                        limits: &crate::tools::ToolLimits::default(),
+                    },
                 )
                 .unwrap();
                 let (status, stdout, stderr) = reactor
@@ -4443,8 +4252,7 @@ printf 'native command success'
                         },
                         &runtime.config,
                         root,
-                        crate::tools::ToolLimits::default().cache_bytes > 0,
-                        crate::tools::ToolLimits::default().result_bytes as usize,
+                        &crate::tools::ToolLimits::default(),
                         &Default::default(),
                     ))
                     .unwrap();
@@ -4461,8 +4269,7 @@ printf 'native command success'
                         &call,
                         &runtime.config,
                         root,
-                        crate::tools::ToolLimits::default().cache_bytes > 0,
-                        crate::tools::ToolLimits::default().result_bytes as usize,
+                        &crate::tools::ToolLimits::default(),
                         &Default::default(),
                     ))
                     .unwrap();
@@ -4472,22 +4279,10 @@ printf 'native command success'
                 volumes[0].write("profile-receipt", b"PROFILE\n").unwrap();
                 return;
             }
-            let block = vec![0; FILL_CHUNK_BYTES];
             for volume in &volumes {
-                let mut output = volume.create("filled").unwrap();
-                let full = (0..=STORAGE_BYTES_CAP / block.len() as u64).any(|_| {
-                    match output.write_all(&block).and_then(|()| output.sync_all()) {
-                        Ok(()) => false,
-                        Err(error) => {
-                            assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
-                            true
-                        }
-                    }
-                });
-                assert!(full, "native filesystem must enforce its aggregate ceiling");
-                assert!(output.metadata().unwrap().len() <= STORAGE_BYTES_CAP);
+                volume.write("written", b"disposable").unwrap();
             }
-            stream.write_all(b"FULL\n").unwrap();
+            stream.write_all(b"WRITTEN\n").unwrap();
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
             return;
         }
@@ -4527,12 +4322,7 @@ printf 'native command success'
             control.write_all(b"G").unwrap();
         }
         if phase == "attachment" {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(prepare_storage(root))
-                .unwrap();
+            prepare_storage(root).unwrap();
         }
         assert_eq!(stream.read(&mut [0]).unwrap(), 0);
     }

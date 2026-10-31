@@ -29,8 +29,15 @@ impl ApprovalMode {
     }
 
     pub(crate) fn asks(self, call: &ToolCall) -> bool {
+        use super::permissions::{auto_approved_edit, protected_publication};
         let facts = call.facts();
-        facts.asks_approval && (self != Self::AutoEdits || !facts.typed_edit())
+        match self {
+            Self::AutoEdits => facts.asks_approval && !facts.typed_edit(),
+            Self::Auto => {
+                facts.asks_approval && !auto_approved_edit(call) || protected_publication(call)
+            }
+            Self::Request => facts.asks_approval,
+        }
     }
 }
 
@@ -69,6 +76,7 @@ pub struct UnguardedPrompt {
     pub prefix: bool,
     pub sensitive: bool,
     pub inactive_rules: bool,
+    pub sandbox_off: bool,
 }
 
 pub struct ToolApproval {
@@ -76,6 +84,8 @@ pub struct ToolApproval {
     pub unguarded: Option<UnguardedPrompt>,
     pub allow_auto_edits: bool,
     pub remember_prefix: Option<super::permissions::TypedGitPrefix>,
+    pub save_reads: bool,
+    pub pin_repository: bool,
     reply: oneshot::Sender<ApprovalReply>,
     withdrawal: Option<oneshot::Receiver<()>>,
 }
@@ -195,7 +205,7 @@ impl ToolApprovals {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn ask(&self, intent: &EffectIntent) -> bool {
         matches!(
-            self.ask_local(intent, false, None).await,
+            self.ask_local(intent, ApprovalOffers::default()).await,
             ApprovalReply::AllowOnce
                 | ApprovalReply::AllowForSession
                 | ApprovalReply::AllowPrefixInFolder
@@ -205,26 +215,34 @@ impl ToolApprovals {
     pub(crate) async fn ask_local(
         &self,
         intent: &EffectIntent,
-        allow_auto_edits: bool,
-        remember_prefix: Option<super::permissions::TypedGitPrefix>,
+        offers: ApprovalOffers,
     ) -> ApprovalReply {
-        self.request(intent, None, allow_auto_edits, remember_prefix)
-            .await
+        self.request(intent, None, offers).await
     }
 
     pub(crate) async fn begin_local(
         &self,
         intent: &EffectIntent,
-        allow_auto_edits: bool,
-        remember_prefix: Option<super::permissions::TypedGitPrefix>,
+        offers: ApprovalOffers,
+    ) -> ApprovalWait {
+        self.begin(intent, None, offers).await
+    }
+
+    pub(crate) async fn begin(
+        &self,
+        intent: &EffectIntent,
+        unguarded: Option<UnguardedPrompt>,
+        offers: ApprovalOffers,
     ) -> ApprovalWait {
         let (reply, response) = oneshot::channel();
         let (withdrawal, committed) = oneshot::channel();
         let approval = ToolApproval {
             intent: intent.clone(),
-            unguarded: None,
-            allow_auto_edits,
-            remember_prefix,
+            unguarded,
+            allow_auto_edits: offers.allow_auto_edits,
+            remember_prefix: offers.remember_prefix,
+            save_reads: offers.save_reads,
+            pin_repository: offers.pin_repository,
             reply,
             withdrawal: Some(committed),
         };
@@ -245,24 +263,26 @@ impl ToolApprovals {
         intent: &EffectIntent,
         prompt: UnguardedPrompt,
     ) -> ApprovalReply {
-        self.request(intent, Some(prompt), false, None).await
+        self.request(intent, Some(prompt), ApprovalOffers::default())
+            .await
     }
 
     async fn request(
         &self,
         intent: &EffectIntent,
         unguarded: Option<UnguardedPrompt>,
-        allow_auto_edits: bool,
-        remember_prefix: Option<super::permissions::TypedGitPrefix>,
+        offers: ApprovalOffers,
     ) -> ApprovalReply {
         let (reply, response) = oneshot::channel();
         if self
             .sender
             .send(ToolApproval {
                 intent: intent.clone(),
+                save_reads: offers.save_reads,
+                pin_repository: offers.pin_repository,
                 unguarded,
-                allow_auto_edits,
-                remember_prefix,
+                allow_auto_edits: offers.allow_auto_edits,
+                remember_prefix: offers.remember_prefix,
                 reply,
                 withdrawal: None,
             })
@@ -273,6 +293,14 @@ impl ToolApprovals {
         }
         response.await.unwrap_or(ApprovalReply::Unavailable)
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ApprovalOffers {
+    pub(crate) allow_auto_edits: bool,
+    pub(crate) remember_prefix: Option<super::permissions::TypedGitPrefix>,
+    pub(crate) save_reads: bool,
+    pub(crate) pin_repository: bool,
 }
 
 #[cfg(test)]
@@ -303,25 +331,34 @@ mod tests {
     }
 
     #[test]
-    fn modes_only_preapprove_typed_file_edits_in_auto_edits() {
+    fn edit_modes_preapprove_typed_workspace_edits_except_protected_paths_in_auto() {
         let cases = [
-            (ToolCall::Mkdir { path: "d".into() }, [true, false, true]),
+            (ToolCall::Mkdir { path: "d".into() }, [true, false, false]),
+            // Auto approval still reviews a protected path.
             (
                 ToolCall::Write {
-                    path: "a".into(),
+                    path: "AGENTS.md".into(),
                     expected_digest: None,
                     content: "x".into(),
                 },
                 [true, false, true],
             ),
             (
+                ToolCall::Write {
+                    path: "a".into(),
+                    expected_digest: None,
+                    content: "x".into(),
+                },
+                [true, false, false],
+            ),
+            (
                 ToolCall::Edit {
                     path: "a".into(),
-                    expected_digest: "0".repeat(64),
+                    expected_digest: Some("0".repeat(64)),
                     old: "x".into(),
                     new: "y".into(),
                 },
-                [true, false, true],
+                [true, false, false],
             ),
             (
                 ToolCall::ApplyChangeset {
@@ -330,7 +367,7 @@ mod tests {
                         changeset: super::super::CommandChangeset::default(),
                     },
                 },
-                [true, false, true],
+                [false; 3],
             ),
             (
                 ToolCall::GitCommit {
@@ -371,8 +408,9 @@ mod tests {
                     cwd: ".".into(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
-                [true; 3],
+                [false; 3],
             ),
             (
                 ToolCall::CommandUnguarded {

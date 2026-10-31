@@ -44,7 +44,7 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
         },
         Operation::Edit => arany::ToolCall::Edit {
             path: path.into(),
-            expected_digest: hash(fixture_content(operation).as_bytes()),
+            expected_digest: Some(hash(fixture_content(operation).as_bytes())),
             old: "fn pick".into(),
             new: "fn done".into(),
         },
@@ -54,6 +54,7 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
             cwd: "src".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         Operation::Other | Operation::InvalidProposal => panic!("unsupported latency operation"),
     }
@@ -95,7 +96,7 @@ fn fixture_for(
     } else {
         Vec::new()
     };
-    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":commands,"skills":[],"mcp":[]})).unwrap());
+    private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"workspace_paths":["src"],"write":operation == Operation::Edit,"commands":commands,"skills":[],"mcp":[]})).unwrap());
     let provider = Arc::new(
         ScriptedProvider::new(vec![
             ProviderOutcome::Tools(
@@ -944,7 +945,7 @@ fn failing_fixture(
             unreachable!();
         };
         *path = "src/main.rs".into();
-        *expected_digest = "0".repeat(64);
+        *expected_digest = Some("0".repeat(64));
     }
     if invalid {
         let mut responses = provider.responses.lock().unwrap();

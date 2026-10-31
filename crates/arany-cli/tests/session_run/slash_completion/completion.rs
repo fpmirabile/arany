@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
-    use super::loopback::{check_profile, read_request, send_response, write_profile};
+    use super::loopback::{read_request, send_response, write_profile};
     use sha2::Digest;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -34,105 +34,43 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
         })
         .collect::<Vec<_>>();
     let peer = thread::spawn(move || {
-        for index in 0..4 {
-            let mut stream = crate::process::accept_with_deadline(
-                &listener,
-                Duration::from_secs(20),
-                "directory mention request",
-            );
-            let wire: serde_json::Value =
-                serde_json::from_slice(&read_request(&mut stream)).unwrap();
-            if index == 3 {
-                let input = crate::semantic::input(&wire);
-                assert_eq!(input["objective"], draft);
-                assert_eq!(input["includes"], serde_json::json!(expected));
-                assert!(!wire.to_string().contains("FILE_BODY_CANARY"));
-                assert!(!wire.to_string().contains("NESTED_BODY_CANARY"));
-            }
-            let answer = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!("synthetic summary"),
-                _ => serde_json::json!("Directory listed."),
-            };
-            send_response(&mut stream, index, answer);
-        }
+        let mut stream = crate::process::accept_with_deadline(
+            &listener,
+            Duration::from_secs(20),
+            "directory mention request",
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&read_request(&mut stream)).unwrap();
+        let input = crate::semantic::input(&wire);
+        assert_eq!(input["objective"], draft);
+        assert_eq!(input["includes"], serde_json::json!(expected));
+        assert!(!wire.to_string().contains("FILE_BODY_CANARY"));
+        assert!(!wire.to_string().contains("NESTED_BODY_CANARY"));
+        send_response(&mut stream, 0, serde_json::json!("Directory listed."));
     });
-    check_profile(&workspace, &state);
     let shell = r#"printf 'SHELL_PID:%s\n' "$$"; "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --resume "$ARANY_TEST_SESSION" --provider custom:local --model model-1"#;
-    let mut command = crate::isolation::account_isolated_script(temp.path());
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+            shell,
+        )
+        .session(&state, &workspace)
         .env("ARANY_TEST_SESSION", id.to_string())
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("TERM", "dumb")
-        .env("SHELL", "/bin/sh")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().unwrap());
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Input:\r\n",
+        .spawn(),
     );
-    let shell_pid = super::active_terminal::transcript_field(
-        &String::from_utf8_lossy(&transcript),
-        "SHELL_PID:",
-    )
-    .parse::<u32>()
-    .unwrap();
-    let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
-    let submitted_at = transcript.len();
-    write!(input, "{draft}\r").unwrap();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        submitted_at,
-        b"Directory listed.",
-    );
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        submitted_at,
-        b"Input:\r\n",
-    );
+    pty.wait_for(b"Input:\r\n");
+    pty.adopt_product(&state);
+    let submitted_at = pty.send(format!("{draft}\r").as_bytes());
+    pty.wait_for_after(submitted_at, b"Directory listed.");
+    pty.wait_for_after(submitted_at, b"Input:\r\n");
     assert!(
-        crate::process::pty_text_matches(&transcript, format!("You:\n  {draft}\n").as_bytes())
+        crate::process::pty_text_matches(&pty.transcript, format!("You:\n  {draft}\n").as_bytes())
             .next()
             .is_some()
     );
-    input.write_all(b"/exit\r").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while child.child().try_wait().unwrap().is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "directory mention exit: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    assert!(child.take().wait().unwrap().success());
+    pty.send(b"/exit\r");
+    pty.wait_exit("directory mention exit");
+    assert!(pty.child.take().wait().unwrap().success());
     peer.join().unwrap();
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -144,7 +82,14 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
             assert_eq!(view.runs[0].objective, draft);
             assert_eq!(view.runs[0].status, arany::RunStatus::Finished);
             assert_eq!(
-                view.runs[0].config.as_ref().unwrap().include_digests,
+                view.runs[0]
+                    .config
+                    .as_ref()
+                    .unwrap()
+                    .include_sources
+                    .iter()
+                    .map(|source| source.digest)
+                    .collect::<Vec<_>>(),
                 listings.map(|listing| <[u8; 32]>::from(sha2::Sha256::digest(listing.as_bytes())))
             );
             let events = store.load_session(id).await.unwrap();
@@ -155,12 +100,13 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
 }
 
 #[test]
-fn local_registry_has_twenty_three_commands_and_refuses_arguments_without_state_access() {
+fn local_registry_has_twenty_four_commands_and_refuses_arguments_without_state_access() {
     use arany_cli::terminal::{
         CommandParseError, InteractiveCommand, Submission, command_completions, parse_submission,
     };
     let names = command_completions("/");
-    assert_eq!(names.len(), 23);
+    assert_eq!(names.len(), 24);
+    assert!(names.contains(&"limits"));
     assert!(names.contains(&"rewind"));
     assert!(names.contains(&"storage"));
     assert!(names.contains(&"usage"));
@@ -203,22 +149,13 @@ fn seed_empty_build_cache(
             .create(&cache)
             .expect("private cache directory");
     }
-    let archive = cache.join(format!("cache-{token}.arc"));
+    let tree = cache.join(format!("directory-{token}.tree"));
     let lock = cache.join(format!("identity-{token}.lock"));
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"ARANYCACHE\0\x01");
-    bytes.extend_from_slice(&(path.len() as u16).to_le_bytes());
-    bytes.extend_from_slice(&metadata.dev().to_le_bytes());
-    bytes.extend_from_slice(&metadata.ino().to_le_bytes());
-    bytes.extend_from_slice(path.as_bytes());
-    bytes.extend_from_slice(&[0; 12]);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&archive)
-        .expect("cache archive");
-    file.write_all(&bytes).expect("write empty cache archive");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(tree.join("target"))
+        .expect("cache directory tree");
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -226,7 +163,7 @@ fn seed_empty_build_cache(
         .mode(0o600)
         .open(&lock)
         .expect("cache identity lock");
-    (archive, lock)
+    (tree, lock)
 }
 
 #[test]
@@ -240,43 +177,20 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            shell,
+        )
+        .session(&state, &workspace)
         .env("ARANY_TEST_SESSION", saved_id.to_string())
         .env("OPENAI_API_KEY", "synthetic-test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("new-conversation PTY"));
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Input:\r\n",
+        .spawn(),
     );
-    let shell_pid = super::active_terminal::transcript_field(
-        &String::from_utf8_lossy(&transcript),
-        "SHELL_PID:",
-    )
-    .parse::<u32>()
-    .expect("shell PID");
-    let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    pty.wait_for(b"Input:\r\n");
+    pty.adopt_product(&state);
     let process_limit = arany::ToolResourceSettings::default().build_processes;
     let build_jobs = match std::thread::available_parallelism()
         .ok()
@@ -295,126 +209,100 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         Some(cores) => format!("automatic; {cores} effective (1..{cores})"),
         None => "automatic; Build unavailable".into(),
     };
-    let settings_at = transcript.len();
-    input
-        .write_all(b"/settings\r")
-        .expect("linear settings choices");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        settings_at,
-        format!("Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
-          Choice 1: Slash menu: tabs (tabs|combined)\r\n\
-          Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
-          Choice 3: Goal provider calls: unlimited (number or unlimited)\r\n\
-          Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
-          Choice 5: Goal active time: unlimited (duration or unlimited)\r\n\
-          Choice 6: Default command timeout: 2 min (duration, e.g. 30s)\r\n\
-          Choice 7: Maximum command timeout: 10 min (duration, e.g. 5m)\r\n\
-          Choice 8: Build memory: 4.0 GB (size, e.g. 512MB)\r\n\
-          Choice 9: Build processes/threads: 256 (number)\r\n\
-          Choice 10: Build writable project: 1.0 GB (size, e.g. 1GB)\r\n\
-          Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)\r\n\
-          Choice 12: Copy on select: on (on|off)\r\n\
-          Choice 13: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
-          Choice 14: Build jobs: {build_jobs} (automatic or 1..cores)\r\n\
-          Choice 15: Build CPU cores: {build_cpu} (automatic or 1..cores; Linux quota)\r\n\
-          Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
-          Input:\r\n").as_bytes(),
+    let settings = "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
+          Choice 1: Slash menu: tabs (default) (tabs|combined)\r\n\
+          Choice 2: Chat view: fullscreen (default) (fullscreen|classic)\r\n\
+          Choice 3: Copy on select: on (default) (on|off)\r\n\
+          Choice 4: Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)\r\n\
+          Choice 5: Guard: auto (default) (auto|required|off)\r\n\
+          Choice 6: Guard folders: opens the folders every guarded command may read\r\n\
+          Choice 7: Limits: opens /limits\r\n";
+    pty.send_and_wait(
+        b"/settings\r",
+        format!("{settings}Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\nInput:\r\n").as_bytes(),
     );
+    pty.send_and_wait(b"7\r", format!("Limits: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
+          Choice 1: Provider calls per task: unlimited (default) (number or unlimited)\r\n\
+          Choice 2: Tokens per task: unlimited (default) (number or unlimited)\r\n\
+          Choice 3: Active time per task: unlimited (default) (duration or unlimited)\r\n\
+          Choice 4: Default command timeout: 2 min (default) (duration, e.g. 30s)\r\n\
+          Choice 5: Maximum command timeout: 10 min (default) (duration, e.g. 5m)\r\n\
+          Choice 6: Build memory: 4.0 GB (default) (size, e.g. 512MB)\r\n\
+          Choice 7: Build processes/threads: 256 (default) (number)\r\n\
+          Choice 8: Build writable project: 1.0 GB (default) (size, e.g. 1GB)\r\n\
+          Choice 9: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)\r\n\
+          Choice 10: Build jobs: {build_jobs} (default) (automatic or 1..cores)\r\n\
+          Choice 11: Build CPU cores: {build_cpu} (default) (automatic or 1..cores; Linux quota)\r\n\
+          Choice 12: Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)\r\n\
+          Choice 13: Editor changes: files: 512 (default) (number of files)\r\n\
+          Choice 14: Editor changes: size: 64.0 MB (default) (size, e.g. 64MB)\r\n\
+          Input:\r\n").as_bytes());
+    let over_active_limit = format!("3 {}h\r", arany::MAX_GOAL_ACTIVE_MS / 3_600_000 + 1);
     for rejected in [
         &b"combined\r"[..],
         b"12 combined\r",
         b"1 classic\r",
-        b"6 30000\r",
-        b"8 512\r",
-        b"5 2h\r",
+        b"4 30000\r",
+        b"6 512\r",
+        b"13 0\r",
+        over_active_limit.as_bytes(),
     ] {
-        let invalid_at = transcript.len();
-        input
-            .write_all(rejected)
-            .expect("reject invalid NUMBER VALUE");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            invalid_at,
+        pty.send_and_wait(
+            rejected,
             b"Notice: Type NUMBER VALUE from the list; q cancels\r\nInput:\r\n",
         );
     }
     for (value, row) in [
         (
-            "5 5m",
-            "Choice 5: Goal active time: 5 min (duration or unlimited)",
+            "3 5m",
+            "Choice 3: Active time per task: 5 min (duration or unlimited)",
         ),
         (
-            "5 unlimited",
-            "Choice 5: Goal active time: unlimited (duration or unlimited)",
+            "3 unlimited",
+            "Choice 3: Active time per task: unlimited (default) (duration or unlimited)",
         ),
         (
-            "6 30s",
-            "Choice 6: Default command timeout: 30 s (duration, e.g. 30s)",
+            "4 30s",
+            "Choice 4: Default command timeout: 30 s (duration, e.g. 30s)",
         ),
         (
-            "6 2min",
-            "Choice 6: Default command timeout: 2 min (duration, e.g. 30s)",
+            "4 2min",
+            "Choice 4: Default command timeout: 2 min (default) (duration, e.g. 30s)",
         ),
         (
-            "8 512MB",
-            "Choice 8: Build memory: 512.0 MB (size, e.g. 512MB)",
+            "6 512MB",
+            "Choice 6: Build memory: 512.0 MB (size, e.g. 512MB)",
         ),
-        ("8 4GB", "Choice 8: Build memory: 4.0 GB (size, e.g. 512MB)"),
-        ("11 0B", "Choice 11: Build cache: 0 B (size, e.g. 8GB)"),
-        ("11 8GB", "Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)"),
+        (
+            "6 4GB",
+            "Choice 6: Build memory: 4.0 GB (default) (size, e.g. 512MB)",
+        ),
+        (
+            "9 0B",
+            "Choice 9: Build cache: 0 B · 0 B used (size or unlimited, e.g. 8GB)",
+        ),
+        (
+            "9 8GB",
+            "Choice 9: Build cache: 8.0 GB · 0 B used (size or unlimited, e.g. 8GB)",
+        ),
+        (
+            "9 unlimited",
+            "Choice 9: Build cache: unlimited (default) · 0 B used (size or unlimited, e.g. 8GB)",
+        ),
     ] {
-        let changed_at = transcript.len();
-        input
-            .write_all(format!("{value}\r").as_bytes())
-            .expect("human-unit setting");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            changed_at,
+        let changed_at = pty.send_and_wait(
+            format!("{value}\r").as_bytes(),
             format!("{row}\r\n").as_bytes(),
         );
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            changed_at,
-            b"Input:\r\n",
-        );
+        pty.wait_for_after(changed_at, b"Input:\r\n");
     }
-    let selected_at = transcript.len();
-    input
-        .write_all(b"1 combined\r")
-        .expect("linear combined selection");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        selected_at,
+    // Closing /limits returns to /settings, which saves both.
+    pty.send_and_wait(b"\r", format!("{settings}Input:\r\n").as_bytes());
+    pty.send_and_wait(
+        b"1 combined\r",
         b"Choice 1: Slash menu: combined (tabs|combined)\r\n",
     );
-    let selected_at = transcript.len();
-    input
-        .write_all(b"\r")
-        .expect("linear combined selection saved by empty Enter");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        selected_at,
-        "Notice: Settings saved · calls unlimited · active unlimited · command max 10 min · visual sessions\r\nInput:\r\n".as_bytes(),
-    );
+    pty.send_and_wait(b"\r", "Notice: Settings saved · calls unlimited · active unlimited · command max 10 min · visual sessions\r\nInput:\r\n".as_bytes());
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
@@ -436,16 +324,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             "Next-Run collaboration: team · up to 2 children",
         ),
     ] {
-        let from = transcript.len();
-        input
-            .write_all(format!("{command}\r").as_bytes())
-            .expect("current selection");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(
+            format!("{command}\r").as_bytes(),
             format!("Notice: {feedback}\r\nInput:\r\n").as_bytes(),
         );
     }
@@ -478,12 +358,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         "/model claude-sonnet-5 low",
         "/agents single",
     ] {
-        let from = transcript.len();
-        input
-            .write_all(format!("{command}\r").as_bytes())
-            .expect("busy choice");
-        wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes\r\nInput:\r\n");
+        pty.send_and_wait(format!("{command}\r").as_bytes(), b"Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes\r\nInput:\r\n");
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State"))
                 .expect("rejected choice Store");
@@ -499,16 +374,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     }
     rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).expect("release operation");
     for effort in ["low", "high"] {
-        let from = transcript.len();
-        input
-            .write_all(format!("/model claude-sonnet-5 {effort}\r").as_bytes())
-            .expect("explicit post-unlock choice");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(
+            format!("/model claude-sonnet-5 {effort}\r").as_bytes(),
             format!("Notice: Model: claude-sonnet-5 · {effort}\r\nInput:\r\n").as_bytes(),
         );
     }
@@ -567,28 +434,9 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     });
     let mut source_prefix = Vec::new();
     for (command, title) in [("/new", "Before new"), ("/clear", "Before clear")] {
-        let from = transcript.len();
-        input
-            .write_all(format!("/resume {current_id}\r").as_bytes())
-            .expect("resume original");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Input:\r\n",
-        );
-        let from = transcript.len();
-        input
-            .write_all(format!("/rename {title}\r").as_bytes())
-            .expect("source title");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(format!("/resume {current_id}\r").as_bytes(), b"Input:\r\n");
+        pty.send_and_wait(
+            format!("/rename {title}\r").as_bytes(),
             format!("Notice: Renamed Session: {title}\r\nInput:\r\n").as_bytes(),
         );
         let prefix = runtime.block_on(async {
@@ -599,19 +447,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             events
         });
         source_prefix = prefix;
-        let from = transcript.len();
-        input
-            .write_all(format!("{command}\r").as_bytes())
-            .expect("new conversation command");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Input:\r\n",
-        );
-        assert!(String::from_utf8_lossy(&transcript[from..]).contains("New conversation"));
+        let from = pty.send_and_wait(format!("{command}\r").as_bytes(), b"Input:\r\n");
+        assert!(String::from_utf8_lossy(&pty.transcript[from..]).contains("New conversation"));
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).expect("State"))
                 .expect("source Store");
@@ -634,26 +471,10 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                 1
             );
         });
-        let from = transcript.len();
-        input
-            .write_all(b"/provider\r")
-            .expect("inspect preserved Provider");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"Notice: Provider: anthropic\r\nInput:\r\n",
-        );
+        pty.send_and_wait(b"/provider\r", b"Notice: Provider: anthropic\r\nInput:\r\n");
     }
-    let storage_at = transcript.len();
-    input
-        .write_all(b"/storage\r")
-        .expect("local storage report");
-    wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, storage_at,
-        b"History, credentials and live/uncertain Guard storage have no automatic-removal hint.\r\nInput:\r\n");
-    let storage_text = String::from_utf8_lossy(&transcript[storage_at..]);
+    let storage_at = pty.send_and_wait(b"/storage\r", b"History, credentials and live/uncertain Guard storage have no automatic-removal hint.\r\nInput:\r\n");
+    let storage_text = String::from_utf8_lossy(&pty.transcript[storage_at..]);
     assert!(storage_text.contains("Known owned subtotal:"));
     assert!(storage_text.contains("Guard backing storage/scratch: not yet included"));
     assert!(!storage_text.contains("account-credentials.json"));
@@ -697,91 +518,47 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         matches!(clear_result, Err(arany::StoreError::BuildCacheBusy)),
         "Store clear result category: {clear_category}"
     );
-    let usage_at = transcript.len();
-    input
-        .write_all(b"/cache clear now\r")
-        .expect("malformed cache clear");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        usage_at,
+    pty.send_and_wait(
+        b"/cache clear now\r",
         b"Notice: Error: Usage: /cache clear [all]\r\n",
     );
-    let busy_at = transcript.len();
-    input
-        .write_all(b"/cache clear\r")
-        .expect("busy cache clear");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        busy_at,
+    pty.send_and_wait(
+        b"/cache clear\r",
         b"Notice: Build cache is in use; retry after its command finishes\r\nInput:\r\n",
     );
     assert!(current_cache.exists());
     assert!(other_cache.exists());
     rustix::fs::flock(&held_cache, rustix::fs::FlockOperation::Unlock)
         .expect("release cache lease");
-    let clear_workspace_at = transcript.len();
-    input
-        .write_all(b"/cache clear\r")
-        .expect("clear current Workspace cache");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_workspace_at,
+    pty.send_and_wait(
+        b"/cache clear\r",
         b"Notice: Cleared this Workspace's private build cache\r\nInput:\r\n",
     );
     assert!(!current_cache.exists());
     assert!(other_cache.exists());
-    let clear_all_at = transcript.len();
-    input
-        .write_all(b"/cache clear all\r")
-        .expect("clear all private build caches");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_all_at,
+    pty.send_and_wait(
+        b"/cache clear all\r",
         b"Notice: Cleared all private build caches\r\nInput:\r\n",
     );
     assert!(!other_cache.exists());
     let (planted_cache, planted_lock) = seed_empty_build_cache(&state, &workspace);
     std::fs::set_permissions(&planted_lock, std::fs::Permissions::from_mode(0o644))
         .expect("non-private cache identity lock");
-    let failed_clear_at = transcript.len();
-    input
-        .write_all(b"/cache clear\r")
-        .expect("cache clear over non-private storage");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        failed_clear_at,
+    pty.send_and_wait(
+        b"/cache clear\r",
         b"Notice: Error: private build cache could not be cleared\r\nInput:\r\n",
     );
     assert!(planted_cache.exists());
-    input.write_all(b"/exit\r").expect("exit");
-    let result = super::loopback::wait_product(child.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    pty.send(b"/exit\r");
+    let result = pty.finish();
     assert!(result.status.success());
     assert!(result.stderr.is_empty());
-    assert_eq!(answered.cursor_queries, 0);
-    let text = String::from_utf8(transcript).expect("linear transcript UTF-8");
+    assert_eq!(pty.answered.cursor_queries, 0);
+    let text = String::from_utf8(pty.transcript).expect("linear transcript UTF-8");
     assert!(text.contains("Run npx --yes skills@1.7.0 experimental_install in this project: .agents/skills is missing and skills-lock.json exists."));
     assert!(!text.contains('\u{1b}'));
     assert_eq!(text.matches("Notice: Error:").count(), 7);
-    assert_eq!(
-        super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
-        super::active_terminal::transcript_field(&text, "TTY_AFTER:"),
-    );
+    assert_tty_restored(&text);
     let expected = arany::SessionDefaults {
         provider: Some("anthropic".into()),
         model: Some("claude-sonnet-5".into()),
@@ -831,103 +608,65 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     let shell = "stty rows 8 cols 16; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            shell,
+        )
+        .session(&state, &workspace)
         .env("OPENAI_API_KEY", "synthetic-test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"SHELL_PID:",
+        .term("xterm")
+        .spawn(),
     );
-    let shell_line = transcript
+    pty.wait_for(b"SHELL_PID:");
+    let shell_line = pty
+        .transcript
         .windows(b"SHELL_PID:".len())
         .position(|part| part == b"SHELL_PID:")
         .expect("shell marker")
         + b"SHELL_PID:".len();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        shell_line,
-        b"\n",
-    );
-    let shell_pid = String::from_utf8_lossy(&transcript)
-        .lines()
-        .find_map(|line| line.strip_prefix("SHELL_PID:"))
-        .expect("shell PID")
-        .trim_end_matches('\r')
-        .parse::<u32>()
-        .expect("numeric shell PID");
-    let product_pid = product_child_of(shell_pid);
-    let _product_guard = ProductGuard::new(product_pid, state.clone());
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Ask Arany",
-    );
-    let visible = String::from_utf8_lossy(&transcript);
+    pty.wait_for_after(shell_line, b"\n");
+    let product_pid = pty.adopt_product(&state);
+    pty.wait_for(b"Ask Arany");
+    let visible = String::from_utf8_lossy(&pty.transcript);
     let before = visible
         .lines()
         .find_map(|line| line.strip_prefix("TTY_BEFORE:"))
         .expect("initial terminal settings")
         .trim_end_matches('\r')
         .to_owned();
-    let ready = transcript.len();
-    input.write_all(b"/help\r").expect("open help");
-    wait_for_frame(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (ready, 16, 8),
-        |screen| {
-            screen.iter().any(|row| row.contains("Commands"))
-                && screen.iter().any(|row| row.contains("Up/Dn Enter Esc"))
-        },
-    );
+    let ready = pty.send(b"/help\r");
+    wait_for_frame(&mut pty, (ready, 16, 8), |screen| {
+        screen.iter().any(|row| row.contains("Commands"))
+            && screen.iter().any(|row| row.contains("Up/Dn Enter Esc"))
+    });
     assert_ne!(tty_settings(product_pid), before, "help owns raw mode");
     kill_process(product_pid, Signal::TERM).expect("terminate open help");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if child.child().try_wait().expect("process status").is_some() {
+        pty.pump();
+        if pty
+            .child
+            .child()
+            .try_wait()
+            .expect("process status")
+            .is_some()
+        {
             break;
         }
         assert!(
             Instant::now() < deadline,
             "help exit: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let status = child.take().wait().expect("process exit");
+    let status = pty.child.take().wait().expect("process exit");
     assert!(!status.success(), "SIGTERM exits unsuccessfully");
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    let text = String::from_utf8_lossy(&transcript);
+    pty.pump();
+    let text = String::from_utf8_lossy(&pty.transcript);
     let after = text
         .rsplit_once("TTY_AFTER:")
         .expect("restored terminal marker")
@@ -954,71 +693,32 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     });
 }
 
-fn inspect_storage_pager(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-) {
-    let from = transcript.len();
-    input.write_all(b"/storage\r").expect("open storage pager");
-    wait_for_screen(output, input, transcript, answered, (from, 40, 24), "Esc |");
-    assert!(screen_contains(transcript, 40, 24, "Arany storage:"));
-    let from = transcript.len();
-    input.write_all(b"\x1b[F").expect("last storage page");
-    wait_for_screen(
-        output,
-        input,
-        transcript,
-        answered,
-        (from, 40, 24),
-        "History, credentials",
-    );
-    let from = transcript.len();
-    input.write_all(b"\x1b").expect("close storage pager");
-    wait_for_caret(output, input, transcript, answered, from, 3);
+fn inspect_storage_pager(pty: &mut Pty) {
+    let from = pty.send(b"/storage\r");
+    pty.wait_for_screen((from, 40, 24), "Esc |");
+    assert!(screen_contains(&pty.transcript, 40, 24, "Arany storage:"));
+    let from = pty.send(b"\x1b[F");
+    pty.wait_for_screen((from, 40, 24), "History, credentials");
+    let from = pty.send(b"\x1b");
+    wait_for_caret(pty, from, 3);
 }
 
-fn inspect_file_suggestions(
-    workspace: &Path,
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-) {
-    let start = transcript.len();
-    input.write_all(b"@").unwrap();
-    wait_for_screen(
-        output,
-        input,
-        transcript,
-        answered,
-        (start, 40, 24),
-        "visible-note.txt",
-    );
+fn inspect_file_suggestions(workspace: &Path, pty: &mut Pty) {
+    let start = pty.send(b"@");
+    pty.wait_for_screen((start, 40, 24), "visible-note.txt");
     for hidden in ["ignored.cache", "private-note.txt", ".ENV"] {
-        assert!(!screen_contains(transcript, 40, 24, hidden));
-        assert!(!String::from_utf8_lossy(&transcript[start..]).contains(hidden));
+        assert!(!screen_contains(&pty.transcript, 40, 24, hidden));
+        assert!(!String::from_utf8_lossy(&pty.transcript[start..]).contains(hidden));
     }
     std::fs::write(workspace.join(".gitignore"), b"*").unwrap();
-    let refining = transcript.len();
-    input.write_all(b"visible-no").unwrap();
+    let refining = pty.send(b"visible-no");
     let refined_column = 14;
-    wait_for_caret(
-        output,
-        input,
-        transcript,
-        answered,
-        refining,
-        refined_column,
-    );
-    assert!(screen_contains(transcript, 40, 24, "visible-note.txt"));
-    let closed = transcript.len();
-    input.write_all(b"\x1b").unwrap();
-    wait_for_caret(output, input, transcript, answered, closed, refined_column);
-    let cleared = transcript.len();
-    input.write_all(b"\x03").unwrap();
-    wait_for_caret(output, input, transcript, answered, cleared, 3);
+    wait_for_caret(pty, refining, refined_column);
+    assert!(screen_contains(&pty.transcript, 40, 24, "visible-note.txt"));
+    let closed = pty.send(b"\x1b");
+    wait_for_caret(pty, closed, refined_column);
+    let cleared = pty.send(b"\x03");
+    wait_for_caret(pty, cleared, 3);
     std::fs::write(workspace.join(".gitignore"), b"*.cache\n").unwrap();
 }
 
@@ -1041,7 +741,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"---\nname: ask-matt\ndescription: Synthetic guidance\n---\nGuide the selected task.\n",
     )
     .unwrap();
-    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
+    let config = serde_json::json!({"workspace_paths":["."],"write":false,
         "commands":[],"mcp":[],"skills":[]});
     std::fs::write(
         state.join("tools.json"),
@@ -1073,281 +773,70 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     )
     .unwrap();
     let shell = "stty rows 24 cols 40; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic --tools --no-color; first_code=$?; printf 'SETTINGS_RESTART\n'; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; second_code=$?; printf 'VIEW_RESTART\n'; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai --tools --no-color; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; test \"$first_code\" -eq 0 || exit \"$first_code\"; test \"$second_code\" -eq 0 || exit \"$second_code\"; exit \"$exit_code\"";
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            shell,
+        )
+        .session(&state, &workspace)
         .env("ARANY_TEST_SESSION", saved_id.to_string())
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Ask Arany",
+        .term("xterm")
+        .spawn(),
     );
-    let shell_pid = String::from_utf8_lossy(&transcript)
-        .lines()
-        .find_map(|line| line.trim_end_matches('\r').strip_prefix("SHELL_PID:"))
-        .expect("shell PID")
-        .parse::<u32>()
-        .expect("numeric shell PID");
-    let _product_guard = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    pty.wait_for(b"Ask Arany");
+    let shell_pid = pty.shell_pid();
+    pty.adopt_product(&state);
     let tty_before = super::active_terminal::transcript_field(
-        &String::from_utf8_lossy(&transcript),
+        &String::from_utf8_lossy(&pty.transcript),
         "TTY_BEFORE:",
     )
     .to_owned();
-    inspect_file_suggestions(
-        &workspace,
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-    );
-    inspect_storage_pager(&mut output, &mut input, &mut transcript, &mut answered);
-    let paste_at = transcript.len();
-    input
-        .write_all(b"\x1b[200~first\r\nsecond\x1b[201~")
-        .expect("bracketed multiline paste");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        paste_at,
-        b";3Hfirst",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        paste_at,
-        9,
-    );
+    inspect_file_suggestions(&workspace, &mut pty);
+    inspect_storage_pager(&mut pty);
+    let paste_at = pty.send_and_wait(b"\x1b[200~first\r\nsecond\x1b[201~", b";3Hfirst");
+    wait_for_caret(&mut pty, paste_at, 9);
     assert!(
-        !String::from_utf8_lossy(&transcript[paste_at..]).contains("error:"),
+        !String::from_utf8_lossy(&pty.transcript[paste_at..]).contains("error:"),
         "paste must edit the draft without submitting either line"
     );
-    let clipboard_at = transcript.len();
-    input.write_all(b"\x16").expect("explicit clipboard paste");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clipboard_at,
-        b"unavailable;",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clipboard_at,
-        9,
-    );
-    let continued_at = transcript.len();
-    input
-        .write_all(b"Z")
-        .expect("continue retained paste draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        continued_at,
-        10,
-    );
-    let clear_at = transcript.len();
-    input.write_all(b"\x03").expect("clear pasted draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
-    fresh_capture(&mut transcript, &mut answered);
-    let tabs_at = transcript.len();
-    input.write_all(b"/").expect("open default Commands tab");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        tabs_at,
-        b"[Commands]",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        tabs_at,
-        4,
-    );
-    let skill_at = transcript.len();
-    input.write_all(b"\x1b[C").expect("switch to Skills");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        skill_at,
-        b"> (skill) /ask-matt",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        skill_at,
-        4,
-    );
-    let commands_at = transcript.len();
-    input.write_all(b"\x1b[D").expect("return to Commands");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        commands_at,
-        4,
-    );
-    let skill_at = transcript.len();
-    input
-        .write_all(b"ask")
-        .expect("filter commands and Skills from the Commands tab");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        skill_at,
-        b"> (skill) /ask-matt",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        skill_at,
-        7,
-    );
-    let skill_accept_at = transcript.len();
-    input.write_all(b"\t").expect("choose Skill as a draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        skill_accept_at,
-        13,
-    );
-    let skill_clear_at = transcript.len();
-    input.write_all(b"\x03").expect("clear unsent Skill draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        skill_clear_at,
-        3,
-    );
-    let invoke_at = transcript.len();
-    input.write_all(b"/ask").expect("filter Skill prefix again");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        invoke_at,
-        7,
-    );
-    let invoke_at = transcript.len();
-    input.write_all(b"\r").expect("invoke the focused Skill");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (invoke_at, 40, 24),
-        "Choose a model",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        invoke_at,
-        12,
-    );
+    let clipboard_at = pty.send_and_wait(b"\x16", b"unavailable;");
+    wait_for_caret(&mut pty, clipboard_at, 9);
+    let continued_at = pty.send(b"Z");
+    wait_for_caret(&mut pty, continued_at, 10);
+    let clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, clear_at, 3);
+    pty.fresh_capture();
+    let tabs_at = pty.send_and_wait(b"/", b"[Commands]");
+    wait_for_caret(&mut pty, tabs_at, 4);
+    let skill_at = pty.send_and_wait(b"\x1b[C", b"> (skill) /ask-matt");
+    wait_for_caret(&mut pty, skill_at, 4);
+    let commands_at = pty.send(b"\x1b[D");
+    wait_for_caret(&mut pty, commands_at, 4);
+    let skill_at = pty.send_and_wait(b"ask", b"> (skill) /ask-matt");
+    wait_for_caret(&mut pty, skill_at, 7);
+    let skill_accept_at = pty.send(b"\t");
+    wait_for_caret(&mut pty, skill_accept_at, 13);
+    let skill_clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, skill_clear_at, 3);
+    let invoke_at = pty.send(b"/ask");
+    wait_for_caret(&mut pty, invoke_at, 7);
+    let invoke_at = pty.send(b"\r");
+    pty.wait_for_screen((invoke_at, 40, 24), "Choose a model");
+    wait_for_caret(&mut pty, invoke_at, 12);
     assert!(
-        crate::screen_rows(&transcript, 40, 24)
+        crate::screen_rows(&pty.transcript, 40, 24)
             .iter()
             .any(|row| row.trim() == "> /ask-matt"),
         "model rejection must retain the complete Skill invocation"
     );
-    let clear_at = transcript.len();
-    input
-        .write_all(b"\x03")
-        .expect("clear retained Skill invocation");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
-    let settings_at = transcript.len();
-    input
-        .write_all(b"/settings\r")
-        .expect("open display settings");
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        settings_at,
-    );
-    let saved_at = transcript.len();
-    input.write_all(b"\x1b[C\r").expect("save combined menu");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        saved_at,
-        b"combined",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        saved_at,
-        3,
-    );
+    let clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, clear_at, 3);
+    let settings_at = pty.send(b"/settings\r");
+    wait_armed(&mut pty, settings_at);
+    let saved_at = pty.send_and_wait(b"\x1b[C\r", b"combined");
+    wait_for_caret(&mut pty, saved_at, 3);
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
@@ -1358,379 +847,121 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         saved_ui_preferences("combined", "fullscreen"),
         "--classic must not leak into the saved chat view"
     );
-    fresh_capture(&mut transcript, &mut answered);
-    let menu_at = transcript.len();
-    input.write_all(b"/resum").expect("single command prefix");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        menu_at,
-        b"> Cmd /resume",
-    );
-    let picker_at = transcript.len();
-    input
-        .write_all(b"\r")
-        .expect("Enter invokes the focused resume entry");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        picker_at,
-        b"Resume",
-    );
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        picker_at,
-    );
-    let closed_at = transcript.len();
-    input.write_all(b"\x1b").expect("dismiss resume picker");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (closed_at, 40, 24),
-        "closed",
-    );
-    let menu_at = transcript.len();
-    input.write_all(b"/s").expect("ambiguous command prefix");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        menu_at,
-        5,
-    );
-    input.write_all(b"\x1b[B").expect("focus status choice");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"> Cmd /status",
-    );
-    let status_at = transcript.len();
-    input.write_all(b"\r").expect("invoke focused status");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        status_at,
-        b"Tokens",
-    );
-    wait_for_frame(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (status_at, 40, 24),
-        |screen| {
-            screen
-                .iter()
-                .any(|row| row.contains("Tokens used: no calls yet"))
-                && screen.iter().any(|row| row.contains("/usage for details"))
-                && screen.iter().any(|row| row.contains("Esc close"))
-        },
-    );
-    let closed = transcript.len();
-    input.write_all(b"\x1b").expect("close status report");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        closed,
-        b"Ask Arany",
-    );
-    let newline_at = transcript.len();
-    input
-        .write_all(b"alpha\\\r")
-        .expect("portable backslash-Enter continues the chat draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        newline_at,
-        3,
-    );
-    let newline_at = transcript.len();
-    input
-        .write_all(b"beta\x1b[13;2u")
-        .expect("distinct Shift+Enter adds another newline");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        newline_at,
-        3,
-    );
-    input.write_all(b"\x03").expect("clear multiline draft");
+    pty.fresh_capture();
+    pty.send_and_wait(b"/resum", b"> Cmd /resume");
+    let picker_at = pty.send_and_wait(b"\r", b"Resume");
+    wait_armed(&mut pty, picker_at);
+    let closed_at = pty.send(b"\x1b");
+    pty.wait_for_screen((closed_at, 40, 24), "closed");
+    let menu_at = pty.send(b"/s");
+    wait_for_caret(&mut pty, menu_at, 5);
+    pty.send(b"\x1b[B");
+    pty.wait_for(b"> Cmd /status");
+    let status_at = pty.send_and_wait(b"\r", b"Tokens");
+    wait_for_frame(&mut pty, (status_at, 40, 24), |screen| {
+        screen
+            .iter()
+            .any(|row| row.contains("Tokens used: no calls yet"))
+            && screen.iter().any(|row| row.contains("/usage for details"))
+            && screen.iter().any(|row| row.contains("Esc close"))
+    });
+    pty.send_and_wait(b"\x1b", b"Ask Arany");
+    let newline_at = pty.send(b"alpha\\\r");
+    wait_for_caret(&mut pty, newline_at, 3);
+    let newline_at = pty.send(b"beta\x1b[13;2u");
+    wait_for_caret(&mut pty, newline_at, 3);
+    pty.send(b"\x03");
     // The viewport shrinks with the draft, so the cleared composer is read from the settled screen.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let rows = crate::session_picker::screen_rows(&transcript, 40, 24);
+        let rows = crate::session_picker::screen_rows(&pty.transcript, 40, 24);
         if rows.iter().any(|row| row.starts_with('>'))
             && !rows.iter().any(|row| row.contains("alpha"))
         {
             break;
         }
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "cleared draft: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let model_menu_at = transcript.len();
-    input.write_all(b"/s").expect("ambiguous Session prefix");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        model_menu_at,
-        5,
-    );
-    input.write_all(b"\x1b[B").expect("focus status choice");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        model_menu_at,
-        b"> Cmd /status",
-    );
-    let closed_at = transcript.len();
-    input.write_all(b"\x1b").expect("dismiss completion menu");
+    let model_menu_at = pty.send(b"/s");
+    wait_for_caret(&mut pty, model_menu_at, 5);
+    pty.send(b"\x1b[B");
+    pty.wait_for_after(model_menu_at, b"> Cmd /status");
+    let closed_at = pty.send(b"\x1b");
     // The open menu also leaves the caret in column 5; only a decoded composer without the
     // menu proves Escape was handled, wherever the content-sized viewport now sits.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !crate::composer_caret(&transcript, closed_at, 40, 24).is_some_and(|(column, screen)| {
-        column == 5
-            && !screen.iter().any(|row| row.contains("Cmd /status"))
-            && screen.iter().any(|row| row.starts_with("> /s"))
-    }) {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "closed completion menu: {}",
-            tail(&transcript[closed_at..])
-        );
-        thread::yield_now();
-    }
-    input
-        .write_all(b"\x7f\x7f/model staged-model\r")
-        .expect("correct retained prefix with a literal model selection");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        closed_at,
-        b"Model:",
-    );
-    transcript.clear();
-    answered = crate::session_picker::PtyResponses::default();
-    let unknown_at = transcript.len();
-    input.write_all(b"/provder\r").expect("unknown command");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Unknown",
-    );
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"r?",
-    );
+    pty.pump_until("closed completion menu", |transcript| {
+        crate::composer_caret(transcript, closed_at, 40, 24).is_some_and(|(column, screen)| {
+            column == 5
+                && !screen.iter().any(|row| row.contains("Cmd /status"))
+                && screen.iter().any(|row| row.starts_with("> /s"))
+        })
+    });
+    pty.send(b"\x7f\x7f/model staged-model\r");
+    pty.wait_for_after(closed_at, b"Model:");
+    pty.fresh_capture();
+    let unknown_at = pty.send(b"/provder\r");
+    pty.wait_for(b"Unknown");
+    pty.wait_for(b"r?");
     assert!(
-        String::from_utf8_lossy(&transcript[unknown_at..]).contains("error:"),
+        String::from_utf8_lossy(&pty.transcript[unknown_at..]).contains("error:"),
         "local command rejection needs a textual error heading: {}",
-        tail(&transcript)
+        tail(&pty.transcript)
     );
-    input
-        .write_all(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fprov")
-        .expect("correct retained command");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"> Cmd /provider",
-    );
-    input
-        .write_all(b"\topenai\r")
-        .expect("Tab completion and Provider argument");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Provider:",
-    );
-    input
-        .write_all(b"/agents bad\r")
-        .expect("invalid collaboration argument");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"policy",
-    );
-    input
-        .write_all(b"\x7f\x7f\x7fteam 2\r")
-        .expect("correct retained argument");
-    let rename_at = transcript.len();
-    input
-        .write_all(format!("/rename {}Z\x1b[D\r", "A".repeat(128)).as_bytes())
-        .expect("oversized rename with a mid-draft caret");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        rename_at,
+    pty.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fprov");
+    pty.wait_for(b"> Cmd /provider");
+    pty.send(b"\topenai\r");
+    pty.wait_for(b"Provider:");
+    pty.send(b"/agents bad\r");
+    pty.wait_for(b"policy");
+    pty.send(b"\x7f\x7f\x7fteam 2\r");
+    let rename_at = pty.send_and_wait(
+        format!("/rename {}Z\x1b[D\r", "A".repeat(128)).as_bytes(),
         b"long;",
     );
     let notice_at = rename_at
-        + transcript[rename_at..]
+        + pty.transcript[rename_at..]
             .windows(b"long;".len())
             .position(|part| part == b"long;")
             .expect("rename rejection")
         + b"long;".len();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        notice_at,
-        b"\x1b[?25h",
-    );
-    let corrected_at = transcript.len();
-    input
-        .write_all(b"\x7f\r")
-        .expect("correct retained rename at its original caret");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        corrected_at,
-        b"Renamed",
-    );
-    transcript.clear();
-    answered = crate::session_picker::PtyResponses::default();
-    input
-        .write_all(b"/exit\r")
-        .expect("exit after corrected rename");
-    let restart_at = transcript.len();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        restart_at,
-        b"SETTINGS_RESTART",
-    );
+    pty.wait_for_after(notice_at, b"\x1b[?25h");
+    pty.send_and_wait(b"\x7f\r", b"Renamed");
+    pty.fresh_capture();
+    pty.send(b"/exit\r");
+    let restart_at = pty.transcript.len();
+    pty.wait_for_after(restart_at, b"SETTINGS_RESTART");
     let restart_at = restart_at
-        + transcript[restart_at..]
+        + pty.transcript[restart_at..]
             .windows(b"SETTINGS_RESTART".len())
             .position(|part| part == b"SETTINGS_RESTART")
             .unwrap()
         + b"SETTINGS_RESTART".len();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        restart_at,
-        b"Ask Arany",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        restart_at,
-        3,
-    );
-    let _restarted_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
-    let combined_at = transcript.len();
-    input
-        .write_all(b"/")
-        .expect("remembered combined menu in fresh process");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        combined_at,
-        4,
-    );
-    let selected_at = transcript.len();
-    input
-        .write_all(b"rev\t")
-        .expect("remembered combined mode exposes Skills without switching tabs");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        selected_at,
-        11,
-    );
-    let clear_at = transcript.len();
-    input.write_all(b"\x03").expect("clear menu without a Run");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
+    pty.wait_for_after(restart_at, b"Ask Arany");
+    wait_for_caret(&mut pty, restart_at, 3);
+    pty.guard_product(ProductGuard::new(
+        product_child_of(shell_pid),
+        state.clone(),
+    ));
+    let combined_at = pty.send(b"/");
+    wait_for_caret(&mut pty, combined_at, 4);
+    let selected_at = pty.send(b"rev\t");
+    wait_for_caret(&mut pty, selected_at, 11);
+    let clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, clear_at, 3);
     let pending = state.join("ui-preferences.pending");
     let outside = temp.path().join("outside-preference-canary");
     std::fs::write(&outside, b"unchanged").unwrap();
     std::os::unix::fs::symlink(&outside, &pending).unwrap();
-    let rejected_at = transcript.len();
-    input
-        .write_all(b"/settings\r")
-        .expect("open settings for the unsafe replacement");
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        rejected_at,
-    );
-    input
-        .write_all(b"\x1b[C\r")
-        .expect("unsafe replacement must retain current display");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        rejected_at,
-        3,
-    );
+    let rejected_at = pty.send(b"/settings\r");
+    wait_armed(&mut pty, rejected_at);
+    pty.send(b"\x1b[C\r");
+    wait_for_caret(&mut pty, rejected_at, 3);
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
@@ -1742,65 +973,30 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
     assert!(
-        String::from_utf8_lossy(&transcript[rejected_at..]).contains("error"),
+        String::from_utf8_lossy(&pty.transcript[rejected_at..]).contains("error"),
         "unsafe save gives visible failure feedback: {}",
-        String::from_utf8_lossy(&transcript[rejected_at..])
+        String::from_utf8_lossy(&pty.transcript[rejected_at..])
             .chars()
             .take(4096)
             .flat_map(char::escape_default)
             .collect::<String>()
     );
-    let unchanged_at = transcript.len();
-    input
-        .write_all(b"/rev\t")
-        .expect("failed save leaves combined display");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        unchanged_at,
-        11,
-    );
-    let clear_at = transcript.len();
-    input.write_all(b"\x03").expect("clear retained display");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
-    fresh_capture(&mut transcript, &mut answered);
+    let unchanged_at = pty.send(b"/rev\t");
+    wait_for_caret(&mut pty, unchanged_at, 11);
+    let clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, clear_at, 3);
+    pty.fresh_capture();
     std::fs::remove_file(pending).unwrap();
-    let tabs_at = transcript.len();
-    input
-        .write_all(b"/settings\r")
-        .expect("open settings for tabs");
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        tabs_at,
-    );
-    input
-        .write_all(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(12)).as_bytes())
-        .expect("save tabs and Ctrl+Enter in the settings window");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        tabs_at,
-        3,
-    );
+    let tabs_at = pty.send(b"/settings\r");
+    wait_armed(&mut pty, tabs_at);
+    pty.send(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(3)).as_bytes());
+    wait_for_caret(&mut pty, tabs_at, 3);
     let record = |view: &str| {
-        String::from_utf8(saved_ui_preferences("tabs", view))
-            .unwrap()
-            .replace("shift_enter", "ctrl_enter")
-            .into_bytes()
+        ui_preferences(&[
+            ("completion", "tabs", "tabs"),
+            ("newline", "ctrl_enter", "shift_enter"),
+            ("view", view, "fullscreen"),
+        ])
     };
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -1811,60 +1007,17 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .unwrap(),
         record("fullscreen")
     );
-    let shortcut_at = transcript.len();
-    input
-        .write_all(b"saved\x1b[13;5u")
-        .expect("use saved Ctrl+Enter immediately");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        shortcut_at,
-        3,
-    );
-    let clear_at = transcript.len();
-    input.write_all(b"\x03").expect("clear newline draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
+    let shortcut_at = pty.send(b"saved\x1b[13;5u");
+    wait_for_caret(&mut pty, shortcut_at, 3);
+    let clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, clear_at, 3);
     for (view, pinned) in [("classic", false), ("fullscreen", true), ("classic", false)] {
-        fresh_capture(&mut transcript, &mut answered);
-        let chosen_at = transcript.len();
-        input
-            .write_all(b"/settings\r")
-            .expect("open settings for the chat view");
-        wait_armed(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            chosen_at,
-        );
-        input
-            .write_all(b"\x1b[B\x1b[C\r")
-            .expect("chat view selected with Down and Right");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            chosen_at,
-            b"saved",
-        );
-        wait_for_caret(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            chosen_at,
-            3,
-        );
+        pty.fresh_capture();
+        let chosen_at = pty.send(b"/settings\r");
+        wait_armed(&mut pty, chosen_at);
+        pty.send(b"\x1b[B\x1b[C\r");
+        pty.wait_for_after(chosen_at, b"saved");
+        wait_for_caret(&mut pty, chosen_at, 3);
         assert_eq!(
             StateRoot::open_existing(&state)
                 .unwrap()
@@ -1874,7 +1027,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
                 .unwrap(),
             record(view)
         );
-        let frames = &transcript[chosen_at..];
+        let frames = &pty.transcript[chosen_at..];
         assert!(
             !frames.windows(8).any(|part| part == b"\x1b[?1049h"),
             "--classic keeps this process classic: {}",
@@ -1887,101 +1040,38 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             tail(frames)
         );
     }
-    fresh_capture(&mut transcript, &mut answered);
-    input
-        .write_all(b"/exit\r")
-        .expect("exit pinned classic process");
-    let view_at = transcript.len();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        view_at,
-        b"VIEW_RESTART",
-    );
+    pty.fresh_capture();
+    pty.send(b"/exit\r");
+    let view_at = pty.transcript.len();
+    pty.wait_for_after(view_at, b"VIEW_RESTART");
     let view_at = view_at
-        + transcript[view_at..]
+        + pty.transcript[view_at..]
             .windows(b"VIEW_RESTART".len())
             .position(|part| part == b"VIEW_RESTART")
             .unwrap()
         + b"VIEW_RESTART".len();
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        view_at,
-        b"Ask Arany",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        view_at,
-        3,
-    );
+    pty.wait_for_after(view_at, b"Ask Arany");
+    wait_for_caret(&mut pty, view_at, 3);
     assert!(
-        !transcript[view_at..]
+        !pty.transcript[view_at..]
             .windows(8)
             .any(|part| part == b"\x1b[?1049h"),
         "saved classic starts on the primary screen"
     );
-    let _viewed_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
-    let shortcut_at = transcript.len();
-    input
-        .write_all(b"saved\x1b[13;5u")
-        .expect("use saved Ctrl+Enter after a fresh process restores it");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        shortcut_at,
-        3,
-    );
-    let clear_at = transcript.len();
-    input.write_all(b"\x03").expect("clear newline draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
-    fresh_capture(&mut transcript, &mut answered);
-    let switched_at = transcript.len();
-    input
-        .write_all(b"/settings\r")
-        .expect("open settings for the live switch");
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        switched_at,
-    );
-    input
-        .write_all(b"\x1b[B\x1b[C\r")
-        .expect("saved fullscreen switches the live view");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        switched_at,
-        b"\x1b[?1049h",
-    );
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        switched_at,
-        3,
-    );
+    pty.guard_product(ProductGuard::new(
+        product_child_of(shell_pid),
+        state.clone(),
+    ));
+    let shortcut_at = pty.send(b"saved\x1b[13;5u");
+    wait_for_caret(&mut pty, shortcut_at, 3);
+    let clear_at = pty.send(b"\x03");
+    wait_for_caret(&mut pty, clear_at, 3);
+    pty.fresh_capture();
+    let switched_at = pty.send(b"/settings\r");
+    wait_armed(&mut pty, switched_at);
+    pty.send(b"\x1b[B\x1b[C\r");
+    pty.wait_for_after(switched_at, b"\x1b[?1049h");
+    wait_for_caret(&mut pty, switched_at, 3);
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
@@ -1991,42 +1081,41 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .unwrap(),
         record("fullscreen")
     );
-    inspect_storage_pager(&mut output, &mut input, &mut transcript, &mut answered);
-    let draft_at = transcript.len();
-    input
-        .write_all(b"abc")
-        .expect("draft after the live switch");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        draft_at,
-        6,
-    );
-    input
-        .write_all(b"\x7f\x7f\x7f/exit\r")
-        .expect("exit fullscreen process");
+    inspect_storage_pager(&mut pty);
+    let draft_at = pty.send(b"abc");
+    wait_for_caret(&mut pty, draft_at, 6);
+    pty.send(b"\x7f\x7f\x7f/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if child.child().try_wait().expect("process status").is_some() {
+        pty.pump();
+        if pty
+            .child
+            .child()
+            .try_wait()
+            .expect("process status")
+            .is_some()
+        {
             break;
         }
-        assert!(Instant::now() < deadline, "PTY exit: {}", tail(&transcript));
+        assert!(
+            Instant::now() < deadline,
+            "PTY exit: {}",
+            tail(&pty.transcript)
+        );
         thread::yield_now();
     }
-    let status = child.take().wait().expect("process exit");
-    assert!(status.success(), "product failed: {}", tail(&transcript));
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    let text = String::from_utf8_lossy(&transcript);
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .expect("TTY marker")
-            .to_owned()
-    };
-    assert_eq!(tty_before, marker("TTY_AFTER:"));
+    let status = pty.child.take().wait().expect("process exit");
+    assert!(
+        status.success(),
+        "product failed: {}",
+        tail(&pty.transcript)
+    );
+    pty.pump();
+    let text = String::from_utf8_lossy(&pty.transcript);
+    assert_eq!(
+        tty_before,
+        active_terminal::transcript_field(&text, "TTY_AFTER:")
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("read-only runtime");
@@ -2111,81 +1200,33 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     let state = temp.path().join("state");
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider anthropic; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_SESSION", saved_id.to_string())
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    let command = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        shell,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_TEST_SESSION", saved_id.to_string())
+    .term("xterm");
     #[cfg(debug_assertions)]
-    command
+    let command = command
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
         .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false");
-    let mut child = ChildGuard::new(command.spawn().expect("screen-reader PTY process"));
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Input:\r\n",
-    );
-    input.write_all(b"/provder\r").expect("unknown command");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Notice: Error: Unknown command; did you mean /provider?\r\nInput:\r\n",
-    );
-    let clipboard_at = transcript.len();
-    input
-        .write_all(b"/paste\r")
-        .expect("accessible clipboard command");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clipboard_at,
+    let mut pty = Pty::new(command.spawn());
+    pty.wait_for(b"Input:\r\n");
+    pty.send(b"/provder\r");
+    pty.wait_for(b"Notice: Error: Unknown command; did you mean /provider?\r\nInput:\r\n");
+    pty.send_and_wait(
+        b"/paste\r",
         b"Notice: Error: local clipboard unavailable; use terminal paste; draft unchanged\r\n",
     );
-    input
-        .write_all(b"/provider openai\r")
-        .expect("fresh Provider command");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Notice: Provider: openai; set /model\r\nInput:\r\n",
-    );
+    pty.send(b"/provider openai\r");
+    pty.wait_for(b"Notice: Provider: openai; set /model\r\nInput:\r\n");
     {
-        let model_at = transcript.len();
-        input
-            .write_all(b"/model gpt-5.4\r")
-            .expect("stage a native model");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            model_at,
+        pty.send_and_wait(
+            b"/model gpt-5.4\r",
             "Notice: Model: gpt-5.4 · low\r\nInput:\r\n".as_bytes(),
         );
         for (objective, error) in [
@@ -2203,35 +1244,14 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             ),
             ("Check @\".ENV/\"", "\".ENV/\": protected path"),
         ] {
-            let from = transcript.len();
-            input
-                .write_all(format!("{objective}\r").as_bytes())
-                .unwrap();
-            wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from, format!("Notice: Error: {error}; check the file inputs and enter a new line\r\nInput:\r\n").as_bytes());
-            let from = transcript.len();
-            input.write_all(b"/provider\r").unwrap();
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                from,
-                b"Notice: Provider: openai\r\nInput:\r\n",
-            );
+            pty.send_and_wait(format!("{objective}\r").as_bytes(), format!("Notice: Error: {error}; check the file inputs and enter a new line\r\nInput:\r\n").as_bytes());
+            pty.send_and_wait(b"/provider\r", b"Notice: Provider: openai\r\nInput:\r\n");
         }
     }
     #[cfg(debug_assertions)]
     {
-        let effort_at = transcript.len();
-        input
-            .write_all(b"/model gpt-5.4 low\r")
-            .expect("select reviewed effort without inference");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            effort_at,
+        pty.send_and_wait(
+            b"/model gpt-5.4 low\r",
             "Notice: Model: gpt-5.4 · low\r\nInput:\r\n".as_bytes(),
         );
         for malformed in [false, true] {
@@ -2242,64 +1262,34 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
                     .replace(b"synthetic-malformed-account-canary")
                     .expect("synthetic malformed metadata");
             }
-            let selection_at = transcript.len();
-            input
-                .write_all(b"/provider chatgpt\r")
-                .expect("reject an unavailable account selection");
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                selection_at,
-                if malformed {
+            pty.send_and_wait(b"/provider chatgpt\r", if malformed {
                     b"Notice: Error: saved ChatGPT setup is incompatible or damaged; use /setup or arany --setup to reset it and sign in again\r\nInput:\r\n"
                 } else {
                     b"Notice: Error: no selected ChatGPT account; use /setup to connect\r\nInput:\r\n"
-                },
-            );
-            let provider_at = transcript.len();
-            input
-                .write_all(b"/provider\r")
-                .expect("inspect the unchanged Provider");
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                provider_at,
-                b"Notice: Provider: openai\r\nInput:\r\n",
-            );
+                });
+            pty.send_and_wait(b"/provider\r", b"Notice: Provider: openai\r\nInput:\r\n");
         }
     }
     {
-        let from = transcript.len();
-        input
-            .write_all(b"/provider custom:synthetic\r")
-            .expect("stage an exact custom selection");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
+        pty.send_and_wait(
+            b"/provider custom:synthetic\r",
             b"Notice: Provider: custom:synthetic; set /model\r\nInput:\r\n",
         );
     }
     let profile_path = state.join("provider-profiles.json");
-    let mut profile = serde_json::json!({
-        "version": 1,
-        "profiles": [{
-            "name": "synthetic", "protocol": "openai-responses",
-            "endpoint": "http://127.0.0.1:9/responses", "model": "different-model",
-            "credential_env": "ARANY_PROVIDER_SYNTHETIC", "outcome_encoding": "json_schema",
-            "privacy": "user_authorized", "max_output_tokens": 4096,
-            "capability_evidence_version": 2, "efforts": ["low", "high"]
-        }]
-    });
-    let mismatched = serde_json::to_vec(&profile).expect("mismatched profile JSON");
-    profile["profiles"][0]["model"] = "synthetic-custom-model".into();
-    let matched = serde_json::to_vec(&profile).expect("matching profile JSON");
+    let document = |model: &str| {
+        let draft = arany::CustomProfileDraft {
+            name: "synthetic".into(),
+            url: "http://127.0.0.1:9/responses".into(),
+            model: model.into(),
+            credential_env: "ARANY_PROVIDER_SYNTHETIC".into(),
+            efforts: vec![arany::Effort::Low, arany::Effort::High],
+            ..arany::test_support::local_custom_profile(9)
+        };
+        serde_json::to_vec(&serde_json::json!({ "profiles": [draft] })).expect("profile JSON")
+    };
+    let mismatched = document("different-model");
+    let matched = document("synthetic-custom-model");
     let forms = [
         "/model synthetic-custom-model max",
         "/model synthetic-custom-model low",
@@ -2342,16 +1332,8 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
                 .expect("test profile permissions");
         }
         for command in commands {
-            let rejected_at = transcript.len();
-            input
-                .write_all(format!("{command}\r").as_bytes())
-                .expect("reject unadmitted custom effort");
-            wait_for_after(
-                &mut output,
-                &mut input,
-                &mut transcript,
-                &mut answered,
-                rejected_at,
+            pty.send_and_wait(
+                format!("{command}\r").as_bytes(),
                 format!("Notice: Error: {feedback}\r\nInput:\r\n").as_bytes(),
             );
         }
@@ -2363,16 +1345,8 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         ),
         ("/provider openai", "Provider: openai; set /model"),
     ] {
-        let accepted_at = transcript.len();
-        input
-            .write_all(format!("{command}\r").as_bytes())
-            .expect("accept an explicit local selection");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            accepted_at,
+        pty.send_and_wait(
+            format!("{command}\r").as_bytes(),
             format!("Notice: {feedback}\r\nInput:\r\n").as_bytes(),
         );
     }
@@ -2381,81 +1355,29 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
         ("/model gpt-5.4", "Model: gpt-5.4 · low"),
         ("/model gpt-5.4 low", "Model: gpt-5.4 · low"),
     ] {
-        let accepted_at = transcript.len();
-        input
-            .write_all(format!("{command}\r").as_bytes())
-            .expect("restore native selection explicitly");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            accepted_at,
+        pty.send_and_wait(
+            format!("{command}\r").as_bytes(),
             format!("Notice: {feedback}\r\nInput:\r\n").as_bytes(),
         );
     }
-    let help_at = transcript.len();
-    input.write_all(b"/help\r").expect("screen-reader help");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        help_at,
+    pty.send_and_wait(
+        b"/help\r",
         b"Command: /exit; Exit Session; during Run: view-only\r\nInput:\r\n",
     );
-    input
-        .write_all(b"/agents bad\r")
-        .expect("invalid collaboration command");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Notice: Error: invalid collaboration policy\r\nInput:\r\n",
-    );
-    input
-        .write_all(b"/agents team 2\r")
-        .expect("fresh collaboration command");
-    wait_for(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Notice: Next-Run collaboration: team \xc2\xb7 up to 2 children\r\nInput:\r\n",
-    );
-    let missing_at = transcript.len();
-    input
-        .write_all(format!("/resume {}\r", arany::SessionId::new()).as_bytes())
-        .expect("resume a syntactically valid missing Session");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        missing_at,
+    pty.send(b"/agents bad\r");
+    pty.wait_for(b"Notice: Error: invalid collaboration policy\r\nInput:\r\n");
+    pty.send(b"/agents team 2\r");
+    pty.wait_for(b"Notice: Next-Run collaboration: team \xc2\xb7 up to 2 children\r\nInput:\r\n");
+    pty.send_and_wait(
+        format!("/resume {}\r", arany::SessionId::new()).as_bytes(),
         b"Notice: Error: Session not found\r\nInput:\r\n",
     );
-    let fork_at = transcript.len();
-    input.write_all(b"/fork\r").expect("reject an empty fork");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        fork_at,
+    pty.send_and_wait(
+        b"/fork\r",
         b"Notice: Error: Session has no committed Run boundary to fork\r\nInput:\r\n",
     );
-    let rename_at = transcript.len();
-    input
-        .write_all(format!("/rename {}\r", "é".repeat(65)).as_bytes())
-        .expect("reject a title over the UTF-8 byte bound");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        rename_at,
+    pty.send_and_wait(
+        format!("/rename {}\r", "é".repeat(65)).as_bytes(),
         b"Notice: Error: Title is empty or too long; use a shorter title\r\nInput:\r\n",
     );
     let state_guard = StateModeGuard {
@@ -2464,57 +1386,47 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     };
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000))
         .expect("make State unavailable mid-Session");
-    let unavailable_at = transcript.len();
-    input
-        .write_all(format!("/resume {saved_id}\r").as_bytes())
-        .expect("resume with unavailable State");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        unavailable_at,
+    pty.send_and_wait(
+        format!("/resume {saved_id}\r").as_bytes(),
         b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n",
     );
     std::fs::set_permissions(&state, state_guard.mode.clone()).expect("restore State");
-    let corrected_at = transcript.len();
-    input
-        .write_all(b"/rename Corrected title\r")
-        .expect("fresh rename after rejected physical line");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        corrected_at,
+    pty.send_and_wait(
+        b"/rename Corrected title\r",
         b"Notice: Renamed Session: Corrected title\r\nInput:\r\n",
     );
-    input
-        .write_all(b"/exit\r")
-        .expect("exit after fresh rename");
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if child.child().try_wait().expect("process status").is_some() {
+        pty.pump();
+        if pty
+            .child
+            .child()
+            .try_wait()
+            .expect("process status")
+            .is_some()
+        {
             break;
         }
-        assert!(Instant::now() < deadline, "PTY exit: {}", tail(&transcript));
+        assert!(
+            Instant::now() < deadline,
+            "PTY exit: {}",
+            tail(&pty.transcript)
+        );
         thread::yield_now();
     }
-    let status = child.take().wait().expect("process exit");
-    assert!(status.success(), "product failed: {}", tail(&transcript));
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
-    let text = String::from_utf8_lossy(&transcript);
+    let status = pty.child.take().wait().expect("process exit");
+    assert!(
+        status.success(),
+        "product failed: {}",
+        tail(&pty.transcript)
+    );
+    pty.pump();
+    let text = String::from_utf8_lossy(&pty.transcript);
     assert!(!text.contains('\u{1b}'));
     assert!(!text.contains("synthetic-malformed-account-canary"));
     assert!(!text.contains("synthetic-malformed-profile-canary"));
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .expect("TTY marker")
-            .to_owned()
-    };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    assert_tty_restored(&text);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("read-only runtime");

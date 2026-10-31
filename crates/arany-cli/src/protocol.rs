@@ -15,7 +15,6 @@ pub struct EventLine {
     pub agent_run_id: Option<String>,
     #[schemars(schema_with = "event_kind_schema")]
     pub kind: String,
-    pub event_version: u32,
     #[schemars(with = "serde_json::Map<String, serde_json::Value>")]
     pub payload: serde_json::Value,
     pub created_at_ms: i64,
@@ -29,7 +28,6 @@ impl From<&arany::EventEnvelope> for EventLine {
             run_id: envelope.run_id.map(|id| id.to_string()),
             agent_run_id: envelope.agent_run_id.map(|id| id.to_string()),
             kind: envelope.event.kind().into(),
-            event_version: u32::try_from(envelope.event.version()).expect("compiled Event version"),
             payload: serde_json::from_str(&envelope.event.payload().expect("validated Event"))
                 .expect("valid Event JSON"),
             created_at_ms: envelope.created_at_ms,

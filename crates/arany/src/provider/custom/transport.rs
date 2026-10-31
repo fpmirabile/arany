@@ -1,4 +1,4 @@
-use super::{CustomProfile, CustomProfileError, MessagesAuth, PinnedDestination, Protocol};
+use super::{CustomProfile, CustomProfileError, CustomProtocol, MessagesAuth, PinnedDestination};
 use crate::provider::ProviderError;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
@@ -17,7 +17,8 @@ pub(super) struct CustomTransport {
     client: Client,
     endpoint: String,
     key: String,
-    protocol: Protocol,
+    protocol: CustomProtocol,
+    auth: MessagesAuth,
 }
 
 struct TransportResponse {
@@ -53,7 +54,8 @@ impl CustomTransport {
             client: destination.client()?,
             endpoint: destination.endpoint().to_owned(),
             key,
-            protocol: profile.protocol.clone(),
+            protocol: profile.protocol(),
+            auth: profile.auth(),
         })
     }
 
@@ -88,30 +90,62 @@ impl CustomTransport {
             return Err(TransportError::InvalidOutcome);
         }
         let conversation = render::conversation(request).map_err(|_| TransportError::Rejected)?;
-        let mut body = match &self.protocol {
-            Protocol::OpenaiResponses => match effort {
-                Some(value) => wire::run_body_with_effort(request, &conversation, value),
-                None => wire::run_body(request, &conversation),
-            },
-            Protocol::AnthropicMessages { .. } => {
-                messages::run_body_with_optional_effort(request, &conversation, effort)
-            }
-            Protocol::OpenaiChatCompletions { .. } => {
-                chat::run_body(request, &conversation, effort)
-            }
+        let mut body = self.run_body(request, &conversation, effort)?;
+        let received = if stream && !matches!(self.protocol, CustomProtocol::OpenaiChatCompletions)
+        {
+            body["stream"] = Value::Bool(true);
+            self.send_streamed(body, &request.model, preview, request.max_output_tokens)
+                .await?
+        } else {
+            self.send(body).await?
+        };
+        let response = self.decode_run(request, &conversation, &received, stream)?;
+        if !valid_usage(response.usage, request.max_output_tokens) {
+            self.log_messages_failure(
+                crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
+                received.counts,
+            );
+            return Err(TransportError::InvalidOutcome);
         }
-        .map_err(|_| TransportError::Rejected)?;
-        let received =
-            if stream && !matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. }) {
-                body["stream"] = Value::Bool(true);
-                self.send_streamed(body, &request.model, preview, request.max_output_tokens)
-                    .await?
-            } else {
-                self.send(body).await?
-            };
-        let response = match &self.protocol {
-            Protocol::OpenaiResponses => {
-                let scope = wire::RunScope::new(request, &conversation, &self.key);
+        if response.reflects_secret(&self.key) {
+            self.log_messages_failure(
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                received.counts,
+            );
+            return Err(TransportError::InvalidOutcome);
+        }
+        Ok(response)
+    }
+
+    fn run_body(
+        &self,
+        request: &ProviderRequest,
+        conversation: &crate::provider::conversation::Conversation,
+        effort: Option<Effort>,
+    ) -> Result<Value, TransportError> {
+        match self.protocol {
+            CustomProtocol::OpenaiResponses => match effort {
+                Some(value) => wire::run_body_with_effort(request, conversation, value),
+                None => wire::run_body(request, conversation),
+            },
+            CustomProtocol::AnthropicMessages => {
+                messages::run_body_with_optional_effort(request, conversation, effort)
+            }
+            CustomProtocol::OpenaiChatCompletions => chat::run_body(request, conversation, effort),
+        }
+        .map_err(|_| TransportError::Rejected)
+    }
+
+    fn decode_run(
+        &self,
+        request: &ProviderRequest,
+        conversation: &crate::provider::conversation::Conversation,
+        received: &TransportResponse,
+        stream: bool,
+    ) -> Result<ProviderResponse, TransportError> {
+        match self.protocol {
+            CustomProtocol::OpenaiResponses => {
+                let scope = wire::RunScope::new(request, conversation, &self.key);
                 if stream {
                     wire::decode_streamed_run(&received.bytes, &scope)
                         .map_err(|_| ProviderError::InvalidOutcome)
@@ -119,7 +153,7 @@ impl CustomTransport {
                     wire::decode_run(&received.bytes, &scope)
                 }
             }
-            Protocol::AnthropicMessages { .. } => {
+            CustomProtocol::AnthropicMessages => {
                 let offered: Vec<_> = conversation
                     .tools
                     .iter()
@@ -141,7 +175,7 @@ impl CustomTransport {
                     received.counts,
                 )
             }
-            Protocol::OpenaiChatCompletions { .. } => {
+            CustomProtocol::OpenaiChatCompletions => {
                 let offered: Vec<_> = conversation.tools.iter().flatten().cloned().collect();
                 chat::decode_run(
                     &received.bytes,
@@ -153,27 +187,12 @@ impl CustomTransport {
             }
         }
         .map_err(|error| {
-            if matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. }) {
+            if matches!(self.protocol, CustomProtocol::OpenaiChatCompletions) {
                 response_decode_failure(error)
             } else {
                 TransportError::InvalidOutcome
             }
-        })?;
-        if !valid_usage(response.usage, request.max_output_tokens) {
-            self.log_messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::UsageContract,
-                received.counts,
-            );
-            return Err(TransportError::InvalidOutcome);
-        }
-        if response.reflects_secret(&self.key) {
-            self.log_messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                received.counts,
-            );
-            return Err(TransportError::InvalidOutcome);
-        }
-        Ok(response)
+        })
     }
 
     pub(super) async fn compact(
@@ -186,31 +205,33 @@ impl CustomTransport {
         {
             return Err(TransportError::InvalidOutcome);
         }
-        let body = match &self.protocol {
-            Protocol::OpenaiResponses => effort.map_or_else(
+        let body = match self.protocol {
+            CustomProtocol::OpenaiResponses => effort.map_or_else(
                 || wire::compaction_body(request),
                 |value| wire::compaction_body_with_effort(request, value),
             ),
-            Protocol::AnthropicMessages { .. } => {
+            CustomProtocol::AnthropicMessages => {
                 messages::compaction_body_with_optional_effort(request, effort)
             }
-            Protocol::OpenaiChatCompletions { .. } => chat::compaction_body(request, effort),
+            CustomProtocol::OpenaiChatCompletions => chat::compaction_body(request, effort),
         };
         let received = self.send(body).await?;
-        let response = match &self.protocol {
-            Protocol::OpenaiResponses => wire::decode_compaction(&received.bytes, &request.model),
-            Protocol::AnthropicMessages { .. } => messages::decode_compaction_with_counts(
+        let response = match self.protocol {
+            CustomProtocol::OpenaiResponses => {
+                wire::decode_compaction(&received.bytes, &request.model)
+            }
+            CustomProtocol::AnthropicMessages => messages::decode_compaction_with_counts(
                 &received.bytes,
                 &request.model,
                 request.max_output_tokens,
                 received.counts,
             ),
-            Protocol::OpenaiChatCompletions { .. } => {
+            CustomProtocol::OpenaiChatCompletions => {
                 chat::decode_compaction(&received.bytes, &request.model, request.max_output_tokens)
             }
         }
         .map_err(|error| {
-            if matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. }) {
+            if matches!(self.protocol, CustomProtocol::OpenaiChatCompletions) {
                 response_decode_failure(error)
             } else {
                 TransportError::InvalidOutcome
@@ -238,19 +259,19 @@ impl CustomTransport {
         stage: crate::provider::diagnostics::SubscriptionFailureStage,
         counts: crate::provider::diagnostics::StreamCounts,
     ) {
-        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+        if matches!(self.protocol, CustomProtocol::AnthropicMessages) {
             crate::provider::diagnostics::messages_failure(stage, counts);
         }
     }
 
     fn request(&self, request: &Value) -> Result<reqwest::RequestBuilder, TransportError> {
-        let body = match &self.protocol {
-            Protocol::OpenaiResponses => wire::encode_request(request),
-            Protocol::AnthropicMessages { .. } => messages::encode_request_within(
+        let body = match self.protocol {
+            CustomProtocol::OpenaiResponses => wire::encode_request(request),
+            CustomProtocol::AnthropicMessages => messages::encode_request_within(
                 request,
                 crate::provider::MAX_PROVIDER_REQUEST_BYTES,
             ),
-            Protocol::OpenaiChatCompletions { .. } => wire::encode_request(request),
+            CustomProtocol::OpenaiChatCompletions => wire::encode_request(request),
         }
         .map_err(|_| TransportError::InvalidOutcome)?;
         let request = self
@@ -263,11 +284,11 @@ impl CustomTransport {
                 concat!("arany/", env!("CARGO_PKG_VERSION")),
             )
             .body(body);
-        Ok(match &self.protocol {
-            Protocol::OpenaiResponses => request.bearer_auth(&self.key),
-            Protocol::AnthropicMessages { auth, .. } => {
+        Ok(match self.protocol {
+            CustomProtocol::OpenaiResponses => request.bearer_auth(&self.key),
+            CustomProtocol::AnthropicMessages => {
                 let request = request.header("anthropic-version", "2023-06-01");
-                match auth {
+                match self.auth {
                     MessagesAuth::Bearer => request.bearer_auth(&self.key),
                     MessagesAuth::ApiKey => {
                         let mut key = HeaderValue::from_str(&self.key)
@@ -277,7 +298,7 @@ impl CustomTransport {
                     }
                 }
             }
-            Protocol::OpenaiChatCompletions { .. } => request.bearer_auth(&self.key),
+            CustomProtocol::OpenaiChatCompletions => request.bearer_auth(&self.key),
         })
     }
 
@@ -289,8 +310,8 @@ impl CustomTransport {
         max_output_tokens: u32,
     ) -> Result<TransportResponse, TransportError> {
         let mut response = self.stream_response(&request).await?;
-        let received = match &self.protocol {
-            Protocol::OpenaiResponses => crate::provider::openai::read_streamed_reply(
+        let received = match self.protocol {
+            CustomProtocol::OpenaiResponses => crate::provider::openai::read_streamed_reply(
                 &mut response,
                 &self.key,
                 model,
@@ -306,7 +327,7 @@ impl CustomTransport {
                 },
                 bytes,
             }),
-            Protocol::AnthropicMessages { .. } => crate::provider::anthropic::read_streamed_reply(
+            CustomProtocol::AnthropicMessages => crate::provider::anthropic::read_streamed_reply(
                 &mut response,
                 &self.key,
                 model,
@@ -318,7 +339,7 @@ impl CustomTransport {
                 bytes: reply.bytes,
                 counts: reply.counts,
             }),
-            Protocol::OpenaiChatCompletions { .. } => Err(ProviderError::Rejected),
+            CustomProtocol::OpenaiChatCompletions => Err(ProviderError::Rejected),
         }
         .map_err(stream_failure)?;
         self.validate_streamed_messages(&received)?;
@@ -361,7 +382,7 @@ impl CustomTransport {
         &self,
         received: &TransportResponse,
     ) -> Result<(), TransportError> {
-        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+        if matches!(self.protocol, CustomProtocol::AnthropicMessages) {
             crate::provider::parse_response_json(&received.bytes).map_err(|_| {
                 self.log_messages_failure(
                     crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
@@ -399,27 +420,63 @@ impl CustomTransport {
         &self,
         response: &mut reqwest::Response,
     ) -> Result<TransportResponse, TransportError> {
+        self.check_response_head(response).await?;
+        let status = response.status().as_u16();
+        let bytes = super::super::read_identity_body(response, MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|error| {
+                self.log_messages_failure(
+                    if matches!(error, ProviderError::PartialTransport) {
+                        crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
+                    } else {
+                        crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope
+                    },
+                    status_counts(status, 0),
+                );
+                match error {
+                    ProviderError::Unavailable => TransportError::Unavailable,
+                    ProviderError::PartialTransport => TransportError::PartialTransport,
+                    _ => TransportError::InvalidOutcome,
+                }
+            })?;
+        if matches!(self.protocol, CustomProtocol::AnthropicMessages) {
+            crate::provider::parse_response_json(&bytes).map_err(|_| {
+                self.log_messages_failure(
+                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
+                    status_counts(status, bytes.len()),
+                );
+                TransportError::InvalidOutcome
+            })?;
+        }
+        if raw_reflects_secret(&bytes, &self.key) {
+            self.log_messages_failure(
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
+                status_counts(status, bytes.len()),
+            );
+            return Err(TransportError::InvalidOutcome);
+        }
+        Ok(TransportResponse {
+            counts: status_counts(status, bytes.len()),
+            bytes,
+        })
+    }
+
+    async fn check_response_head(
+        &self,
+        response: &mut reqwest::Response,
+    ) -> Result<(), TransportError> {
         if response.url().as_str() != self.endpoint {
             self.log_messages_failure(
                 crate::provider::diagnostics::SubscriptionFailureStage::Destination,
-                crate::provider::diagnostics::StreamCounts {
-                    http_status: Some(response.status().as_u16()),
-                    ..Default::default()
-                },
+                status_counts(response.status().as_u16(), 0),
             );
             return Err(TransportError::InvalidOutcome);
         }
         if let Some(stage) = response_failure_stage(true, response.status()) {
-            self.log_messages_failure(
-                stage,
-                crate::provider::diagnostics::StreamCounts {
-                    http_status: Some(response.status().as_u16()),
-                    ..Default::default()
-                },
-            );
+            self.log_messages_failure(stage, status_counts(response.status().as_u16(), 0));
             return Err(status_failure(response).await);
         }
-        if matches!(&self.protocol, Protocol::OpenaiChatCompletions { .. })
+        if matches!(self.protocol, CustomProtocol::OpenaiChatCompletions)
             && !response
                 .headers()
                 .get(header::CONTENT_TYPE)
@@ -433,59 +490,15 @@ impl CustomTransport {
         {
             return Err(TransportError::InvalidOutcome);
         }
-        let status = response.status().as_u16();
-        let bytes = super::super::read_identity_body(response, MAX_RESPONSE_BYTES)
-            .await
-            .map_err(|error| {
-                self.log_messages_failure(
-                    if matches!(error, ProviderError::PartialTransport) {
-                        crate::provider::diagnostics::SubscriptionFailureStage::ReadTransport
-                    } else {
-                        crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope
-                    },
-                    crate::provider::diagnostics::StreamCounts {
-                        http_status: Some(status),
-                        ..Default::default()
-                    },
-                );
-                match error {
-                    ProviderError::Unavailable => TransportError::Unavailable,
-                    ProviderError::PartialTransport => TransportError::PartialTransport,
-                    _ => TransportError::InvalidOutcome,
-                }
-            })?;
-        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
-            crate::provider::parse_response_json(&bytes).map_err(|_| {
-                self.log_messages_failure(
-                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseEnvelope,
-                    crate::provider::diagnostics::StreamCounts {
-                        bytes: bytes.len(),
-                        http_status: Some(status),
-                        ..Default::default()
-                    },
-                );
-                TransportError::InvalidOutcome
-            })?;
-        }
-        if raw_reflects_secret(&bytes, &self.key) {
-            self.log_messages_failure(
-                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection,
-                crate::provider::diagnostics::StreamCounts {
-                    bytes: bytes.len(),
-                    http_status: Some(status),
-                    ..Default::default()
-                },
-            );
-            return Err(TransportError::InvalidOutcome);
-        }
-        Ok(TransportResponse {
-            counts: crate::provider::diagnostics::StreamCounts {
-                bytes: bytes.len(),
-                http_status: Some(status),
-                ..Default::default()
-            },
-            bytes,
-        })
+        Ok(())
+    }
+}
+
+fn status_counts(status: u16, bytes: usize) -> crate::provider::diagnostics::StreamCounts {
+    crate::provider::diagnostics::StreamCounts {
+        bytes,
+        http_status: Some(status),
+        ..Default::default()
     }
 }
 
@@ -585,10 +598,8 @@ mod tests {
             client: Client::new(),
             endpoint: "http://127.0.0.1:9321/v1/messages".into(),
             key: key.into(),
-            protocol: Protocol::AnthropicMessages {
-                base_url: "http://127.0.0.1:9321".into(),
-                auth: MessagesAuth::ApiKey,
-            },
+            protocol: CustomProtocol::AnthropicMessages,
+            auth: MessagesAuth::ApiKey,
         };
         let request = transport
             .request(&serde_json::json!({}))

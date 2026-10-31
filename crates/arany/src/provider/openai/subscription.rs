@@ -5,14 +5,13 @@ use crate::provider::conversation::Conversation;
 use crate::provider::diagnostics::subscription_failure;
 use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage};
 use crate::provider::{
-    AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
-    CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_REPORTED_OUTPUT_TOKENS,
-    OutputTokenBound, PROBE_OUTPUT_CAP, PromptRole, Provenance, Provider, ProviderError,
-    ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage,
+    CallLimits, ChatGptProvenance, CompactionRequest, CompactionResponse, Effort,
+    MAX_REPORTED_INPUT_TOKENS, MAX_REPORTED_OUTPUT_TOKENS, OutputTokenBound, Provenance, Provider,
+    ProviderError, ProviderIdentity, ProviderRequest, ProviderResponse, Usage,
     catalog::valid_model_id, render,
 };
 use crate::provider::{RateLimitSlot, ResponsePreview};
-use crate::session::{AgentRunId, MAX_COMPACTION_OUTPUT_TOKENS, RunId, SessionId};
+use crate::session::MAX_COMPACTION_OUTPUT_TOKENS;
 #[cfg(test)]
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url, header};
@@ -21,7 +20,7 @@ use std::time::Duration;
 use tokio::time::{Instant, timeout, timeout_at};
 
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
-// Codex's `stream_idle_timeout_ms` default; each received event restarts it.
+// Each received event restarts the idle timeout.
 const STREAM_IDLE: Duration = Duration::from_secs(300);
 const CALL_CEILING: Duration = Duration::from_secs(600);
 // The route sends no cap, so the Engine's summary byte bound decides compaction acceptance.
@@ -159,141 +158,6 @@ impl Provider for ChatGptProvider {
     }
 }
 
-pub(super) async fn probe_model(
-    access_token: &str,
-    model: &str,
-    effort: Effort,
-    check: &mut crate::ChatGptCheck,
-) -> Result<(), crate::ChatGptCheckError> {
-    if !matches!(&check.journal.view().start.target, crate::CheckTarget::Chatgpt { model: selected, effort: selected_effort, .. } if selected == model && *selected_effort == effort)
-    {
-        return Err(ProviderError::Rejected.into());
-    }
-    let client = client()?;
-    let endpoint = Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint");
-    probe_model_at(&client, endpoint, access_token, (model, effort), check).await
-}
-
-async fn probe_model_at(
-    client: &Client,
-    endpoint: Url,
-    access_token: &str,
-    selection: (&str, Effort),
-    check: &mut crate::ChatGptCheck,
-) -> Result<(), crate::ChatGptCheckError> {
-    let (model, effort) = selection;
-    if !valid_model_id(model)
-        || access_token.is_empty()
-        || access_token.len() > MAX_ACCESS_TOKEN_BYTES
-        || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
-    {
-        return Err(ProviderError::Rejected.into());
-    }
-    let direct = probe_request(model);
-    let session_id = direct.session_id;
-    let direct_id = journal_probe(check, crate::CheckCallKind::Answer, async {
-        let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
-        if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !value.text.trim().is_empty() && value.text.len() <= 8 * 1024) {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        Ok((response.response_id.ok_or(ProviderError::InvalidOutcome)?, response.usage))
-    }).await?;
-
-    let delegate = ProviderRequest {
-        collaboration: crate::session::CollaborationPolicy::Team { max_active_children: 1 },
-        run_id: RunId::new(),
-        agent_run_id: AgentRunId::new(),
-        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
-        ..direct
-    };
-    let delegate_id = journal_probe(check, crate::CheckCallKind::Delegate, async {
-        let response = invoke_at(client, endpoint.clone(), access_token, &delegate, effort).await?;
-        if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none()) {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        let id = response.response_id.ok_or(ProviderError::InvalidOutcome)?;
-        if id == direct_id { return Err(ProviderError::InvalidOutcome); }
-        Ok((id, response.usage))
-    }).await?;
-
-    let compact = CompactionRequest {
-        session_id,
-        covered_run_id: RunId::new(),
-        model: model.to_owned(),
-        previous_summary: None,
-        items: vec![CompactionItem::Completed(HistoryTurn {
-            user: "Synthetic conformance question".into(),
-            assistant: "Synthetic conformance answer".into(),
-        })],
-        max_output_tokens: PROBE_OUTPUT_CAP,
-    };
-    journal_probe(check, crate::CheckCallKind::Compaction, async {
-        let response = compact_at(client, endpoint, access_token, &compact, effort).await?;
-        if response.summary.trim().is_empty()
-            || response.summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES
-            || !response
-                .response_id
-                .as_deref()
-                .is_some_and(|id| id != direct_id && id != delegate_id)
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        Ok(((), response.usage))
-    })
-    .await
-}
-
-fn probe_request(model: &str) -> ProviderRequest {
-    ProviderRequest {
-        session_id: SessionId::new(),
-        run_id: RunId::new(),
-        agent_run_id: AgentRunId::new(),
-        phase: AgentPhase::RootPlan,
-        collaboration: crate::session::CollaborationPolicy::Single,
-        model: model.to_owned(),
-        max_output_tokens: PROBE_OUTPUT_CAP,
-        input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
-    }
-}
-
-async fn journal_probe<T>(
-    check: &mut crate::ChatGptCheck,
-    kind: crate::CheckCallKind,
-    call: impl std::future::Future<Output = Result<(T, Usage), ProviderError>>,
-) -> Result<T, crate::ChatGptCheckError> {
-    let token = check.begin_call(kind).await?;
-    let result = check
-        .await_response(&token, call)
-        .await
-        .and_then(|result| result.map_err(crate::ChatGptCheckError::from));
-    let usage = result.as_ref().ok().and_then(|(_, usage)| {
-        Some(crate::CheckUsage {
-            input_tokens: usage.input_tokens?,
-            output_tokens: usage.output_tokens?,
-        })
-    });
-    check
-        .journal
-        .call_finished(
-            token,
-            match &result {
-                Ok(_) => crate::CheckDisposition::Succeeded,
-                Err(crate::ChatGptCheckError::Provider(error)) => {
-                    crate::provider::native_check::disposition(error)
-                }
-                Err(
-                    crate::ChatGptCheckError::Cancelled
-                    | crate::ChatGptCheckError::Deadline
-                    | crate::ChatGptCheckError::Journal(_),
-                ) => crate::CheckDisposition::Uncertain,
-            },
-            usage,
-            false,
-        )
-        .await?;
-    result.map(|(value, _)| value)
-}
-
 fn client() -> Result<Client, ProviderError> {
     super::super::http_client(CALL_CEILING)
         .https_only(true)
@@ -309,6 +173,7 @@ struct RunCall<'a> {
     max_output_tokens: u32,
 }
 
+#[cfg(test)]
 async fn invoke_at(
     client: &Client,
     endpoint: Url,
@@ -322,7 +187,7 @@ async fn invoke_at(
             endpoint,
             access_token,
             effort,
-            max_output_tokens: PROBE_OUTPUT_CAP,
+            max_output_tokens: crate::provider::SMALL_OUTPUT_CAP,
         },
         request,
         crate::provider::MAX_PROVIDER_REQUEST_BYTES,
@@ -386,6 +251,7 @@ async fn invoke_at_observed(
     Ok(result)
 }
 
+#[cfg(test)]
 async fn compact_at(
     client: &Client,
     endpoint: Url,
@@ -716,7 +582,7 @@ fn subscription_compaction_body(
     let mut body = wire::compaction_body_with_effort(request, effort);
     body["instructions"] = json!(format!(
         "{} Keep the summary under {COMPACTION_TARGET_BYTES} UTF-8 bytes; a non-ASCII character takes up to 4 bytes.",
-        crate::provider::prompts::COMPACTION_INSTRUCTIONS
+        request.prompts.compaction_instructions()
     ));
     streaming_body(body, crate::provider::MAX_PROVIDER_REQUEST_BYTES)
 }

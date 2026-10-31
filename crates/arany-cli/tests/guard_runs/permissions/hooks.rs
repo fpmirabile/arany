@@ -22,6 +22,7 @@ fn cancellable_hook() -> (Value, HookCancellation) {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     });
     (
         shell_hook(&script),
@@ -651,6 +652,7 @@ async fn hook_on_a_command_keeps_changeset_integration_valid() {
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let (result, _, _) = fixture
         .run(
@@ -1317,6 +1319,7 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let (result, requests, _) = fixture
         .run(
@@ -2408,11 +2411,12 @@ mod lifecycle_hooks {
         }
     }
 
-    const AUTO_PRE_COMPACT_READS: usize = 5;
+    const AUTO_PRE_COMPACT_READS: usize = 9;
 
     fn auto_pre_compact_fixture(fixture: &Fixture) -> (Arc<ScriptedProvider>, arany::GoalBudget) {
-        // Three recent pages leave room for the next turn; clearing one page still needs a summary.
-        const PAGE_BYTES: usize = 40 * 1024;
+        // The fifth page crosses two-thirds of the allowance; after clearing, the three retained
+        // pages plus the next-turn reserve still overflow, so a summary follows.
+        const PAGE_BYTES: usize = 56 * 1024;
         const LINE_BYTES: usize = 1024;
         std::fs::write(
             fixture.workspace.join("notes/data.txt"),
@@ -2453,7 +2457,8 @@ mod lifecycle_hooks {
     #[tokio::test]
     async fn in_run_auto_pre_compact_journals_before_reservation_or_skips_and_continues() {
         use arany::permissions::{HookEvent, HookResult};
-        const STOPPED_UNCONSUMED: usize = 2;
+        // Five pages first cross two-thirds of the Tool allowance.
+        const FIRST_PRESSURED_CALL: usize = 5;
         let reads = AUTO_PRE_COMPACT_READS;
 
         for (script, expected) in [
@@ -2476,7 +2481,7 @@ mod lifecycle_hooks {
             let mut fixture = Fixture::new(Some(&settings), false);
             // The stop lands at the first compaction pressure; every later scripted call stays unused.
             fixture.expected_unconsumed = if matches!(expected, HookResult::Stopped { .. }) {
-                STOPPED_UNCONSUMED
+                reads + 1 - FIRST_PRESSURED_CALL
             } else {
                 0
             };
@@ -2487,7 +2492,7 @@ mod lifecycle_hooks {
             if matches!(expected, HookResult::Stopped { .. }) {
                 assert_eq!(result.run.status, RunStatus::StoppedByHook);
                 assert_eq!(provider.compact_requests.lock().unwrap().len(), 0);
-                assert_eq!(requests.len(), reads + 1 - STOPPED_UNCONSUMED);
+                assert_eq!(requests.len(), FIRST_PRESSURED_CALL);
                 continue;
             }
             assert_eq!(result.run.status, RunStatus::Finished, "{expected:?}");
@@ -2578,12 +2583,17 @@ mod lifecycle_hooks {
                 for (clearing, start) in clearings.iter().zip(&starts) {
                     assert!(clearing < start);
                 }
-                let first = *hook_calls.first().unwrap();
-                assert!(first < reads, "must exercise later occurrences");
+                assert!(
+                    FIRST_PRESSURED_CALL < reads,
+                    "must exercise later occurrences"
+                );
+                // Each clearing frees two pages, so pressure recurs at every second call.
                 assert_eq!(
                     hook_calls,
-                    (first..=reads).collect::<Vec<_>>(),
-                    "fresh hook at every eligible call count"
+                    (FIRST_PRESSURED_CALL..=reads)
+                        .step_by(2)
+                        .collect::<Vec<_>>(),
+                    "fresh hook at every pressured call count"
                 );
             }
             for (occurrence, (start, end)) in starts.iter().zip(&finishes).enumerate() {

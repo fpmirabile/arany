@@ -25,12 +25,14 @@ fn image_chip_rectangles_match_only_visible_full_chips() {
             .draw(|frame| {
                 chips = draw_frame_with_history_and_chips(
                     frame,
-                    &model,
-                    &composer,
-                    None,
-                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                    &[],
-                    None,
+                    FrameContent {
+                        model: &model,
+                        composer: &composer,
+                        notice: None,
+                        hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                        history_rows: &[],
+                        history_status: None,
+                    },
                 )
                 .image_chips;
             })
@@ -51,12 +53,14 @@ fn image_chip_rectangles_match_only_visible_full_chips() {
         .draw(|frame| {
             chips = draw_frame_with_history_and_chips(
                 frame,
-                &model,
-                &composer,
-                None,
-                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                &[],
-                None,
+                FrameContent {
+                    model: &model,
+                    composer: &composer,
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                    history_rows: &[],
+                    history_status: None,
+                },
             )
             .image_chips;
         })
@@ -136,15 +140,17 @@ fn newline_hint_recommends_a_received_preference_with_the_portable_fallback() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &composer,
-                        None,
-                        ComposerHints::new(
-                            Palette { color: false },
-                            composer.newline_hint(KeyboardSupport::Disambiguated),
-                        ),
-                        &[],
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &composer,
+                            notice: None,
+                            hints: ComposerHints::new(
+                                Palette { color: false },
+                                composer.newline_hint(KeyboardSupport::Disambiguated),
+                            ),
+                            history_rows: &[],
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -1026,15 +1032,17 @@ fn empty_composer_names_agent_keys_only_when_the_run_has_children() {
             .draw(|frame| {
                 draw_frame_with_history(
                     frame,
-                    &model,
-                    &composer,
-                    None,
-                    ComposerHints::new(
-                        Palette { color: false },
-                        composer.newline_hint(KeyboardSupport::Legacy),
-                    ),
-                    &[],
-                    None,
+                    FrameContent {
+                        model: &model,
+                        composer: &composer,
+                        notice: None,
+                        hints: ComposerHints::new(
+                            Palette { color: false },
+                            composer.newline_hint(KeyboardSupport::Legacy),
+                        ),
+                        history_rows: &[],
+                        history_status: None,
+                    },
                 );
             })
             .unwrap();
@@ -1100,10 +1108,12 @@ fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
                 draw_paste_detail(
                     frame,
                     frame.area(),
-                    &label,
-                    text,
-                    0,
-                    Palette { color: false },
+                    PasteDetailFrame {
+                        label: &label,
+                        text,
+                        scroll: 0,
+                        palette: Palette { color: false },
+                    },
                 )
             })
             .unwrap();

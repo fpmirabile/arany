@@ -69,7 +69,7 @@ pub(super) async fn worker_case(case: &'static str) {
     assert_eq!(bundle.exit, Some(0));
     assert!(bundle.stderr.is_empty());
     assert!(!bundle.stdout.is_empty());
-    if case == "success" {
+    if matches!(case, "success" | "omitted_digest") {
         assert!(
             bundle.view.runs[0].agents[1]
                 .tools
@@ -84,19 +84,27 @@ pub(super) async fn worker_case(case: &'static str) {
                         matches!(&event.event, Event::ToolFinished { observation: recorded, .. }
                             if recorded == observation)
                     }));
-                    tool.checkpoint.is_some()
+                    tool.checkpoint.is_none()
                 })
         );
+        let integration = bundle.view.runs[0].agents[1].tools.last().unwrap();
+        assert!(matches!(
+            integration.intent.call,
+            arany::ToolCall::ApplyChangeset {
+                source: arany::worker::ChangesetSource::EditorWorkspace { .. }
+            }
+        ));
+        assert!(integration.checkpoint.is_some());
     }
 }
 
 #[tokio::test]
-async fn foreground_editor_writes_live_files_checkpoints_verifies_and_reopens() {
+async fn foreground_editor_integrates_its_workspace_checkpoints_verifies_and_reopens() {
     worker_case("success").await;
 }
 
 #[tokio::test]
-async fn cancelled_editor_keeps_landed_workspace_effects_and_causal_release() {
+async fn cancelled_editor_integrates_nothing_and_keeps_its_workspace() {
     worker_case("cancel_landed").await;
 }
 
@@ -140,6 +148,11 @@ async fn foreground_editor_discovery_and_writes_share_active_time_without_overla
 }
 
 #[tokio::test]
+async fn editor_null_digest_write_replaces_the_file_its_own_read_observed() {
+    worker_case("omitted_digest").await;
+}
+
+#[tokio::test]
 async fn primary_verification_of_assignment_cannot_reuse_stale_goal_evidence() {
     worker_case("stale_goal").await;
 }
@@ -166,18 +179,20 @@ async fn foreground_editor_capacity_stop_releases_the_lease_before_returning_sto
 }
 
 #[tokio::test]
-async fn background_editors_share_live_reads_and_disjoint_primary_writes() {
+async fn background_editors_integrate_beside_disjoint_primary_writes() {
     worker_case("background").await;
 }
 
 #[tokio::test]
-async fn editor_commands_publish_whole_leased_changesets_with_checkpoints_and_reports() {
+async fn editor_commands_run_in_the_editor_workspace_and_integrate_once() {
     for case in [
         "command",
         "command_criterion",
         "command_auto",
         "command_bash_only",
         "command_outside",
+        "command_conflict",
+        "command_large",
         "command_cancel",
         "command_pause",
         "command_cache_unknown",
@@ -186,29 +201,7 @@ async fn editor_commands_publish_whole_leased_changesets_with_checkpoints_and_re
     }
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-#[cfg_attr(
-    not(arany_ci),
-    ignore = "native Linux editor overlay commands and closed replay"
-)]
-fn editor_overlay_commands_bind_child_grants_baselines_cache_and_stops() {
-    let _gate = process::NATIVE_GATE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            for case in [
-                "command_overlay",
-                "command_outside",
-                "command_overlay_conflict",
-                "command_overlay_cancel",
-                "command_overlay_uncertain",
-            ] {
-                worker_case(case).await;
-            }
-        });
+#[tokio::test]
+async fn editor_host_commands_without_a_sandbox_ask_per_call_and_integrate_once() {
+    worker_case(arany::test_support::worker_teams::HOST_CASE).await;
 }

@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use arany::test_support::process::file_output;
 use std::{fs, process::Command};
 

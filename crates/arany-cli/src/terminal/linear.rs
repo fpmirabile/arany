@@ -8,8 +8,8 @@ use arany::ModelEntry;
 use arany::{SessionDefaults, SessionId, SessionListItem, SessionView};
 use std::io::{self, Write};
 
-use super::CommandAvailability;
 use super::commands::{help_entry, help_len};
+use super::{CommandAvailability, TerminalInput};
 
 pub(super) struct LinearState {
     mode_label: &'static str,
@@ -66,7 +66,38 @@ pub(super) fn transcript_details(run: &arany::RunView) -> Vec<String> {
     parts
 }
 
+// One linear setup screen: its title and instruction print once, a notice every time.
+struct SetupLine<'a> {
+    step: u8,
+    title: &'a str,
+    instruction: &'a str,
+    notice: Option<&'a str>,
+    instruction_limit: usize,
+    takes_input: bool,
+}
+
 impl LinearState {
+    // A submitted, interrupted or rejected line needs a fresh prompt.
+    pub(super) fn note_input(&mut self, input: TerminalInput) {
+        match input {
+            TerminalInput::Submit => {
+                self.prompt_needed = true;
+                self.line_open = false;
+            }
+            TerminalInput::Interrupt
+            | TerminalInput::EndOfInput
+            | TerminalInput::Suspend
+            | TerminalInput::Shutdown(_)
+            | TerminalInput::LineRejected
+            | TerminalInput::LineContinued
+            | TerminalInput::Paste => {
+                self.prompt_needed = true;
+                self.newline_pending = self.line_open;
+            }
+            _ => {}
+        }
+    }
+
     // An unarmed selector prints its rows and holds the prompt until input is admitted.
     pub(super) fn disarm(&mut self) {
         self.unarmed = true;
@@ -415,7 +446,17 @@ impl LinearState {
         warning: &str,
         notice: Option<&str>,
     ) -> io::Result<()> {
-        self.write_setup_with_limit(&mut io::stderr(), 1, title, warning, notice, (1024, false))
+        self.write_setup_with_limit(
+            &mut io::stderr(),
+            SetupLine {
+                step: 1,
+                title,
+                instruction: warning,
+                notice,
+                instruction_limit: 1024,
+                takes_input: false,
+            },
+        )
     }
 
     pub(super) fn draw_setup_choices(
@@ -427,11 +468,14 @@ impl LinearState {
     ) -> io::Result<()> {
         self.write_setup_with_limit(
             &mut io::stderr(),
-            step,
-            title,
-            instruction,
-            notice,
-            (MAX_ROW_WIDTH, true),
+            SetupLine {
+                step,
+                title,
+                instruction,
+                notice,
+                instruction_limit: MAX_ROW_WIDTH,
+                takes_input: true,
+            },
         )
     }
 
@@ -446,23 +490,30 @@ impl LinearState {
         let instruction_limit = if step == 3 { 512 } else { MAX_ROW_WIDTH };
         self.write_setup_with_limit(
             writer,
-            step,
-            title,
-            instruction,
-            notice,
-            (instruction_limit, matches!(step, 1 | 2 | 3 | 5)),
+            SetupLine {
+                step,
+                title,
+                instruction,
+                notice,
+                instruction_limit,
+                takes_input: matches!(step, 1 | 2 | 3 | 5),
+            },
         )
     }
 
     fn write_setup_with_limit(
         &mut self,
         writer: &mut impl Write,
-        step: u8,
-        title: &str,
-        instruction: &str,
-        notice: Option<&str>,
-        (instruction_limit, takes_input): (usize, bool),
+        line: SetupLine<'_>,
     ) -> io::Result<()> {
+        let SetupLine {
+            step,
+            title,
+            instruction,
+            notice,
+            instruction_limit,
+            takes_input,
+        } = line;
         let unchanged = self.last_setup.as_ref().is_some_and(|previous| {
             previous.0 == step && previous.1 == title && previous.2 == instruction
         });
@@ -521,7 +572,6 @@ impl LinearState {
         }
         if !self.announced {
             writeln!(writer, "Presentation: {}", self.mode_label)?;
-            #[cfg(unix)]
             writeln!(
                 writer,
                 "Input: Enter submits; backslash then Enter adds a newline; empty Ctrl+D exits",
@@ -572,15 +622,17 @@ impl LinearState {
 
     pub(super) fn draw_settings(
         &mut self,
+        title: &str,
         rows: &[String],
         notice: Option<&str>,
     ) -> io::Result<()> {
-        self.write_settings(&mut io::stderr(), rows, notice)
+        self.write_settings(&mut io::stderr(), title, rows, notice)
     }
 
     fn write_settings(
         &mut self,
         writer: &mut impl Write,
+        title: &str,
         rows: &[String],
         notice: Option<&str>,
     ) -> io::Result<()> {
@@ -588,8 +640,8 @@ impl LinearState {
         let unchanged = self
             .last_setup
             .as_ref()
-            .is_some_and(|(step, title, previous)| {
-                *step == 0 && title == "Settings" && *previous == listing
+            .is_some_and(|(step, previous_title, previous)| {
+                *step == 0 && previous_title == title && *previous == listing
             });
         if unchanged && notice.is_none() {
             return Ok(());
@@ -602,7 +654,7 @@ impl LinearState {
         if !unchanged {
             writeln!(
                 writer,
-                "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels"
+                "{title}: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels"
             )?;
             for (index, row) in rows.iter().enumerate() {
                 writeln!(
@@ -612,7 +664,7 @@ impl LinearState {
                     safe_truncate(row, MAX_ROW_WIDTH)
                 )?;
             }
-            self.last_setup = Some((0, "Settings".into(), listing));
+            self.last_setup = Some((0, title.into(), listing));
         }
         if let Some(notice) = notice {
             writeln!(writer, "Notice: {}", safe_truncate(notice, MAX_ROW_WIDTH))?;
@@ -642,7 +694,12 @@ impl LinearState {
             return Ok(());
         }
         writeln!(writer, "Resume: {} in this Workspace", items.len())?;
-        for (index, item) in items.iter().skip(start).take(10).enumerate() {
+        for (index, item) in items
+            .iter()
+            .skip(start)
+            .take(super::SELECTOR_ROWS)
+            .enumerate()
+        {
             writeln!(
                 writer,
                 "Choice {}: {}",
@@ -719,14 +776,26 @@ impl LinearState {
             picker.items.len()
         )?;
         if picker.catalog_state != super::ModelCatalogState::Current {
-            let status = if picker.catalog_state == super::ModelCatalogState::Updated {
-                "refreshed; reopen /model to see updates; these choice numbers are unchanged"
-            } else {
-                picker.catalog_state.label()
-            };
-            writeln!(writer, "Catalog: {status}")?;
+            match (picker.catalog_state, picker.refresh_error) {
+                (super::ModelCatalogState::Updated, _) => writeln!(
+                    writer,
+                    "Catalog: model list refreshed; reopen /model to see updates; these choice numbers are unchanged"
+                )?,
+                (super::ModelCatalogState::RefreshFailed, Some(error)) => writeln!(
+                    writer,
+                    "Catalog: refresh failed: {}; cached models kept; /model refresh retries",
+                    safe_truncate(error, MAX_ROW_WIDTH)
+                )?,
+                (state, _) => writeln!(writer, "Catalog: {}", state.label())?,
+            }
         }
-        for (index, item) in picker.items.iter().skip(start).take(10).enumerate() {
+        for (index, item) in picker
+            .items
+            .iter()
+            .skip(start)
+            .take(super::SELECTOR_ROWS)
+            .enumerate()
+        {
             let status = super::model_catalog_status(item, picker.exact_custom);
             let effort = picker
                 .efforts
@@ -738,7 +807,7 @@ impl LinearState {
                 writer,
                 "Choice {}: {}; selected effort {}; {}",
                 index + 1,
-                safe_truncate(&item.id, 128),
+                safe_truncate(&item.id, arany::MAX_MODEL_ID_BYTES),
                 effort,
                 status
             )?;
@@ -920,6 +989,7 @@ mod tests {
                 prefix: false,
                 sensitive: true,
                 inactive_rules: false,
+                sandbox_off: false,
             },
         );
         let mut state = LinearState::new("screen-reader");
@@ -1117,21 +1187,26 @@ mod tests {
         let mut output = Vec::new();
         let rows = vec![
             "Slash menu: tabs (tabs|combined)".to_owned(),
-            "Goal tokens: unlimited (number or unlimited)".to_owned(),
+            "Tokens per task: unlimited (number or unlimited)".to_owned(),
         ];
         state.disarm();
-        state.write_settings(&mut output, &rows, None).unwrap();
+        state
+            .write_settings(&mut output, "Settings", &rows, None)
+            .unwrap();
         assert!(
             !String::from_utf8_lossy(&output).contains("Input:"),
             "an unarmed selector holds its prompt"
         );
         state.arm(&mut output).unwrap();
-        state.write_settings(&mut output, &rows, None).unwrap();
+        state
+            .write_settings(&mut output, "Settings", &rows, None)
+            .unwrap();
         state.prompt_needed = true;
         state.line_open = false;
         state
             .write_settings(
                 &mut output,
+                "Settings",
                 &rows,
                 Some("Type NUMBER VALUE from the list; q cancels"),
             )
@@ -1140,20 +1215,22 @@ mod tests {
         state.line_open = false;
         let changed = vec![
             "Slash menu: combined (tabs|combined)".to_owned(),
-            "Goal tokens: unlimited (number or unlimited)".to_owned(),
+            "Tokens per task: unlimited (number or unlimited)".to_owned(),
         ];
-        state.write_settings(&mut output, &changed, None).unwrap();
+        state
+            .write_settings(&mut output, "Settings", &changed, None)
+            .unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\n\
+            "Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\n\
              Choice 1: Slash menu: tabs (tabs|combined)\n\
-             Choice 2: Goal tokens: unlimited (number or unlimited)\n\
+             Choice 2: Tokens per task: unlimited (number or unlimited)\n\
              Input:\n\
              Notice: Type NUMBER VALUE from the list; q cancels\n\
              Input:\n\
-             Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\n\
+             Settings: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\n\
              Choice 1: Slash menu: combined (tabs|combined)\n\
-             Choice 2: Goal tokens: unlimited (number or unlimited)\n\
+             Choice 2: Tokens per task: unlimited (number or unlimited)\n\
              Input:\n"
         );
     }
@@ -1276,7 +1353,6 @@ mod tests {
         assert_eq!(graphemes, "Draft (not sent):\n  e\u{301}👩‍💻\nDraft: 2 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
     }
 
-    #[cfg(unix)]
     #[test]
     fn linear_presentation_is_labeled_append_only_and_control_free() {
         let mut view = SessionView {
@@ -1322,7 +1398,7 @@ mod tests {
                  Model: unset\n\
                  Setup: type /setup to choose an account\n\
                  Permissions: read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox\n\
-                 Collaboration: auto; max children: 3\n\
+                 Collaboration: single\n\
                  Notice: ready\\u{{001b}}[2J\n\
                  Input:\n",
                 view.id
@@ -1406,7 +1482,7 @@ mod tests {
                  Provider: unset\n\
                  Model: unset\n\
                  Permissions: read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox\n\
-                 Collaboration: auto; max children: 3\n\
+                 Collaboration: single\n\
                  Run: {run_id}\n\
                  Agent: primary; state: active\n\
                  Notice: Run is active; Ctrl+C cancels\n",
@@ -1440,11 +1516,12 @@ mod tests {
                 "Command: /compact; Compact context; during Run: locked\n",
                 "Command: /agents <single|auto|team> [max-active-children]; Agent details; during Run: view-only\n",
                 "Command: /provider <provider>; Choose Provider; during Run: view-only\n",
-                "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
+                "Command: /model <model-id> [effort|default]; Choose model; refresh re-reads the list; during Run: view-only\n",
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /storage; Report owned storage metadata; during Run: locked\n",
                 "Command: /settings; Slash menu, chat view and newline shortcut; during Run: locked\n",
+                "Command: /limits; Task budgets, command timeouts, build resources, context window and editor changes; during Run: locked\n",
                 "Command: /transcript [agents [number]]; Write or toggle transcript details; agents lists this Run's agent chats; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
@@ -1505,7 +1582,7 @@ mod tests {
             format!(
                 "Current Run: 1 agent; children: 0\n\
                  History: 1 agents in 1 recent Runs; 0 older Runs\n\
-                 Next Run: auto · up to 3 children\n\
+                 Next Run: single\n\
                  Current Run: admission in progress; topology locked\n\
                  Type to search 1 agent\n\
                  Choices 1-1 of 1:\n\
@@ -1719,11 +1796,14 @@ mod tests {
         linear
             .write_setup_with_limit(
                 &mut output,
-                1,
-                "ChatGPT plan consent",
-                &warning,
-                None,
-                (1024, false),
+                SetupLine {
+                    step: 1,
+                    title: "ChatGPT plan consent",
+                    instruction: &warning,
+                    notice: None,
+                    instruction_limit: 1024,
+                    takes_input: false,
+                },
             )
             .expect("complete warning");
         assert_eq!(
@@ -1734,11 +1814,14 @@ mod tests {
         linear
             .write_setup_with_limit(
                 &mut unchanged,
-                1,
-                "ChatGPT plan consent",
-                &warning,
-                None,
-                (1024, false),
+                SetupLine {
+                    step: 1,
+                    title: "ChatGPT plan consent",
+                    instruction: &warning,
+                    notice: None,
+                    instruction_limit: 1024,
+                    takes_input: false,
+                },
             )
             .expect("no repeated announcement");
         assert!(unchanged.is_empty());
@@ -1811,6 +1894,7 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("first page");
@@ -1839,6 +1923,7 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("unchanged page");
@@ -1855,6 +1940,7 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("second page");
@@ -1877,11 +1963,44 @@ mod tests {
                     filter: "",
                     invalid: false,
                     catalog_state: crate::terminal::ModelCatalogState::Current,
+                    refresh_error: None,
                 },
             )
             .expect("hostile profile label");
         assert!(String::from_utf8_lossy(&hostile).contains("Models: bad\\u{001b}[31m"));
         assert!(!hostile.contains(&0x1b));
+
+        let mut refreshed = Vec::new();
+        let mut linear = LinearState::new("screen-reader");
+        for (catalog_state, refresh_error) in [
+            (
+                crate::terminal::ModelCatalogState::RefreshFailed,
+                Some("Provider unavailable"),
+            ),
+            (crate::terminal::ModelCatalogState::Updated, None),
+        ] {
+            linear
+                .write_models(
+                    &mut refreshed,
+                    "openai",
+                    &super::super::ModelPicker {
+                        items: &items,
+                        efforts: &vec![Some(arany::Effort::Low); items.len()],
+                        selected: 0,
+                        exact_custom: false,
+                        filter: "",
+                        invalid: false,
+                        catalog_state,
+                        refresh_error,
+                    },
+                )
+                .expect("refresh outcome");
+        }
+        let text = String::from_utf8(refreshed).expect("UTF-8 refresh outcome");
+        assert!(text.contains(
+            "Catalog: refresh failed: Provider unavailable; cached models kept; /model refresh retries\n"
+        ));
+        assert!(text.contains("Catalog: model list refreshed; reopen /model"));
     }
 }
 

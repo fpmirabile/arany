@@ -1,12 +1,11 @@
 use super::ToolError;
 use crate::session::LoginShellIdentity;
-use crate::store::{RecordFormat, RecordKind, RecordStep, StateRoot, StoreError};
+use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
 use crate::validate::{MAX_PATH_BYTES, digest, hex_digest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const VERSION: u8 = 3;
 const MAX_NAMES: usize = 32;
 const MAX_PATH_ENTRIES: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -36,7 +35,6 @@ struct Variable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvironment {
-    version: u8,
     source: Source,
     shell: Option<LoginShellIdentity>,
     captured_at: u64,
@@ -74,19 +72,6 @@ pub enum CommandEnvironmentError {
 
 pub(crate) const COMMAND_ENVIRONMENT: RecordFormat = RecordFormat {
     kind: RecordKind::CommandEnvironment,
-    field: "version",
-    floor: 1,
-    current: VERSION as u64,
-    steps: &[
-        RecordStep {
-            from: 1,
-            transform: upgrade_v1,
-        },
-        RecordStep {
-            from: 2,
-            transform: upgrade_v2,
-        },
-    ],
     accepts: |bytes| CommandEnvironment::parse(bytes).is_ok(),
 };
 
@@ -127,6 +112,22 @@ fn valid_entry(entry: &str) -> bool {
     Path::new(entry).is_absolute() && entry.len() <= MAX_PATH_BYTES && !entry.contains(['\0', ':'])
 }
 
+fn pinnable_path(value: &str) -> Result<Vec<String>, CommandEnvironmentError> {
+    let entries: Vec<String> = std::env::split_paths(value)
+        .filter_map(|entry| entry.into_os_string().into_string().ok())
+        .collect();
+    if value.len() > PATH_LIMIT_BYTES
+        || entries.len() > MAX_PATH_ENTRIES
+        || entries.iter().any(|entry| entry.len() > MAX_PATH_BYTES)
+    {
+        return Err(CommandEnvironmentError::TooLarge("PATH"));
+    }
+    Ok(entries
+        .into_iter()
+        .filter(|entry| valid_entry(entry))
+        .collect())
+}
+
 impl CommandEnvironment {
     pub(super) fn for_discovery(path: &Path) -> Result<Self, ToolError> {
         let found = match StateRoot::open_existing(path) {
@@ -134,16 +135,12 @@ impl CommandEnvironment {
                 .record(RecordKind::CommandEnvironment)
                 .read()
                 .map_err(|_| ToolError::Configuration)?,
-            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::symlink_metadata(path) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    _ => return Err(ToolError::Configuration),
-                }
-            }
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(_) => return Err(ToolError::Configuration),
         };
-        match found {
-            Some(bytes) => Self::parse(&COMMAND_ENVIRONMENT.upgrade(&bytes).unwrap_or(bytes)),
+        // Discovery writes nothing, so an unadmitted State or a record awaiting archive previews as a fresh one.
+        match found.and_then(|bytes| Self::parse(&bytes).ok()) {
+            Some(environment) => Ok(environment),
             None => Self::from_process().map_err(|error| match error {
                 CommandEnvironmentError::TooLarge(_) => ToolError::Limit,
                 _ => ToolError::Configuration,
@@ -153,7 +150,8 @@ impl CommandEnvironment {
 
     pub fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let found = state
-            .read_current(&COMMAND_ENVIRONMENT)
+            .record(COMMAND_ENVIRONMENT.kind)
+            .read()
             .map_err(|_| ToolError::Configuration)?;
         match found {
             Some(bytes) => Self::parse(&bytes),
@@ -178,14 +176,15 @@ impl CommandEnvironment {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn save(&self, state: &StateRoot) -> Result<(), CommandEnvironmentError> {
         locked(state, || self.write(state))
     }
 
     fn current_or_init(state: &StateRoot) -> Result<Self, CommandEnvironmentError> {
         match state
-            .read_current(&COMMAND_ENVIRONMENT)
+            .record(COMMAND_ENVIRONMENT.kind)
+            .read()
             .map_err(|_| CommandEnvironmentError::Store)?
         {
             Some(bytes) => Self::parse(&bytes).map_err(|_| CommandEnvironmentError::Invalid),
@@ -230,8 +229,19 @@ impl CommandEnvironment {
         self.shell.as_ref()
     }
 
+    pub fn path_over_guard_limit(&self) -> bool {
+        super::toolchains::path_entries_truncated(&self.path_string())
+    }
+
     pub fn process_path_differs(&self) -> bool {
-        std::env::var_os("PATH").unwrap_or_default() != std::ffi::OsString::from(self.path_string())
+        self.path_differs_from(std::env::var("PATH").ok().as_deref())
+    }
+
+    // Compares what a fresh capture would pin, so entries capture drops never count as a difference.
+    fn path_differs_from(&self, process: Option<&str>) -> bool {
+        !process
+            .map_or(Ok(Vec::new()), pinnable_path)
+            .is_ok_and(|path| path == self.path)
     }
 
     pub(crate) fn replace_captured(
@@ -322,7 +332,6 @@ impl CommandEnvironment {
     // Capture time is informational; keeping it out of the identity keeps the pinned digest stable across state roots.
     fn canonical(&self) -> Vec<u8> {
         serde_json::to_vec(&(
-            self.version,
             self.source,
             &self.shell,
             &self.path,
@@ -348,19 +357,7 @@ impl CommandEnvironment {
                 continue;
             };
             if name == "PATH" {
-                let entries: Vec<String> = std::env::split_paths(&value)
-                    .filter_map(|entry| entry.into_os_string().into_string().ok())
-                    .collect();
-                if value.len() > PATH_LIMIT_BYTES
-                    || entries.len() > MAX_PATH_ENTRIES
-                    || entries.iter().any(|entry| entry.len() > MAX_PATH_BYTES)
-                {
-                    return Err(CommandEnvironmentError::TooLarge(name));
-                }
-                path = entries
-                    .into_iter()
-                    .filter(|entry| valid_entry(entry))
-                    .collect();
+                path = pinnable_path(&value)?;
             } else if valid_value(&value) {
                 names.push(Variable {
                     name: name.to_owned(),
@@ -372,7 +369,6 @@ impl CommandEnvironment {
         }
         names.sort_by(|left, right| left.name.cmp(&right.name));
         let mut record = Self {
-            version: VERSION,
             source: Source::Process,
             shell: None,
             captured_at: super::now_ms(),
@@ -385,10 +381,9 @@ impl CommandEnvironment {
         Ok(record)
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", test, feature = "test-support"))]
     pub(crate) fn empty() -> Self {
         let mut record = Self {
-            version: VERSION,
             source: Source::Process,
             shell: None,
             captured_at: 0,
@@ -410,13 +405,11 @@ impl CommandEnvironment {
             let names: Vec<_> = names.collect();
             names.windows(2).all(|pair| pair[0] < pair[1])
         };
-        if record.version != VERSION
-            || !match (&record.source, &record.shell) {
-                (Source::Process, None) => true,
-                (Source::LoginShell, Some(shell)) => shell.valid(),
-                _ => false,
-            }
-            || record.path.len() > MAX_PATH_ENTRIES
+        if !match (&record.source, &record.shell) {
+            (Source::Process, None) => true,
+            (Source::LoginShell, Some(shell)) => shell.valid(),
+            _ => false,
+        } || record.path.len() > MAX_PATH_ENTRIES
             || !record.path.iter().all(|entry| valid_entry(entry))
             || record.path_string().len() > PATH_LIMIT_BYTES
             || record.names.len() > MAX_NAMES
@@ -504,7 +497,7 @@ impl CommandEnvironment {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_path(path: &str) -> Self {
         let mut record = Self::empty();
         record.path = std::env::split_paths(path)
@@ -513,66 +506,6 @@ impl CommandEnvironment {
         record.seal();
         record
     }
-}
-
-fn upgrade_v1(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    let fields = value.as_object()?;
-    if fields.len() != 7 || fields.get("source")?.as_str()? != "process" {
-        return None;
-    }
-    let canonical = serde_json::to_vec(&(
-        1_u8,
-        Source::Process,
-        fields.get("path")?,
-        fields.get("names")?,
-        fields.get("excluded")?,
-    ))
-    .ok()?;
-    let timestamped = serde_json::to_vec(&(
-        1_u8,
-        Source::Process,
-        fields.get("captured_at")?.as_u64()?,
-        fields.get("path")?,
-        fields.get("names")?,
-        fields.get("excluded")?,
-    ))
-    .ok()?;
-    let sha256 = fields.get("sha256")?.as_str()?;
-    if sha256 != hex_digest(&canonical) && sha256 != hex_digest(&timestamped) {
-        return None;
-    }
-    value["version"] = 2.into();
-    value["shell"] = serde_json::Value::Null;
-    let record: CommandEnvironment = serde_json::from_value(value).ok()?;
-    let sha256 = hex_digest(&timestamped_canonical(&record));
-    let mut value = serde_json::to_value(record).ok()?;
-    value["sha256"] = sha256.into();
-    Some(value)
-}
-
-fn timestamped_canonical(record: &CommandEnvironment) -> Vec<u8> {
-    serde_json::to_vec(&(
-        record.version,
-        record.source,
-        &record.shell,
-        record.captured_at,
-        &record.path,
-        &record.names,
-        &record.excluded,
-    ))
-    .expect("typed record is serializable")
-}
-
-fn upgrade_v2(value: serde_json::Value) -> Option<serde_json::Value> {
-    let mut record: CommandEnvironment = serde_json::from_value(value).ok()?;
-    if record.version != 2 || record.sha256 != hex_digest(&timestamped_canonical(&record)) {
-        return None;
-    }
-    record.version = VERSION;
-    record.seal();
-    let bytes = serde_json::to_vec(&record).ok()?;
-    CommandEnvironment::parse(&bytes).ok()?;
-    serde_json::to_value(record).ok()
 }
 
 #[cfg(test)]
@@ -586,6 +519,18 @@ mod tests {
             inode: 2,
             sha256: "1".repeat(64),
         }
+    }
+
+    #[test]
+    fn process_path_difference_ignores_entries_capture_cannot_pin() {
+        let record = CommandEnvironment::for_path("/usr/bin:/bin");
+        assert!(!record.path_differs_from(Some("/usr/bin:~/.dotnet/tools:relative:/bin")));
+        assert!(record.path_differs_from(Some("/usr/bin:/opt/bin:/bin")));
+        assert!(record.path_differs_from(Some("/bin:/usr/bin")));
+        assert!(record.path_differs_from(None));
+        assert!(!CommandEnvironment::empty().path_differs_from(None));
+        let oversized = vec!["/bin"; MAX_PATH_ENTRIES + 1].join(":");
+        assert!(record.path_differs_from(Some(&oversized)));
     }
 
     #[test]
@@ -687,30 +632,30 @@ mod tests {
         assert_eq!(CommandEnvironment::for_discovery(&path).unwrap(), selected);
         assert_eq!(record.read().unwrap(), saved);
 
-        let mut previous = selected.clone();
-        previous.version = 2;
-        previous.sha256 = hex_digest(&timestamped_canonical(&previous));
+        let mut previous = serde_json::to_value(&selected).unwrap();
+        previous["version"] = 3.into();
         let previous_bytes = serde_json::to_vec(&previous).unwrap();
-        record.replace(&previous_bytes).unwrap();
-        assert_eq!(CommandEnvironment::for_discovery(&path).unwrap(), selected);
-        assert_eq!(record.read().unwrap().unwrap(), previous_bytes);
-
-        record.replace(b"invalid saved environment").unwrap();
-        assert!(matches!(
-            CommandEnvironment::for_discovery(&path),
-            Err(ToolError::Configuration)
-        ));
-        assert_eq!(
-            record.read().unwrap().unwrap(),
-            b"invalid saved environment"
-        );
+        for refused in [previous_bytes.as_slice(), b"invalid saved environment"] {
+            record.replace(refused).unwrap();
+            assert_eq!(
+                CommandEnvironment::for_discovery(&path).unwrap().source(),
+                "process"
+            );
+            assert_eq!(record.read().unwrap().unwrap(), refused);
+        }
 
         selected.save(&state).unwrap();
         std::fs::remove_file(path.join("events.sqlite3")).unwrap();
-        assert!(matches!(
-            CommandEnvironment::for_discovery(&path),
-            Err(ToolError::Configuration)
-        ));
+        let seeded = entries();
+        assert_eq!(
+            CommandEnvironment::for_discovery(&path).unwrap().source(),
+            "process"
+        );
+        assert_eq!(
+            entries(),
+            seeded,
+            "an unadmitted State previews as a new one"
+        );
         assert_eq!(record.read().unwrap(), saved);
     }
 
@@ -794,8 +739,7 @@ mod tests {
         let record = CommandEnvironment::for_path("/usr/bin:/bin");
         let good = serde_json::to_value(&record).unwrap();
         assert!(CommandEnvironment::parse(good.to_string().as_bytes()).is_ok());
-        let mutations: [(&str, serde_json::Value); 5] = [
-            ("version", 4.into()),
+        let mutations: [(&str, serde_json::Value); 4] = [
             ("path", serde_json::json!(["relative"])),
             ("path", serde_json::json!(["/a:b"])),
             (

@@ -90,13 +90,13 @@ pub(crate) fn before_versions(_run: &RunView, call: &ToolCall) -> Vec<(String, O
         ToolCall::Delete {
             path,
             expected_digest,
-        } => vec![(path.clone(), Some(expected_digest.clone()))],
+        } => vec![(path.clone(), expected_digest.clone())],
         ToolCall::Move {
             source,
             destination,
             expected_digest,
         } => vec![
-            (source.clone(), Some(expected_digest.clone())),
+            (source.clone(), expected_digest.clone()),
             (destination.clone(), None),
         ],
         ToolCall::Edit {
@@ -108,11 +108,17 @@ pub(crate) fn before_versions(_run: &RunView, call: &ToolCall) -> Vec<(String, O
             file_path: path,
             expected_digest,
             ..
-        } => vec![(path.clone(), Some(expected_digest.clone()))],
+        } => vec![(path.clone(), expected_digest.clone())],
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt { changeset, .. },
         } => changeset
             .files
+            .iter()
+            .map(|f| (f.path.clone(), f.before.as_ref().map(|v| v.sha256.clone())))
+            .collect(),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => files
             .iter()
             .map(|f| (f.path.clone(), f.before.as_ref().map(|v| v.sha256.clone())))
             .collect(),
@@ -160,7 +166,7 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
                 if source == path {
                     Some(None)
                 } else if destination == path {
-                    Some(Some(expected_digest.clone()))
+                    Some(expected_digest.clone())
                 } else {
                     None
                 }
@@ -169,6 +175,12 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
                 source: ChangesetSource::CommandReceipt { changeset, .. },
             } => changeset
                 .files
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| f.after.as_ref().map(|v| v.sha256.clone())),
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            } => files
                 .iter()
                 .find(|f| f.path == path)
                 .map(|f| f.after.as_ref().map(|v| v.sha256.clone())),

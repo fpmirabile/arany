@@ -10,31 +10,11 @@ use std::{collections::HashSet, time::Duration};
 const MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(20);
-const RUN_ADMISSION_DEADLINE: Duration = Duration::from_secs(5);
 
 pub(crate) struct ChatGptModel {
     pub(crate) slug: String,
     pub(crate) display_name: String,
     pub(crate) context_window_tokens: Option<u32>,
-}
-
-pub(super) fn model_window(
-    models: &[ChatGptModel],
-    slug: &str,
-) -> Result<Option<u32>, AuthorizationError> {
-    models
-        .iter()
-        .find(|row| row.slug == slug)
-        .map(|row| row.context_window_tokens)
-        .ok_or(AuthorizationError::ModelUnavailable)
-}
-
-pub(super) async fn read_for_run(
-    read: impl std::future::Future<Output = Result<Vec<ChatGptModel>, AuthorizationError>>,
-) -> Result<Vec<ChatGptModel>, AuthorizationError> {
-    tokio::time::timeout(RUN_ADMISSION_DEADLINE, read)
-        .await
-        .map_err(|_| AuthorizationError::Unavailable)?
 }
 
 #[derive(Deserialize)]
@@ -59,7 +39,7 @@ pub(crate) async fn list_models(
 ) -> Result<Vec<ChatGptModel>, AuthorizationError> {
     if !consent.matches(credentials, storage)
         || credentials.access_token.is_empty()
-        || credentials.access_token.len() > 16 * 1024
+        || credentials.access_token.len() > super::MAX_ACCESS_TOKEN_BYTES
         || !credentials
             .access_token
             .bytes()
@@ -72,39 +52,6 @@ pub(crate) async fn list_models(
     tokio::time::timeout(DEADLINE, list_at(&client, endpoint, credentials))
         .await
         .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-pub(super) async fn list_models_checked(
-    credentials: &VerifiedCredentials,
-    consent: &ConsentReceipt,
-    storage: AccountStorage,
-    check: &mut arany::ChatGptCheck,
-) -> Result<Vec<ChatGptModel>, AuthorizationError> {
-    let token = check
-        .begin_catalog()
-        .await
-        .map_err(AuthorizationError::from)?;
-    let result = check
-        .await_response(&token, list_models(credentials, consent, storage))
-        .await
-        .map_err(AuthorizationError::from)
-        .and_then(|result| result);
-    check
-        .record_catalog(
-            token,
-            match &result {
-                Ok(_) => arany::CheckDisposition::Succeeded,
-                Err(
-                    AuthorizationError::Unavailable
-                    | AuthorizationError::CheckCancelled
-                    | AuthorizationError::CheckDeadline,
-                ) => arany::CheckDisposition::Uncertain,
-                Err(_) => arany::CheckDisposition::Rejected,
-            },
-        )
-        .await
-        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
-    result
 }
 
 async fn list_at(

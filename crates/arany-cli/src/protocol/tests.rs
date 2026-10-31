@@ -24,7 +24,6 @@ fn supervisor_event_projects_canonical_jsonl_and_validates_against_exported_sche
     };
     let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
     assert_eq!(line["kind"], "SupervisorVerdictRecorded");
-    assert_eq!(line["event_version"], envelope.event.version());
     assert_eq!(
         line["payload"],
         serde_json::from_str::<Value>(&envelope.event.payload().unwrap()).unwrap()
@@ -65,7 +64,6 @@ fn child_steering_projects_as_an_actor_scoped_committed_event() {
     };
     let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
     assert_eq!(line["kind"], "AgentSteeringNoteRecorded");
-    assert_eq!(line["event_version"], envelope.event.version());
     assert_eq!(line["payload"], json!({"goal_id":goal,"text":"note"}));
     let schema = protocol_schema();
     validate(
@@ -474,7 +472,7 @@ fn every_conformance_message_validates_against_the_schema() {
     for (name, params) in [
         (
             "events/committed",
-            json!({"threadId": thread_id, "event": {"sequence": 1, "session_id": thread_id, "run_id": null, "agent_run_id": null, "kind": "SessionStarted", "event_version": 2, "payload": {"title": "Example"}, "created_at_ms": 1}}),
+            json!({"threadId": thread_id, "event": {"sequence": 1, "session_id": thread_id, "run_id": null, "agent_run_id": null, "kind": "SessionStarted", "payload": {"title": "Example"}, "created_at_ms": 1}}),
         ),
         (
             "turn/display",

@@ -31,11 +31,6 @@ pub(super) enum PanelUpdate {
     Open(RunId, AgentRunId),
 }
 
-// The first shown row of a window that keeps the focused row in view.
-pub(super) fn window_start(selected: Option<usize>, visible: usize) -> usize {
-    selected.map_or(0, |index| index.saturating_sub(visible.saturating_sub(1)))
-}
-
 impl AgentPanel {
     pub(super) fn new(locked: bool) -> Self {
         Self {
@@ -435,23 +430,5 @@ mod tests {
         );
         assert_eq!(panel.notice, Some(INVALID_AGENT_PANEL_CHOICE));
         assert_eq!(line(&mut panel, "q", &shown), PanelUpdate::Closed);
-    }
-
-    #[test]
-    fn windows_keep_the_focused_row_last_once_it_passes_the_first_window() {
-        for (selected, visible, start) in [
-            (None, 10, 0),
-            (Some(0), 10, 0),
-            (Some(9), 10, 0),
-            (Some(10), 10, 1),
-            (Some(143), 10, 134),
-            (Some(3), 0, 3),
-        ] {
-            assert_eq!(
-                window_start(selected, visible),
-                start,
-                "{selected:?} of {visible}"
-            );
-        }
     }
 }

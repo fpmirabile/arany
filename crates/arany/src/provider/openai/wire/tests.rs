@@ -55,6 +55,10 @@ fn message(text: &str) -> Value {
     json!({"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": text}]})
 }
 
+fn message_in_phase(phase: &str, text: &str) -> Value {
+    json!({"type": "message", "role": "assistant", "status": "completed", "phase": phase, "content": [{"type": "output_text", "text": text}]})
+}
+
 fn function_call(name: &str, arguments: &Value) -> Value {
     function_call_with("call_test", "fc_test", name, arguments)
 }
@@ -257,6 +261,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
             },
         ],
         max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+        prompts: Default::default(),
     };
     let compact_body = compaction_body(&compact);
     let compact_input: Value =
@@ -500,8 +505,8 @@ fn outbound_input_items_replay_turns_and_function_outputs_once() {
     let input = rendered["input"].as_array().unwrap();
     assert_eq!(
         input.len(),
-        4,
-        "current message, call, output, trailing facts"
+        3,
+        "current message, call and output; no user message ends the step"
     );
     assert_eq!(input[0]["role"], "user");
     assert_eq!(input[1]["type"], "function_call");
@@ -511,13 +516,11 @@ fn outbound_input_items_replay_turns_and_function_outputs_once() {
         output.get("call").is_none(),
         "the replayed turn carries the call"
     );
-    assert_eq!(output["workspace_effect"], "none");
-    assert_eq!(input[3]["role"], "user");
-    assert!(
-        input[3]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("goal_context_facts")
+    assert!(output.get("workspace_effect").is_none() && output.get("cache_update").is_none());
+    assert_eq!(
+        output["harness"]["goal_context_facts"],
+        json!(crate::provider::GoalContextFacts::maximum()),
+        "step facts ride on the last output under an explicit harness label"
     );
     let encoded = encode_request(&rendered).unwrap();
     assert_eq!(
@@ -534,6 +537,58 @@ fn outbound_input_items_replay_turns_and_function_outputs_once() {
             .unwrap()
             .contains("RESULT_CANARY")
     );
+}
+
+#[test]
+fn step_harness_facts_fold_into_the_last_output_and_steering_stays_user_text() {
+    let mut request = primary_request(MODEL);
+    let reply = response(
+        "completed",
+        json!([
+            function_call("arany_read", &read_arguments()),
+            function_call_with("call_second", "fc_second", "arany_read", &read_arguments()),
+        ]),
+    );
+    let mut step = observed_step(decode(&request, &reply).unwrap(), "{\"text\":\"ok\"}");
+    step.calls_remaining = Some(3);
+    request
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(step.clone());
+    let rendered = body(&request);
+    let input = rendered["input"].as_array().unwrap();
+    assert_eq!(input.last().unwrap()["type"], "function_call_output");
+    assert!(input[1..].iter().all(|item| item["role"] != "user"));
+    let outputs: Vec<Value> = input
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .map(|item| serde_json::from_str(item["output"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(outputs.len(), 2);
+    assert!(outputs[0].get("harness").is_none(), "only the last output");
+    assert_eq!(
+        outputs[1]["harness"],
+        json!({
+            "goal_context_facts": crate::provider::GoalContextFacts::maximum(),
+            "tool_calls_remaining": 3,
+        })
+    );
+
+    step.steering_notes = vec!["prefer the smaller fix".into()];
+    request.input.tools.as_mut().unwrap().steps = vec![step];
+    let rendered = body(&request);
+    let input = rendered["input"].as_array().unwrap();
+    let last = input.last().unwrap();
+    assert_eq!(last["role"], "user", "user steering keeps its authority");
+    let text = last["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("prefer the smaller fix"));
+    assert!(!text.contains("goal_context_facts"));
+    let output: Value =
+        serde_json::from_str(input[input.len() - 2]["output"].as_str().unwrap()).unwrap();
+    assert_eq!(output["harness"]["tool_calls_remaining"], 3);
 }
 
 #[test]
@@ -756,7 +811,11 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             .all(|function| function["strict"] == true)
     );
     let instructions = rendered["instructions"].as_str().unwrap();
-    assert!(instructions.starts_with(crate::provider::prompts::PRIMARY_INSTRUCTIONS));
+    assert!(instructions.starts_with(&format!(
+        "{}\n\n{}",
+        crate::provider::EffectivePrompts::default().text(crate::provider::PromptFile::Primary),
+        crate::provider::prompts::PRIMARY_AUTHORITY
+    )));
     assert!(!instructions.contains("canary"));
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 2,
@@ -959,6 +1018,95 @@ fn multi_call_outcomes_preserve_model_order_usage_and_paired_replay() {
 }
 
 #[test]
+fn commentary_may_precede_or_interleave_with_calls_but_a_final_answer_may_not() {
+    let request = primary_request(MODEL);
+    let read = function_call("arany_read", &read_arguments());
+    let second = function_call_with("call_second", "fc_second", "arany_read", &read_arguments());
+    let output = vec![
+        message_in_phase("commentary", "Checking the file."),
+        read.clone(),
+        message_in_phase("commentary", "Checking the next file."),
+        second,
+    ];
+    let interleaved = response("completed", json!(output));
+    for decoded in [
+        decode(&request, &interleaved).unwrap(),
+        decode_streamed(&request, &interleaved).unwrap(),
+    ] {
+        let ProviderOutcome::Tools(requests) = &decoded.outcome else {
+            panic!("Tool batch")
+        };
+        assert_eq!(requests.len(), 2);
+        assert_eq!(decoded.turn.items("openai").unwrap(), output);
+    }
+    let trailing = response("completed", json!([read.clone(), message("Reading next.")]));
+    assert!(decode(&request, &trailing).is_ok());
+    assert!(decode_streamed(&request, &trailing).is_ok());
+    let final_first = response(
+        "completed",
+        json!([message_in_phase("final_answer", "Done."), read]),
+    );
+    assert!(decode(&request, &final_first).is_err());
+    assert!(decode_streamed(&request, &final_first).is_err());
+}
+
+#[test]
+fn the_last_assistant_message_without_calls_is_the_answer_whatever_its_phase() {
+    let request = primary_request(MODEL);
+    for output in [
+        json!([message_in_phase("commentary", "Hecho.")]),
+        json!([reasoning(), message("Hecho.")]),
+        json!([
+            message_in_phase("commentary", "Checking."),
+            message_in_phase("commentary", "Hecho.")
+        ]),
+    ] {
+        let fixture = response("completed", output);
+        for decoded in [
+            decode(&request, &fixture).unwrap(),
+            decode_streamed(&request, &fixture).unwrap(),
+        ] {
+            assert!(
+                matches!(decoded.outcome, ProviderOutcome::Answer(Answer { ref text }) if text == "Hecho.")
+            );
+        }
+    }
+    let blank = response("completed", json!([message_in_phase("commentary", " ")]));
+    assert!(
+        matches!(decode(&request, &blank).unwrap().outcome, ProviderOutcome::Answer(Answer { ref text }) if text.trim().is_empty()),
+        "the Engine, not the decoder, refuses a blank answer as answer_invalid"
+    );
+}
+
+#[test]
+fn unknown_output_items_replay_but_never_decide_the_outcome() {
+    let request = primary_request(MODEL);
+    let read = function_call("arany_read", &read_arguments());
+    let unknown = json!({"type": "future_item", "id": "fi_1", "status": "completed"});
+    let with_call = response("completed", json!([unknown.clone(), read.clone()]));
+    let decoded = decode(&request, &with_call).unwrap();
+    assert!(matches!(decoded.outcome, ProviderOutcome::Tools(ref requests) if requests.len() == 1));
+    assert_eq!(
+        decoded.turn.items("openai").unwrap(),
+        vec![unknown.clone(), read.clone()]
+    );
+    assert!(decode_streamed(&request, &with_call).is_ok());
+    let with_answer = response(
+        "completed",
+        json!([unknown.clone(), message(answer_text())]),
+    );
+    assert!(matches!(
+        decode(&request, &with_answer).unwrap().outcome,
+        ProviderOutcome::Answer(Answer { text }) if text == answer_text()
+    ));
+    assert!(decode_streamed(&request, &with_answer).is_ok());
+    let unknown_call = json!({"type": "future_call", "id": "fc_future", "status": "completed"});
+    let rejected = response("completed", json!([unknown_call, read]));
+    assert!(decode(&request, &rejected).is_err());
+    assert!(decode_streamed(&request, &rejected).is_err());
+}
+
+#[test]
 fn multi_call_batches_reject_mixed_outcomes_and_malformed_siblings() {
     let mut request = primary_request(MODEL);
     request.collaboration = CollaborationPolicy::Auto {
@@ -1117,8 +1265,11 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             ]),
         ),
         (
-            "call and message",
-            json!([read.clone(), message("ignored final answer")]),
+            "call and final answer",
+            json!([
+                read.clone(),
+                message_in_phase("final_answer", "ignored final answer")
+            ]),
         ),
         (
             "unknown name",
@@ -1704,7 +1855,6 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         unphased.as_object_mut().unwrap().remove("phase");
         for (output, expected) in [
             (json!([]), "MissingFinalMessage"),
-            (json!([commentary.clone()]), "MissingFinalMessage"),
             (
                 json!([final_message.clone(), final_message.clone()]),
                 "DuplicateFinalMessage",
@@ -1876,9 +2026,11 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     let overhead = r#"{"oversize":""}"#.len();
     for (window, ceiling) in [
         (None, 512 * 1024),
-        (Some(32_768), 88_473 + 256 * 1024),
-        (Some(272_000), 734_400 + 256 * 1024),
-        (Some(2_000_000), 1280 * 1024),
+        // The ceiling admits the largest calibrated content: 95% of the window at 4 bytes per token.
+        (Some(32_768), 124_518 + 256 * 1024),
+        (Some(272_000), 1_033_600 + 256 * 1024),
+        (Some(1_000_000), 3_800_000 + 256 * 1024),
+        (Some(2_000_000), 7_600_000 + 256 * 1024),
     ] {
         assert_eq!(crate::provider::request_ceiling(window), ceiling);
         let body = |len| json!({"oversize": "x".repeat(len - overhead)});
@@ -1948,7 +2100,12 @@ fn child_research_request_offers_only_read_only_functions_and_text_at_exhaustion
         rendered["instructions"]
             .as_str()
             .unwrap()
-            .starts_with(crate::provider::prompts::RESEARCH_INSTRUCTIONS)
+            .starts_with(&format!(
+                "{}\n\n{}",
+                crate::provider::EffectivePrompts::default()
+                    .text(crate::provider::PromptFile::Researcher),
+                crate::provider::prompts::RESEARCH_AUTHORITY
+            ))
     );
     assert_eq!(
         function_names(&rendered),
@@ -1996,6 +2153,31 @@ fn child_research_request_offers_only_read_only_functions_and_text_at_exhaustion
     assert_eq!(spent_body["tool_choice"], json!("none"));
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
     assert_eq!(rendered["tool_choice"]["mode"], "auto");
+}
+
+#[test]
+fn final_call_keeps_the_tool_list_and_offers_only_an_answer() {
+    let mut request = primary_request(MODEL);
+    let open = body(&request);
+    request.input.final_call = true;
+    let final_call = body(&request);
+    assert_eq!(final_call["tools"], open["tools"]);
+    assert_eq!(final_call["instructions"], open["instructions"]);
+    assert_eq!(final_call["prompt_cache_key"], open["prompt_cache_key"]);
+    assert_eq!(final_call["tool_choice"], json!("none"));
+    assert!(
+        final_call["input"]
+            .to_string()
+            .contains("harness_final_call")
+    );
+    let read = response(
+        "completed",
+        json!([function_call(
+            "arany_read",
+            &json!({"path": "src/lib.rs", "offset": null, "limit": 1024})
+        )]),
+    );
+    assert!(decode(&request, &read).is_err());
 }
 
 #[test]
@@ -2078,6 +2260,11 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
         previous_summary: None,
         items: Vec::new(),
         max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+        // Control bytes are the worst JSON escaping for the largest admitted override.
+        prompts: crate::provider::EffectivePrompts::default().with_override(
+            crate::provider::PromptFile::Compaction,
+            &"\u{1}".repeat(crate::provider::MAX_COMPACTION_PROMPT_OVERRIDE_BYTES),
+        ),
     };
     let envelope = serde_json::to_vec(&compaction_body_with_effort(
         &empty,

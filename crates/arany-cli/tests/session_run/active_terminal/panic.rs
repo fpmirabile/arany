@@ -1,5 +1,5 @@
 use super::{collect_nonblocking, redacted_tail, transcript_field, tty_settings};
-use crate::loopback::{ChildGuard, wait_product};
+use crate::loopback::wait_product;
 use arany_cli::terminal::AttachedTerminal;
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
@@ -8,7 +8,6 @@ use rustix::{
 use std::{
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -47,22 +46,15 @@ fn panic_unwind_restores_the_exact_terminal_settings() {
     let gate = UnixListener::bind(&gate_path).expect("test-owned panic gate");
     gate.set_nonblocking(true).expect("bounded gate accept");
     let command = "/usr/bin/stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(/usr/bin/stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_HELPER\" --ignored --exact active_terminal::panic::panic_child --nocapture; exit_code=$?; after=$(/usr/bin/stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached = Command::new("/usr/bin/script");
-    attached
-        .env_clear()
+    let mut attached = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, command)
         .env(
             "ARANY_TEST_HELPER",
             std::env::current_exe().expect("absolute test helper"),
         )
         .env("ARANY_TEST_PANIC_GATE", &gate_path)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
+        .term("xterm")
         .current_dir(temp.path())
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("supervised panic PTY"));
+        .spawn();
     let _input = attached
         .child()
         .stdin

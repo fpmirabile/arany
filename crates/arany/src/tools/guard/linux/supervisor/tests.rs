@@ -57,16 +57,18 @@ fn supervisor_launch_never_executes_a_path_replacement() {
     let seed = crate::tools::fs::open_directory(root.path()).unwrap();
     let mut runtime = crate::tools::tests::in_process_runtime(
         root.path(),
-        serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
+        serde_json::json!({"workspace_paths":["."],"write":false,
             "commands":[],"skills":[],"mcp":[]}),
     );
     runtime.guard_executable = root.path().join("guard");
     std::fs::copy("/usr/bin/echo", &runtime.guard_executable).unwrap();
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        ToolCall::List { path: ".".into() },
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::List { path: ".".into() },
+        )
+        .unwrap();
     let (command, executable) = unit_command(
         &runtime,
         &intent,
@@ -79,6 +81,7 @@ fn supervisor_launch_never_executes_a_path_replacement() {
             seed_dir: &seed,
             runtime_directories: Vec::new(),
             mounts: Vec::new(),
+            masks: Vec::new(),
             proxy_socket: None,
         },
     )

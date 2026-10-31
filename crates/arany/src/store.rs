@@ -1,57 +1,40 @@
-use crate::provider::evidence::{
-    EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
-};
 use crate::session::{
     Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionListItem, SessionPage,
-    SessionView, WorkspaceIdentity, payload_version,
+    SessionView, WorkspaceIdentity,
 };
 use std::io;
 use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
-pub(crate) mod check;
-mod evidence;
-use crate::journal::check::{CheckId, CheckOp, CheckView};
 pub use replay::{InspectedEvent, InspectionCause, InspectionFailure, SessionInspection};
+mod format;
 mod journal;
-mod migrate;
 mod replay;
 mod state;
-pub(crate) use evidence::{MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_NATIVE_EVIDENCE_ROWS};
+pub use format::{RECORD_FORMATS, RecordFormat};
 pub(crate) use journal::MAX_HOT_SESSION_PAYLOAD_BYTES;
 use journal::{HotSession, append, open_connection};
-pub use migrate::{RECORD_FORMATS, RecordFormat, RecordStep};
 pub(crate) use replay::{MAX_DISCOVERED_SESSIONS, MAX_LIST_SCAN_EVENTS, MAX_SESSION_EVENTS};
 use replay::{
     inspect_session, latest_session_id, list_session_page, load_session, resolve_open_view,
     resolve_view, session_for_run,
 };
-#[cfg(test)]
-pub(crate) use state::capture_archive;
 pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
 pub(crate) use state::spill::{SWEEP_TIME_MS, SpillAccess};
+pub use state::{ArchivedHistory, ArchivedRecords, HistoryReset};
 pub(crate) use state::{
-    AGGREGATE_BYTES, BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease,
-    MAX_ARCHIVE_BYTES, ProviderCheckLock, SessionRunLock, WorkspaceRunLock,
+    BUILD_CACHE_DEFAULT_VIEW_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
+    WorkspaceRunLock,
 };
-pub use state::{ArchivedHistory, HistoryReset};
-#[cfg(target_os = "linux")]
-pub(crate) use state::{
-    CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES, validate_cache_path,
-};
-#[cfg(unix)]
+pub(crate) use state::{CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_cache_path};
 pub(crate) use state::{
     MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES,
 };
 pub use state::{ProviderRecordEdit, ProviderRecordTarget, Record, RecordKind, StateRoot};
-#[cfg(target_os = "macos")]
-pub(crate) use state::{
-    archive_size_with_limit, capture_archive_async_with_limit, restore_archive_async_with_limit,
-};
 
 const DATABASE_FILE: &str = "events.sqlite3";
 const PROVIDER_SETUP_EDIT_EVENT_SLOTS: usize = 2;
@@ -76,24 +59,16 @@ const _: () = assert!(MAX_TOOL_STARTED_BYTES <= MAX_TOOL_FINISHED_BYTES);
 // Run start needs extra headroom because GoalStarted and MessageAccepted exceed the ordinary Event bound.
 const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
-fn event_payload_limit(kind: &str, version: i64) -> usize {
+fn event_payload_limit(kind: &str) -> usize {
     match kind {
-        "SupervisorVerdictRecorded" if payload_version(kind) == Some(version) => {
-            crate::supervisor::MAX_VERDICT_BYTES
-        }
-        "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
-        "ContextCompacted" | "GoalContextCompacted" if payload_version(kind) == Some(version) => {
-            MAX_COMPACTION_EVENT_BYTES
-        }
-        "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
-        "GoalFinished" if payload_version(kind) == Some(version) => MAX_GOAL_FINISHED_BYTES,
-        "ToolProposed" | "ToolStarted" | "CommandToolProbeStarted"
-            if payload_version(kind) == Some(version) =>
-        {
-            MAX_TOOL_STARTED_BYTES
-        }
-        "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
-        "HookFinished" | "CommandToolProbeFinished" if payload_version(kind) == Some(version) => {
+        "SupervisorVerdictRecorded" => crate::supervisor::MAX_VERDICT_BYTES,
+        "MessageAccepted" => MAX_MESSAGE_ACCEPTED_BYTES,
+        "ContextCompacted" | "GoalContextCompacted" => MAX_COMPACTION_EVENT_BYTES,
+        "GoalStarted" => MAX_GOAL_STARTED_BYTES,
+        "GoalFinished" => MAX_GOAL_FINISHED_BYTES,
+        "ToolProposed" | "ToolStarted" | "CommandToolProbeStarted" => MAX_TOOL_STARTED_BYTES,
+        "ToolFinished" => MAX_TOOL_FINISHED_BYTES,
+        "HookFinished" | "CommandToolProbeFinished" => {
             crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
         }
         _ => MAX_EVENT_BYTES,
@@ -112,8 +87,6 @@ pub enum StoreError {
     ForkNotAtRunBoundary,
     #[error("state storage is full")]
     StorageFull,
-    #[error("another Provider check is active")]
-    ProviderCheckBusy,
     #[error("Session has an active operation")]
     SessionBusy,
     #[error("Workspace has an active writer")]
@@ -144,8 +117,6 @@ pub enum StoreError {
     InvalidHistory,
     #[error("an interrupted history archive no longer matches its files")]
     ArchiveConflict,
-    #[error("an interrupted history migration no longer matches its files")]
-    MigrationConflict,
     #[error("invalid compaction snapshot")]
     InvalidSnapshot,
     #[error("store thread closed unexpectedly")]
@@ -169,7 +140,6 @@ pub enum HistoryRecovery {
     InvalidStateDirectory,
     Inaccessible,
     ArchiveConflict,
-    MigrationConflict,
     Busy,
     Changed,
     StorageFull,
@@ -200,7 +170,6 @@ impl StoreError {
             Self::InvalidStateDirectory => HistoryRecovery::InvalidStateDirectory,
             Self::StateNotPrivate | Self::Io(_) => HistoryRecovery::Inaccessible,
             Self::ArchiveConflict => HistoryRecovery::ArchiveConflict,
-            Self::MigrationConflict => HistoryRecovery::MigrationConflict,
             Self::HistoryBusy => HistoryRecovery::Busy,
             Self::HistoryChanged => HistoryRecovery::Changed,
             Self::StorageFull => HistoryRecovery::StorageFull,
@@ -249,10 +218,6 @@ pub enum AdmissionKind {
 }
 
 enum Request {
-    Check {
-        op: Box<CheckOp>,
-        reply: oneshot::Sender<Result<Option<CheckView>, StoreError>>,
-    },
     SupervisorCorpus {
         session_id: SessionId,
         reply: oneshot::Sender<Result<String, crate::supervisor::CorpusError>>,
@@ -323,10 +288,6 @@ enum Request {
         title: String,
         reply: oneshot::Sender<Result<SessionId, StoreError>>,
     },
-    Evidence {
-        op: EvidenceOp,
-        reply: oneshot::Sender<Result<Option<EvidenceRecord>, StoreError>>,
-    },
     CheckpointCapture {
         capture: CheckpointCapture,
         reply: oneshot::Sender<Result<crate::session::Checkpoint, StoreError>>,
@@ -343,23 +304,340 @@ enum Request {
     },
 }
 
+// A requester that stopped waiting needs no reply.
+fn send<T>(reply: oneshot::Sender<T>, value: T) {
+    let _ = reply.send(value);
+}
+
+struct StoreThread {
+    root: StateRoot,
+    read_only: bool,
+    connection: rusqlite::Connection,
+    hot_session: Option<HotSession>,
+    checkpoint_checked: state::checkpoints::Checked,
+    pending_prunes: state::checkpoints::Pruned,
+    pruning_notified_run: Option<RunId>,
+}
+
+impl StoreThread {
+    fn new(root: StateRoot, read_only: bool, connection: rusqlite::Connection) -> Self {
+        let mut checkpoint_checked = None;
+        let pending_prunes: state::checkpoints::Pruned = if !read_only {
+            state::checkpoints::sweep(
+                &root,
+                i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                &mut checkpoint_checked,
+            )
+            .unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        Self {
+            root,
+            read_only,
+            connection,
+            hot_session: None,
+            checkpoint_checked,
+            pending_prunes,
+            pruning_notified_run: None,
+        }
+    }
+
+    fn handle(&mut self, request: Request) -> std::ops::ControlFlow<()> {
+        let connection = &self.connection;
+        match request {
+            Request::Admit {
+                session_id,
+                event_slots,
+                tool_observations,
+                kind,
+                reply,
+            } => {
+                let admission = journal::Admission {
+                    session_id,
+                    event_slots,
+                    tool_observations,
+                    kind,
+                };
+                self.admit(admission, reply);
+            }
+            Request::Append {
+                session_id,
+                event,
+                reply,
+            } => self.append(session_id, event, reply),
+            Request::SupervisorCorpus { session_id, reply } => {
+                send(reply, replay::supervisor_corpus(connection, session_id));
+            }
+            Request::Load { session_id, reply } => {
+                send(reply, load_session(connection, session_id))
+            }
+            Request::Inspect { session_id, reply } => {
+                send(reply, inspect_session(connection, session_id));
+            }
+            Request::RunSession { run_id, reply } => {
+                send(reply, session_for_run(connection, run_id))
+            }
+            Request::LoadView { session_id, reply } => send(
+                reply,
+                resolve_view(connection, session_id, 0, &mut 0).map(|(_, view)| view),
+            ),
+            Request::LoadOpenView { session_id, reply } => send(
+                reply,
+                resolve_open_view(connection, session_id, &mut 0).map(|(_, view)| view),
+            ),
+            Request::LoadResolved { session_id, reply } => {
+                send(reply, resolve_view(connection, session_id, 0, &mut 0));
+            }
+            Request::LatestSession {
+                workspace_identity,
+                reply,
+            } => send(reply, latest_session_id(connection, workspace_identity)),
+            Request::ListSessions {
+                workspace_identity,
+                after,
+                limit,
+                watermark,
+                reply,
+            } => send(
+                reply,
+                list_session_page(
+                    connection,
+                    workspace_identity,
+                    after,
+                    limit,
+                    replay::MAX_LIST_SCAN_EVENTS,
+                    watermark,
+                ),
+            ),
+            Request::ListAllSessions {
+                workspace_identity,
+                reply,
+            } => send(
+                reply,
+                replay::list_all_sessions(connection, workspace_identity),
+            ),
+            Request::PrepareFork {
+                source_session_id,
+                source_sequence,
+                reply,
+            } => self.prepare_fork(source_session_id, source_sequence, reply),
+            Request::ForkAt {
+                boundary,
+                title,
+                reply,
+            } => self.fork_at(boundary, title, reply),
+            Request::Fork {
+                source_session_id,
+                title,
+                reply,
+            } => self.fork(source_session_id, title, reply),
+            Request::CheckpointCapture { capture, reply } => self.capture(capture, reply),
+            Request::CheckpointLoad { digest, reply } => self.load_checkpoint(digest, reply),
+            Request::CheckpointReset { reply } => self.reset_checkpoints(reply),
+            Request::Close { reply } => {
+                send(reply, ());
+                return std::ops::ControlFlow::Break(());
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+
+    fn admit(
+        &mut self,
+        admission: journal::Admission,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    ) {
+        let result = if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else {
+            journal::admit(&mut self.connection, self.hot_session.as_ref(), admission)
+        };
+        send(reply, result);
+    }
+
+    fn prepare_fork(
+        &mut self,
+        source_session_id: SessionId,
+        source_sequence: Option<u64>,
+        reply: oneshot::Sender<Result<ForkLineage, StoreError>>,
+    ) {
+        send(
+            reply,
+            journal::prepare_fork(
+                &mut self.connection,
+                self.hot_session.as_ref(),
+                source_session_id,
+                source_sequence,
+            ),
+        );
+    }
+
+    fn fork_at(
+        &mut self,
+        boundary: ForkLineage,
+        title: String,
+        reply: oneshot::Sender<Result<SessionId, StoreError>>,
+    ) {
+        let cached = self.hot_session.take();
+        let result = if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else {
+            journal::fork_at(&mut self.connection, cached.as_ref(), boundary, title)
+        };
+        send(reply, result);
+    }
+
+    fn fork(
+        &mut self,
+        source_session_id: SessionId,
+        title: String,
+        reply: oneshot::Sender<Result<SessionId, StoreError>>,
+    ) {
+        let cached = self.hot_session.take();
+        let connection = &mut self.connection;
+        let result = if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else {
+            journal::prepare_fork(connection, cached.as_ref(), source_session_id, None)
+                .and_then(|boundary| journal::fork_at(connection, cached.as_ref(), boundary, title))
+        };
+        send(reply, result);
+    }
+
+    fn load_checkpoint(
+        &mut self,
+        digest: [u8; 32],
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, StoreError>>,
+    ) {
+        send(
+            reply,
+            state::checkpoints::load(&self.root, digest, &mut self.checkpoint_checked),
+        );
+    }
+
+    fn reset_checkpoints(&mut self, reply: oneshot::Sender<Result<CheckpointReset, StoreError>>) {
+        let result = if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else {
+            state::checkpoints::prepare_reset(&self.root)
+        };
+        send(reply, result);
+    }
+
+    fn append(
+        &mut self,
+        session_id: SessionId,
+        event: Box<Event>,
+        reply: oneshot::Sender<Result<EventEnvelope, StoreError>>,
+    ) {
+        if let Err(error) = crate::fault::append(session_id, event.as_ref()) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let result = if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else if matches!(event.as_ref(), Event::SessionForked { .. }) {
+            Err(StoreError::InvalidHistory)
+        } else {
+            append(
+                &mut self.connection,
+                &mut self.hot_session,
+                session_id,
+                *event,
+            )
+        };
+        if let Ok(envelope) = &result {
+            let notice = match &envelope.event {
+                Event::ToolFinished {
+                    run_id,
+                    checkpoint: Some(checkpoint),
+                    ..
+                } => Some((Some(*run_id), checkpoint)),
+                Event::WorkspaceRewindFinished { record } => record
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| (None, checkpoint)),
+                _ => None,
+            };
+            if let Some((run, checkpoint)) = notice
+                && let Some(pruned) = checkpoint.pruned_before_run
+            {
+                if self
+                    .pending_prunes
+                    .get(&session_id)
+                    .is_some_and(|pending| pending <= &pruned)
+                {
+                    self.pending_prunes.remove(&session_id);
+                }
+                if run.is_some() {
+                    self.pruning_notified_run = run;
+                }
+            }
+        }
+        let result = crate::fault::acknowledge(session_id, result);
+        let _ = reply.send(result);
+    }
+
+    fn capture(
+        &mut self,
+        capture: CheckpointCapture,
+        reply: oneshot::Sender<Result<crate::session::Checkpoint, StoreError>>,
+    ) {
+        let result = if self.read_only {
+            Err(StoreError::ReadOnly)
+        } else {
+            let (started, run) = match capture.owner {
+                CheckpointOwner::Tool { run, intent_id, .. } => (
+                    self.connection.query_row(
+                        "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND run_id=?2 AND kind='ToolStarted' AND json_extract(payload,'$.intent.id')=?3",
+                        rusqlite::params![capture.session.to_string(), run.to_string(), intent_id.to_string()],
+                        |row| row.get::<_, Option<i64>>(0),
+                    ),
+                    Some(run),
+                ),
+                CheckpointOwner::Rewind { rewind_id } => (
+                    self.connection.query_row(
+                        "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND kind='WorkspaceRewindStarted' AND json_extract(payload,'$.rewind_id')=?2",
+                        rusqlite::params![capture.session.to_string(), rewind_id.to_string()],
+                        |row| row.get::<_, Option<i64>>(0),
+                    ),
+                    None,
+                ),
+            };
+            let Ok(Some(started)) = started else {
+                let _ = reply.send(Err(StoreError::InvalidHistory));
+                return;
+            };
+            let session = capture.session;
+            let mut checkpoint = state::checkpoints::capture(
+                &self.root,
+                capture,
+                u64::try_from(started).unwrap_or_default(),
+                i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                &mut self.checkpoint_checked,
+            );
+            if let Some(pruned) = checkpoint.pruned_before_run {
+                let pending = self.pending_prunes.entry(session).or_insert(pruned);
+                *pending = (*pending).max(pruned);
+            }
+            checkpoint.pruned_before_run = self
+                .pending_prunes
+                .get(&session)
+                .copied()
+                .filter(|_| run.is_none() || self.pruning_notified_run != run);
+            Ok(checkpoint)
+        };
+        let _ = reply.send(result);
+    }
+}
+
 pub struct Store {
     requests: Option<mpsc::Sender<Request>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Store {
-    pub(crate) async fn check(&self, op: CheckOp) -> Result<Option<CheckView>, StoreError> {
-        self.call(|reply| Request::Check {
-            op: Box::new(op),
-            reply,
-        })
-        .await
-    }
-    pub async fn load_check(&self, id: CheckId) -> Result<Option<CheckView>, StoreError> {
-        self.check(CheckOp::Load(id)).await
-    }
-
     pub fn open(root: StateRoot) -> Result<Self, StoreError> {
         Self::start(root, false)
     }
@@ -374,7 +652,7 @@ impl Store {
         let thread = std::thread::Builder::new()
             .name("arany-sqlite".into())
             .spawn(move || {
-                let _history = match migrate::lease_after_recovery(&root, !read_only) {
+                let _history = match root.lock_history(false) {
                     Ok(lock) => lock,
                     Err(error) => {
                         let _ = ready_sender.send(Err(error));
@@ -382,7 +660,7 @@ impl Store {
                     }
                 };
                 let connection = open_connection(&root, read_only);
-                let Ok(mut connection) = connection else {
+                let Ok(connection) = connection else {
                     let _ = ready_sender.send(connection.map(|_| ()));
                     return;
                 };
@@ -392,214 +670,10 @@ impl Store {
                 if ready_sender.send(Ok(())).is_err() {
                     return;
                 }
-                let mut checkpoint_checked = None;
-                let mut pending_prunes: state::checkpoints::Pruned = if !read_only {
-                    state::checkpoints::sweep(
-                        &root,
-                        i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
-                        &mut checkpoint_checked,
-                    ).unwrap_or_default()
-                } else { Default::default() };
-                let mut pruning_notified_run = None;
-                let mut hot_session = None::<HotSession>;
+                let mut store = StoreThread::new(root, read_only, connection);
                 while let Some(request) = receiver.blocking_recv() {
-                    match request {
-                        Request::Admit {
-                            session_id,
-                            event_slots,
-                            tool_observations,
-                            kind,
-                            reply,
-                        } => {
-                            let result = if read_only {
-                                Err(StoreError::ReadOnly)
-                            } else {
-                                journal::admit(
-                                    &mut connection,
-                                    hot_session.as_ref(),
-                                    journal::Admission {
-                                        session_id,
-                                        event_slots,
-                                        tool_observations,
-                                        kind,
-                                    },
-                                )
-                            };
-                            let _ = reply.send(result);
-                        }
-                        Request::Append {
-                            session_id,
-                            event,
-                            reply,
-                        } => {
-                            if let Err(error) = crate::fault::append(session_id, event.as_ref()) {
-                                let _ = reply.send(Err(error));
-                                continue;
-                            }
-                            let result = if read_only {
-                                Err(StoreError::ReadOnly)
-                            } else if matches!(event.as_ref(), Event::SessionForked { .. }) {
-                                Err(StoreError::InvalidHistory)
-                            } else {
-                                append(&mut connection, &mut hot_session, session_id, *event)
-                            };
-                            if let Ok(envelope) = &result {
-                                let notice = match &envelope.event {
-                                    Event::ToolFinished { run_id, checkpoint: Some(checkpoint), .. } => Some((Some(*run_id), checkpoint)),
-                                    Event::WorkspaceRewindFinished { record } => record.checkpoint.as_ref().map(|checkpoint| (None, checkpoint)),
-                                    _ => None,
-                                };
-                                if let Some((run, checkpoint)) = notice
-                                    && let Some(pruned) = checkpoint.pruned_before_run
-                                {
-                                    if pending_prunes.get(&session_id).is_some_and(|pending| pending <= &pruned) {
-                                        pending_prunes.remove(&session_id);
-                                    }
-                                    if run.is_some() {
-                                        pruning_notified_run = run;
-                                    }
-                                }
-                            }
-                            let result = crate::fault::acknowledge(session_id, result);
-                            let _ = reply.send(result);
-                        }
-                        Request::SupervisorCorpus { session_id, reply } => {
-                            let _ = reply.send(replay::supervisor_corpus(&connection, session_id));
-                        }
-                        Request::Load { session_id, reply } => {
-                            let _ = reply.send(load_session(&connection, session_id));
-                        }
-                        Request::Inspect { session_id, reply } => {
-                            let _ = reply.send(inspect_session(&connection, session_id));
-                        }
-                        Request::RunSession { run_id, reply } => {
-                            let _ = reply.send(session_for_run(&connection, run_id));
-                        }
-                        Request::LoadView { session_id, reply } => {
-                            let _ = reply.send(
-                                resolve_view(&connection, session_id, 0, &mut 0)
-                                    .map(|(_, view)| view),
-                            );
-                        }
-                        Request::LoadOpenView { session_id, reply } => {
-                            let _ = reply.send(
-                                resolve_open_view(&connection, session_id, &mut 0)
-                                    .map(|(_, view)| view),
-                            );
-                        }
-                        Request::LoadResolved { session_id, reply } => {
-                            let _ = reply.send(resolve_view(&connection, session_id, 0, &mut 0));
-                        }
-                        Request::LatestSession {
-                            workspace_identity,
-                            reply,
-                        } => {
-                            let _ = reply.send(latest_session_id(&connection, workspace_identity));
-                        }
-                        Request::ListSessions {
-                            workspace_identity,
-                            after,
-                            limit,
-                            watermark,
-                            reply,
-                        } => {
-                            let _ = reply.send(list_session_page(
-                                &connection,
-                                workspace_identity,
-                                after,
-                                limit,
-                                replay::MAX_LIST_SCAN_EVENTS,
-                                watermark,
-                            ));
-                        }
-                        Request::ListAllSessions { workspace_identity, reply } => {
-                            let _ = reply.send(replay::list_all_sessions(&connection, workspace_identity));
-                        }
-                        Request::PrepareFork { source_session_id, source_sequence, reply } => {
-                            let _ = reply.send(journal::prepare_fork(&mut connection, hot_session.as_ref(), source_session_id, source_sequence));
-                        }
-                        Request::ForkAt { boundary, title, reply } => {
-                            let cached = hot_session.take();
-                            let result = if read_only { Err(StoreError::ReadOnly) } else {
-                                journal::fork_at(&mut connection, cached.as_ref(), boundary, title)
-                            };
-                            let _ = reply.send(result);
-                        }
-                        Request::Fork {
-                            source_session_id,
-                            title,
-                            reply,
-                        } => {
-                            let cached = hot_session.take();
-                            let result = if read_only {
-                                Err(StoreError::ReadOnly)
-                            } else {
-                                journal::prepare_fork(&mut connection, cached.as_ref(), source_session_id, None)
-                                    .and_then(|boundary| journal::fork_at(&mut connection, cached.as_ref(), boundary, title))
-                            };
-                            let _ = reply.send(result);
-                        }
-                        Request::Check { op, reply } => {
-                            let result = check::apply(&mut connection, read_only, *op);
-                            let _ = reply.send(result);
-                        }
-                        Request::Evidence { op, reply } => {
-                            let _ = reply.send(evidence::apply(&mut connection, read_only, op));
-                        }
-                        Request::CheckpointCapture { capture, reply } => {
-                            let result = if read_only {
-                                Err(StoreError::ReadOnly)
-                            } else {
-                                let (started, run) = match capture.owner {
-                                    CheckpointOwner::Tool { run, intent_id, .. } => (
-                                        connection.query_row(
-                                            "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND run_id=?2 AND kind='ToolStarted' AND json_extract(payload,'$.intent.id')=?3",
-                                            rusqlite::params![capture.session.to_string(), run.to_string(), intent_id.to_string()],
-                                            |row| row.get::<_, Option<i64>>(0),
-                                        ), Some(run)),
-                                    CheckpointOwner::Rewind { rewind_id } => (
-                                        connection.query_row(
-                                            "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND kind='WorkspaceRewindStarted' AND json_extract(payload,'$.rewind_id')=?2",
-                                            rusqlite::params![capture.session.to_string(), rewind_id.to_string()],
-                                            |row| row.get::<_, Option<i64>>(0),
-                                        ), None),
-                                };
-                                let Ok(Some(started)) = started else {
-                                    let _ = reply.send(Err(StoreError::InvalidHistory));
-                                    continue;
-                                };
-                                let session = capture.session;
-                                let mut checkpoint = state::checkpoints::capture(
-                                    &root, capture, u64::try_from(started).unwrap_or_default(),
-                                    i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
-                                    &mut checkpoint_checked,
-                                );
-                                if let Some(pruned) = checkpoint.pruned_before_run {
-                                    let pending = pending_prunes.entry(session).or_insert(pruned);
-                                    *pending = (*pending).max(pruned);
-                                }
-                                checkpoint.pruned_before_run = pending_prunes.get(&session)
-                                    .copied()
-                                    .filter(|_| run.is_none() || pruning_notified_run != run);
-                                Ok(checkpoint)
-                            };
-                            let _ = reply.send(result);
-                        }
-                        Request::CheckpointLoad { digest, reply } => {
-                            let _ = reply.send(state::checkpoints::load(&root, digest, &mut checkpoint_checked));
-                        }
-                        Request::CheckpointReset { reply } => {
-                            let result = if read_only {
-                                Err(StoreError::ReadOnly)
-                            } else {
-                                state::checkpoints::prepare_reset(&root)
-                            };
-                            let _ = reply.send(result);
-                        }
-                        Request::Close { reply } => {
-                            let _ = reply.send(());
-                            break;
-                        }
+                    if store.handle(request).is_break() {
+                        break;
                     }
                 }
             })?;
@@ -656,66 +730,6 @@ impl Store {
             reply,
         })
         .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_provider_evidence(
-        &self,
-        record: ProviderEvidenceRecord,
-    ) -> Result<(), StoreError> {
-        self.check(CheckOp::Seed(EvidenceRecord::Provider(record)))
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn load_provider_evidence(
-        &self,
-        name: String,
-    ) -> Result<Option<ProviderEvidenceRecord>, StoreError> {
-        match self.evidence(EvidenceOp::LoadProvider(name)).await? {
-            None => Ok(None),
-            Some(EvidenceRecord::Provider(record)) => Ok(Some(record)),
-            Some(EvidenceRecord::Native(_)) => Err(StoreError::InvalidHistory),
-        }
-    }
-
-    pub(crate) async fn clear_provider_evidence(&mut self, name: String) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::ClearProvider(name)).await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn clear_native_evidence(
-        &self,
-        fingerprint: [u8; 32],
-    ) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::ClearNative(fingerprint)).await?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn record_native_evidence(
-        &self,
-        record: NativeEvidenceRecord,
-    ) -> Result<(), StoreError> {
-        self.check(CheckOp::Seed(EvidenceRecord::Native(record)))
-            .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn load_native_evidence(
-        &self,
-        fingerprint: [u8; 32],
-    ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-        match self.evidence(EvidenceOp::LoadNative(fingerprint)).await? {
-            None => Ok(None),
-            Some(EvidenceRecord::Native(record)) => Ok(Some(record)),
-            Some(EvidenceRecord::Provider(_)) => Err(StoreError::InvalidHistory),
-        }
-    }
-
-    async fn evidence(&self, op: EvidenceOp) -> Result<Option<EvidenceRecord>, StoreError> {
-        self.call(|reply| Request::Evidence { op, reply }).await
     }
 
     pub(crate) async fn supervisor_corpus(
@@ -912,7 +926,6 @@ impl Drop for Store {
     }
 }
 
-#[cfg(unix)]
 pub use state::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,

@@ -58,6 +58,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         chatgpt_provenance: None,
         output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
         context_window_tokens: None,
+        effective_context_window_tokens: None,
         policy: CollaborationPolicy::Single,
         output_token_cap: 4096,
         provider_concurrency: 1,
@@ -65,8 +66,9 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         workspace_inode: 1,
         user_instruction_digest: None,
         instruction_sources: Vec::new(),
+        prompts: crate::provider::EffectivePrompts::default().pins(),
         launch_directory: String::new(),
-        include_digests: Vec::new(),
+        include_sources: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
         context_usage: None,
@@ -84,7 +86,11 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     };
     assert_eq!(
         event.payload().unwrap(),
-        r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+        format!(
+            r#"{{"config":{{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":{{"kind":"openai","custom_name":null}},"model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"effective_context_window_tokens":null,"policy":{{"mode":"single"}},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"prompts":{},"launch_directory":"","include_sources":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null}},"active_deadline_ms":{}}}"#,
+            serde_json::to_string(&config.prompts).unwrap(),
+            MAX_GOAL_ACTIVE_MS
+        )
     );
     let Event::RunStarted {
         config: ordinary, ..
@@ -108,14 +114,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut payload = serde_json::json!({"config":ordinary,"active_deadline_ms":null});
         payload["config"]["provider"] = provider;
         assert!(
-            Event::decode(
-                "RunStarted",
-                payload_version("RunStarted").unwrap(),
-                &payload.to_string(),
-                Some(RunId::new()),
-                None
-            )
-            .is_err()
+            Event::decode("RunStarted", &payload.to_string(), Some(RunId::new()), None).is_err()
         );
     }
     let mut roster_config = ordinary.clone();
@@ -282,7 +281,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     config.effort = Some(crate::provider::Effort::High);
     config.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
         account_id: Uuid::now_v7(),
-        evidence_fingerprint: [7; 32],
+        admission_fingerprint: [7; 32],
         admission: crate::provider::ChatGptAdmission::AccountConsent,
     });
     assert!(config.validate().is_err());
@@ -298,13 +297,13 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         .chatgpt_provenance
         .as_mut()
         .unwrap()
-        .evidence_fingerprint = [0; 32];
+        .admission_fingerprint = [0; 32];
     assert!(config.validate().is_err());
     config
         .chatgpt_provenance
         .as_mut()
         .unwrap()
-        .evidence_fingerprint = [7; 32];
+        .admission_fingerprint = [7; 32];
     config.provider_concurrency = 2;
     assert!(config.validate().is_err());
     config.provider_concurrency = 1;
@@ -317,7 +316,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         ("chatgpt", Some(2_000_000), 1024 * 1024, true),
         ("chatgpt", Some(2_000_001), 64 * 1024, false),
         ("chatgpt", Some(32_767), 64 * 1024, false),
-        ("openai", Some(272_000), 64 * 1024, false),
+        ("openai", Some(272_000), 64 * 1024, true),
         ("anthropic", Some(272_000), 64 * 1024, true),
     ] {
         let mut pinned = if provider == "chatgpt" {
@@ -327,6 +326,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         };
         pinned.provider = crate::ProviderRecord::parse(provider).unwrap();
         pinned.context_window_tokens = window;
+        pinned.effective_context_window_tokens = window;
         pinned.context_usage = Some(ContextUsage {
             used_bytes: 0,
             budget_bytes: budget,
@@ -339,6 +339,30 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
             "{provider} {window:?} {budget}"
         );
     }
+    // The effective window bounds the content ceiling and never exceeds the model window.
+    for (window, effective, budget, valid) in [
+        (Some(272_000), Some(136_000), 367_200, true),
+        (Some(272_000), Some(136_000), 367_201, false),
+        (Some(272_000), Some(272_001), 64 * 1024, false),
+        (Some(272_000), Some(32_767), 64 * 1024, false),
+        (Some(272_000), None, 64 * 1024, false),
+        (None, Some(272_000), 64 * 1024, false),
+    ] {
+        let mut pinned = config.clone();
+        pinned.context_window_tokens = window;
+        pinned.effective_context_window_tokens = effective;
+        pinned.context_usage = Some(ContextUsage {
+            used_bytes: 0,
+            budget_bytes: budget,
+            compactable_bytes: 0,
+            tool_history_bytes: 0,
+        });
+        assert_eq!(
+            pinned.validate().is_ok(),
+            valid,
+            "{window:?} {effective:?} {budget}"
+        );
+    }
     let mut fallback = config.identity().unwrap();
     fallback.model = "fallback-model".into();
     let mut custom = ordinary.identity().unwrap();
@@ -346,15 +370,14 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
     custom.provenance =
         crate::provider::Provenance::Custom(crate::provider::CustomProfileProvenance {
             endpoint: "https://example.invalid/v1".into(),
-            evidence_digest: [1; 32],
-            capability_evidence_version: 2,
+            profile_digest: [1; 32],
         });
     let mut anthropic = ordinary.identity().unwrap();
     anthropic.profile = "anthropic".into();
     anthropic.model = "claude-sonnet-5".into();
     for (fallback, window_valid) in [
         (fallback, true),
-        (ordinary.identity().unwrap(), false),
+        (ordinary.identity().unwrap(), true),
         (custom, false),
         (anthropic, true),
     ] {
@@ -365,11 +388,12 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         ]));
         assert!(pinned.validate().is_ok(), "no window: {pinned:?}");
         pinned.context_window_tokens = Some(272_000);
+        pinned.effective_context_window_tokens = Some(272_000);
         assert_eq!(pinned.validate().is_ok(), window_valid, "{pinned:?}");
     }
     let encoded = serde_json::to_value(&config).unwrap();
     assert_eq!(encoded["output_token_bound"], "local_acceptance_only");
-    assert_eq!(encoded["chatgpt_provenance"]["evidence_fingerprint"][0], 7);
+    assert_eq!(encoded["chatgpt_provenance"]["admission_fingerprint"][0], 7);
     assert_eq!(
         encoded["chatgpt_provenance"]["admission"],
         "account_consent"
@@ -385,6 +409,7 @@ fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         "chatgpt_provenance",
         "output_token_bound",
         "provider_concurrency",
+        "effective_context_window_tokens",
         "context_usage",
         "compaction_event_sequence",
         "compaction_content_digest",

@@ -37,7 +37,6 @@ use tokio::io::{AsyncWriteExt, BufReader};
 #[allow(unsafe_code)]
 mod ffi;
 pub(crate) mod fixture;
-mod git_write;
 mod storage;
 mod unit;
 
@@ -74,6 +73,57 @@ pub(super) fn configure_runtime_compat<'a>(
         super::prefix_shell_runtime_compat(args, path)?;
     }
     Ok(())
+}
+
+// Resolves once the payload's volume falls below the reserve, or when free space cannot be observed.
+pub(in crate::tools) async fn disk_floor_reached(workspace: &Path) {
+    let Ok(directory) = crate::tools::fs::open_directory(workspace) else {
+        return;
+    };
+    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+    loop {
+        samples.tick().await;
+        if !storage::free_bytes(&directory)
+            .is_ok_and(|free| free >= crate::tools::types::GUARD_DISK_RESERVE_BYTES)
+        {
+            return;
+        }
+    }
+}
+
+const CACHE_ALIAS: &str = "cache-alias";
+
+// Cargo fingerprints absolute registry and target paths, so a stable per-Workspace alias keeps a cloned cache fresh across units.
+fn cache_alias(device: u64, inode: u64) -> PathBuf {
+    Path::new(unit::UNIT_ROOT_PARENT).join(format!("arany-c-{device}-{inode}"))
+}
+
+// The alias is used only while it resolves to this unit's own view; the Workspace cache lease keeps other units from repointing it.
+pub(in crate::tools) fn cache_view(root: &Path) -> PathBuf {
+    let view = root.join("cache");
+    std::fs::read_link(root.join(CACHE_ALIAS))
+        .ok()
+        .filter(|alias| std::fs::read_link(alias).is_ok_and(|target| target == view))
+        .unwrap_or(view)
+}
+
+// Best effort: a name another user squats in the sticky parent leaves the unit on its private path.
+pub(super) fn publish_cache_alias(root: &Path, device: u64, inode: u64) {
+    let alias = cache_alias(device, inode);
+    let staged = alias.with_extension(uuid::Uuid::now_v7().to_string());
+    let published = std::os::unix::fs::symlink(root.join("cache"), &staged)
+        .and_then(|()| std::fs::rename(&staged, &alias))
+        .and_then(|()| std::os::unix::fs::symlink(&alias, root.join(CACHE_ALIAS)));
+    if published.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+}
+
+pub(super) fn retire_cache_alias(root: &Path, device: u64, inode: u64) {
+    let alias = cache_alias(device, inode);
+    if std::fs::read_link(&alias).is_ok_and(|target| target == root.join("cache")) {
+        let _ = std::fs::remove_file(alias);
+    }
 }
 
 pub(super) fn unit_main() -> std::process::ExitCode {
@@ -245,20 +295,6 @@ const PROXY_RULES: &str = "(allow system-socket (socket-domain AF_INET))
 (allow network-outbound (remote ip \"localhost:{port}\"))
 ";
 
-const GIT_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
-(allow file-read-metadata (literal \"/System/Cryptexes\") (literal \"/System/Cryptexes/OS\"))
-(allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))
-(allow file-read* (literal \"/\") (literal \"/dev/random\") (literal \"/dev/urandom\"))
-(allow file-read* file-write* (literal \"/dev/null\"))
-(allow process-fork)
-(deny process-fork (require-entitlement \"com.apple.private.coalition-spawn\") (require-entitlement \"com.apple.private.persona-mgmt\"))
-(deny process-exec-update-label)
-(allow signal (target self) (target children))
-";
-
-// Mutating fcntls on a read-only descriptor bypass file-write* and file-ioctl; F_MAKECOMPRESSED is 80 and F_TRANSFEREXTENTS 110, as in Codex CLI's Seatbelt policy.
-const GIT_PLAN_FCNTL_DENY: &str = "(deny system-fcntl (fcntl-command 80 110))\n";
-
 fn profile(rules: &str, denied_syscalls: &[i32]) -> String {
     let mut profile =
         String::from("(version 1)\n(deny default)\n(allow syscall-unix)\n(deny syscall-unix");
@@ -274,7 +310,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    for program in ["/bin/launchctl", "/usr/bin/env", "/usr/bin/hdiutil"] {
+    for program in ["/bin/launchctl", "/usr/bin/env"] {
         if !system_program(program)? {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -290,14 +326,12 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut bytes = b"arany-macos-guard-v17:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
+    let mut bytes = b"arany-macos-guard-v18:shared-fifo-capacity;owner-only-same-device-unit-directories;boot-bound-locked-root-recovery;persisted-supervisor-before-task;no-mount-under-unit-root;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-root-removal;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cloned-cache-directory-grant-stable-alias-metadata-literal;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go;command-project-default268435456".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(MACOS_REWIND_CONTRACT);
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
     bytes.extend_from_slice(b";user-programs-v1:selected-subtrees-and-homebrew-prefixes-and-manager-roots-read-map-exec-without-system-catalogue-checks;pinned-roots-mount-topology-before-seatbelt-and-ready-go");
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
-    bytes.extend_from_slice(super::DISCOVERY_DONE);
-    bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
     bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export-reject-option-script-position;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
     bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
     bytes.extend_from_slice(include_bytes!("macos/runtime_compat.c"));
@@ -305,24 +339,15 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
         env!("CARGO_MANIFEST_DIR"),
         "/build.rs"
     )));
-    for kind in [
-        ProfileKind::File,
-        ProfileKind::Command,
-        ProfileKind::Git,
-        ProfileKind::GitPlan,
-        ProfileKind::GitPublish,
-    ] {
+    for kind in [ProfileKind::File, ProfileKind::Command] {
         bytes.extend_from_slice(SeatbeltProfile::new(kind).text.as_bytes());
     }
-    bytes.extend_from_slice(b";typed-git-write-two-units:executor-view-volume-write-only-fcntl-denied-publisher-workspace-write-no-exec-no-network;one-reservation-for-both-units;controller-relay-one-chunk-in-flight-hash-verified;executor-coalition-empty-before-publisher-go");
-    bytes.extend_from_slice(&(crate::tools::git::WRITE_FRAME_BYTES as u64).to_le_bytes());
-    bytes.extend_from_slice(b";typed-git-read-pinned-clt-git-after-go-read-only-workspace-unit-root-view-no-repository-config-closed-env-coalition-supervised");
-    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
+    bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;disk-floor-supervised-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&SUPERVISION_INTERVAL.as_nanos().to_le_bytes());
     bytes.extend_from_slice(&MEMORY_BYTES.to_le_bytes());
     bytes.extend_from_slice(&MAX_PROCESSES_OR_THREADS.to_le_bytes());
-    bytes.extend_from_slice(&storage::STORAGE_BYTES_CAP.to_le_bytes());
+    bytes.extend_from_slice(&crate::tools::types::GUARD_DISK_RESERVE_BYTES.to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(PROFILE_BYTES_CAP as u64).to_le_bytes());
@@ -404,43 +429,61 @@ enum ProfileKind {
     File,
     Command,
     CommandProxy,
-    Git,
-    GitPlan,
-    GitPublish,
 }
 
 impl ProfileKind {
     fn denied_syscalls(self) -> &'static [i32] {
         match self {
-            Self::File | Self::GitPublish => FILE_DENIED_SYSCALLS,
-            Self::Command | Self::Git | Self::GitPlan => COMMAND_DENIED_SYSCALLS,
+            Self::File => FILE_DENIED_SYSCALLS,
+            Self::Command => COMMAND_DENIED_SYSCALLS,
             Self::CommandProxy => PROXY_COMMAND_DENIED_SYSCALLS,
         }
     }
 
     fn is_file_like(self) -> bool {
-        matches!(self, Self::File | Self::GitPublish)
+        matches!(self, Self::File)
     }
+}
+
+// A case-insensitive POSIX regex alternation of exactly the names `validate::forbidden` accepts.
+fn protected_pattern() -> String {
+    let letters = |name: &str| {
+        name.chars()
+            .map(|c| {
+                if c.is_ascii_alphabetic() {
+                    format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+                } else {
+                    format!("[{c}]")
+                }
+            })
+            .collect::<String>()
+    };
+    crate::validate::FORBIDDEN_NAMES
+        .iter()
+        .map(|name| letters(name))
+        .chain(std::iter::once(format!("{}[^/]*", letters(".env."))))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 struct SeatbeltProfile {
     text: String,
     kind: ProfileKind,
     proxy_port: Option<u16>,
+    masked: Vec<PathBuf>,
 }
 
 impl SeatbeltProfile {
     fn new(kind: ProfileKind) -> Self {
         let rules = match kind {
-            ProfileKind::File | ProfileKind::GitPublish => PROFILE.to_owned(),
+            ProfileKind::File => PROFILE.to_owned(),
             ProfileKind::Command | ProfileKind::CommandProxy => COMMAND_PROFILE.to_owned(),
-            ProfileKind::Git => GIT_PROFILE.to_owned(),
-            ProfileKind::GitPlan => format!("{GIT_PROFILE}{GIT_PLAN_FCNTL_DENY}"),
         };
         Self {
             text: profile(&rules, kind.denied_syscalls()),
             kind,
             proxy_port: None,
+            masked: Vec::new(),
         }
     }
 
@@ -489,6 +532,35 @@ impl SeatbeltProfile {
             if let Some(root) = &grant.root {
                 self.grant(operations, "subpath", &root.path)?;
             }
+            if grant.kind == RuntimeKind::ExtraRead {
+                self.masked.push(grant.path.clone());
+            }
+        }
+        Ok(())
+    }
+
+    // Seatbelt applies the last matching rule, so these denies follow every allow.
+    fn mask_protected(&mut self) -> Result<(), ToolError> {
+        let names = protected_pattern();
+        for root in std::mem::take(&mut self.masked) {
+            let root = quoted(&root)?;
+            let root = &root[1..root.len() - 1];
+            if root.contains(['\\', '"']) {
+                return Err(ToolError::Path);
+            }
+            let escaped: String = root
+                .chars()
+                .map(|c| {
+                    if "^$.|?*+()[]{}".contains(c) {
+                        format!("\\{c}")
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            self.text.push_str(&format!(
+                "(deny file-read* file-map-executable process-exec (regex #\"^{escaped}/(.*/)?({names})(/.*)?$\"))\n"
+            ));
         }
         Ok(())
     }
@@ -499,10 +571,8 @@ impl SeatbeltProfile {
 
     fn install(self) -> Result<(), ToolError> {
         let operations: &[(&CStr, i32)] = match self.kind {
-            ProfileKind::File | ProfileKind::GitPublish => {
-                &[(c"process-fork", 1), (c"network-outbound", 1)]
-            }
-            ProfileKind::Command | ProfileKind::Git | ProfileKind::GitPlan => &[
+            ProfileKind::File => &[(c"process-fork", 1), (c"network-outbound", 1)],
+            ProfileKind::Command => &[
                 (c"process-fork", 0),
                 (c"network-outbound", 1),
                 (c"mach-lookup", 1),
@@ -575,13 +645,6 @@ pub(super) fn install(
 ) -> Result<PathBuf, ToolError> {
     if task.intent.call.is_process() {
         return install_command(task, stage);
-    }
-    if task.intent.call.is_git() {
-        return if task.git_stage == Some(super::GitStage::Publish) {
-            install_git_publish(task, stage)
-        } else {
-            install_git(task, stage)
-        };
     }
     configure_file_cpu()?;
     let mut profile = SeatbeltProfile::new(ProfileKind::File);
@@ -676,12 +739,8 @@ fn unprivileged_helper() -> Result<(), ToolError> {
     Ok(())
 }
 
-fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
-    use std::os::unix::fs::MetadataExt;
-
-    unprivileged_helper()?;
-    let root = command_root(task)?;
-    let mut required_system_programs = Vec::new();
+fn configured_system_programs(task: &Task) -> Result<Vec<PathBuf>, ToolError> {
+    let mut required = Vec::new();
     for program in task.config.commands.iter().chain(
         task.config
             .mcp
@@ -690,9 +749,18 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     ) {
         program.verify()?;
         if system_program(&program.executable)? {
-            required_system_programs.push(PathBuf::from(&program.executable));
+            required.push(PathBuf::from(&program.executable));
         }
     }
+    Ok(required)
+}
+
+fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
+    use std::os::unix::fs::MetadataExt;
+
+    unprivileged_helper()?;
+    let root = command_root(task)?;
+    let mut required_system_programs = configured_system_programs(task)?;
     let mut profile = SeatbeltProfile::new(match task.proxy_port {
         Some(_) => ProfileKind::CommandProxy,
         None => ProfileKind::Command,
@@ -706,7 +774,10 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
         &["workspace", "scratch"][..]
     };
     for name in grants {
-        let path = root.join(name);
+        let path = match (&task.editor_tree, *name) {
+            (Some(tree), "workspace") => tree.clone(),
+            _ => root.join(name),
+        };
         profile.grant(
             "allow file-read* file-write* file-map-executable process-exec",
             "subpath",
@@ -715,6 +786,15 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     }
     for grant in &task.config.runtime_grants {
         profile.runtime_grant(grant)?;
+    }
+    let view = cache_view(&root);
+    if task.intent.limits.cache_bytes > 0 && view != root.join("cache") {
+        profile.rule(
+            "allow file-read-metadata",
+            "literal",
+            &root.join(CACHE_ALIAS),
+        )?;
+        profile.rule("allow file-read-metadata", "literal", &view)?;
     }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
@@ -741,66 +821,9 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     verify_runtime_mounts(&task.config.runtime_grants)?;
     *stage = super::BootstrapStage::Capabilities;
     profile.protect_guard(&task.guard_executable)?;
+    profile.mask_protected()?;
     profile.install()?;
     Ok(root)
-}
-
-fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
-    unprivileged_helper()?;
-    let unit = unit_root(task)?;
-    storage::verify_git_storage(&unit)?;
-    let root = unit.join(storage::GIT_VOLUME);
-    let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
-    crate::tools::git::verify_host_executable(git)?;
-    let git_path = Path::new(&git.executable);
-    let mut profile = SeatbeltProfile::new(if task.git_stage == Some(super::GitStage::Plan) {
-        ProfileKind::GitPlan
-    } else {
-        ProfileKind::Git
-    });
-    profile.grant(
-        "allow file-read* file-map-executable process-exec",
-        "literal",
-        git_path,
-    )?;
-    profile.grant("allow file-read*", "subpath", &task.workspace)?;
-    let view = root.join(crate::tools::git::VIEW);
-    profile.grant("allow file-read* file-write*", "subpath", &view)?;
-    profile.rule(
-        "allow file-read*",
-        "subpath",
-        &root.join(crate::tools::git::HOME),
-    )?;
-    profile.protect_guard(&task.guard_executable)?;
-    *stage = super::BootstrapStage::Capabilities;
-    profile.install()?;
-    Ok(root)
-}
-
-// The publisher is Arany code that spawns nothing and may write only the admitted Workspace, never Git's configuration or hooks.
-fn install_git_publish(
-    task: &Task,
-    stage: &mut super::BootstrapStage,
-) -> Result<PathBuf, ToolError> {
-    unprivileged_helper()?;
-    let unit = unit_root(task)?;
-    configure_file_cpu()?;
-    let mut profile = SeatbeltProfile::new(ProfileKind::GitPublish);
-    profile.grant("allow file-read* file-write*", "subpath", &task.workspace)?;
-    profile.rule(
-        "deny file-write*",
-        "literal",
-        &task.workspace.join(".git/config"),
-    )?;
-    profile.rule(
-        "deny file-write*",
-        "subpath",
-        &task.workspace.join(".git/hooks"),
-    )?;
-    profile.protect_guard(&task.guard_executable)?;
-    *stage = super::BootstrapStage::Capabilities;
-    profile.install()?;
-    Ok(unit)
 }
 
 pub(super) fn verify_runtime_mounts(
@@ -1080,21 +1103,12 @@ pub(super) async fn execute_inner(
     let mut handle = tokio::task::spawn_blocking(move || {
         crate::tools::fs::validate_workspace(&runtime)?;
         // Admission and Engine deadlines must use the same runtime clock.
-        if intent.call.is_git() && intent.call.mutates() {
-            reactor.block_on(git_write::execute(
-                &runtime,
-                &intent,
-                worker_cancellation,
-                &worker_started,
-            ))
-        } else {
-            reactor.block_on(unit::execute(
-                &runtime,
-                &intent,
-                worker_cancellation,
-                &worker_started,
-            ))
-        }
+        reactor.block_on(unit::execute(
+            &runtime,
+            &intent,
+            worker_cancellation,
+            &worker_started,
+        ))
     });
     let result = tokio::select! {
         result = &mut handle => result,
@@ -1118,9 +1132,12 @@ impl Task {
         intent: &EffectIntent,
         cache: Option<super::BuildCacheTransfer>,
     ) -> Result<Self, ToolError> {
+        let config = runtime.process_config(&intent.call)?;
         Ok(Self {
             command_deadline: None,
-            config: runtime.config.clone(),
+            policy_grants: matches!(config, std::borrow::Cow::Owned(_))
+                .then(|| runtime.config.runtime_grants.clone()),
+            config: config.into_owned(),
             intent: intent.clone(),
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1132,16 +1149,14 @@ impl Task {
                 .as_ref()
                 .and_then(|_| super::transfer::handover_ref(intent)),
             workspace: runtime.workspace.clone(),
+            editor_tree: runtime.editor_tree(intent),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
                 runtime.system_programs.as_deref().cloned()
             } else {
                 None
             },
-            git_stage: None,
             proxy_port: None,
-            #[cfg(any(test, feature = "test-support"))]
-            git_fault: None,
         })
     }
 
@@ -1159,8 +1174,12 @@ impl Task {
             host_settings_admitted: false,
             host_settings_saved: Default::default(),
             guard_available: false,
-            git_writes_available: false,
-            host_authentication: Default::default(),
+            guard_mode: crate::tools::GuardMode::Auto,
+            once_reads: Default::default(),
+            git_environment: None,
+            git_hooks: None,
+            repository: None,
+            human_approvals: false,
             handover,
             definitions: super::super::definitions::DefinitionSnapshots::from_payload(
                 &self.intent.call,
@@ -1170,7 +1189,9 @@ impl Task {
             permissions: None,
             result_filter: Some(self.hidden),
             unguarded_rules: None,
-            context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
+            context_limit_bytes: std::sync::Arc::new(
+                crate::tools::types::MAX_TOOL_CONTEXT_BYTES.into(),
+            ),
             queue_progress: None,
             active_action_gate: None,
             hook_stdin: self.hook_stdin.map(Into::into),
@@ -1229,32 +1250,6 @@ async fn worker_ready(
 struct WorkerOutput {
     observation: ToolObservation,
     windows: Option<crate::tools::output::CommandWindows>,
-    frame: Option<Vec<u8>>,
-}
-
-// What the supervisor waits for before GO: the controller's signal and, for a publisher, the frame it must forward first.
-struct GoGate {
-    receive_go: tokio::sync::oneshot::Receiver<()>,
-    git_stage: Option<super::GitStage>,
-    git_input: Option<tokio::sync::oneshot::Receiver<(Vec<u8>, Vec<u8>)>>,
-    #[cfg(any(test, feature = "test-support"))]
-    git_fault: Option<crate::fault::git_write::GitWriteStage>,
-}
-
-impl GoGate {
-    async fn wait(
-        self,
-        stdin: &mut tokio::process::ChildStdin,
-        result_bytes: usize,
-    ) -> Result<(), ToolError> {
-        if let Some(input) = self.git_input {
-            let (result, frame) = input.await.map_err(|_| ToolError::Operation)?;
-            super::transfer::send_frame_capped(stdin, &result, result_bytes).await?;
-            super::transfer::send_frame_capped(stdin, &frame, crate::tools::git::WRITE_FRAME_BYTES)
-                .await?;
-        }
-        self.receive_go.await.map_err(|_| ToolError::Operation)
-    }
 }
 
 async fn read_command_windows(
@@ -1288,8 +1283,6 @@ async fn worker_receipt(
     mut stdin: tokio::process::ChildStdin,
     stdout: &mut BufReader<tokio::process::ChildStdout>,
     intent: &EffectIntent,
-    control: &mut tokio::net::unix::OwnedWriteHalf,
-    git_stage: Option<super::GitStage>,
 ) -> Result<WorkerOutput, ToolError> {
     let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
     stdin
@@ -1298,62 +1291,60 @@ async fn worker_receipt(
         .map_err(|_| ToolError::Operation)?;
     drop(stdin);
     let windows = read_command_windows(stdout, intent).await?;
-    let mut frame = None;
-    let observation = if git_stage == Some(super::GitStage::Plan) {
-        let (observation, framed) = super::read_plan_report(stdout, intent).await?;
-        if framed {
-            frame = Some(
-                super::transfer::receive_frame_capped(stdout, crate::tools::git::WRITE_FRAME_BYTES)
-                    .await?,
-            );
-            if !read_capped(&mut *stdout, 1).await?.is_empty() {
-                return Err(ToolError::Operation);
-            }
-        }
-        observation
-    } else {
-        read_observation(stdout, intent).await?
-    };
-    if super::super::discovery::possible(&intent.call) {
-        control
-            .write_all(super::DISCOVERY_DONE)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-    }
+    let observation = read_observation(stdout, intent).await?;
     capture.complete();
     Ok(WorkerOutput {
         observation,
         windows,
-        frame,
     })
+}
+
+type WorkerPlacement<'a> = (
+    &'a Path,
+    Option<[u8; 8]>,
+    Option<u16>,
+    Option<&'a Path>,
+    Option<Vec<crate::tools::toolchains::RuntimeGrant>>,
+);
+
+struct WorkerLink<'a> {
+    scope: &'a mut unit::Scope,
+    control: &'a mut tokio::net::unix::OwnedWriteHalf,
+    receive_go: tokio::sync::oneshot::Receiver<()>,
+}
+
+fn worker_task(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    (_, command_deadline, proxy_port, editor_tree, policy_grants): WorkerPlacement<'_>,
+) -> Result<Vec<u8>, ToolError> {
+    crate::tools::fs::validate_workspace(runtime)?;
+    let mut task = Task::new(runtime, intent, None)?;
+    task.policy_grants = policy_grants;
+    task.editor_tree = editor_tree.map(Path::to_owned);
+    task.command_deadline = command_deadline;
+    task.proxy_port = proxy_port;
+    super::encode_task(&task)
 }
 
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     mut cancellation: Cancellation,
-    scope: &mut unit::Scope,
-    control: &mut tokio::net::unix::OwnedWriteHalf,
-    gate: GoGate,
-    (root, command_deadline, proxy_port): (&Path, Option<[u8; 8]>, Option<u16>),
+    link: WorkerLink<'_>,
+    placement: WorkerPlacement<'_>,
 ) -> Result<WorkerOutput, ToolError> {
-    crate::tools::fs::validate_workspace(runtime)?;
-    let git_stage = gate.git_stage;
-    #[cfg(any(test, feature = "test-support"))]
-    let git_fault = gate.git_fault;
-    let mut task = Task::new(runtime, intent, None)?;
-    task.command_deadline = command_deadline;
-    task.proxy_port = proxy_port;
-    task.git_stage = git_stage;
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        task.git_fault = git_fault;
-    }
-    let task = super::encode_task(&task)?;
+    let WorkerLink {
+        scope,
+        control,
+        receive_go,
+    } = link;
+    let root = placement.0;
+    let task = worker_task(runtime, intent, placement)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
-        .current_dir(if intent.call.is_process() || intent.call.is_git() {
+        .current_dir(if intent.call.is_process() {
             root
         } else {
             Path::new("/")
@@ -1392,57 +1383,67 @@ async fn execute_worker(
                 .map_err(|_| ToolError::Operation)?;
             capture.complete();
             let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
-            gate.wait(&mut stdin, intent.limits.result_bytes as usize)
-                .await?;
-            #[cfg(any(test, feature = "test-support"))]
-            if matches!(
-                git_fault,
-                Some(
-                    crate::fault::git_write::GitWriteStage::PublisherHeld
-                        | crate::fault::git_write::GitWriteStage::ExecutorTimeout
-                )
-            ) {
-                control
-                    .write_all(b"GIT_HELD\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                std::future::pending::<()>().await;
-            }
+            receive_go.await.map_err(|_| ToolError::Operation)?;
             capture.complete();
             let payload_deadline = super::payload_report_deadline(
                 tokio::time::Instant::now(),
                 intent.limits.runtime_ms,
             );
-            tokio::time::timeout_at(
-                payload_deadline,
-                worker_receipt(stdin, &mut stdout, intent, control, git_stage),
-            )
-            .await
-            .map_err(|_| ToolError::Limit)?
+            tokio::time::timeout_at(payload_deadline, worker_receipt(stdin, &mut stdout, intent))
+                .await
+                .map_err(|_| ToolError::Limit)?
         };
         let deadline = tokio::time::Instant::now()
             + RESERVATION_OVERHEAD
             + Duration::from_millis(u64::from(intent.limits.runtime_ms))
             + super::transfer::transfer_time(intent);
-        let execution = tokio::time::timeout_at(deadline, execution);
-        tokio::pin!(execution);
-        let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
-        let mut status = None;
-        let result = loop {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => break Err(ToolError::Operation),
-                result = &mut execution => break result.unwrap_or(Err(ToolError::Limit)),
-                exited = child.wait(), if status.is_none() => {
-                    status = Some(exited.map_err(|_| ToolError::Operation));
-                }
-                _ = samples.tick() => {
-                    if let Err(error) = scope.check_resources() { break Err(error); }
-                }
-            }
-        };
-        (result, status)
+        supervise_worker(
+            tokio::time::timeout_at(deadline, execution),
+            &mut child,
+            &mut cancellation,
+            scope,
+        )
+        .await
     };
+    settle_worker(&mut child, status, &mut stderr_task, scope, result).await
+}
+
+async fn supervise_worker(
+    execution: tokio::time::Timeout<impl Future<Output = Result<WorkerOutput, ToolError>>>,
+    child: &mut tokio::process::Child,
+    cancellation: &mut Cancellation,
+    scope: &mut unit::Scope,
+) -> (
+    Result<WorkerOutput, ToolError>,
+    Option<Result<std::process::ExitStatus, ToolError>>,
+) {
+    tokio::pin!(execution);
+    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+    let mut status = None;
+    let result = loop {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => break Err(ToolError::Operation),
+            result = &mut execution => break result.unwrap_or(Err(ToolError::Limit)),
+            exited = child.wait(), if status.is_none() => {
+                status = Some(exited.map_err(|_| ToolError::Operation));
+            }
+            _ = samples.tick() => {
+                if let Err(error) = scope.check_resources() { break Err(error); }
+            }
+        }
+    };
+    (result, status)
+}
+
+// Reaps the launcher; a bootstrap failure it reported outranks the payload's own error.
+async fn settle_worker(
+    child: &mut tokio::process::Child,
+    status: Option<Result<std::process::ExitStatus, ToolError>>,
+    stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
+    scope: &mut unit::Scope,
+    result: Result<WorkerOutput, ToolError>,
+) -> Result<WorkerOutput, ToolError> {
     if result.is_err() {
         let _ = child.start_kill();
     }
@@ -1462,7 +1463,7 @@ async fn execute_worker(
         let _ = child.start_kill();
         let _ = tokio::time::timeout_at(deadline, child.wait()).await;
     }
-    let drained = drain_stderr(&mut stderr_task, deadline).await;
+    let drained = drain_stderr(stderr_task, deadline).await;
     capture.finish(matches!(reaped, Ok(Ok(_))) && drained.is_some());
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
@@ -1483,6 +1484,21 @@ async fn execute_worker(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_view_uses_the_stable_alias_only_while_it_resolves_to_this_unit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("unit");
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        assert_eq!(super::cache_view(&root), root.join("cache"));
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&alias, root.join(super::CACHE_ALIAS)).unwrap();
+        std::os::unix::fs::symlink(root.join("cache"), &alias).unwrap();
+        assert_eq!(super::cache_view(&root), alias);
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(temp.path(), &alias).unwrap();
+        assert_eq!(super::cache_view(&root), root.join("cache"));
+    }
+
     #[test]
     fn enforcement_prose_matches_resource_limits() {
         use crate::validate::hex_digest;
@@ -1530,10 +1546,7 @@ mod tests {
     use crate::tools::types::ToolLimits;
     use nix::libc;
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
-
-    const BOOTSTRAP_NOT_PRIVILEGED: i32 = 1100;
 
     #[test]
     fn profile_builder_emits_exact_rules() {
@@ -1562,18 +1575,6 @@ mod tests {
 (deny file-write* (literal "/guard/arany"))
 "#,
             ),
-            (
-                ProfileKind::Git,
-                GIT_PROFILE,
-                COMMAND_DENIED_SYSCALLS,
-                "allow file-read* file-map-executable process-exec",
-                "literal",
-                r#"(allow file-read-metadata (literal "/a"))
-(allow file-read-metadata (literal "/"))
-(allow file-read* file-map-executable process-exec (literal "/a/b\"c"))
-(deny file-write* (literal "/guard/arany"))
-"#,
-            ),
         ] {
             let mut actual = SeatbeltProfile::new(kind);
             assert_eq!(actual.text, profile(rules, syscalls));
@@ -1584,27 +1585,6 @@ mod tests {
             actual.protect_guard(Path::new("/guard/arany")).unwrap();
             assert_eq!(&actual.text.as_bytes()[base_len..], expected.as_bytes());
         }
-        assert_eq!(
-            SeatbeltProfile::new(ProfileKind::GitPlan).text,
-            profile(
-                &format!("{GIT_PROFILE}{GIT_PLAN_FCNTL_DENY}"),
-                COMMAND_DENIED_SYSCALLS
-            )
-        );
-        assert!(
-            SeatbeltProfile::new(ProfileKind::GitPlan)
-                .text
-                .ends_with("(deny system-fcntl (fcntl-command 80 110))\n")
-        );
-        assert_eq!(
-            SeatbeltProfile::new(ProfileKind::GitPublish).text,
-            profile(PROFILE, FILE_DENIED_SYSCALLS)
-        );
-        assert!(
-            !SeatbeltProfile::new(ProfileKind::GitPublish)
-                .text
-                .contains("process-exec")
-        );
     }
 
     fn runtime_fixture(
@@ -1638,6 +1618,7 @@ mod tests {
                     inode,
                 }
             }),
+            masks: Vec::new(),
         }
     }
 
@@ -1852,10 +1833,10 @@ mod tests {
         let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,
-            "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
+            policy_grants: None,
             command_deadline: None,
             definition: None,
             handover: None,
@@ -1887,12 +1868,10 @@ mod tests {
             secret: None,
             hidden: Default::default(),
             workspace,
+            editor_tree: None,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
-            git_stage: None,
             proxy_port: None,
-            #[cfg(any(test, feature = "test-support"))]
-            git_fault: None,
         };
         assert!(Path::new("/usr/bin/true").is_file());
         configure_resources().unwrap();
@@ -1974,569 +1953,5 @@ mod tests {
                 std::hint::spin_loop();
             }
         }
-    }
-
-    #[test]
-    // Skipped in the Guard: local test IPC capability is missing.
-    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
-    fn native_git_profile_runs_pinned_git_and_denies_host_access() {
-        let git = crate::tools::git::discover();
-        if !Path::new(EXECUTABLES.git[0].path)
-            .try_exists()
-            .expect("Command Line Tools Git availability")
-        {
-            assert!(
-                git.is_none() && !cfg!(arany_ci),
-                "Git must be unavailable without Command Line Tools; CI requires Command Line Tools Git"
-            );
-            return;
-        }
-        let git = git.expect("pinned git");
-        let temp = std::env::temp_dir().canonicalize().unwrap();
-        let root = tempfile::Builder::new()
-            .prefix("arany-git-root-")
-            .tempdir_in(&temp)
-            .unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let workspace = tempfile::Builder::new()
-            .prefix("arany-git-workspace-")
-            .tempdir_in(&temp)
-            .unwrap();
-        let home = tempfile::tempdir_in(&temp).unwrap();
-        let git_in_workspace = |args: &[&str]| {
-            let output = std::process::Command::new(&git.executable)
-                .args(args)
-                .current_dir(workspace.path())
-                .env_clear()
-                .env("HOME", home.path())
-                .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "Arany Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-                .env("GIT_COMMITTER_NAME", "Arany Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        git_in_workspace(&["init", "-q"]);
-        std::fs::write(workspace.path().join("a.txt"), "one\n").unwrap();
-        git_in_workspace(&["add", "a.txt"]);
-        git_in_workspace(&["commit", "-q", "-m", "first commit"]);
-        std::fs::write(workspace.path().join("a.txt"), "two\n").unwrap();
-        std::fs::write(root.path().join("outside"), b"synthetic excluded data").unwrap();
-        let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let reactor = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        struct DetachOnUnwind<'a> {
-            root: &'a Path,
-            armed: bool,
-        }
-
-        impl Drop for DetachOnUnwind<'_> {
-            fn drop(&mut self) {
-                if self.armed {
-                    // Volume handles drop first, so the image detaches even while unwinding.
-                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        let _ = runtime.block_on(storage::cleanup_storage(self.root));
-                    }
-                }
-            }
-        }
-
-        let mut detach = DetachOnUnwind {
-            root: root.path(),
-            armed: true,
-        };
-        let volume = reactor
-            .block_on(storage::prepare_git_storage(root.path()))
-            .unwrap();
-        let bare = tempfile::Builder::new()
-            .prefix("arany-git-bare-")
-            .tempdir_in(&temp)
-            .unwrap();
-        std::fs::set_permissions(bare.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let run = |phase: &str, directory: &Path| {
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "tools::guard::macos::tests::native_git_profile_helper",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env_clear()
-                .env("ARANY_TEST_GIT_PROFILE_PHASE", phase)
-                .env("ARANY_TEST_GIT_PROFILE_ROOT", root.path())
-                .env("ARANY_TEST_GIT_PROFILE_WORKSPACE", workspace.path())
-                .env("ARANY_TEST_GIT_PROFILE_HOME", home.path())
-                .env(
-                    "ARANY_TEST_GIT_PROFILE_PORT",
-                    network.local_addr().unwrap().port().to_string(),
-                )
-                .current_dir(directory)
-                .bounded_output_for(Duration::from_secs(90), 32 * 1024)
-                .unwrap()
-        };
-        let control_root = || {
-            let mut names: Vec<_> = std::fs::read_dir(root.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name())
-                .collect();
-            names.sort();
-            (names, std::fs::read(root.path().join("outside")).unwrap())
-        };
-        let before = control_root();
-        let refused = run("bare", bare.path());
-        let read = run("read", root.path());
-        storage::exhaust_git_storage(&volume[0])
-            .expect("the Git view volume must be exhausted before the full-volume run");
-        let exhausted = run("full", root.path());
-        let after = control_root();
-        drop(volume);
-        let detached = reactor.block_on(storage::cleanup_storage(root.path()));
-        detach.armed = false;
-        let mounted = storage::storage_mounted(root.path());
-        for (phase, output) in [("bare", &refused), ("read", &read), ("full", &exhausted)] {
-            assert!(
-                output.status.success(),
-                "native git profile {phase}: {:?}; stdout={:?}; stderr={:?}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            crate::test_process::assert_single_test_completed(&output.stdout, "native git profile");
-            assert!(output.stderr.is_empty());
-        }
-        assert_eq!(before, after, "the control root must stay unchanged");
-        detached.unwrap();
-        assert!(!mounted.unwrap());
-    }
-
-    fn write_profile_probe(phase: &str) -> std::process::Output {
-        let temp = tempfile::tempdir().unwrap();
-        for directory in ["workspace/.git/hooks", "workspace/.git/refs/heads", "view"] {
-            std::fs::create_dir_all(temp.path().join(directory)).unwrap();
-        }
-        for name in [
-            "workspace/a.txt",
-            "workspace/donor",
-            "workspace/receiver",
-            "control",
-        ] {
-            std::fs::write(temp.path().join(name), b"synthetic input").unwrap();
-        }
-        std::fs::write(temp.path().join("workspace/.git/config"), b"[core]\n").unwrap();
-        std::fs::write(temp.path().join("outside"), b"synthetic excluded data").unwrap();
-        let network = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tools::guard::macos::tests::native_git_write_profile_helper",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env_clear()
-            .env("ARANY_TEST_GIT_WRITE_PROFILE_PHASE", phase)
-            .env("ARANY_TEST_GIT_WRITE_PROFILE_ROOT", temp.path())
-            .env(
-                "ARANY_TEST_GIT_WRITE_PROFILE_PORT",
-                network.local_addr().unwrap().port().to_string(),
-            )
-            .current_dir(temp.path())
-            .bounded_output_for(Duration::from_secs(90), 32 * 1024)
-            .unwrap()
-    }
-
-    #[test]
-    // Skipped in the Guard: local test IPC capability is missing.
-    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
-    fn native_git_executor_and_publisher_profiles_confine_their_writes() {
-        for phase in ["plan", "publish"] {
-            let output = write_profile_probe(phase);
-            assert!(
-                output.status.success(),
-                "native git write profile {phase}: {:?}; stdout={:?}; stderr={:?}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            crate::test_process::assert_single_test_completed(
-                &output.stdout,
-                "native git write profile",
-            );
-            assert!(output.stderr.is_empty());
-        }
-    }
-
-    #[test]
-    #[ignore = "isolated native git write profile helper"]
-    fn native_git_write_profile_helper() {
-        let root = PathBuf::from(
-            std::env::var_os("ARANY_TEST_GIT_WRITE_PROFILE_ROOT").expect("private fixture root"),
-        );
-        let port = std::env::var("ARANY_TEST_GIT_WRITE_PROFILE_PORT")
-            .unwrap()
-            .parse::<u16>()
-            .unwrap();
-        let phase = std::env::var("ARANY_TEST_GIT_WRITE_PROFILE_PHASE").unwrap();
-        let (workspace, view) = (root.join("workspace"), root.join("view"));
-        let plan = phase == "plan";
-        let mut profile = SeatbeltProfile::new(if plan {
-            ProfileKind::GitPlan
-        } else {
-            ProfileKind::GitPublish
-        });
-        profile
-            .grant("allow file-read*", "subpath", &workspace)
-            .unwrap();
-        profile
-            .grant(
-                "allow file-read* file-write*",
-                "subpath",
-                if plan { &view } else { &workspace },
-            )
-            .unwrap();
-        if !plan {
-            profile
-                .rule(
-                    "deny file-write*",
-                    "literal",
-                    &workspace.join(".git/config"),
-                )
-                .unwrap();
-            profile
-                .rule("deny file-write*", "subpath", &workspace.join(".git/hooks"))
-                .unwrap();
-        }
-        use std::os::fd::{AsRawFd, IntoRawFd};
-        use std::os::macos::fs::MetadataExt;
-        let snapshot = |name: &str| {
-            let metadata = std::fs::metadata(workspace.join(name)).unwrap();
-            (
-                std::fs::read(workspace.join(name)).unwrap(),
-                metadata.st_blocks(),
-                metadata.st_flags(),
-                (metadata.st_mtime(), metadata.st_mtime_nsec()),
-                (metadata.st_ctime(), metadata.st_ctime_nsec()),
-            )
-        };
-        let before = ["a.txt", "donor", "receiver"].map(snapshot);
-        // An inherited writable Workspace descriptor must not survive the helper's real closure path.
-        let inherited = std::fs::OpenOptions::new()
-            .write(true)
-            .open(workspace.join("a.txt"))
-            .unwrap()
-            .into_raw_fd();
-        assert!(ffi::open_descriptors().unwrap().contains(&inherited));
-        close_inherited_descriptors().unwrap();
-        assert!(!ffi::open_descriptors().unwrap().contains(&inherited));
-        assert!(
-            ffi::open_descriptors()
-                .unwrap()
-                .iter()
-                .all(|descriptor| *descriptor < 3)
-        );
-        let control = std::fs::File::open(root.join("control")).unwrap();
-        let transfer = |receiver: &std::fs::File, donor: &std::fs::File| {
-            nix::fcntl::fcntl(
-                receiver,
-                nix::fcntl::FcntlArg::F_TRANSFEREXTENTS(donor.as_raw_fd()),
-            )
-        };
-        let baseline = transfer(&control, &control);
-        configure_resources().unwrap();
-        if !plan {
-            configure_file_cpu().unwrap();
-        }
-        profile.install().unwrap();
-        let denied = |result: std::io::Result<()>, what: &str| {
-            assert_eq!(
-                result.unwrap_err().kind(),
-                std::io::ErrorKind::PermissionDenied,
-                "{what}"
-            );
-        };
-        denied(
-            std::fs::write(root.join("outside"), b"forbidden"),
-            "outside write",
-        );
-        denied(
-            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).map(|_| ()),
-            "network",
-        );
-        // macOS 15 reports denied execs as ENOENT; later releases report EPERM.
-        let exec = std::process::Command::new("/usr/bin/true")
-            .bounded_output_for(Duration::from_secs(10), 1024)
-            .map(|_| ())
-            .unwrap_err();
-        assert!(
-            matches!(
-                exec.kind(),
-                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-            ),
-            "exec: {exec}"
-        );
-        assert_eq!(
-            std::fs::read(workspace.join("a.txt")).unwrap(),
-            b"synthetic input"
-        );
-        if plan {
-            // Seatbelt checks at open, so these read-only descriptors open under the installed profile.
-            let donor = std::fs::File::open(workspace.join("donor")).unwrap();
-            let receiver = std::fs::File::open(workspace.join("receiver")).unwrap();
-            assert_ne!(baseline, Err(nix::errno::Errno::EPERM));
-            assert_eq!(transfer(&receiver, &donor), Err(nix::errno::Errno::EPERM));
-            assert_eq!(["a.txt", "donor", "receiver"].map(snapshot), before);
-            for path in ["a.txt", "new.txt", ".git/refs/heads/topic"] {
-                denied(std::fs::write(workspace.join(path), b"forbidden"), path);
-            }
-            std::fs::write(view.join("probe"), b"allowed").unwrap();
-        } else {
-            std::fs::write(workspace.join(".git/refs/heads/topic"), b"allowed").unwrap();
-            std::fs::rename(
-                workspace.join(".git/refs/heads/topic"),
-                workspace.join(".git/refs/heads/renamed"),
-            )
-            .unwrap();
-            for path in [".git/config", ".git/hooks/pre-commit"] {
-                denied(std::fs::write(workspace.join(path), b"forbidden"), path);
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "isolated native git profile helper"]
-    fn native_git_profile_helper() {
-        let root = PathBuf::from(
-            std::env::var_os("ARANY_TEST_GIT_PROFILE_ROOT").expect("private fixture root"),
-        );
-        let workspace = PathBuf::from(
-            std::env::var_os("ARANY_TEST_GIT_PROFILE_WORKSPACE").expect("fixture workspace"),
-        );
-        let home = PathBuf::from(
-            std::env::var_os("ARANY_TEST_GIT_PROFILE_HOME").expect("synthetic host home"),
-        );
-        let port = std::env::var("ARANY_TEST_GIT_PROFILE_PORT")
-            .unwrap()
-            .parse::<u16>()
-            .unwrap();
-        let git = crate::tools::git::discover().expect("pinned git");
-        let (device, inode) =
-            crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
-                .unwrap();
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,
-            "workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[],
-            "git": git}))
-        .unwrap();
-        let call = ToolCall::GitStatus { path: ".".into() };
-        let task = Task {
-            command_deadline: None,
-            definition: None,
-            handover: None,
-            intent: EffectIntent {
-                host: None,
-                wrap: None,
-                rewrite: Vec::new(),
-                host_command: None,
-                target: crate::session::worker::EffectTarget::Workspace,
-                id: uuid::Uuid::now_v7(),
-                run_id: crate::session::RunId::default(),
-                agent_run_id: crate::session::AgentRunId::default(),
-                policy_digest: config.digest(),
-                enforcement_digest: enforcement_digest().unwrap(),
-                workspace_device: device,
-                workspace_inode: inode,
-                call: call.clone(),
-                limits: ToolLimits::default(),
-                use_count: 1,
-            },
-            config,
-            cache: None,
-            hook_stdin: None,
-            secret: None,
-            hidden: Default::default(),
-            workspace: workspace.clone(),
-            guard_executable: std::env::current_exe().unwrap(),
-            system_programs: None,
-            git_stage: None,
-            proxy_port: None,
-            #[cfg(any(test, feature = "test-support"))]
-            git_fault: None,
-        };
-        let phase = std::env::var("ARANY_TEST_GIT_PROFILE_PHASE").unwrap();
-        if phase == "bare" {
-            let mut stage = super::BootstrapStage::Workspace;
-            assert!(install(&task, &mut stage).is_err());
-            let workspace_file = workspace.join("a.txt");
-            std::fs::write(&workspace_file, b"two\n").unwrap();
-            return;
-        }
-        let sibling = Path::new(&git.executable).with_file_name("clang");
-        let exec_probes = [
-            (Path::new("/usr/bin/true"), &[][..]),
-            (sibling.as_path(), &["--version"][..]),
-            (Path::new("/usr/bin/git"), &["--version"][..]),
-        ];
-        let exec = |program: &Path, args: &[&str]| {
-            std::process::Command::new(program)
-                .args(args)
-                .env_clear()
-                .env("HOME", &home)
-                .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .bounded_output_for(Duration::from_secs(20), 16 * 1024)
-        };
-        for (program, args) in exec_probes {
-            let output = exec(program, args).expect("unsandboxed exec baseline");
-            assert!(output.status.success(), "exec baseline: {program:?}");
-        }
-        let gitconfig = home.join(".gitconfig");
-        let config_bytes = b"[user]\n\tname = Synthetic Host\n";
-        std::fs::write(&gitconfig, config_bytes).unwrap();
-        assert_eq!(std::fs::read(&gitconfig).unwrap(), config_bytes);
-        let outside = root.join("outside");
-        let outside_bytes = b"synthetic excluded data";
-        std::fs::write(&outside, outside_bytes).unwrap();
-        assert_eq!(std::fs::read(&outside).unwrap(), outside_bytes);
-        assert!(std::fs::read_dir(&root).unwrap().next().is_some());
-        let workspace_file = workspace.join("a.txt");
-        std::fs::write(&workspace_file, b"two\n").unwrap();
-        let view = root.join(storage::GIT_VOLUME).join(crate::tools::git::VIEW);
-        let writable = view.join("write-probe");
-        if phase == "read" {
-            std::fs::create_dir(&view).unwrap();
-            std::fs::write(&writable, b"allowed").unwrap();
-            assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
-            std::fs::remove_dir_all(&view).unwrap();
-        }
-        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-            .expect("unsandboxed network baseline");
-        let mach = ffi::MachLookupProbe::new();
-        assert_eq!(mach.lookup(), 0, "unsandboxed logger lookup baseline");
-        configure_resources().unwrap();
-        let mut stage = super::BootstrapStage::Workspace;
-        let scratch = install(&task, &mut stage).unwrap();
-        assert_eq!(scratch, root.join(storage::GIT_VOLUME));
-        assert_eq!(
-            mach.lookup(),
-            BOOTSTRAP_NOT_PRIVILEGED,
-            "Seatbelt must deny the same service lookup through the retained bootstrap right"
-        );
-        for path in [&outside, &workspace_file] {
-            assert_eq!(
-                std::fs::write(path, b"forbidden").unwrap_err().kind(),
-                std::io::ErrorKind::PermissionDenied,
-                "write outside Git view: {path:?}"
-            );
-        }
-        assert_eq!(std::fs::read(&workspace_file).unwrap(), b"two\n");
-        assert_eq!(
-            std::fs::read(&gitconfig).unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        if phase == "read" {
-            std::fs::create_dir(&view).unwrap();
-            std::fs::write(&writable, b"allowed").unwrap();
-            assert_eq!(std::fs::read(&writable).unwrap(), b"allowed");
-            std::fs::remove_dir_all(&view).unwrap();
-        }
-        assert_eq!(
-            std::fs::read(root.join("outside")).unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        assert_eq!(
-            std::fs::read_dir(&root).unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        assert_eq!(
-            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        for (program, args) in exec_probes {
-            let error = exec(program, args).expect_err("only the pinned Git may execute");
-            assert!(
-                matches!(
-                    error.kind(),
-                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-                ),
-                "exec denial: {program:?}: {error}"
-            );
-        }
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        if phase == "full" {
-            assert!(!scratch.join(crate::tools::git::VIEW).exists());
-            let result = runtime.block_on(crate::tools::git::execute(
-                crate::tools::git::GitReadRequest {
-                    workspace: &workspace,
-                    scratch: &scratch,
-                    git: &git,
-                    call: &call,
-                    hidden: &Default::default(),
-                    max_bytes: 16 * 1024,
-                    runtime: Duration::from_secs(20),
-                },
-            ));
-            assert!(matches!(result, Err(ToolError::Operation)), "{result:?}");
-            return;
-        }
-        let output = runtime
-            .block_on(crate::tools::git::execute(
-                crate::tools::git::GitReadRequest {
-                    workspace: &workspace,
-                    scratch: &scratch,
-                    git: &git,
-                    call: &call,
-                    hidden: &Default::default(),
-                    max_bytes: 16 * 1024,
-                    runtime: Duration::from_secs(20),
-                },
-            ))
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert!(value.get("failed").is_none(), "{output}");
-        assert!(
-            value["entries"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!({"path": "a.txt", "state": ".M"}))
-        );
-        std::fs::remove_dir_all(scratch.join(crate::tools::git::VIEW)).unwrap();
-        let log = ToolCall::GitLog {
-            path: ".".into(),
-            revision: None,
-            max_count: 5,
-        };
-        let output = runtime
-            .block_on(crate::tools::git::execute(
-                crate::tools::git::GitReadRequest {
-                    workspace: &workspace,
-                    scratch: &scratch,
-                    git: &git,
-                    call: &log,
-                    hidden: &Default::default(),
-                    max_bytes: 16 * 1024,
-                    runtime: Duration::from_secs(20),
-                },
-            ))
-            .unwrap();
-        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(value["commits"].as_array().unwrap().len(), 1, "{output}");
-        std::fs::remove_dir_all(scratch.join(crate::tools::git::VIEW)).unwrap();
     }
 }

@@ -32,7 +32,7 @@ impl Provider for BoundedLoop {
                 }),
                 2 => crate::tool_outcome(ToolCall::Edit {
                     path: "src/current.txt".into(),
-                    expected_digest: hash(b"current"),
+                    expected_digest: Some(hash(b"current")),
                     old: "current".into(),
                     new: "current\n2026-10-06\n".into(),
                 }),
@@ -112,7 +112,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
             let failed_provider = Arc::new(Proposal {
                 call: ToolCall::Edit {
                     path: "src/current.txt".into(),
-                    expected_digest: hash(b"current"),
+                    expected_digest: Some(hash(b"current")),
                     old: "current".into(),
                     new: "must not run".into(),
                 },
@@ -288,7 +288,11 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     );
                     assert_eq!(history["run_status"], "Failed");
                     assert_eq!(history["tool_records"][0]["disposition"], "failed");
-                    assert!(history["tool_records"][0]["cache_update"].is_string());
+                    assert!(history["tool_records"][0].get("cache_update").is_none());
+                    assert_eq!(
+                        history["tool_records"][0]["workspace_effect"],
+                        "not_confirmed"
+                    );
                     assert_eq!(request.input.objective, "Guard corpus");
                     assert_eq!(
                         request.input.tools.as_ref().unwrap().observations().len(),
@@ -491,7 +495,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             "stale",
             ToolCall::Edit {
                 path: "src/current.txt".into(),
-                expected_digest: hash(b"stale"),
+                expected_digest: Some(hash(b"stale")),
                 old: "current".into(),
                 new: "overwritten".into(),
             },
@@ -669,6 +673,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             requests: requests.clone(),
             inspect_first: false,
@@ -850,6 +855,7 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         requests: requests.clone(),
         inspect_first: false,
@@ -984,6 +990,7 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         requests: requests.clone(),
         inspect_first: false,
@@ -1066,6 +1073,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             requests: requests.clone(),
             inspect_first: false,

@@ -60,7 +60,6 @@ pub struct ScriptedProvider {
     pub cached_input_tokens: u32,
     pub usage_override: Option<crate::Usage>,
     pub context_window_tokens: Option<u32>,
-    pub context_window_snapshots: Mutex<VecDeque<Option<u32>>>,
     pub input_tokens_at: Vec<(usize, u32)>,
     pub requests: Arc<Mutex<Vec<ProviderRequest>>>,
     pub compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
@@ -91,7 +90,6 @@ impl ScriptedProvider {
             cached_input_tokens: 0,
             usage_override: None,
             context_window_tokens: None,
-            context_window_snapshots: Mutex::new(VecDeque::new()),
             input_tokens_at: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
@@ -129,11 +127,6 @@ impl ScriptedProvider {
     /// Reports the input window an authenticated catalog would have supplied.
     pub fn with_context_window(mut self, tokens: u32) -> Self {
         self.context_window_tokens = Some(tokens);
-        self
-    }
-
-    pub fn with_context_window_snapshots(mut self, windows: Vec<Option<u32>>) -> Self {
-        self.context_window_snapshots = Mutex::new(windows.into());
         self
     }
 
@@ -191,7 +184,7 @@ impl ScriptedProvider {
         self.identity.effort = Some(Effort::High);
         self.identity.provenance = Provenance::ChatGpt(ChatGptProvenance {
             account_id: id,
-            evidence_fingerprint: fingerprint,
+            admission_fingerprint: fingerprint,
             admission: ChatGptAdmission::AccountConsent,
         });
         self.identity.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
@@ -208,14 +201,6 @@ impl Provider for ScriptedProvider {
 
     fn context_window_tokens(&self) -> Option<u32> {
         self.context_window_tokens
-    }
-
-    async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        self.context_window_snapshots
-            .lock()
-            .expect("context window snapshots")
-            .pop_front()
-            .unwrap_or(self.context_window_tokens)
     }
 
     async fn invoke_observed(
@@ -714,7 +699,6 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 12] {
     ]
 }
 
-#[cfg(unix)]
 pub fn offline_cargo_fixture(home: &Path, workspace: &Path) {
     const REGISTRY: &str = "index.crates.io-1949cf8c6b5b557f";
     use std::os::unix::fs::PermissionsExt;
@@ -845,7 +829,7 @@ pub fn user_programs_fixture(home: &Path) {
 pub fn homebrew_programs_fixture(root: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let prefix = root.join("homebrew");
-    for directory in ["bin", "lib", "opt", "Cellar/rustup/1.0/bin"] {
+    for directory in ["bin", "lib", "opt", "Cellar/rustup/1.0/libexec/bin"] {
         std::fs::create_dir_all(prefix.join(directory)).unwrap();
     }
     std::fs::create_dir_all(root.join("home/.rustup")).unwrap();
@@ -855,7 +839,7 @@ pub fn homebrew_programs_fixture(root: &Path) {
         ("bin/arany-brew-tool", "cat /opt/homebrew/lib/tool-data"),
         ("bin/arany-collide", "printf collide-brew"),
         (
-            "Cellar/rustup/1.0/bin/arany-rustup-tool",
+            "Cellar/rustup/1.0/libexec/bin/arany-rustup-tool",
             "cat \"$RUSTUP_HOME/tool-data\"",
         ),
     ] {
@@ -880,17 +864,17 @@ test "$(arany-pyenv-tool)" = ran-pyenv
 test "$(arany-volta-tool)" = ran-volta
 test "$(arany-brew-tool)" = ran-brew
 test "$(arany-rustup-tool)" = ran-rustup
-test "$(arany-collide)" = collide-local
+test "$(arany-collide)" = collide-pyenv
 test "$PYENV_ROOT" = "{home}/.pyenv"
 test "$VOLTA_HOME" = "{home}/.volta"
 test "$RUSTUP_HOME" = "{home}/.rustup"
-test "$PATH" = "{local}:{pyenv}:/opt/homebrew/bin:/opt/homebrew/Cellar/rustup/1.0/bin:{volta}:/usr/bin:/bin"
+test "$PATH" = "{pyenv}:/opt/homebrew/Cellar/rustup/1.0/libexec/bin:{volta}:{local}:/opt/homebrew/bin:/usr/bin:/bin"
 case "$HOME" in /scratch*) ;; *) exit 91 ;; esac
 test "$HOME" = "$TMPDIR"
 if (printf changed > "{local}/arany-local-tool") 2>/dev/null; then exit 92; fi
 if (printf new > "{volta}/arany-new-file") 2>/dev/null; then exit 93; fi
 if (printf changed > /opt/homebrew/lib/tool-data) 2>/dev/null; then exit 94; fi
-if (printf changed > /opt/homebrew/Cellar/rustup/1.0/bin/arany-rustup-tool) 2>/dev/null; then exit 95; fi
+if (printf changed > /opt/homebrew/Cellar/rustup/1.0/libexec/bin/arany-rustup-tool) 2>/dev/null; then exit 95; fi
 if (printf changed > "{home}/.rustup/new-file") 2>/dev/null; then exit 96; fi
 printf user-programs-ok
 "#,
@@ -1032,15 +1016,15 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let state = root.join("state");
     let (outcome, provider) = run_user_program_command(workspace, guard, &state, &call).await;
     assert_user_programs_ran(&state, &provider, outcome).await;
 
+    // Selected shims and their roots stay pinned; automatic PATH directories are simply re-granted.
     for directory in [
-        home.join(".local/bin"),
-        root.join("homebrew/bin"),
-        root.join("homebrew/Cellar/rustup/1.0/bin"),
+        root.join("homebrew/Cellar/rustup/1.0/libexec/bin"),
         home.join(".rustup"),
     ] {
         let moved = directory.with_extension("old");
@@ -1057,22 +1041,9 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
     }
 }
 
-#[cfg(unix)]
-pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
-    use crate::{
-        ApprovalMode, CacheUpdate, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion,
-        RunControls, RunStatus, SessionView, StateRoot, Store, ToolApprovals, ToolCall, ToolGrant,
-        ToolResourceClass, WorkspacePermissions,
-    };
-    let home = root.join("home");
-    let registry = home.join(".cargo/registry");
-    let index = registry
-        .join("index/index.crates.io-1949cf8c6b5b557f/.cache/ar/an/arany-fixture-dependency");
-    let source =
-        registry.join("src/index.crates.io-1949cf8c6b5b557f/arany-fixture-dependency-0.1.0");
-    let index_bytes = std::fs::read(&index).unwrap();
-    let source_bytes = std::fs::read(source.join("src/lib.rs")).unwrap();
-    let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
+// Remembers every default-selected profile, the private registry caches included; returns the Rust sysroot.
+pub(crate) fn select_offline_cargo_profiles(workspace: &Path) -> std::path::PathBuf {
+    use crate::{ApprovalMode, StateRoot, WorkspacePermissions};
     let mut permissions = WorkspacePermissions::open(workspace)
         .unwrap()
         .prepare_profile_selection(&StateRoot::account_path().unwrap());
@@ -1093,10 +1064,42 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
             .expect("private registry candidate");
         assert!(choice.selected);
     }
+    let rust = choices
+        .iter()
+        .find(|choice| choice.group == "Rust" && choice.selected)
+        .expect("selected Rust toolchain")
+        .path
+        .clone();
     permissions
         .remember_profiles(true, ApprovalMode::Request, &tokens)
         .unwrap();
+    rust
+}
+
+pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
+    use crate::{
+        ApprovalMode, CacheUpdate, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion,
+        RunControls, RunStatus, SessionView, StateRoot, Store, ToolApprovals, ToolCall, ToolGrant,
+        ToolResourceClass, WorkspacePermissions,
+    };
+    let home = root.join("home");
+    let registry = home.join(".cargo/registry");
+    let index = registry
+        .join("index/index.crates.io-1949cf8c6b5b557f/.cache/ar/an/arany-fixture-dependency");
+    let source =
+        registry.join("src/index.crates.io-1949cf8c6b5b557f/arany-fixture-dependency-0.1.0");
+    let index_bytes = std::fs::read(&index).unwrap();
+    let source_bytes = std::fs::read(source.join("src/lib.rs")).unwrap();
+    let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
+    select_offline_cargo_profiles(workspace);
     let state = root.join("cargo-state");
+    // Below this free space every cache session evicts the prior cache, so "warm" would find none.
+    let capacity = rustix::fs::statvfs(root).unwrap();
+    assert!(
+        capacity.f_bavail.saturating_mul(capacity.f_frsize)
+            >= crate::tools::types::GUARD_DISK_EVICTION_BYTES,
+        "the warm case needs the cache volume to keep the eviction floor free"
+    );
     let cores = u32::try_from(std::thread::available_parallelism().unwrap().get()).unwrap();
     let jobs = cores.min(2);
     for (case, script, success) in [
@@ -1199,6 +1202,7 @@ printf cache-changed
             cwd: String::new(),
             resource_class: (case == "guarded").then_some(ToolResourceClass::Build),
             timeout_ms: (case == "guarded").then_some(crate::tools::types::MAX_COMMAND_TIMEOUT_MS),
+            additional_reads: None,
         };
         let mut steps = vec![
             plan_outcome(GoalPlanContract {
@@ -1223,8 +1227,23 @@ printf cache-changed
             steps.remove(0);
         }
         let provider = Arc::new(ScriptedProvider::new(steps));
+        let root = StateRoot::admit(&state).unwrap();
+        // Every PATH directory is granted, so only the selected profiles may reach a toolchain here.
+        crate::CommandEnvironment::for_path("/usr/bin:/bin")
+            .save(&root)
+            .unwrap();
+        // Sandboxed commands ask nothing; the cancellation cases keep a human gate through an ask rule.
+        let human_gate = matches!(case, "cancelled" | "cancelled-report");
+        let settings: &[u8] = if human_gate {
+            br#"{"permissions":{"ask":["Bash"]}}"#
+        } else {
+            b"{}"
+        };
+        root.record(crate::RecordKind::Permissions)
+            .replace(settings)
+            .unwrap();
         let engine = Engine::open(
-            StateRoot::admit(&state).unwrap(),
+            root,
             EngineConfig {
                 guard_executable: Some(guard.to_path_buf()),
                 ..Default::default()
@@ -1249,6 +1268,13 @@ printf cache-changed
             },
         );
         let approve = async {
+            if !human_gate {
+                assert!(
+                    inbox.next().await.is_none(),
+                    "{case}: a sandboxed command asked"
+                );
+                return None;
+            }
             let approval = inbox.next().await.expect("one exact command approval");
             assert_eq!(approval.intent.call, call);
             assert_eq!(
@@ -1316,6 +1342,16 @@ printf cache-changed
             .as_ref()
             .expect("Cargo observation");
         assert_eq!(run.tools.len(), 1);
+        if !human_gate {
+            assert_eq!(
+                run.tools[0]
+                    .permission_verdict
+                    .as_ref()
+                    .map(|verdict| verdict.source),
+                Some(crate::permissions::PermissionSource::Mode),
+                "{case}"
+            );
+        }
         assert_eq!(replay.goals[0].resource_settings.build_jobs, Some(jobs));
         assert_eq!(observation.intent.limits.build_jobs, jobs);
         assert_eq!(

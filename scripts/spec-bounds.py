@@ -1,4 +1,5 @@
-# Matching prose bounds require a limits.md#anchor link, or immediately following
+# Matching prose bounds require a limits.md#anchor link (../limits.md#anchor from a
+# domain folder), or immediately following
 # VALUE UNIT<!-- unrelated-bound: reason --> identifying a genuinely distinct bound.
 import argparse
 import re
@@ -13,7 +14,7 @@ NUMBER = re.compile(r"(?<!\w)(\d[\d,]*(?:\.\d+)?)(?:\s*-\s*|\s*)([A-Za-z][A-Za-z
 UNIT_WORD = re.compile(r"[A-Za-z]+(?:/[A-Za-z]+)?")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 GENERATED_LIMIT_LINK = re.compile(
-    r"\[(?P<label>[^\]]+)\]\((?:\./)?limits\.md#(?P<anchor>[^)]+)\)"
+    r"\[(?P<label>[^\]]+)\]\((?P<prefix>\./|(?:\.\./)+)?limits\.md#(?P<anchor>[^)]+)\)"
 )
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 UNRELATED_MARKER = re.compile(r"[ \t]*<!-- unrelated-bound: (?P<reason>[^<>\r\n]+) -->")
@@ -100,11 +101,14 @@ def prose_blocks(text):
 def restatement_errors(path, text, bounds):
     errors = []
     targets = {anchor: pair for pair, anchors in bounds.items() for anchor in anchors}
+    depth = len(path.parent.relative_to(SPEC_DIR).parts)
+    prefixes = {"../" * depth} if depth else {"", "./"}
     for first_line, paragraph in prose_blocks(text):
         comments = list(HTML_COMMENT.finditer(paragraph))
         links = [
             link for link in GENERATED_LIMIT_LINK.finditer(paragraph)
-            if not any(comment.start() <= link.start() < comment.end() for comment in comments)
+            if (link.group("prefix") or "") in prefixes
+            and not any(comment.start() <= link.start() < comment.end() for comment in comments)
         ]
         for link in links:
             line = first_line + paragraph[:link.start()].count("\n")
@@ -136,7 +140,7 @@ def restatement_errors(path, text, bounds):
 def check(root):
     bounds = generated_bounds(root / LIMITS_FILE)
     errors = []
-    for path in sorted((root / SPEC_DIR).glob("*.md")):
+    for path in sorted((root / SPEC_DIR).rglob("*.md")):
         if path != root / LIMITS_FILE:
             text = path.read_text(encoding="utf-8")
             errors.extend(restatement_errors(path.relative_to(root), text, bounds))

@@ -1,5 +1,3 @@
-use crate::tools::config::Config;
-use crate::tools::tests::config_value;
 use crate::tools::types::{MAX_GIT_LOG_COMMITS, ToolCall, model_call};
 use crate::validate::{MAX_REVISION_BYTES, valid_revision};
 use serde_json::{Value, json};
@@ -235,64 +233,4 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
             staged: false
         }
     );
-}
-
-#[test]
-fn git_pin_is_optional_closed_and_rooted_per_platform() {
-    let good = if cfg!(target_os = "macos") {
-        "/Library/Developer/CommandLineTools/usr/bin/git"
-    } else {
-        "/usr/bin/git"
-    };
-    let other = if cfg!(target_os = "macos") {
-        "/usr/bin/git"
-    } else {
-        "/Library/Developer/CommandLineTools/usr/bin/git"
-    };
-    let pin = json!({"name":"git","executable":good,"sha256":"0".repeat(64),"interpreter":false,"inputs":[]});
-    let config_with = |workspace: Value, git: Option<Value>| {
-        let mut value = config_value();
-        value["workspace_paths"] = workspace;
-        if let Some(git) = git {
-            value["git"] = git;
-        }
-        serde_json::from_value::<Config>(value).unwrap()
-    };
-    let status = ToolCall::GitStatus { path: ".".into() };
-    let config = config_with(json!(["."]), Some(pin.clone()));
-    assert!(config.validate().is_ok());
-    assert!(config.allows(&status));
-    assert!(config.allows(&ToolCall::GitLog {
-        path: ".".into(),
-        revision: None,
-        max_count: 5
-    }));
-    assert!(config.allows(&ToolCall::GitDiff {
-        path: "src".into(),
-        base: None,
-        head: None,
-        staged: false,
-    }));
-    let mutations = [
-        json!({"name":"git","executable":other,"sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
-        json!({"name":"sh","executable":if cfg!(target_os = "macos") { "/Library/Developer/CommandLineTools/usr/bin/git" } else { "/usr/bin/git" },"sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
-        json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}),
-        json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[{"path":"/usr/bin/true","destination":"t","sha256":"0".repeat(64)}]}),
-        json!({"name":"git","executable":"/opt/git/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
-        json!({"name":"git","executable":"/usr/../opt/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]}),
-    ];
-    for mutation in mutations {
-        assert!(
-            config_with(json!(["."]), Some(mutation))
-                .validate()
-                .is_err()
-        );
-    }
-    let narrow = config_with(json!(["src", "Cargo.toml"]), Some(pin));
-    assert!(narrow.validate().is_ok());
-    assert!(!narrow.allows(&status));
-    let absent = config_with(json!(["."]), None);
-    assert!(absent.validate().is_ok());
-    assert!(!absent.allows(&status));
-    assert!(serde_json::to_value(&absent).unwrap().get("git").is_none());
 }

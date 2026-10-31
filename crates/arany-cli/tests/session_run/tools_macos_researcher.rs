@@ -98,10 +98,41 @@ done
 
     #[cfg(all(not(debug_assertions), arany_ci))]
     pub(super) fn release_researcher_journey() {
-        crate::tools_git::release_native_journey(
-            "tools_researcher::journey::native_researcher_journey_helper",
-            "native researcher journey",
+        use crate::process::BoundedOutput;
+
+        const HELPER: &str = "tools_researcher::journey::native_researcher_journey_helper";
+        const LABEL: &str = "native researcher journey";
+        let _gate = crate::process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        for directory in ["home", "environment-state", "environment-data"] {
+            std::fs::create_dir(temp.path().join(directory)).unwrap();
+        }
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", HELPER, "--ignored", "--nocapture"])
+            .env_clear()
+            .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
+            .env("HOME", temp.path().join("home"))
+            // Runs resolve Git from PATH; the Command Line Tools Git is the only one on it here.
+            .env("PATH", "/Library/Developer/CommandLineTools/usr/bin")
+            .env("XDG_STATE_HOME", temp.path().join("environment-state"))
+            .env("XDG_DATA_HOME", temp.path().join("environment-data"))
+            .current_dir(temp.path());
+        crate::process::isolate_host_authentication(&mut command, &temp.path().join("home"));
+        let output = command
+            .bounded_output_for(Duration::from_secs(360), 32 * 1024)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{LABEL}: {:?}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
+        crate::process::assert_single_test_completed(&output.stdout, LABEL);
+        assert!(output.stderr.is_empty());
     }
 
     #[tokio::test]
@@ -123,15 +154,13 @@ done
         let peer = root.join("mcp.sh");
         private_file(&peer, MCP_SCRIPT.as_bytes());
         let shell_digest = hash(&std::fs::read("/bin/sh").unwrap());
-        let git = std::fs::canonicalize("/Library/Developer/CommandLineTools/usr/bin/git").unwrap();
         let config = json!({
-            "version": 1, "workspace_paths": ["."], "write": true,
+            "workspace_paths": ["."], "write": true,
             "commands": [{"name":"shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,"inputs":[]}],
             "skills": [],
             "mcp": [{"name":"synthetic","program":{"name":"mcp-shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,
                 "inputs":[{"path":peer,"destination":"mcp.sh","sha256":hash(MCP_SCRIPT.as_bytes())}]},
-                "args":["/inputs/mcp-shell/mcp.sh"],"tools":["echo"]}],
-            "git": {"name":"git","executable":git,"sha256":hash(&std::fs::read(&git).unwrap()),"interpreter":false,"inputs":[]}
+                "args":["/inputs/mcp-shell/mcp.sh"],"tools":["echo"]}]
         });
         let reads = vec![
             ToolCall::List { path: "src".into() },
@@ -177,8 +206,7 @@ done
                     args: vec!["-c".into(), "printf changed > src/facts.txt".into()],
                     cwd: "".into(),
                     resource_class: None,
-                    timeout_ms: None,
-                },
+                    timeout_ms: None, additional_reads: None },
             ),
             (
                 "mcp-call",
@@ -309,7 +337,8 @@ done
                     "git_log",
                     "git_commit",
                     "git_branch",
-                    "git_switch"
+                    "git_switch",
+                    "git_push"
                 ])
             );
             let catalog: Value =
@@ -317,10 +346,7 @@ done
             assert_eq!(catalog["write"], false);
             assert_eq!(catalog["commands"], json!([]));
             assert!(catalog.get("git").is_none());
-            assert_eq!(
-                catalog["file_tools"],
-                "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)"
-            );
+            assert_eq!(catalog["file_tools"], true);
             assert_eq!(catalog["skills"][0]["name"], "synthetic");
             assert_eq!(
                 catalog["mcp_servers"],
@@ -455,10 +481,12 @@ done
                         matches!(
                             calls[index],
                             ToolCall::Read { .. }
+                                | ToolCall::List { .. }
+                                | ToolCall::Glob { .. }
                                 | ToolCall::Search { .. }
                                 | ToolCall::Skill { .. }
                         ),
-                        "exact file and Skill reads require in-process attestation"
+                        "file reads, discovery and Skill reads require in-process attestation"
                     );
                     assert_eq!(*policy_digest, observation.intent.policy_digest);
                     assert_eq!(
@@ -471,11 +499,8 @@ done
                 }
                 Attestation::Guard(receipt) => {
                     assert!(
-                        matches!(
-                            calls[index],
-                            ToolCall::List { .. } | ToolCall::McpList { .. }
-                        ),
-                        "discovery and MCP catalog listing require a Guard receipt"
+                        matches!(calls[index], ToolCall::McpList { .. }),
+                        "MCP catalog listing requires a Guard receipt"
                     );
                     assert_eq!(receipt.contract_version, 1);
                     let digest: [u8; 32] =
@@ -489,6 +514,7 @@ done
                 }
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
                 Attestation::Host(_) => panic!("researchers never run host Tools"),
+                Attestation::Git(_) => panic!("researchers never run Git"),
             }
         }
         let output =

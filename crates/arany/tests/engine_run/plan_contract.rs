@@ -1,5 +1,6 @@
 use super::goals::{
-    AUTONOMOUS_OBJECTIVE, autonomous_input, facts_digest, facts_engine, facts_plan, facts_read,
+    AUTONOMOUS_OBJECTIVE, SMALL_WINDOW_TOKENS, autonomous_input, facts_digest, facts_engine,
+    facts_plan, facts_read,
 };
 use super::recovery::interrupted_autonomous_goal;
 use super::team::child_tool_starts;
@@ -39,6 +40,7 @@ async fn command_resources_refuse_invalid_requests_and_plan_widening_before_disp
             cwd: String::new(),
             resource_class: Some(class),
             timeout_ms: Some(timeout),
+            additional_reads: None,
         };
         let mut steps = Vec::new();
         if let Some((resource_class, command_timeout_ms)) = plan {
@@ -89,7 +91,7 @@ fn command_resource_engine(state_path: &Path) -> Engine {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+    let config = serde_json::json!({"workspace_paths":["notes"],"write":false,
         "commands":[{"name":"sh","executable":executable,"sha256":digest,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
     let config_path = state_path.join("tools.json");
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -174,6 +176,78 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.run_ids, [outcome.run.id]);
+}
+
+#[tokio::test]
+async fn only_autonomous_goals_and_explicit_teams_are_offered_the_plan() {
+    for (case, autonomous, policy, offered) in [
+        (
+            "plain chat",
+            false,
+            arany::CollaborationPolicy::Single,
+            false,
+        ),
+        (
+            "auto policy",
+            false,
+            arany::CollaborationPolicy::Auto {
+                max_active_children: 1,
+            },
+            false,
+        ),
+        (
+            "explicit team",
+            false,
+            arany::CollaborationPolicy::Team {
+                max_active_children: 1,
+            },
+            true,
+        ),
+        (
+            "autonomous Goal",
+            true,
+            arany::CollaborationPolicy::Single,
+            true,
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let team = matches!(policy, arany::CollaborationPolicy::Team { .. });
+        // An explicit team's root must delegate before answering, so its answers are refused.
+        let answers = if team { 3 } else { 1 };
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..answers).map(|_| finish_with("done")).collect(),
+        ));
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let mut input = if autonomous {
+            autonomous_input(&workspace)
+        } else {
+            request(&workspace, "Answer directly")
+        };
+        input.include_paths.clear();
+        input.policy = policy;
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect(case);
+        assert_eq!(
+            outcome.run.failure,
+            team.then_some(arany::RunFailure::RefusalLimit),
+            "{case}"
+        );
+        engine.close().await.expect("engine shutdown");
+        let requests = provider.requests.lock().expect("Provider requests");
+        assert_eq!(requests.len(), answers, "{case}");
+        assert_eq!(requests[0].input.plan_offered, offered, "{case}");
+    }
 }
 
 #[tokio::test]
@@ -487,12 +561,12 @@ async fn a_recorded_plan_cannot_be_replaced_or_restated() {
 
 #[tokio::test]
 async fn plan_contract_recorded_mid_run_survives_compaction() {
-    const READS: usize = 400;
+    const READS: usize = 40;
 
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-    let content = format!("{}\n", "x".repeat(31)).repeat(4 * READS);
+    let content = format!("{}\n", "x".repeat(511)).repeat(4 * READS);
     std::fs::write(workspace.join("notes/data.txt"), &content).expect("bounded fixture file");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
@@ -538,8 +612,10 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
             wire_provenance: None,
         })
     };
-    let provider =
-        ScriptedProvider::new(outcomes).with_compactions((0..16).map(|_| compaction()).collect());
+    let provider = ScriptedProvider::new(outcomes)
+        .with_compactions((0..16).map(|_| compaction()).collect())
+        .with_context_window(SMALL_WINDOW_TOKENS)
+        .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -691,7 +767,7 @@ async fn resumed_goal_refuses_plan_excluded_invoked_skill_before_tool_started() 
     let config = state.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("admit project Skill discovery");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))

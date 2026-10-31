@@ -41,7 +41,6 @@ impl FileSuggestionSource {
             ToolGrant::None => vec![".".into()],
         };
         Ok(Config {
-            version: 1,
             workspace_paths: paths,
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -51,7 +50,6 @@ impl FileSuggestionSource {
             mcp: Vec::new(),
             runtime_grants: Vec::new(),
             git: None,
-            git_identity: None,
             locale: Default::default(),
             environment_sha256: None,
             network: None,

@@ -3,7 +3,7 @@ use super::config::Config;
 use super::fs::{self, Keep};
 use super::glob::{MAX_DEPTH, MAX_SCANNED_ENTRIES};
 use super::selection::{CONTROL_BYTES, Selector};
-use super::types::MAX_SNAPSHOT_FILES;
+use super::types::{MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES};
 use super::{ToolCall, ToolError};
 use crate::validate::valid_relative;
 use cap_std::fs::{Dir, MetadataExt};
@@ -13,12 +13,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 pub use suggestions::FileSuggestionSource;
 
-pub(super) const TYPED_WAIT: Duration = Duration::from_millis(250);
 pub const SUGGESTION_LIFETIME: Duration = Duration::from_secs(30);
 pub const SUGGESTION_QUERY_TIME: Duration = Duration::from_millis(50);
 const INDEX_NAMES: usize = 2048;
 const INDEX_BYTES: usize = 48 * 1024;
 const DISPLAY_NAMES: usize = 64;
+const MAX_LIST_ENTRIES: usize = MAX_SNAPSHOT_FILES * 4;
+// Search stops scanning at this share of its time budget, leaving the rest for control checks.
+const SEARCH_SCAN_PERCENT: u32 = 60;
 
 #[derive(Clone, Copy)]
 pub(super) enum Output {
@@ -92,17 +94,18 @@ impl SuggestionIndex {
 }
 
 pub(super) fn enforcement_contract() -> Vec<u8> {
-    let mut bytes = b";typed-discovery-v1-guard-owned-no-follow-controls-restrictive-read-before-payload-no-partial-results-no-fallback".to_vec();
+    let mut bytes = b";typed-discovery-v3-in-process-pinned-root-handle-relative-no-follow-controls-restrictive-read-before-payload-nested-repositories-pruned-partial-discovery-pages-shared-read-capacity".to_vec();
     for limit in [
         super::selection::DISCOVERY_CALLS,
         MAX_DEPTH as u64,
         MAX_SCANNED_ENTRIES as u64,
+        MAX_LIST_ENTRIES as u64,
+        u64::from(SEARCH_SCAN_PERCENT),
+        super::MAX_IN_PROCESS_READS as u64,
     ] {
         bytes.extend_from_slice(&limit.to_le_bytes());
     }
-    for duration in [super::selection::DISCOVERY_TIME, TYPED_WAIT] {
-        bytes.extend_from_slice(&duration.as_nanos().to_le_bytes());
-    }
+    bytes.extend_from_slice(&super::selection::DISCOVERY_TIME.as_nanos().to_le_bytes());
     bytes
 }
 
@@ -142,9 +145,13 @@ struct Walk<'a> {
     visited: BTreeSet<String>,
     entries: BTreeMap<String, Node>,
     scanned: usize,
+    content_bytes: usize,
     device: u64,
     query: Query<'a>,
     base: String,
+    prefix: Vec<String>,
+    scan_until: Instant,
+    stopped: bool,
 }
 
 enum Query<'a> {
@@ -152,6 +159,8 @@ enum Query<'a> {
     Glob {
         matcher: regex::Regex,
         depth: Option<usize>,
+        offset: u32,
+        skipped: u32,
         limit: u32,
     },
     Search(super::search::Search<'a>),
@@ -160,7 +169,6 @@ enum Query<'a> {
 struct Node {
     directory: bool,
     bytes: u64,
-    inode: u64,
 }
 
 pub(super) fn inspect(request: Request<'_>) -> Result<String, ToolError> {
@@ -176,20 +184,36 @@ impl<'a> Walk<'a> {
             _ => return Err(ToolError::Operation),
         };
         let path = if path == "." { "" } else { path.as_str() };
-        let query = match request.call {
-            ToolCall::List { .. } => Query::List,
-            ToolCall::Glob { pattern, limit, .. } => Query::Glob {
-                matcher: super::glob::matcher(pattern).map_err(|_| ToolError::Operation)?,
-                depth: (!pattern.split('/').any(|part| part == "**"))
-                    .then(|| pattern.split('/').count()),
-                limit: *limit,
-            },
-            ToolCall::Search { .. } => {
-                Query::Search(super::search::Search::new(request.call, request.deadline)?)
-            }
+        let (query, pattern) = match request.call {
+            ToolCall::List { .. } => (Query::List, None),
+            ToolCall::Glob {
+                pattern,
+                offset,
+                limit,
+                ..
+            } => (
+                Query::Glob {
+                    matcher: super::glob::matcher(pattern).map_err(|_| ToolError::Operation)?,
+                    depth: (!pattern.split('/').any(|part| part == "**"))
+                        .then(|| pattern.split('/').count()),
+                    offset: *offset,
+                    skipped: 0,
+                    limit: *limit,
+                },
+                Some(pattern),
+            ),
+            ToolCall::Search { include, .. } => (
+                Query::Search(super::search::Search::new(request.call, request.deadline)?),
+                include.as_ref(),
+            ),
             _ => return Err(ToolError::Operation),
         };
         let device = fs::identity(request.root)?.0;
+        let now = Instant::now();
+        let budget = request
+            .deadline
+            .saturating_duration_since(now)
+            .min(super::selection::DISCOVERY_TIME);
         Ok(Self {
             selector: Selector::discovery(request.deadline),
             request,
@@ -197,9 +221,13 @@ impl<'a> Walk<'a> {
             visited: BTreeSet::new(),
             entries: BTreeMap::new(),
             scanned: 0,
+            content_bytes: 0,
             device,
             query,
             base: path.into(),
+            prefix: pattern.map_or_else(Vec::new, |pattern| super::glob::literal_prefix(pattern)),
+            scan_until: now + budget * SEARCH_SCAN_PERCENT / 100,
+            stopped: false,
         })
     }
 
@@ -207,18 +235,26 @@ impl<'a> Walk<'a> {
         let base = self.base.clone();
         let path = base.as_str();
         self.check_time()?;
-        self.control("")?;
+        let root = self.request.root.try_clone().map_err(|_| ToolError::Path)?;
+        self.control("", &root)?;
+        let mut roots = Vec::new();
         for selected in &self.request.config.workspace_paths {
-            let root = if selected == "."
+            if selected == "."
                 || !path.is_empty() && std::path::Path::new(path).starts_with(selected)
             {
-                path
+                roots.push(path.to_owned());
             } else if path.is_empty() || std::path::Path::new(selected).starts_with(path) {
-                selected
-            } else {
-                continue;
-            };
-            self.start(root)?;
+                roots.push(selected.clone());
+            }
+        }
+        // Directory order keeps Search rows in path byte order across scope roots.
+        roots.sort_by_key(|root| format!("{root}/"));
+        roots.dedup();
+        for root in roots {
+            if self.stopped {
+                break;
+            }
+            self.start(&root)?;
         }
         self.verify_controls()?;
         let output = self.render()?;
@@ -241,7 +277,31 @@ impl<'a> Walk<'a> {
         self.request.config.in_workspace_scope(path) && !(self.request.hidden)(path)
     }
 
-    fn control(&mut self, directory: &str) -> Result<(), ToolError> {
+    // Search returns the rows found so far when a scan bound stops it after at least one row.
+    fn bound(&mut self) -> Result<(), ToolError> {
+        match &mut self.query {
+            Query::Search(search) if search.has_rows() => {
+                search.truncate();
+                self.stopped = true;
+                Ok(())
+            }
+            _ => Err(ToolError::Limit),
+        }
+    }
+
+    fn excluded(&mut self, path: &str, directory: bool) -> Result<bool, ToolError> {
+        match self.selector.excluded(path, directory) {
+            Err(ToolError::Limit) => self.bound().map(|()| true),
+            result => result,
+        }
+    }
+
+    fn open_path(&self, path: &str) -> Result<Dir, ToolError> {
+        fs::open_file(self.request.root, if path.is_empty() { "." } else { path })
+            .map(Dir::from_std_file)
+    }
+
+    fn control(&mut self, directory: &str, handle: &Dir) -> Result<(), ToolError> {
         let path = joined(directory, ".gitignore");
         if self.controls.contains_key(&path) {
             return Ok(());
@@ -249,12 +309,7 @@ impl<'a> Walk<'a> {
         if path.split('/').count() > MAX_DEPTH || path.len() > crate::validate::MAX_PATH_BYTES {
             return Err(ToolError::Limit);
         }
-        let parent = fs::open_file(
-            self.request.root,
-            if directory.is_empty() { "." } else { directory },
-        )?;
-        let parent = Dir::from_std_file(parent);
-        match parent.symlink_metadata(".gitignore") {
+        match handle.symlink_metadata(".gitignore") {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.controls.insert(path, None);
                 return Ok(());
@@ -267,7 +322,7 @@ impl<'a> Walk<'a> {
             }
             Ok(_) => {}
         }
-        let file = fs::open_file(self.request.root, &path)?;
+        let file = fs::open_child(handle, ".gitignore", self.device)?;
         let metadata = file.metadata().map_err(|_| ToolError::Path)?;
         let bytes = fs::read_regular(file, CONTROL_BYTES)?;
         self.selector.add(directory, &bytes)?;
@@ -286,46 +341,49 @@ impl<'a> Walk<'a> {
         }
         for (index, _) in path.match_indices('/') {
             let ancestor = &path[..index];
-            if (self.request.hidden)(ancestor) || self.selector.excluded(ancestor, true)? {
+            if (self.request.hidden)(ancestor) || self.excluded(ancestor, true)? {
                 return Ok(());
             }
-            self.control(ancestor)?;
+            let handle = self.open_path(ancestor)?;
+            self.control(ancestor, &handle)?;
         }
         if path.is_empty() {
-            self.directory(path)
-        } else {
-            self.entry(path)
+            let root = self.request.root.try_clone().map_err(|_| ToolError::Path)?;
+            return self.directory(path, root);
+        }
+        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        match self.open_path(parent) {
+            Ok(parent) => self.entry(path, &parent),
+            Err(ToolError::NotFound) if path != self.base => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
-    fn entry(&mut self, path: &str) -> Result<(), ToolError> {
+    fn entry(&mut self, path: &str, parent: &Dir) -> Result<(), ToolError> {
         self.check_time()?;
-        if !valid_relative(path, false) || (self.request.hidden)(path) {
+        if self.stopped || !valid_relative(path, false) || (self.request.hidden)(path) {
             return Ok(());
+        }
+        if matches!(&self.query, Query::Search(search) if search.has_rows())
+            && Instant::now() >= self.scan_until
+        {
+            return self.bound();
         }
         if path.split('/').count() > MAX_DEPTH {
             return Err(ToolError::Limit);
         }
-        let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
-        let metadata = fs::open_file(self.request.root, parent).and_then(|file| {
-            Dir::from_std_file(file)
-                .symlink_metadata(name)
-                .map_err(|error| {
-                    if error.kind() == std::io::ErrorKind::NotFound {
-                        ToolError::NotFound
-                    } else {
-                        ToolError::Path
-                    }
-                })
-        });
-        let metadata = match metadata {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let metadata = match parent.symlink_metadata(name) {
             Ok(metadata) => metadata,
-            Err(ToolError::NotFound) if path != self.base => return Ok(()),
-            Err(error) => return Err(error),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && path != self.base => {
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolError::NotFound);
+            }
+            Err(_) => return Err(ToolError::Path),
         };
-        if path.split('/').any(fs::ignored_directory)
-            || self.selector.excluded(path, metadata.is_dir())?
-        {
+        if path.split('/').any(fs::ignored_directory) || self.excluded(path, metadata.is_dir())? {
             return Ok(());
         }
         if metadata.is_symlink()
@@ -342,7 +400,6 @@ impl<'a> Walk<'a> {
         let node = Node {
             directory: metadata.is_dir(),
             bytes: metadata.len(),
-            inode: metadata.ino(),
         };
         if !metadata.is_dir()
             && matches!(self.request.call, ToolCall::List { path: requested } | ToolCall::Glob { path: requested, .. } if requested == path)
@@ -350,13 +407,102 @@ impl<'a> Walk<'a> {
             return Err(ToolError::Operation);
         }
         if self.admitted(path) && self.candidate(path, &node) {
-            self.entries.insert(path.into(), node);
-            if self.entries.len() > self.retained_limit() {
-                return Err(ToolError::Limit);
+            if matches!(self.query, Query::Search(_)) {
+                self.scan(path, parent, &metadata)?;
+            } else {
+                self.retain(path, node)?;
             }
         }
         if metadata.is_dir() && self.descend(path) {
-            self.directory(path)?;
+            let child = Dir::from_std_file(fs::open_child(parent, name, self.device)?);
+            if !self.explicit(path) && fs::nested_repository(&child)? {
+                return Ok(());
+            }
+            self.directory(path, child)?;
+        }
+        Ok(())
+    }
+
+    // Requested bases and scope roots are walked even when they hold their own `.git`.
+    fn explicit(&self, path: &str) -> bool {
+        path == self.base
+            || self
+                .request
+                .config
+                .workspace_paths
+                .iter()
+                .any(|root| root == path)
+    }
+
+    fn scan(
+        &mut self,
+        path: &str,
+        parent: &Dir,
+        metadata: &cap_std::fs::Metadata,
+    ) -> Result<(), ToolError> {
+        use std::os::unix::fs::MetadataExt as _;
+        if !self.visited.insert(path.into()) {
+            return Ok(());
+        }
+        let Query::Search(search) = &mut self.query else {
+            return Err(ToolError::Operation);
+        };
+        if metadata.len() > MAX_FILE_BYTES as u64 {
+            search.skip_large();
+            return Ok(());
+        }
+        if self.content_bytes as u64 + metadata.len() > MAX_SNAPSHOT_BYTES as u64 {
+            return self.bound();
+        }
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let file = match fs::open_child(parent, name, self.device) {
+            Err(ToolError::NotFound) => return Ok(()),
+            file => file?,
+        };
+        if file.metadata().map_err(|_| ToolError::Path)?.ino() != metadata.ino() {
+            return Err(ToolError::ChangedInput);
+        }
+        let Query::Search(search) = &mut self.query else {
+            return Err(ToolError::Operation);
+        };
+        let content = match fs::read_regular(file, MAX_FILE_BYTES) {
+            Err(ToolError::Limit) => {
+                search.skip_large();
+                return Ok(());
+            }
+            content => content?,
+        };
+        self.content_bytes += content.len();
+        if search.scan(path, &content)? {
+            self.stopped = true;
+        }
+        Ok(())
+    }
+
+    // Glob skips its offset matches unretained. The walk visits matches in path order, so one
+    // lookahead match past the page, or a full Tool listing, ends it with the rows so far.
+    fn retain(&mut self, path: &str, node: Node) -> Result<(), ToolError> {
+        if let Query::Glob {
+            offset, skipped, ..
+        } = &mut self.query
+            && *skipped < *offset
+        {
+            *skipped += 1;
+            return Ok(());
+        }
+        if self.entries.len() == self.retained_limit() {
+            if !matches!(
+                (&self.query, self.request.output),
+                (Query::List, Output::Tool)
+            ) {
+                return Err(ToolError::Limit);
+            }
+            self.stopped = true;
+            return Ok(());
+        }
+        self.entries.insert(path.into(), node);
+        if matches!(self.query, Query::Glob { limit, .. } if self.entries.len() > limit as usize) {
+            self.stopped = true;
         }
         Ok(())
     }
@@ -366,13 +512,11 @@ impl<'a> Walk<'a> {
     }
 
     fn retained_limit(&self) -> usize {
-        match self.request.output {
-            Output::Suggestions => INDEX_NAMES,
-            Output::Tool => match self.query {
-                Query::List => MAX_SCANNED_ENTRIES,
-                Query::Glob { .. } => super::glob::MAX_GLOB_CANDIDATES,
-                Query::Search(_) => MAX_SNAPSHOT_FILES,
-            },
+        match (self.request.output, &self.query) {
+            (Output::Suggestions, _) => INDEX_NAMES,
+            (Output::Tool, Query::List) => MAX_LIST_ENTRIES,
+            (Output::Tool, Query::Glob { limit, .. }) => *limit as usize + 1,
+            (Output::Tool, Query::Search(_)) => MAX_SNAPSHOT_FILES,
         }
     }
 
@@ -416,21 +560,33 @@ impl<'a> Walk<'a> {
         }
     }
 
-    fn directory(&mut self, path: &str) -> Result<(), ToolError> {
+    // A literal pattern prefix prunes names that no match can lie under, so results are unchanged.
+    fn within_prefix(&self, path: &str) -> bool {
+        let relative = if self.base.is_empty() {
+            Some(path)
+        } else {
+            path.strip_prefix(&self.base)
+                .and_then(|rest| rest.strip_prefix('/'))
+        };
+        relative.is_none_or(|relative| {
+            relative
+                .split('/')
+                .zip(&self.prefix)
+                .all(|(part, literal)| part == literal)
+        })
+    }
+
+    fn directory(&mut self, path: &str, handle: Dir) -> Result<(), ToolError> {
         if !self.visited.insert(path.into()) {
             return Ok(());
         }
-        self.control(path)?;
-        let directory = Dir::from_std_file(fs::open_file(
-            self.request.root,
-            if path.is_empty() { "." } else { path },
-        )?);
+        self.control(path, &handle)?;
         let mut names = Vec::new();
-        for entry in directory.entries().map_err(|_| ToolError::Path)? {
+        for entry in handle.entries().map_err(|_| ToolError::Path)? {
             self.check_time()?;
             self.scanned += 1;
             if self.scanned > MAX_SCANNED_ENTRIES {
-                return Err(ToolError::Limit);
+                return self.bound();
             }
             let entry = entry.map_err(|_| ToolError::Path)?;
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -443,13 +599,21 @@ impl<'a> Walk<'a> {
             if relative.len() > crate::validate::MAX_PATH_BYTES {
                 return Err(ToolError::Limit);
             }
-            if valid_relative(&relative, false) && !(self.request.hidden)(&relative) {
-                names.push(relative);
+            if valid_relative(&relative, false)
+                && !(self.request.hidden)(&relative)
+                && self.within_prefix(&relative)
+            {
+                let directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                names.push((if directory { format!("{name}/") } else { name }, relative));
             }
         }
+        // Sorting directories as `name/` visits files in full-path byte order.
         names.sort();
-        for name in names {
-            self.entry(&name)?;
+        for (_, name) in names {
+            if self.stopped {
+                break;
+            }
+            self.entry(&name, &handle)?;
         }
         Ok(())
     }
@@ -496,15 +660,16 @@ impl<'a> Walk<'a> {
             Output::Suggestions => self.names(),
             Output::Tool => match std::mem::replace(&mut self.query, Query::List) {
                 Query::List => self.list(&self.base),
-                Query::Glob { limit, .. } => super::glob::render(
+                Query::Glob { offset, limit, .. } => super::glob::render(
                     self.entries
                         .iter()
                         .map(|(path, node)| (path.clone(), node.bytes))
                         .collect(),
+                    offset,
                     limit,
                     self.request.result_bytes,
                 ),
-                Query::Search(search) => self.search(search),
+                Query::Search(search) => search.finish(self.request.result_bytes),
             },
         }
     }
@@ -553,40 +718,12 @@ impl<'a> Walk<'a> {
                 }
             })
             .collect();
-        if self.request.config.workspace_paths != ["."] && rows.len() > MAX_SNAPSHOT_FILES {
-            return Err(ToolError::Limit);
-        }
-        let truncated = rows.len() > DISPLAY_NAMES;
+        let truncated = self.stopped || rows.len() > DISPLAY_NAMES;
         fs::fit_rows(
             rows.into_iter().take(DISPLAY_NAMES).collect(),
             truncated,
             self.request.result_bytes,
         )
-    }
-
-    fn search(&self, mut search: super::search::Search<'_>) -> Result<String, ToolError> {
-        use std::os::unix::fs::MetadataExt;
-        let mut bytes = 0usize;
-        for (path, node) in &self.entries {
-            self.check_time()?;
-            if node.directory || !search.includes(path) {
-                continue;
-            }
-            let file = fs::open_file(self.request.root, path)?;
-            let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-            if metadata.ino() != node.inode || metadata.len() != node.bytes {
-                return Err(ToolError::ChangedInput);
-            }
-            let content = fs::read_regular(file, super::types::MAX_FILE_BYTES)?;
-            bytes = bytes.checked_add(content.len()).ok_or(ToolError::Limit)?;
-            if bytes > super::types::MAX_SNAPSHOT_BYTES {
-                return Err(ToolError::Limit);
-            }
-            if search.scan(path, &content)? {
-                break;
-            }
-        }
-        search.finish(self.request.result_bytes)
     }
 }
 
@@ -606,7 +743,10 @@ mod tests {
     fn vanished_descendants_are_omitted_after_enumeration() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fs::open_directory(fixture.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config = serde_json::from_value(
+            json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        )
+        .unwrap();
         let calls = [
             (json!({"operation":"list","path":"."}), Output::Tool),
             (json!({"operation":"glob","pattern":"**"}), Output::Tool),
@@ -644,7 +784,7 @@ mod tests {
     fn missing_requested_bases_fail_but_absent_scope_roots_are_omitted() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fs::open_directory(fixture.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["missing/nested"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config = serde_json::from_value(json!({"workspace_paths":["missing/nested"],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         for path in [".", "missing/nested"] {
             let call = ToolCall::List { path: path.into() };
             let result = inspect(Request {
@@ -669,6 +809,39 @@ mod tests {
     }
 
     #[test]
+    fn listings_past_the_entry_bound_return_a_truncated_page() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(fixture.path().join("notes/deep")).unwrap();
+        for index in 0..=MAX_LIST_ENTRIES {
+            std::fs::write(fixture.path().join(format!("notes/deep/e{index:05}")), b"").unwrap();
+        }
+        let root = fs::open_directory(fixture.path()).unwrap();
+        for (scope, path, first) in [
+            ("notes", "notes", "notes/deep/e00000"),
+            (".", "notes/deep", "notes/deep/e00000"),
+        ] {
+            let config = serde_json::from_value(
+                json!({"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]}),
+            )
+            .unwrap();
+            let call = ToolCall::List { path: path.into() };
+            let page: serde_json::Value = serde_json::from_str(
+                &inspect(tool_request(&root, &call, &config, Output::Tool)).unwrap(),
+            )
+            .unwrap();
+            let entries = page["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), DISPLAY_NAMES, "{scope}");
+            let first_row = entries[0]
+                .get("path")
+                .unwrap_or(&entries[0])
+                .as_str()
+                .unwrap();
+            assert_eq!(first_row, first, "{scope}");
+            assert_eq!(page["may_be_truncated"], true, "{scope}");
+        }
+    }
+
+    #[test]
     fn listings_mark_truncation_only_when_a_row_is_omitted() {
         let fixture = tempfile::tempdir().unwrap();
         std::fs::create_dir(fixture.path().join("notes")).unwrap();
@@ -683,7 +856,7 @@ mod tests {
                 created += 1;
             }
             for scope in [".", "notes"] {
-                let config = serde_json::from_value(json!({"version":1,"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+                let config = serde_json::from_value(json!({"workspace_paths":[scope],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
                 let output = inspect(Request {
                     root: &root,
                     call: &call,
@@ -794,7 +967,10 @@ mod tests {
             std::fs::write(temp.path().join(path), b"fixture payload").unwrap();
         }
         let root = fs::open_directory(temp.path()).unwrap();
-        let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config = serde_json::from_value(
+            json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        )
+        .unwrap();
         let call = ToolCall::List {
             path: "notes".into(),
         };
@@ -817,5 +993,226 @@ mod tests {
             index.refine("notes", "visible").unwrap(),
             ["notes/visible.txt"]
         );
+    }
+
+    fn tool_request<'a>(
+        root: &'a Dir,
+        call: &'a ToolCall,
+        config: &'a Config,
+        output: Output,
+    ) -> Request<'a> {
+        Request {
+            root,
+            call,
+            config,
+            hidden: fs::NONE,
+            result_bytes: super::super::types::MAX_TOOL_RESULT_BYTES,
+            deadline: Instant::now() + super::super::selection::DISCOVERY_TIME,
+            output,
+            cancellation: None,
+        }
+    }
+
+    fn whole_workspace() -> Config {
+        serde_json::from_value(
+            json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        )
+        .unwrap()
+    }
+
+    fn search_call(path: &str, query: &str, include: Option<&str>) -> ToolCall {
+        ToolCall::Search {
+            path: path.into(),
+            query: query.into(),
+            regex: false,
+            include: include.map(str::to_owned),
+            case_sensitive: true,
+            offset: 0,
+            limit: super::super::types::MAX_SEARCH_ROWS,
+        }
+    }
+
+    #[test]
+    fn directories_replaced_by_symlinks_mid_walk_are_never_followed() {
+        let config = whole_workspace();
+        for replaced in ["a", "a/sub"] {
+            let fixture = tempfile::tempdir().unwrap();
+            let workspace = fixture.path().join("workspace");
+            std::fs::create_dir_all(workspace.join("a/sub")).unwrap();
+            std::fs::write(workspace.join("a/sub/inside.txt"), b"needle inside").unwrap();
+            std::fs::create_dir(fixture.path().join("outside")).unwrap();
+            std::fs::write(
+                fixture.path().join("outside/secret.txt"),
+                b"needle OUTSIDE_CANARY",
+            )
+            .unwrap();
+            let root = fs::open_directory(&workspace).unwrap();
+            for (call, output) in [
+                (search_call(".", "needle", None), Output::Tool),
+                (
+                    serde_json::from_value(json!({"operation":"glob","pattern":"**"})).unwrap(),
+                    Output::Tool,
+                ),
+                (ToolCall::List { path: ".".into() }, Output::Suggestions),
+            ] {
+                let target = workspace.join(replaced);
+                if std::fs::symlink_metadata(&target).unwrap().is_symlink() {
+                    std::fs::remove_file(&target).unwrap();
+                    std::fs::rename(fixture.path().join("moved"), &target).unwrap();
+                }
+                let mut walk = Walk::new(tool_request(&root, &call, &config, output)).unwrap();
+                let (outside, moved) =
+                    (fixture.path().join("outside"), fixture.path().join("moved"));
+                walk.selector.in_progress = Some(Box::new(move || {
+                    std::fs::rename(&target, moved).unwrap();
+                    std::os::unix::fs::symlink(outside, &target).unwrap();
+                }));
+                // A replaced ancestor refuses the walk; a replaced descendant is omitted.
+                match walk.inspect() {
+                    Ok(result) => assert!(
+                        replaced == "a/sub"
+                            && !result.contains("OUTSIDE_CANARY")
+                            && !result.contains("secret.txt"),
+                        "{replaced}: {result}"
+                    ),
+                    Err(error) => assert!(
+                        replaced == "a" && matches!(error, ToolError::Path),
+                        "{replaced}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_repositories_are_pruned_unless_requested() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path();
+        for (path, content) in [
+            ("src/lib.rs", "needle"),
+            ("worktrees/copy/src/lib.rs", "needle"),
+            ("worktrees/copy/.git", "gitdir: elsewhere"),
+            ("vendor/repo/.git/HEAD", "ref: refs/heads/main"),
+            ("vendor/repo/file.rs", "needle"),
+            (".git/HEAD", "ref: refs/heads/main"),
+        ] {
+            std::fs::create_dir_all(workspace.join(path).parent().unwrap()).unwrap();
+            std::fs::write(workspace.join(path), content).unwrap();
+        }
+        let root = fs::open_directory(workspace).unwrap();
+        let config = whole_workspace();
+        let glob = serde_json::from_value(json!({"operation":"glob","pattern":"**"})).unwrap();
+        let list = ToolCall::List { path: ".".into() };
+        let search = search_call(".", "needle", None);
+        for (call, output) in [
+            (&search, Output::Tool),
+            (&glob, Output::Tool),
+            (&list, Output::Suggestions),
+        ] {
+            let result = inspect(tool_request(&root, call, &config, output)).unwrap();
+            assert!(result.contains("src/lib.rs"), "{result}");
+            assert!(
+                !result.contains("copy/src") && !result.contains("repo/file.rs"),
+                "{result}"
+            );
+        }
+        let requested = search_call("worktrees/copy", "needle", None);
+        let result = inspect(tool_request(&root, &requested, &config, Output::Tool)).unwrap();
+        assert!(result.contains("worktrees/copy/src/lib.rs"), "{result}");
+    }
+
+    #[test]
+    fn include_prefixes_prune_the_walk_without_changing_results() {
+        assert_eq!(
+            super::super::glob::literal_prefix("src/deep/*.rs"),
+            ["src", "deep"]
+        );
+        assert_eq!(super::super::glob::literal_prefix("src/**/x.rs"), ["src"]);
+        assert!(super::super::glob::literal_prefix("{src,lib}/x.rs").is_empty());
+        assert!(super::super::glob::literal_prefix("*.rs").is_empty());
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path();
+        for path in ["src/a.rs", "src/deep/b.rs", "srcx/c.rs", "other/d.rs"] {
+            std::fs::create_dir_all(workspace.join(path).parent().unwrap()).unwrap();
+            std::fs::write(workspace.join(path), "needle").unwrap();
+        }
+        // An unreadable control fails any walk that enters `other`.
+        std::fs::write(workspace.join("other/.gitignore"), [0xff]).unwrap();
+        let root = fs::open_directory(workspace).unwrap();
+        let config = whole_workspace();
+        let pruned = search_call(".", "needle", Some("src/**/*.rs"));
+        let result: serde_json::Value = serde_json::from_str(
+            &inspect(tool_request(&root, &pruned, &config, Output::Tool)).unwrap(),
+        )
+        .unwrap();
+        let paths: Vec<_> = result["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["src/a.rs", "src/deep/b.rs"]);
+        let glob =
+            serde_json::from_value(json!({"operation":"glob","pattern":"src/*.rs"})).unwrap();
+        let output = inspect(tool_request(&root, &glob, &config, Output::Tool)).unwrap();
+        assert!(
+            output.contains("src/a.rs") && !output.contains("deep"),
+            "{output}"
+        );
+        let unpruned = search_call(".", "needle", Some("**/*.rs"));
+        assert!(inspect(tool_request(&root, &unpruned, &config, Output::Tool)).is_err());
+    }
+
+    #[test]
+    fn search_skips_unreadable_files_and_returns_partial_pages_at_scan_bounds() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path();
+        std::fs::write(workspace.join("a.txt"), "needle one").unwrap();
+        std::fs::write(workspace.join("b.bin"), b"needle \xff binary").unwrap();
+        std::fs::File::create(workspace.join("c.big"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES as u64 + 1)
+            .unwrap();
+        std::fs::write(workspace.join("d.txt"), "needle two").unwrap();
+        let root = fs::open_directory(workspace).unwrap();
+        let config = whole_workspace();
+        let call = search_call(".", "needle", None);
+        let page: serde_json::Value = serde_json::from_str(
+            &inspect(tool_request(&root, &call, &config, Output::Tool)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            (
+                page["skipped_large"].as_u64(),
+                page["skipped_binary"].as_u64()
+            ),
+            (Some(1), Some(1))
+        );
+        assert_eq!(page["may_be_truncated"], false);
+
+        let mut walk = Walk::new(tool_request(&root, &call, &config, Output::Tool)).unwrap();
+        walk.scan_until = Instant::now();
+        let page: serde_json::Value = serde_json::from_str(&walk.inspect().unwrap()).unwrap();
+        assert_eq!(page["entries"][0]["path"], "a.txt");
+        assert_eq!(page["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(page["may_be_truncated"], true);
+        assert_eq!(page["next_offset"], 1);
+
+        let glob = ToolCall::Glob {
+            pattern: "*.txt".into(),
+            path: ".".into(),
+            offset: 0,
+            limit: 100,
+        };
+        for call in [
+            search_call(".", "needle", None),
+            search_call(".", "absent", None),
+            glob,
+        ] {
+            let mut walk = Walk::new(tool_request(&root, &call, &config, Output::Tool)).unwrap();
+            walk.scanned = MAX_SCANNED_ENTRIES;
+            assert!(matches!(walk.inspect(), Err(ToolError::Limit)), "{call:?}");
+        }
     }
 }

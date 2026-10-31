@@ -53,7 +53,7 @@ fn request_body_uses_the_non_streaming_chat_contract() {
     };
     request.input = RunInput::new(PromptRole::ReadOnly, "snapshot prompt".into());
     let conversation = render::conversation(&request).unwrap();
-    let prompt = include_str!("../../prompts/read_only.txt");
+    let prompt = include_str!("../../prompts/read_only.md");
     use sha2::Digest;
     let prompt_digest: String = sha2::Sha256::digest(prompt.as_bytes())
         .iter()
@@ -83,7 +83,7 @@ fn request_body_uses_the_non_streaming_chat_contract() {
         "max_completion_tokens":4096,
         "stream":false,
         "parallel_tool_calls":false,
-        "tools":[{"type":"function","function":{"name":"arany_delegate","description":"Delegate a bounded team of researchers and offered editor assignments in the next settled wave. The primary integrates private edits and verifies the criterion before completing.","parameters":schema,"strict":true}}],
+        "tools":[{"type":"function","function":{"name":"arany_delegate","description":"Delegate bounded read-only research or leased live-Workspace editor assignments, settled in waves. After an editor finishes, verify its criterion yourself with fresh Tool evidence before answering.","parameters":schema,"strict":true}}],
         "tool_choice":"auto"
     });
     for (effort, reasoning_effort) in [(None, None), (Some(Effort::High), Some("high"))] {
@@ -101,6 +101,26 @@ fn request_body_uses_the_non_streaming_chat_contract() {
                 .unwrap()
                 .contains("You are Arany's read-only assistant")
         );
+    }
+}
+
+#[test]
+fn chat_route_states_one_call_per_step_for_every_role() {
+    let mut editor = crate::provider::test_support::researcher_request(MODEL);
+    editor.input.role = PromptRole::Editor;
+    for request in [
+        crate::provider::test_support::primary_request(MODEL),
+        crate::provider::test_support::researcher_request(MODEL),
+        editor,
+    ] {
+        let conversation = render::conversation(&request).unwrap();
+        let messages = messages(&conversation).unwrap();
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("Tool calls per step: at most 1."));
+        assert!(!system.contains(&format!(
+            "Tool calls per step: at most {}",
+            crate::session::MAX_STEP_TOOL_CALLS
+        )));
     }
 }
 
@@ -291,6 +311,18 @@ fn workspace_tools_are_offered_decoded_and_replayed_like_native_routes() {
     let body = run_body(&request, &exhausted, None).unwrap();
     assert!(!body["tools"].as_array().unwrap().is_empty());
     assert_eq!(body["tool_choice"], "none");
+}
+
+#[test]
+fn final_call_keeps_the_tool_list_and_offers_only_an_answer() {
+    let mut request = crate::provider::test_support::primary_request(MODEL);
+    let open = run_body(&request, &render::conversation(&request).unwrap(), None).unwrap();
+    request.input.final_call = true;
+    let final_call = render::conversation(&request).unwrap();
+    let body = run_body(&request, &final_call, None).unwrap();
+    assert_eq!(body["tools"], open["tools"]);
+    assert_eq!(body["tool_choice"], "none");
+    assert!(body["messages"].to_string().contains("harness_final_call"));
 }
 
 #[test]

@@ -8,16 +8,18 @@ A spec is the maintained contract for one product domain: what a user or caller 
 |---|---|
 | `acp`, editor protocol and ACP capabilities | [ACP](./acp.md) |
 | `serve --stdio`, JSON-RPC protocol and schema export | [Serve](./serve.md) |
-| Attached terminal, interactive controls, accessibility and deterministic output | [Terminal](./terminal.md) |
+| Attached terminal, interactive controls, accessibility and deterministic output | [Terminal](./terminal/README.md) |
 | Saved-account scope, storage, selected-item authorization and recovery | [Credentials](./credentials.md) |
-| Tool grants, guarded file effects, commands, runtime Skills and local MCP | [Tools](./tools.md) |
+| Tool grants, guarded file effects, commands, runtime Skills and local MCP | [Tools](./tools/README.md) |
 | Durable task Goals, Run linkage, budgets, plan contracts and recovery | [Goals](./goals.md) |
-| Bounded Run coordination, delegation, strict outcomes and history-capacity admission | [Execution](./execution.md) |
+| Bounded Run coordination, delegation, strict outcomes and history-capacity admission | [Execution](./execution/README.md) |
 | Session lifecycle, Run and AgentRun identity, collaboration, context and compaction | [Session](./session.md) |
-| Provider routes, adapters, models, strict outcomes, streaming and usage | [Provider](./provider.md) |
+| Provider routes, adapters, models, strict outcomes, streaming and usage | [Provider](./provider/README.md) |
 | ChatGPT-plan OAuth, consent, tokens and catalogs | [ChatGPT](./chatgpt.md) |
 | OTLP export, privacy, bounds and shutdown | [Telemetry](./telemetry.md) |
 | Local development failure diagnostics, privacy and retention | [Diagnostics](./diagnostics.md) |
+
+Terminal, Tools, Execution and Provider are folders whose README lists one file per topic; the other domains are single files.
 
 Every spec is edited under the [security](../../agents/security.md) and [testing](../../agents/testing.md) rules. Every product domain has a spec; `agents/` holds working practice only, and tests are the only evidence for a spec. Avoid empty domain files.
 
@@ -29,6 +31,10 @@ Every spec is edited under the [security](../../agents/security.md) and [testing
 4. Specs carry no scenario tables, test names or evidence links: the tests that prove a rule are found from the code. They also carry no per-version migration narratives ("N → M" steps) and no plan slice IDs, and they link a guarantee another passage owns instead of restating it. [Testing rules](../../agents/testing.md) decide when a new test is justified. Check local links after editing.
 
 When contract, code and tests disagree, name the discrepancy and resolve it at the owner; neither an old research recommendation nor current faulty behavior silently overrides an agreed spec. Surface a conflict that recorded decisions cannot settle before changing the contract. Create a new spec only when a real behavior change or an overloaded contract earns it; replace normative copies with links, update the domain index, the AGENTS.md loading trigger and inbound links together, and close the execution plan under the [planning lifecycle](../../planning/README.md#lifecycle).
+
+## Auto-learning
+
+Record a found invariant, failure or ownership decision once: behavior, limits and decisions in the owning spec; an implementation invariant as a test, or a non-obvious reason as one `//` line beside its code; a working practice in its general rule under `agents/`. Fix misleading guidance instead of duplicating it; add no task transcripts, check logs or facts readable from code.
 
 ## Spec structure
 
@@ -42,7 +48,7 @@ Specs state requirements, not verification status: never keep a pass/fail or com
 
 ### Generated bounds and disambiguation
 
-`scripts/spec-bounds.py` rejects any prose value and unit matching a generated limit, including inline literals and table cells. Link the amount or bound name to its anchor in [limits.md](./limits.md), for example [the Tool result limit](./limits.md#max_tool_result_bytes). Numeric link labels must match the target row; unknown anchors fail. Fenced examples and HTML comments are not prose.
+`scripts/spec-bounds.py` rejects any prose value and unit matching a generated limit, including inline literals and table cells. Link the amount or bound name to its anchor in [limits.md](./limits.md), for example [the Tool result limit](./limits.md#max_tool_result_bytes). Files in a domain folder link `../limits.md#anchor`. Numeric link labels must match the target row; unknown anchors fail. Fenced examples and HTML comments are not prose.
 
 If an independent bound has the same value and unit, append `<!-- unrelated-bound: reason -->` right after that pair on the same line. The nonempty reason names the distinct bound or owner and covers only that pair. Never use it to exempt a restatement of an exported bound:
 

@@ -72,6 +72,7 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative directory whose immediate entries to list.",
             "type": "string"
           }
         },
@@ -84,7 +85,7 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
@@ -119,7 +120,7 @@
       "type": "function"
     },
     {
-      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+      "description": "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
       "name": "arany_search",
       "parameters": {
         "additionalProperties": false,
@@ -153,6 +154,7 @@
             ]
           },
           "path": {
+            "description": "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
             "type": "string"
           },
           "query": {
@@ -322,12 +324,13 @@
       "type": "function"
     },
     {
-      "description": "Create a new directory whose parent already exists. Does not edit an existing file.",
+      "description": "Create a new empty directory whose parent already exists; only needed for an empty directory, since write and move create missing parents. Does not edit an existing file.",
       "name": "arany_mkdir",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative path of the new directory; its parent must exist.",
             "type": "string"
           }
         },
@@ -340,7 +343,7 @@
       "type": "function"
     },
     {
-      "description": "Write the real Workspace file; null expected_digest only creates a missing file. Existing files require the current SHA-256.",
+      "description": "Write the real Workspace file. Replacing an existing file is guarded by its SHA-256 from your latest Read or edit; with none known, it only creates a missing file. Creates missing parent directories.",
       "name": "arany_write",
       "parameters": {
         "additionalProperties": false,
@@ -350,12 +353,14 @@
             "type": "string"
           },
           "expected_digest": {
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run, or creates a missing file when none is known; supply one only to pin a specific version. Never invent it.",
             "type": [
               "string",
               "null"
             ]
           },
           "path": {
+            "description": "Workspace-relative file to create or replace.",
             "type": "string"
           }
         },
@@ -370,14 +375,17 @@
       "type": "function"
     },
     {
-      "description": "Apply a unique literal replacement to the real Workspace file, guarded by its current SHA-256. To append, replace a unique file ending with that ending plus new text.",
+      "description": "Apply a unique literal replacement to the real Workspace file, guarded by its SHA-256 from your latest Read or edit. To append, replace a unique file ending with that ending plus new text.",
       "name": "arany_edit",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "expected_digest": {
-            "description": "Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it.",
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "new": {
             "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 65536 bytes.",
@@ -388,6 +396,7 @@
             "type": "string"
           },
           "path": {
+            "description": "Workspace-relative existing file to edit.",
             "type": "string"
           }
         },
@@ -408,6 +417,29 @@
       "parameters": {
         "additionalProperties": false,
         "properties": {
+          "additional_reads": {
+            "additionalProperties": false,
+            "description": "Optional request, needing the user's approval, to read and execute up to 4 absolute host directories outside the granted set, with a short reason; null for none. Never writable. Directories the user already allowed need no request.",
+            "properties": {
+              "justification": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "paths",
+              "justification"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "args": {
             "items": {
               "type": "string"
@@ -448,7 +480,8 @@
           "args",
           "cwd",
           "resource_class",
-          "timeout_ms"
+          "timeout_ms",
+          "additional_reads"
         ],
         "type": "object"
       },
@@ -489,7 +522,7 @@
       "type": "function"
     },
     {
-      "description": "Request a primary host command with no sandbox and a one-sentence justification, before or after a Guard failure. Privilege tools and literal privilege-tool invocations through wrappers or inline programs cannot be approved: explicitly ask the user to run the exact displayed command by hand; never evade refusal through wrappers or children. Host access can expose private data to the Provider and modify Arany state; report partial coverage honestly. Never retry automatically.",
+      "description": "Request a host command with no sandbox and a one-sentence justification, before or after a Guard failure. Privilege tools and literal privilege-tool invocations through wrappers or inline programs cannot be approved: explicitly ask the user to run the exact displayed command by hand; never evade refusal through wrappers or children. Host access can expose private data to the Provider and modify Arany state; report partial coverage honestly. Never retry automatically.",
       "name": "arany_command_unguarded",
       "parameters": {
         "additionalProperties": false,
@@ -539,7 +572,14 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, continue at next_offset or narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching files to skip; null starts at 0. Continue using next_offset.",
             "type": [
               "integer",
               "null"
@@ -560,6 +600,7 @@
         "required": [
           "pattern",
           "path",
+          "offset",
           "limit"
         ],
         "type": "object"
@@ -568,7 +609,7 @@
       "type": "function"
     },
     {
-      "description": "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
+      "description": "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Runs Git with the user's configuration; repository hooks never run; asks approval.",
       "name": "arany_git_commit",
       "parameters": {
         "additionalProperties": false,
@@ -600,7 +641,7 @@
       "type": "function"
     },
     {
-      "description": "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
+      "description": "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and upstream status; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
       "name": "arany_git_branch",
       "parameters": {
         "additionalProperties": false,
@@ -660,7 +701,7 @@
       "type": "function"
     },
     {
-      "description": "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
+      "description": "Switch to an existing local branch, updating the changed Workspace files. Refuses from a detached HEAD and whenever Git refuses, such as when it would overwrite local changes or untracked files. Asks approval.",
       "name": "arany_git_switch",
       "parameters": {
         "additionalProperties": false,
@@ -679,7 +720,7 @@
       "type": "function"
     },
     {
-      "description": "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
+      "description": "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file, guarded by its SHA-256 from your latest Read or edit. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
       "name": "arany_multiedit",
       "parameters": {
         "additionalProperties": false,
@@ -715,8 +756,11 @@
             "type": "array"
           },
           "expected_digest": {
-            "description": "Exact lowercase 64-character SHA-256 of the existing file from Read or a file include.",
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "file_path": {
             "type": "string"
@@ -733,15 +777,20 @@
       "type": "function"
     },
     {
-      "description": "Delete one regular Workspace file, guarded by its current SHA-256. Does not delete directories.",
+      "description": "Delete one regular Workspace file, guarded by its SHA-256 from your latest Read or edit. Does not delete directories.",
       "name": "arany_delete",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "expected_digest": {
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "path": {
+            "description": "Workspace-relative regular file to delete.",
             "type": "string"
           }
         },
@@ -764,7 +813,11 @@
             "type": "string"
           },
           "expected_digest": {
-            "type": "string"
+            "description": "Optional: null uses the SHA-256 from your latest Read or edit of source in this Run; supply one only to pin a specific version. Never invent it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source": {
             "type": "string"
@@ -944,6 +997,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative path of the new directory; its parent must exist.",
                             "type": "string"
                           }
                         },
@@ -961,6 +1015,7 @@
                             "type": "string"
                           },
                           "expected_digest": {
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run, or creates a missing file when none is known; supply one only to pin a specific version. Never invent it.",
                             "type": [
                               "string",
                               "null"
@@ -973,6 +1028,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative file to create or replace.",
                             "type": "string"
                           }
                         },
@@ -988,8 +1044,11 @@
                         "additionalProperties": false,
                         "properties": {
                           "expected_digest": {
-                            "description": "Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it.",
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "new": {
                             "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 65536 bytes.",
@@ -1006,6 +1065,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative existing file to edit.",
                             "type": "string"
                           }
                         },
@@ -1021,6 +1081,29 @@
                       {
                         "additionalProperties": false,
                         "properties": {
+                          "additional_reads": {
+                            "additionalProperties": false,
+                            "description": "Optional request, needing the user's approval, to read and execute up to 4 absolute host directories outside the granted set, with a short reason; null for none. Never writable. Directories the user already allowed need no request.",
+                            "properties": {
+                              "justification": {
+                                "type": "string"
+                              },
+                              "paths": {
+                                "items": {
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              }
+                            },
+                            "required": [
+                              "paths",
+                              "justification"
+                            ],
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          },
                           "args": {
                             "items": {
                               "type": "string"
@@ -1068,7 +1151,8 @@
                           "args",
                           "cwd",
                           "resource_class",
-                          "timeout_ms"
+                          "timeout_ms",
+                          "additional_reads"
                         ],
                         "type": "object"
                       },
@@ -1185,8 +1269,11 @@
                             "type": "array"
                           },
                           "expected_digest": {
-                            "description": "Exact lowercase 64-character SHA-256 of the existing file from Read or a file include.",
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "file_path": {
                             "type": "string"
@@ -1210,7 +1297,11 @@
                         "additionalProperties": false,
                         "properties": {
                           "expected_digest": {
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of this file in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "operation": {
                             "enum": [
@@ -1219,6 +1310,7 @@
                             "type": "string"
                           },
                           "path": {
+                            "description": "Workspace-relative regular file to delete.",
                             "type": "string"
                           }
                         },
@@ -1236,7 +1328,11 @@
                             "type": "string"
                           },
                           "expected_digest": {
-                            "type": "string"
+                            "description": "Optional: null uses the SHA-256 from your latest Read or edit of source in this Run; supply one only to pin a specific version. Never invent it.",
+                            "type": [
+                              "string",
+                              "null"
+                            ]
                           },
                           "operation": {
                             "enum": [
@@ -1349,6 +1445,7 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative directory whose immediate entries to list.",
             "type": "string"
           }
         },
@@ -1361,7 +1458,7 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
@@ -1396,7 +1493,7 @@
       "type": "function"
     },
     {
-      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+      "description": "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
       "name": "arany_search",
       "parameters": {
         "additionalProperties": false,
@@ -1430,6 +1527,7 @@
             ]
           },
           "path": {
+            "description": "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
             "type": "string"
           },
           "query": {
@@ -1465,7 +1563,14 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, continue at next_offset or narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching files to skip; null starts at 0. Continue using next_offset.",
             "type": [
               "integer",
               "null"
@@ -1486,6 +1591,7 @@
         "required": [
           "pattern",
           "path",
+          "offset",
           "limit"
         ],
         "type": "object"
@@ -1691,6 +1797,7 @@
         "additionalProperties": false,
         "properties": {
           "path": {
+            "description": "Workspace-relative directory whose immediate entries to list.",
             "type": "string"
           }
         },
@@ -1703,7 +1810,7 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file as numbered lines and get its whole-file SHA-256, which later edits of the file use as their precondition. Prefer one large read (null offset and limit read up to 2000 lines) over many small windows; continue from next_line when present. Use search to find content in large files first.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
@@ -1738,7 +1845,7 @@
       "type": "function"
     },
     {
-      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
+      "description": "Find lines in Workspace files (literal unless regex is true) to locate code before reading. Narrow with a directory path or include glob. Pages hold up to 100 matching lines; continue from next_offset.",
       "name": "arany_search",
       "parameters": {
         "additionalProperties": false,
@@ -1772,6 +1879,7 @@
             ]
           },
           "path": {
+            "description": "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
             "type": "string"
           },
           "query": {
@@ -1856,7 +1964,14 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, continue at next_offset or narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching files to skip; null starts at 0. Continue using next_offset.",
             "type": [
               "integer",
               "null"
@@ -1877,6 +1992,7 @@
         "required": [
           "pattern",
           "path",
+          "offset",
           "limit"
         ],
         "type": "object"

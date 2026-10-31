@@ -25,14 +25,12 @@ impl CommandFixture {
         compile_hook(root, &executable, failure);
         let state = StateRoot::admit(&root.join("state")).unwrap();
         let folder = workspace.metadata().unwrap();
-        let programs = directory.metadata().unwrap();
         state
             .record(arany::RecordKind::WorkspacePermissions)
             .replace(
-                &serde_json::to_vec(&json!({"version":2,"workspaces":[{
+                &serde_json::to_vec(&json!({"workspaces":[{
                     "path":workspace,"device":folder.dev(),"inode":folder.ino(),"mode":"request",
-                    "runtime_grants":[{"kind":"user_programs","manager":"user_directory","version":null,
-                        "path":directory,"device":programs.dev(),"inode":programs.ino()}]
+                    "runtime_grants":[],"git_hooks":null,"repository":null
                 }]}))
                 .unwrap(),
             )
@@ -40,6 +38,19 @@ impl CommandFixture {
         state
             .record(arany::RecordKind::Permissions)
             .replace(br#"{"permissions":{"defaultMode":"default","allow":["Bash"]}}"#)
+            .unwrap();
+        // Every PATH directory is granted, so the programs directory comes from the command environment.
+        let path = [directory.to_str().unwrap(), "/usr/bin", "/bin"];
+        let canonical = serde_json::to_vec(&json!(["process", null, path, [], []])).unwrap();
+        state
+            .record(arany::RecordKind::CommandEnvironment)
+            .replace(
+                &serde_json::to_vec(&json!({
+                    "source":"process","shell":null,"captured_at":0,"path":path,
+                    "names":[],"excluded":[],"sha256":hash(&canonical)
+                }))
+                .unwrap(),
+            )
             .unwrap();
         let tool =
             arany::CommandTool::pin(&state, &workspace, executable.to_str().unwrap(), Vec::new())
@@ -268,6 +279,7 @@ fn command(host: bool, script: &str) -> arany::ToolCall {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         }
     }
 }

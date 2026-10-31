@@ -852,6 +852,72 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
 }
 
 #[tokio::test]
+async fn last_budgeted_primary_call_is_answer_only_and_completes_the_goal() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts");
+    let state_path = temp.path().join("state");
+    let missing = || {
+        crate::tool_outcome(arany::ToolCall::Read {
+            path: "notes/missing.txt".into(),
+            offset: None,
+            limit: None,
+        })
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        missing(),
+        missing(),
+        finish_with("Provider-call budget reached; the facts file is still unread."),
+    ]));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Inspect missing facts and report");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_provider_calls: Some(3),
+            ..Default::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("answered Run");
+    engine.close().await.expect("Engine shutdown");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(
+        provider
+            .requests
+            .lock()
+            .expect("requests")
+            .iter()
+            .map(|request| request.input.final_call)
+            .collect::<Vec<_>>(),
+        [false, false, true],
+        "only the last budgeted call is answer-only and no extra call follows"
+    );
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Completed);
+    assert_eq!(goal.provider_calls, 3);
+    assert!(goal.budget_refusal.is_none());
+    assert!(
+        goal.report
+            .as_ref()
+            .expect("durable report")
+            .unresolved
+            .iter()
+            .any(|fact| fact == "Provider-call budget reached; the final call was answer-only.")
+    );
+}
+
+#[tokio::test]
 async fn refused_answer_on_the_last_allowed_call_is_a_budget_close() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
@@ -1125,34 +1191,10 @@ async fn exhausted_crashed_goal_closes_only_when_its_includes_are_known() {
             Event::RunStarted {
                 run_id,
                 config: arany::RunConfig {
-                    supervisor: None,
-                    worker_policy: None,
-                    agent_definitions: None,
-                    roster: None,
-                    providers: None,
-                    provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                     model: "scripted-model".into(),
-                    effort: None,
-                    custom_profile_provenance: None,
-                    saved_api_account_id: None,
-                    chatgpt_provenance: None,
-                    output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                    context_window_tokens: None,
-                    policy: CollaborationPolicy::Single,
-                    output_token_cap: 4096,
-                    provider_concurrency: 1,
                     workspace_device: identity.device,
                     workspace_inode: identity.inode,
-                    user_instruction_digest: None,
-                    instruction_sources: Vec::new(),
-                    launch_directory: String::new(),
-                    include_digests: Vec::new(),
-                    history_run_ids: Vec::new(),
-                    excluded_history_runs: 0,
-                    context_usage: None,
-                    compaction_event_sequence: None,
-                    compaction_content_digest: None,
-                    tool_policy: None,
+                    ..arany::test_support::run_config()
                 },
                 active_deadline_ms: None,
             },
@@ -1959,34 +2001,10 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
-                supervisor: None,
-                worker_policy: None,
-                agent_definitions: None,
-                roster: None,
-                providers: None,
-                provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                 model: "scripted-model".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                context_window_tokens: None,
-                policy: CollaborationPolicy::Single,
-                output_token_cap: 4096,
-                provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
-                user_instruction_digest: None,
-                instruction_sources: Vec::new(),
-                launch_directory: String::new(),
-                include_digests: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
-                context_usage: None,
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
+                ..arany::test_support::run_config()
             },
             active_deadline_ms: None,
         },
@@ -2203,7 +2221,7 @@ async fn reviewed_write_run(
     for (name, bytes) in [
         (
             "tools.json",
-            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+            &br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
         ),
         (
             "permissions.json",
@@ -2240,10 +2258,11 @@ async fn reviewed_write_run(
         );
     }
     let mut provider = ScriptedProvider::new(vec![
-        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        arany::test_support::scenario::plan_outcome(protected_facts_plan()),
         crate::tool_outcome(facts_read()),
+        // Auto approval reviews only protected paths among Workspace edits.
         crate::tool_outcome(arany::ToolCall::Write {
-            path: "notes/facts.txt".into(),
+            path: "notes/AGENTS.md".into(),
             expected_digest: None,
             content: "v2".into(),
         }),
@@ -2282,10 +2301,7 @@ async fn reviewed_write_run(
     )
     .await;
     engine.close().await.expect("shutdown");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
-        "v1"
-    );
+    assert!(!workspace.join("notes/AGENTS.md").exists());
     replayed(&state_path, session_id).await
 }
 
@@ -2426,4 +2442,11 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
                 .any(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
         );
     }
+}
+
+// Auto approval reviews a Workspace write only on a protected path, so the plan admits one.
+pub(super) fn protected_facts_plan() -> arany::GoalPlanContract {
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.paths.push("notes/AGENTS.md".into());
+    plan
 }

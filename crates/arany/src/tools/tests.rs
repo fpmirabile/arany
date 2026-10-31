@@ -4,7 +4,7 @@ use super::types::*;
 use serde_json::{Value, json};
 
 pub(super) fn config_value() -> Value {
-    json!({"version":1,"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
+    json!({"workspace_paths":["src","Cargo.toml"],"write":false,"commands":[],"skills":[],"mcp":[]})
 }
 
 #[test]
@@ -15,6 +15,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     assert_eq!(
         super::guard_error_cache_update(&command, true),
@@ -82,10 +83,12 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let cleanup = intent(command.clone());
-    let failure = serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#)
-        .expect("closed storage cleanup failure");
+    let failure =
+        serde_json::from_str(r#"{"stage":"storage_cleanup","check":"mount_still_present"}"#)
+            .expect("closed storage cleanup failure");
     let observation = super::uncertain_observation(
         cleanup.clone(),
         super::ToolError::GuardBootstrap(failure),
@@ -97,7 +100,7 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
     );
     assert_eq!(
         crate::test_support::recorded_tool_failure(cleanup.id).as_deref(),
-        Some("Guard stage=storage cleanup check=detach failed")
+        Some("Guard stage=storage cleanup check=mount still present")
     );
     let unstarted = intent(command);
     super::unstarted_observation(
@@ -213,14 +216,18 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         host_settings_admitted: true,
         host_settings_saved: Default::default(),
         guard_available: true,
-        git_writes_available: false,
-        host_authentication: Default::default(),
+        guard_mode: crate::tools::GuardMode::Auto,
+        once_reads: Default::default(),
+        git_environment: None,
+        git_hooks: None,
+        repository: None,
+        human_approvals: false,
         handover: None,
         definitions: Default::default(),
         permissions: None,
         result_filter: None,
         unguarded_rules: None,
-        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        context_limit_bytes: std::sync::Arc::new(MAX_TOOL_CONTEXT_BYTES.into()),
         cache_state: None,
         command_tools: std::sync::Arc::new(super::CommandTools::default()),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
@@ -246,6 +253,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
                 .collect(),
             root: std::sync::Arc::new(root),
             slots: std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IN_PROCESS_READS)),
+            editors: Default::default(),
         }),
         guard_executable: std::path::PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -263,60 +271,20 @@ pub(super) async fn inspect_read(
     runtime: &super::ToolRuntime,
     intent: EffectIntent,
 ) -> ToolObservation {
-    if !runtime.guard_available
-        || !runtime.config.allows(&intent.call)
-        || !super::discovery::possible(&intent.call)
-    {
-        return runtime.execute(intent, super::Cancellation::new()).await;
-    }
-    let root = match runtime.pinned_root(&intent) {
-        Ok(root) => root,
-        Err(error) => return super::unstarted_observation(intent, error),
-    };
-    if super::discovery::exact_search(&root, &intent.call).unwrap_or(true) {
-        return runtime.execute(intent, super::Cancellation::new()).await;
-    }
-    let hidden = runtime.hidden_paths(&intent.call);
-    let result = super::discovery::inspect(super::discovery::Request {
-        root: &root,
-        call: &intent.call,
-        config: &runtime.config,
-        hidden: &|path| hidden.covers(path),
-        result_bytes: intent.limits.result_bytes as usize,
-        deadline: std::time::Instant::now() + super::selection::DISCOVERY_TIME,
-        output: super::discovery::Output::Tool,
-        cancellation: None,
-    });
-    let (disposition, output, enforcement_cause, limit_cause) =
-        super::dispatch::outcome(&intent, result);
-    ToolObservation {
-        spill: None,
-        attestation: Some(Attestation::Guard(super::GuardReceipt {
-            contract_version: 1,
-            intent_digest: intent.digest(),
-            enforcement_digest: intent.enforcement_digest,
-            limits: intent.limits.clone(),
-        })),
-        intent,
-        disposition,
-        output,
-        enforcement_cause,
-        limit_cause,
-        approval_cause: None,
-        guard_stage: None,
-        cache_update: super::CacheUpdate::NotApplicable,
-    }
+    runtime.execute(intent, super::Cancellation::new()).await
 }
 
 pub(super) async fn run_in_process(
     runtime: &super::ToolRuntime,
     call: ToolCall,
 ) -> ToolObservation {
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        call,
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call,
+        )
+        .unwrap();
     inspect_read(runtime, intent).await
 }
 
@@ -325,9 +293,9 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
     let temp = tempfile::tempdir().unwrap();
     let mut runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
-    runtime.context_limit_bytes = 1 << 20;
+    runtime.context_limit_bytes = std::sync::Arc::new((1 << 20).into());
     let limit = runtime.context_limit_bytes();
     let reserve = super::ToolRuntime::step_context_reserve(false, 0);
     let fitted = |overhead: usize| limit.saturating_sub(overhead + 512);
@@ -352,6 +320,63 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
     assert_eq!(runtime.result_capacity(at_floor + 1, reserve), None);
 }
 
+#[test]
+fn guard_mode_without_a_sandbox_keeps_file_tools_and_offers_only_host_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = in_process_runtime(temp.path(), config_value());
+    runtime.guard_available = false;
+    for (mode, fallback) in [
+        (super::GuardMode::Auto, true),
+        (super::GuardMode::Off, true),
+        (super::GuardMode::Required, false),
+    ] {
+        runtime.guard_mode = mode;
+        let context: Value = serde_json::from_str(runtime.context().unwrap().catalog()).unwrap();
+        assert_eq!(context["file_tools"], fallback, "{mode:?}");
+        assert_eq!(context["commands"], json!([]));
+        assert_eq!(context.get("sandbox").is_some(), fallback);
+        let receipt = runtime.receipt();
+        assert_eq!(receipt.guard.host_fallback(), fallback);
+        assert_eq!(
+            receipt.child_unguarded == super::UnguardedGrant::HumanOnly,
+            fallback
+        );
+        assert!(receipt.valid());
+    }
+}
+
+#[test]
+fn extra_reads_need_a_human_once_per_run_and_never_cover_protected_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let tools = std::fs::canonicalize(outside.path()).unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    let command = |path: &std::path::Path| ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "true".into()],
+        cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
+        additional_reads: Some(Box::new(super::types::ReadRequest {
+            paths: vec![path.to_str().unwrap().into()],
+            justification: "Read the shared tools".into(),
+        })),
+    };
+    assert!(runtime.reads_need_approval(&command(&tools)).unwrap());
+    runtime.allow_reads(&command(&tools));
+    assert!(!runtime.reads_need_approval(&command(&tools)).unwrap());
+    assert!(
+        runtime
+            .process_config(&command(&tools))
+            .unwrap()
+            .runtime_grants
+            .iter()
+            .any(|grant| grant.path == tools)
+    );
+    let workspace = std::fs::canonicalize(temp.path()).unwrap();
+    assert!(runtime.reads_need_approval(&command(&workspace)).is_err());
+}
+
 #[tokio::test]
 async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
     let temp = tempfile::tempdir().unwrap();
@@ -366,12 +391,13 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
     assert!(runtime.allows_skill("root"));
     assert!(runtime.context().unwrap().catalog().contains("root skill"));
     runtime.guard_available = false;
+    runtime.guard_mode = super::GuardMode::Required;
     assert!(!runtime.allows_skill("root"));
     let context: serde_json::Value =
         serde_json::from_str(runtime.context().unwrap().catalog()).unwrap();
     assert_eq!(context["commands"], serde_json::json!([]));
     assert_eq!(context["mcp_servers"], serde_json::json!([]));
-    assert_eq!(context["file_tools"], "");
+    assert_eq!(context["file_tools"], false);
     assert_eq!(context["skills"], serde_json::json!([]));
     assert_eq!(context["host_commands"], true);
     assert_eq!(context["write"], false);
@@ -395,6 +421,7 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "Guard",
         ),
@@ -423,6 +450,7 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
             ToolCall::Glob {
                 pattern: "src/*".into(),
                 path: ".".into(),
+                offset: 0,
                 limit: 100,
             },
             "Read",
@@ -475,17 +503,20 @@ fn undispatched_guard_failures_explain_safe_causes_and_recovery() {
             "Check the Guard executable",
         ),
     ] {
-        let intent = runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Command {
-                program: "script".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "script".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         let observation = super::unstarted_observation(intent, error);
         assert_eq!(observation.disposition, ToolDisposition::Failed);
         assert!(observation.attestation.is_none());
@@ -507,17 +538,20 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = in_process_runtime(temp.path(), config_value());
     let command = || {
-        runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Command {
-                program: "script".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        )
+        runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "script".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap()
     };
     for (error, stage, label, disposition, limit_cause, stops_run) in [
         (
@@ -566,6 +600,7 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
         assert_eq!(observation.disposition, disposition);
         assert_eq!(observation.limit_cause, limit_cause);
         assert_eq!(observation.stops_run(), stops_run);
+        assert!(observation.guard_failed_before_dispatch() && !observation.stops_tool_step());
         assert!(
             observation
                 .output
@@ -615,15 +650,17 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
         );
     }
     let read = super::unstarted_observation(
-        runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Read {
-                path: "a".into(),
-                offset: Some(0),
-                limit: Some(10),
-            },
-        ),
+        runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Read {
+                    path: "a".into(),
+                    offset: Some(0),
+                    limit: Some(10),
+                },
+            )
+            .unwrap(),
         ToolError::NotFound,
     );
     assert_eq!(read.guard_stage, None);
@@ -638,28 +675,68 @@ fn selection_boundary_failures_are_named_and_other_variants_keep_their_stage() {
 fn undispatched_resource_limit_remains_a_stopping_limit() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = in_process_runtime(temp.path(), config_value());
-    let intent = runtime.intent(
-        crate::RunId::new(),
-        crate::AgentRunId::new(),
-        ToolCall::Command {
-            program: "script".into(),
-            args: Vec::new(),
-            cwd: ".".into(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let intent = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "script".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     let mut observation = super::unstarted_observation(intent, super::ToolError::Limit);
     assert_eq!(observation.disposition, ToolDisposition::Limit);
     assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
     assert!(observation.attestation.is_none());
     assert!(observation.valid());
-    assert!(observation.stops_run());
+    assert!(observation.stops_run() && !observation.stops_tool_step());
     assert!(observation.output.contains("resource limit"));
     assert!(observation.output.contains("no operation was dispatched"));
     observation.limit_cause = Some(super::LimitCause::RequestedTime);
     assert!(observation.valid());
     assert!(!observation.stops_run());
+}
+
+#[test]
+fn disk_space_limits_keep_their_actionable_text_before_and_after_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    let intent = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "script".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
+    let refusal = "Not enough free disk space for a guarded command: free disk space, then retry.";
+    let observation =
+        super::unstarted_observation(intent.clone(), super::ToolError::DiskSpace(refusal.into()));
+    assert_eq!(observation.disposition, ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
+    assert_eq!(observation.output, refusal);
+    assert!(observation.valid());
+    let stopped = r#"{"exit_code":null,"stderr":"[arany] Command stopped"}"#;
+    assert_eq!(
+        super::dispatch::outcome(&intent, Err(super::ToolError::DiskSpace(stopped.into()))),
+        (
+            ToolDisposition::Limit,
+            stopped.into(),
+            None,
+            Some(super::LimitCause::Resource)
+        )
+    );
 }
 
 #[test]
@@ -675,7 +752,7 @@ fn compaction_readmission_accepts_a_recorded_locale() {
     let tools = state.path().join("tools.json");
     std::fs::write(
         &tools,
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .unwrap();
     std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
@@ -688,7 +765,12 @@ fn compaction_readmission_accepts_a_recorded_locale() {
     let snapshot = super::load_permissions(&state).unwrap().unwrap();
     let mut config = Config::load(&state).unwrap();
     config.discover_skills(&workspace).unwrap();
-    config.bind_environment(&super::CommandEnvironment::load(&state).unwrap());
+    config
+        .bind_environment(&super::CommandEnvironment::load(&state).unwrap(), &[])
+        .unwrap();
+    config.git = super::git::Environment::capture(&workspace, &state.path().join("editors"))
+        .as_ref()
+        .and_then(super::git::resolve);
     assert_eq!(config.locale.len(), 1);
     let mut pin = config.receipt();
     pin.permissions_digest = Some(snapshot.digest);
@@ -715,7 +797,7 @@ fn a_changed_environment_record_changes_the_process_policy_digest() {
         let tools = state.path().join("tools.json");
         std::fs::write(
             &tools,
-            br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
         )
         .unwrap();
         std::fs::set_permissions(&tools, std::os::unix::fs::PermissionsExt::from_mode(0o600))
@@ -747,12 +829,15 @@ fn command_reservations_have_no_separate_selection_allowance() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        call.clone(),
-    );
+    let mut intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call.clone(),
+        )
+        .unwrap();
     for runtime_ms in [1_000, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS] {
         intent.limits.runtime_ms = runtime_ms;
         assert_eq!(

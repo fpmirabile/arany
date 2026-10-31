@@ -11,8 +11,9 @@ mod agent;
 mod worker;
 pub use worker::{WorkerState, WorkerView};
 pub(crate) use worker::{
-    coordination_ready, criterion_unmet_in_view, editor_tool_failed, evidence_admitted,
-    validate_request as validate_editor_request, verification_passed, wave_settled,
+    coordination_ready, criterion_unmet_in_view, editor_integration, editor_tool_failed,
+    evidence_admitted, validate_request as validate_editor_request, verification_passed,
+    wave_settled,
 };
 mod goal;
 mod rewind;
@@ -27,7 +28,8 @@ mod test_support;
 pub use test_support::selection_failure_session;
 mod tool;
 pub(crate) use tool::{
-    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_started,
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_lease,
+    validate_tool_started,
 };
 mod usage;
 pub use usage::{ApiUsage, PlanUsage, TokenCount, UsageGroup, UsageView};
@@ -149,6 +151,27 @@ impl GoalView {
             })
     }
 
+    pub(crate) fn charges_conservatively(&self) -> bool {
+        self.recovered_usage_unknown()
+            || self.uncertain_active_ms > 0
+            || self.unsettled_active_charge_ms() > 0
+    }
+
+    // Settlement re-qualifies a refusal captured mid-Run, so the basis follows the current state.
+    pub(crate) fn qualify_charge(&self, refusal: &mut super::BudgetRefusal) {
+        refusal.charge_basis = if refusal.token_usage_unknown || self.charges_conservatively() {
+            super::BudgetChargeBasis::Conservative
+        } else {
+            super::BudgetChargeBasis::Observed
+        };
+    }
+
+    fn recovered_usage_unknown(&self) -> bool {
+        self.token_usage_unknown
+            || !self.unobserved_provider_calls.is_empty()
+            || self.compaction_call_reserved.is_some()
+    }
+
     pub(crate) fn resume_usage(&self, view: &SessionView) -> GoalUsage {
         let unaccepted_link = self
             .run_ids
@@ -161,9 +184,7 @@ impl GoalView {
                 .active_ms
                 .saturating_add(self.unsettled_active_charge_ms()),
             known_tokens: self.known_tokens,
-            token_usage_unknown: self.token_usage_unknown
-                || !self.unobserved_provider_calls.is_empty()
-                || self.compaction_call_reserved.is_some(),
+            token_usage_unknown: self.recovered_usage_unknown(),
         }
     }
 
@@ -608,7 +629,7 @@ impl ToolView {
     pub(crate) fn settled_without_stop(&self) -> bool {
         self.observation
             .as_ref()
-            .is_some_and(|observation| !observation.stops_run())
+            .is_some_and(|observation| !observation.stops_tool_step())
             && self.hooks_settled()
     }
 
@@ -625,6 +646,21 @@ impl ToolView {
                     .permission_verdict
                     .as_ref()
                     .is_some_and(|verdict| verdict.approved),
+            }
+    }
+
+    /// A native Git write that may have changed the repository: attested, uncertain or started without an outcome.
+    pub fn ran_git_write(&self) -> bool {
+        self.intent.call.facts().site == crate::tools::catalog::Site::Git
+            && self.intent.call.mutates()
+            && match &self.observation {
+                Some(observation) => {
+                    matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Git(_))
+                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
+                }
+                None => self.started_sequence.is_some(),
             }
     }
 
@@ -818,7 +854,7 @@ impl RunView {
             .rev()
             .find(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
-                    observation.stops_run()
+                    observation.stops_tool_step()
                         || tool.active_time_reserved
                             && observation.disposition == crate::tools::ToolDisposition::Limit
                         || matches!(

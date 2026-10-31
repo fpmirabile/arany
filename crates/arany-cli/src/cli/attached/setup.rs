@@ -215,7 +215,7 @@ pub(super) async fn admit_history(
     let mut reset_attempted = false;
     let mut uncertain = false;
     loop {
-        let root = match crate::files::open_optional_state(state_dir) {
+        let root = match arany::StateRoot::open_optional(state_dir) {
             Ok(None) => return Ok(ready(reset_attempted)),
             Ok(Some(_)) => StateRoot::admit(state_dir),
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -244,25 +244,7 @@ pub(super) async fn admit_history(
         let reason = if uncertain {
             "Reset may be incomplete; check storage access and retry."
         } else {
-            match reset.as_ref().err().unwrap_or(&error).history_recovery() {
-                HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
-                HistoryRecovery::Damaged => "Saved history is damaged.",
-                HistoryRecovery::ArchiveConflict => {
-                    "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
-                }
-                HistoryRecovery::MigrationConflict => {
-                    "An interrupted history migration no longer matches its files; inspect the migrations folder in the state directory."
-                }
-                HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
-                HistoryRecovery::Changed => "History changed during recovery; retry.",
-                HistoryRecovery::StorageFull => "Storage is full; free space and retry.",
-                HistoryRecovery::Inaccessible | HistoryRecovery::InvalidStateDirectory => {
-                    "History files are unsafe or inaccessible; check permissions and retry."
-                }
-                HistoryRecovery::Unavailable => {
-                    "History cannot be opened; check storage access and retry."
-                }
-            }
+            recovery_reason(reset.as_ref().err().unwrap_or(&error).history_recovery())
         };
         let reset = reset.ok().flatten();
         let instruction = if reset.is_some() {
@@ -292,6 +274,23 @@ pub(super) async fn admit_history(
             }
             _ => return Ok(HistoryAdmission::Exit),
         }
+    }
+}
+
+fn recovery_reason(recovery: HistoryRecovery) -> &'static str {
+    match recovery {
+        HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
+        HistoryRecovery::Damaged => "Saved history is damaged.",
+        HistoryRecovery::ArchiveConflict => {
+            "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
+        }
+        HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
+        HistoryRecovery::Changed => "History changed during recovery; retry.",
+        HistoryRecovery::StorageFull => "Storage is full; free space and retry.",
+        HistoryRecovery::Inaccessible | HistoryRecovery::InvalidStateDirectory => {
+            "History files are unsafe or inaccessible; check permissions and retry."
+        }
+        HistoryRecovery::Unavailable => "History cannot be opened; check storage access and retry.",
     }
 }
 
@@ -400,12 +399,6 @@ pub(super) async fn resolve(
     journal: &mut SetupJournal,
     current: &SessionDefaults,
 ) -> Result<Option<SetupSelection>, SetupError> {
-    if super::models::preferences_need_reset(workspace)?
-        && !native::reset_saved_setup(terminal, workspace, credentials::SetupData::Models, journal)
-            .await?
-    {
-        return Ok(None);
-    }
     let Some(access) = choose(
         terminal,
         1,

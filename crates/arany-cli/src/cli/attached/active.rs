@@ -77,13 +77,13 @@ pub(super) fn validate_objective_inputs(
         return Ok(());
     }
     let paths = objective_includes(admission, objective)?;
-    validate_include_paths(admission, &paths)
+    validate_include_paths(admission, &paths).map(drop)
 }
 
 fn validate_include_paths(
     admission: &Admission,
     paths: &[std::path::PathBuf],
-) -> Result<(), String> {
+) -> Result<Vec<arany::PartialInclude>, String> {
     let root = arany::StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     arany::validate_workspace_inputs(
@@ -113,6 +113,7 @@ pub(super) fn goal_request(
             .interrupted_goal_id()
             .map(|id| arany::GoalRequest {
                 resource_settings: settings.resources,
+                context_window: settings.context_window,
                 ..arany::GoalRequest::resume(id, true)
             })
             .ok_or_else(|| "No interrupted Goal is available to resume".into());
@@ -126,8 +127,9 @@ pub(super) fn goal_request(
     if start == GoalStart::Continue {
         return view
             .continuable_goal()
-            .map(|source| {
-                arany::GoalRequest::continue_from(
+            .map(|source| arany::GoalRequest {
+                context_window: settings.context_window,
+                ..arany::GoalRequest::continue_from(
                     source.id,
                     settings.goal_budget,
                     settings.resources,
@@ -143,6 +145,7 @@ pub(super) fn goal_request(
     };
     request.budget = Some(settings.goal_budget);
     request.resource_settings = settings.resources;
+    request.context_window = settings.context_window;
     Ok(request)
 }
 
@@ -150,10 +153,11 @@ pub(super) fn preflight_idle_run(
     admission: &Admission,
     view: &SessionView,
     start: GoalStart,
-    draft: &str,
-    has_images: bool,
+    composer: &Composer,
     linear: bool,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
+    let draft = &composer.editable_text();
+    let has_images = !composer.images().is_empty();
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Err("Use /setup to choose an account".into());
     };
@@ -203,6 +207,7 @@ pub(super) fn preflight_idle_run(
     .map_err(|error| format!("Error: {error}"))?;
     submission_includes(admission, view, start, draft)
         .and_then(|paths| validate_include_paths(admission, &paths))
+        .map(|partial| include_notice(&partial))
         .map_err(|error| {
             format!(
                 "Error: {error}; {}",
@@ -213,6 +218,30 @@ pub(super) fn preflight_idle_run(
                 }
             )
         })
+}
+
+fn include_notice(partial: &[arany::PartialInclude]) -> Option<String> {
+    let parts: Vec<_> = partial
+        .iter()
+        .map(|include| match include.fit {
+            arany::IncludeFit::Head { total_bytes, .. } => format!(
+                "{} ({}) attached partially",
+                include.path,
+                crate::presentation::format_bytes(total_bytes)
+            ),
+            arany::IncludeFit::Reference {
+                total_bytes: Some(total_bytes),
+            } => format!(
+                "{} ({}) attached by reference",
+                include.path,
+                crate::presentation::format_bytes(total_bytes)
+            ),
+            arany::IncludeFit::Reference { total_bytes: None } | arany::IncludeFit::Whole => {
+                format!("{} attached by reference", include.path)
+            }
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("{}; the model reads the rest", parts.join("; ")))
 }
 
 pub(super) struct PendingSubmission<'a> {
@@ -305,10 +334,12 @@ impl SubmissionFinish<'_> {
                 None => Err(error),
                 Some(submitted) => {
                     super::reconcile_failed_submission(
-                        ui.terminal,
+                        super::run::RunUi {
+                            terminal: ui.terminal,
+                            view: ui.view,
+                            composer: ui.composer,
+                        },
                         &self.admission.state_dir,
-                        ui.view,
-                        ui.composer,
                         submitted,
                         starting_sequence,
                     )
@@ -383,7 +414,7 @@ async fn admit_submission<'a>(
     };
     let editable = preparation_text(&objective, draft);
     let include_paths = submission_includes(admission, ui.view, goal, &editable)?;
-    let execution_settings = super::controls::settings_or_defaults(admission).await?;
+    let execution_settings = super::controls::restore_settings(admission).await?;
     let goal = goal_request(ui.view, goal, execution_settings)?;
     let (progress, inbox) = RunProgress::new(admission, ui, starting_sequence, autonomous, goal.id);
     let request = RunRequest {
@@ -430,7 +461,7 @@ async fn finish_interrupted_run(
         .interrupted_goal_id()
         .and_then(|id| ui.view.goal(id))
         .filter(|goal| goal.started_sequence > starting_sequence)
-        .map(|goal| paused_goal_notice(goal.admits_resume(ui.view)));
+        .map(|goal| paused_goal_notice(goal, ui.view));
     let interrupted = started_goal_paused.unwrap_or(
         "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.",
     );
@@ -526,7 +557,7 @@ impl CompletedRun<'_> {
 
     fn feedback(&self, view: &SessionView) -> Option<String> {
         // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
-        let run_feedback = crate::presentation::session_run_feedback(view, &self.outcome.run);
+        let run_feedback = crate::presentation::interactive_run_feedback(view, &self.outcome.run);
         let run_feedback = match self.stop {
             Some(reason) => Some(match run_feedback {
                 Some(feedback) => {
@@ -540,7 +571,7 @@ impl CompletedRun<'_> {
         let paused_goal = view
             .goal(self.outcome.goal_id)
             .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
-            .map(|goal| paused_goal_notice(goal.admits_resume(view)));
+            .map(|goal| paused_goal_notice(goal, view));
         submission_notice(
             paused_goal,
             self.outcome.run.status,
@@ -590,10 +621,12 @@ impl CompletedRun<'_> {
         };
         let compaction_notice = match compact_current(
             self.engine,
-            ui.terminal,
             self.admission,
-            ui.view,
-            ui.composer,
+            RunUi {
+                terminal: ui.terminal,
+                view: ui.view,
+                composer: ui.composer,
+            },
             Some((config, self.outcome.run.id)),
         )
         .await?
@@ -653,12 +686,16 @@ impl CompletedRun<'_> {
 
 pub(super) async fn compact_current(
     engine: &arany::Engine,
-    terminal: &mut AttachedTerminal,
     admission: &Admission,
-    view: &SessionView,
-    composer: &mut Composer,
+    ui: RunUi<'_>,
     pinned: Option<(&arany::RunConfig, arany::RunId)>,
 ) -> Result<CompactionOutcome, String> {
+    let RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
+    let view: &SessionView = view;
     let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
         view.runs
             .last()
@@ -685,15 +722,10 @@ pub(super) async fn compact_current(
         .map_err(|error| error.to_string())?;
     let future = run::compact_selected(
         engine,
-        &admission.state_dir,
+        admission,
         selection,
-        view.id,
-        &admission.workspace,
+        view,
         pinned.map(|(_, run_id)| run_id),
-        view.runs
-            .last()
-            .and_then(|run| run.config.as_ref())
-            .filter(|config| config.roster.is_some()),
     );
     drive_compaction(
         future,
@@ -1066,8 +1098,7 @@ mod tests {
             recent_files: Vec::new(),
             provider: "openai".into(),
             model: "gpt-5.4".into(),
-            prompt_version: 1,
-            schema_version: 1,
+            prompt: arany::EffectivePrompts::default().pin(arany::PromptFile::Compaction),
             compiler_version: 4,
             source_bytes: 4,
             source_tokens_estimate: 1,
@@ -1287,6 +1318,7 @@ mod goal_request_tests {
                 goal_request(&view, GoalStart::Resume, settings),
                 Ok(arany::GoalRequest {
                     resource_settings: settings.resources,
+                    context_window: settings.context_window,
                     ..arany::GoalRequest::resume(id, true)
                 })
             );
@@ -1298,6 +1330,36 @@ mod goal_request_tests {
         let autonomous = goal_request(&view, GoalStart::Autonomous, Default::default())
             .expect("autonomous start");
         assert!(autonomous.autonomous);
+    }
+
+    #[test]
+    fn partial_includes_become_one_notice() {
+        assert_eq!(include_notice(&[]), None);
+        let partial = [
+            arany::PartialInclude {
+                path: "src/terminal.rs".into(),
+                fit: arany::IncludeFit::Head {
+                    total_bytes: 212 * 1024,
+                    next_line: 3001,
+                },
+            },
+            arany::PartialInclude {
+                path: "big.log".into(),
+                fit: arany::IncludeFit::Reference {
+                    total_bytes: Some(2048),
+                },
+            },
+            arany::PartialInclude {
+                path: "docs/".into(),
+                fit: arany::IncludeFit::Reference { total_bytes: None },
+            },
+        ];
+        assert_eq!(
+            include_notice(&partial).as_deref(),
+            Some(
+                "src/terminal.rs (212.0 KB) attached partially; big.log (2.0 KB) attached by reference; docs/ attached by reference; the model reads the rest"
+            )
+        );
     }
 
     #[test]
@@ -1330,8 +1392,14 @@ mod goal_request_tests {
             resume_goal: None,
         };
         view.goals.clear();
-        let message = preflight_idle_run(&admission, &view, GoalStart::Resume, "", false, false)
-            .expect_err("no interrupted Goal to resume");
+        let message = preflight_idle_run(
+            &admission,
+            &view,
+            GoalStart::Resume,
+            &Composer::default(),
+            false,
+        )
+        .expect_err("no interrupted Goal to resume");
         assert_eq!(message, "Error: No interrupted Goal is available to resume");
         assert!(
             !admission.state_dir.exists(),

@@ -11,7 +11,7 @@ use crate::terminal::{
     AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand,
     Submission, TerminalInput, TerminalMode, transcript_agents,
 };
-use arany::{Engine, SessionId, SessionView, native_protection_supported};
+use arany::{Engine, SessionId, SessionView};
 use std::{io::Write, time::Instant};
 
 pub(super) struct AttachedSession {
@@ -62,7 +62,8 @@ enum Routed {
 }
 
 enum SubmissionAdmission {
-    Ready,
+    // Carries a notice for includes attached only in part or by reference.
+    Ready(Option<String>),
     Rejected,
 }
 
@@ -145,20 +146,13 @@ impl AttachedSession {
         {
             self.ui.notice = Some(Feedback::History(text.into()));
         }
-        let migration_notice = crate::accounts::chatgpt::take_migration_notice();
-        if let Some(notice) = migration_notice {
-            append_notice(&mut self.ui.notice, notice);
-        }
-        if let Err(error) = self.terminal.draw_notice(
-            &self.view,
-            &self.composer,
-            self.ui.notice.as_ref().map(Feedback::notice),
-        ) {
-            if migration_notice.is_some() {
-                crate::accounts::chatgpt::record_migration_notice();
-            }
-            return Err(error.to_string());
-        }
+        self.terminal
+            .draw_notice(
+                &self.view,
+                &self.composer,
+                self.ui.notice.as_ref().map(Feedback::notice),
+            )
+            .map_err(|error| error.to_string())?;
         let archive_drawn =
             archive_notice_drawn(self.ui.notice.as_ref(), self.ui.archive_notice.as_deref());
         self.ui.notice = self
@@ -304,17 +298,7 @@ impl AttachedSession {
                     .into(),
                 ));
             } else {
-                self.ui.notice = Some(Feedback::History(
-                    rewind::open(
-                        &self.engine,
-                        &mut self.terminal,
-                        &self.admission,
-                        &mut self.session_id,
-                        &mut self.view,
-                        &mut self.composer,
-                    )
-                    .await?,
-                ));
+                self.rewind().await?;
             }
         } else {
             self.ui.idle_escape = Some(Instant::now());
@@ -388,6 +372,7 @@ impl AttachedSession {
             | TerminalInput::QuickActions
             | TerminalInput::HistoryFind
             | TerminalInput::HistoryLive
+            | TerminalInput::Refresh
             | TerminalInput::Transcript
             | TerminalInput::AgentPrevious
             | TerminalInput::AgentNext
@@ -448,7 +433,15 @@ impl AttachedSession {
             return Ok(IdleAction::Continue);
         }
         match self.validate_submission() {
-            SubmissionAdmission::Ready => {}
+            SubmissionAdmission::Ready(None) => {}
+            SubmissionAdmission::Ready(Some(notice)) => self
+                .terminal
+                .draw_notice(
+                    &self.view,
+                    &self.composer,
+                    Some(crate::terminal::TerminalNotice::History(&notice)),
+                )
+                .map_err(|error| error.to_string())?,
             SubmissionAdmission::Rejected => {
                 self.ui.empty_interrupt = None;
                 return Ok(IdleAction::Continue);
@@ -502,8 +495,7 @@ impl AttachedSession {
                     &self.admission,
                     &self.view,
                     start,
-                    &self.composer.editable_text(),
-                    !self.composer.images().is_empty(),
+                    &self.composer,
                     self.terminal.is_linear(),
                 )
             }
@@ -520,6 +512,7 @@ impl AttachedSession {
                     Err("Error: Submit or clear image attachments before switching Sessions".into())
                 } else {
                     controls::validate_idle_command(&self.view, command, argument)
+                        .map(|()| None)
                         .map_err(|error| format!("Error: {error}"))
                 }
             }
@@ -527,13 +520,12 @@ impl AttachedSession {
                 &self.admission,
                 &self.view,
                 GoalStart::Plain,
-                &self.composer.editable_text(),
-                !self.composer.images().is_empty(),
+                &self.composer,
                 self.terminal.is_linear(),
             ),
         };
         match validation {
-            Ok(()) => SubmissionAdmission::Ready,
+            Ok(notice) => SubmissionAdmission::Ready(notice),
             Err(message) => {
                 self.ui.notice = Some(Feedback::History(message));
                 self.discard_linear_command();
@@ -642,36 +634,17 @@ impl AttachedSession {
                 });
             }
             InteractiveCommand::Transcript => self.transcript(argument).await?,
-            InteractiveCommand::Settings => self.settings().await?,
+            InteractiveCommand::Settings => self.settings(controls::Panel::Settings).await?,
+            InteractiveCommand::Limits => self.settings(controls::Panel::Limits).await?,
             InteractiveCommand::Permissions => return self.permissions().await,
-            InteractiveCommand::Setup => {
-                self.ui.notice = Some(
-                    configure_account(
-                        &mut self.terminal,
-                        &mut self.admission,
-                        &mut self.session_id,
-                        &mut self.view,
-                        &mut self.composer,
-                    )
-                    .await?,
-                );
-            }
+            InteractiveCommand::Setup => self.setup().await?,
             InteractiveCommand::Usage | InteractiveCommand::Status => {
                 self.terminal
                     .open_usage(&self.view, command == InteractiveCommand::Status, None)
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            InteractiveCommand::Storage => {
-                crate::cli::storage::attached(
-                    &mut self.terminal,
-                    (&self.admission.workspace, self.admission.workspace_identity),
-                    self.admission.state_dir.clone(),
-                    &self.view,
-                    &mut self.composer,
-                )
-                .await?;
-            }
+            InteractiveCommand::Storage => self.storage().await?,
             InteractiveCommand::Help => {
                 self.terminal
                     .open_help(&self.view)
@@ -682,11 +655,15 @@ impl AttachedSession {
                 self.select(Selector::Resume).await?
             }
             InteractiveCommand::Compact => return self.compact().await,
-            InteractiveCommand::Model | InteractiveCommand::Agents if argument.is_none() => {
-                self.select(if command == InteractiveCommand::Agents {
-                    Selector::Agents
-                } else {
-                    Selector::Models
+            InteractiveCommand::Model | InteractiveCommand::Agents
+                if argument.is_none()
+                    || command == InteractiveCommand::Model
+                        && argument == Some(super::models::REFRESH_ARGUMENT) =>
+            {
+                self.select(match (command, argument) {
+                    (InteractiveCommand::Agents, _) => Selector::Agents,
+                    (_, None) => Selector::Models(super::models::ModelOpen::Cached),
+                    (_, Some(_)) => Selector::Models(super::models::ModelOpen::Refresh),
                 })
                 .await?;
             }
@@ -705,14 +682,42 @@ impl AttachedSession {
         Ok(IdleAction::Continue)
     }
 
-    async fn settings(&mut self) -> Result<(), String> {
+    async fn setup(&mut self) -> Result<(), String> {
+        self.ui.notice = Some(
+            configure_account(
+                &mut self.terminal,
+                &mut self.admission,
+                &mut self.session_id,
+                &mut self.view,
+                &mut self.composer,
+            )
+            .await?,
+        );
+        Ok(())
+    }
+
+    async fn storage(&mut self) -> Result<(), String> {
+        crate::cli::storage::attached(
+            &mut self.terminal,
+            (&self.admission.workspace, self.admission.workspace_identity),
+            self.admission.state_dir.clone(),
+            &self.view,
+            &mut self.composer,
+        )
+        .await
+    }
+
+    async fn settings(&mut self, panel: controls::Panel) -> Result<(), String> {
         self.ui.notice = Some(Feedback::History(
             controls::settings(
-                &mut self.terminal,
+                super::run::RunUi {
+                    terminal: &mut self.terminal,
+                    view: &mut self.view,
+                    composer: &mut self.composer,
+                },
                 &self.admission,
-                &mut self.composer,
                 &mut self.ui.saved_view,
-                &self.view,
+                panel,
             )
             .await?,
         ));
@@ -723,11 +728,13 @@ impl AttachedSession {
         self.ui.notice = Some(Feedback::History(
             rewind::open(
                 &self.engine,
-                &mut self.terminal,
                 &self.admission,
                 &mut self.session_id,
-                &mut self.view,
-                &mut self.composer,
+                super::run::RunUi {
+                    terminal: &mut self.terminal,
+                    view: &mut self.view,
+                    composer: &mut self.composer,
+                },
             )
             .await?,
         ));
@@ -794,11 +801,13 @@ impl AttachedSession {
         self.ui.notice = run_selector(
             &self.engine,
             selector,
-            &mut self.terminal,
             &mut self.admission,
             &mut self.session_id,
-            &mut self.view,
-            &mut self.composer,
+            super::run::RunUi {
+                terminal: &mut self.terminal,
+                view: &mut self.view,
+                composer: &mut self.composer,
+            },
         )
         .await
         .transpose()
@@ -816,10 +825,12 @@ impl AttachedSession {
         }
         let maintenance = match compact_current(
             &self.engine,
-            &mut self.terminal,
             &self.admission,
-            &self.view,
-            &mut self.composer,
+            super::run::RunUi {
+                terminal: &mut self.terminal,
+                view: &mut self.view,
+                composer: &mut self.composer,
+            },
             None,
         )
         .await?
@@ -851,50 +862,32 @@ impl AttachedSession {
         self.engine
             .revoke_host_approvals()
             .map_err(|error| error.to_string())?;
-        match permissions::choose_area(&mut self.terminal).await? {
-            None => {
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History("Permissions unchanged".into()));
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::TypedGitRules) => {
-                let summary = permissions::manage_rules(
+        // Rule edits that change what host commands may do readmit host permissions.
+        let (summary, readmit) = match permissions::choose_area(&mut self.terminal).await? {
+            None => ("Permissions unchanged".into(), false),
+            Some(permissions::PermissionArea::FolderTrust) => return self.folder_trust().await,
+            Some(permissions::PermissionArea::TypedGitRules) => (
+                permissions::manage_rules(
                     &mut self.terminal,
                     &self.admission.state_dir,
                     &self.admission.workspace,
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::HostRules) => {
-                let summary = permissions::manage_host_rules(
-                    &mut self.terminal,
-                    &self.admission.state_dir,
-                    &self.admission.workspace,
-                    &self.view,
-                )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                match summary {
-                    permissions::HostRuleEditOutcome::Confirmed(summary) => {
-                        self.ui.notice = Some(Feedback::History(summary));
-                        readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                    }
-                    permissions::HostRuleEditOutcome::Uncertain => self.ui.notice = Some(Feedback::History("Host rule save is uncertain; reopen /permissions to verify. Nothing dispatched.".into())),
-                }
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::CommandEnvironment) => {
-                let outcome = permissions::manage_command_environment(
+                .await?,
+                true,
+            ),
+            Some(permissions::PermissionArea::HostRules) => match permissions::manage_host_rules(
+                &mut self.terminal,
+                &self.admission.state_dir,
+                &self.admission.workspace,
+                &self.view,
+            )
+            .await?
+            {
+                permissions::HostRuleEditOutcome::Confirmed(summary) => (summary, true),
+                permissions::HostRuleEditOutcome::Uncertain => ("Host rule save is uncertain; reopen /permissions to verify. Nothing dispatched.".into(), false),
+            },
+            Some(permissions::PermissionArea::CommandEnvironment) => (
+                permissions::manage_command_environment(
                     &mut self.terminal,
                     permissions::EnvironmentSession {
                         engine: &self.engine,
@@ -903,62 +896,66 @@ impl AttachedSession {
                         view: &mut self.view,
                     },
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(outcome.summary()));
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::CommandTools) => {
-                let summary = permissions::manage_command_tools(
+                .await?
+                .summary(),
+                false,
+            ),
+            Some(permissions::PermissionArea::CommandTools) => (
+                permissions::manage_command_tools(
                     &mut self.terminal,
                     &self.engine,
                     &self.admission,
                     &mut self.session_id,
                     &mut self.view,
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                return Ok(IdleAction::Handled);
-            }
-            Some(permissions::PermissionArea::NetworkDomains) => {
-                let summary = permissions::manage_network_rules(
+                .await?,
+                false,
+            ),
+            Some(permissions::PermissionArea::NetworkDomains) => (
+                permissions::manage_network_rules(
                     &mut self.terminal,
                     &self.admission.state_dir,
                     &self.admission.workspace,
                     &self.view,
                 )
-                .await?;
-                self.terminal
-                    .restore_draft_input(self.composer.input_capacity())
-                    .map_err(|error| error.to_string())?;
-                self.ui.notice = Some(Feedback::History(summary));
-                readmit_host_permissions(&self.engine, &mut self.ui.notice);
-                return Ok(IdleAction::Handled);
+                .await?,
+                true,
+            ),
+            Some(permissions::PermissionArea::GitHooks) => {
+                (self.git_hooks().await?, false)
             }
-            Some(permissions::PermissionArea::FolderTrust) => {}
+        };
+        self.terminal
+            .restore_draft_input(self.composer.input_capacity())
+            .map_err(|error| error.to_string())?;
+        self.ui.notice = Some(Feedback::History(summary));
+        if readmit {
+            readmit_host_permissions(&self.engine, &mut self.ui.notice);
         }
+        Ok(IdleAction::Handled)
+    }
 
+    async fn git_hooks(&mut self) -> Result<String, String> {
+        Ok(match self.admission.workspace_permissions.as_mut() {
+            Some(access) => permissions::ask_git_hooks(
+                &mut self.terminal,
+                access,
+                &self.admission.state_dir,
+                true,
+            )
+            .await?
+            .unwrap_or_else(|| "Git hooks unchanged".into()),
+            None => "Trust this folder before choosing its Git hooks".into(),
+        })
+    }
+
+    async fn folder_trust(&mut self) -> Result<IdleAction, String> {
         let access = match self.choose_folder_permissions().await? {
             FolderPermissions::Selected(access) => access,
             FolderPermissions::Handled => return Ok(IdleAction::Handled),
             FolderPermissions::Close => return Ok(IdleAction::Close),
         };
-        self.ui.notice = Some(Feedback::History(if !native_protection_supported() {
-            format!(
-                "Folder {} · {}",
-                if access.is_trusted() {
-                    "trusted"
-                } else {
-                    "read only"
-                },
-                permissions::UNAVAILABLE_NOTICE
-            )
-        } else if access.is_trusted() {
+        self.ui.notice = Some(Feedback::History(if access.is_trusted() {
             format!(
                 "Folder trusted · {} · Shift+Tab changes mode",
                 access.mode().label()

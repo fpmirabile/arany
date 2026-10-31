@@ -19,7 +19,7 @@ impl WebCase {
     fn fetch(url: String) -> Self {
         Self {
             calls: vec![ToolCall::WebFetch { url }],
-            config: json!({"version":1,"workspace_paths":["src"],"write":false,
+            config: json!({"workspace_paths":["src"],"write":false,
                 "commands":[],"skills":[],"mcp":[],"network":{"allow":["127.0.0.1"]}}),
             permissions: json!({"permissions":{}}),
             decisions: Vec::new(),

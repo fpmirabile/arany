@@ -1,13 +1,13 @@
 use super::select::{ProviderArg, Selection, SelectionError, select_provider};
 use arany::{
     AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderKind, ProviderRecord,
-    ProviderRole, Providers, RecordFormat, RecordKind, RecordStep, StateRoot,
+    ProviderRole, Providers, RecordFormat, RecordKind, StateRoot,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::Path, str::FromStr, sync::Arc};
 use uuid::{Uuid, Version};
 
-pub(crate) const MAX_ROLE_MODEL_BYTES: usize = 128;
+pub(crate) const MAX_ROLE_MODEL_BYTES: usize = arany::MAX_MODEL_ID_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RoutingError {
@@ -21,8 +21,6 @@ pub(crate) enum RoutingError {
     ChatGptAccountAndEffortRequired,
     #[error("invalid provider-routing.json")]
     InvalidConfiguration,
-    #[error("unsupported Provider routing version")]
-    UnsupportedVersion,
     #[error("Provider role needs one route and at most two fallbacks")]
     InvalidRouteCount,
     #[error("duplicate Provider role route")]
@@ -49,7 +47,6 @@ pub(crate) enum RoutingError {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoutingConfig {
-    version: u8,
     providers: Providers<Option<Vec<Route>>>,
 }
 
@@ -108,7 +105,8 @@ pub(crate) struct RoutingDraft {
 impl RoutingDraft {
     pub(crate) fn load(state: &StateRoot) -> Result<Self, RoutingError> {
         let expected = state
-            .read_current(&PROVIDER_ROUTING)
+            .record(PROVIDER_ROUTING.kind)
+            .read()
             .map_err(|_| RoutingError::RoutingUnavailable)?;
         let providers = match &expected {
             Some(bytes) => parse(bytes)?.providers,
@@ -139,12 +137,8 @@ impl RoutingDraft {
                 route.resolve_effort()?;
             }
         }
-        let bytes = serde_json::to_vec(&RoutingConfig {
-            version: u8::try_from(PROVIDER_ROUTING.current)
-                .map_err(|_| RoutingError::InvalidConfiguration)?,
-            providers,
-        })
-        .map_err(|_| RoutingError::InvalidConfiguration)?;
+        let bytes = serde_json::to_vec(&RoutingConfig { providers })
+            .map_err(|_| RoutingError::InvalidConfiguration)?;
         let config = parse(&bytes)?;
         if config
             .providers
@@ -192,33 +186,8 @@ impl Route {
 
 pub(crate) const PROVIDER_ROUTING: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRouting,
-    field: "version",
-    floor: 1,
-    current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_routing,
-    }],
     accepts: |bytes| parse(bytes).is_ok(),
 };
-
-pub(super) fn migrate_route(route: &mut serde_json::Value) -> Option<()> {
-    let provider = ProviderRecord::parse(route.get("provider")?.as_str()?)?;
-    route["provider"] = serde_json::to_value(provider).ok()?;
-    Some(())
-}
-
-fn migrate_routing(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    for chain in value.get_mut("providers")?.as_object_mut()?.values_mut() {
-        if !chain.is_null() {
-            for route in chain.as_array_mut()? {
-                migrate_route(route)?;
-            }
-        }
-    }
-    value["version"] = PROVIDER_ROUTING.current.into();
-    Some(value)
-}
 
 pub(crate) fn references_custom_profile(
     state_dir: &Path,
@@ -226,7 +195,8 @@ pub(crate) fn references_custom_profile(
 ) -> Result<bool, RoutingError> {
     let state = StateRoot::open_existing(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
     let Some(bytes) = state
-        .read_current(&PROVIDER_ROUTING)
+        .record(PROVIDER_ROUTING.kind)
+        .read()
         .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
         return Ok(false);
@@ -244,9 +214,6 @@ pub(crate) fn references_custom_profile(
 fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {
     let config: RoutingConfig =
         serde_json::from_slice(bytes).map_err(|_| RoutingError::InvalidConfiguration)?;
-    if u64::from(config.version) != PROVIDER_ROUTING.current {
-        return Err(RoutingError::UnsupportedVersion);
-    }
     for chain in config.providers.values().into_iter().flatten() {
         if chain.is_empty() || chain.len() > MAX_PROVIDER_FALLBACKS + 1 {
             return Err(RoutingError::InvalidRouteCount);
@@ -268,7 +235,8 @@ pub(crate) async fn configured_providers(
 ) -> Result<AdmittedProviders, RoutingError> {
     let root = StateRoot::admit(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
     let Some(bytes) = root
-        .read_current(&PROVIDER_ROUTING)
+        .record(PROVIDER_ROUTING.kind)
+        .read()
         .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
         return Ok(AdmittedProviders::single(primary));
@@ -439,10 +407,6 @@ mod tests {
                 "invalid provider-routing.json",
             ),
             (
-                RoutingError::UnsupportedVersion,
-                "unsupported Provider routing version",
-            ),
-            (
                 RoutingError::InvalidRouteCount,
                 "Provider role needs one route and at most two fallbacks",
             ),
@@ -487,19 +451,13 @@ mod tests {
     #[test]
     fn routing_configuration_is_closed_and_bounded() {
         let route = serde_json::json!({"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null});
-        let valid = serde_json::json!({"version":2,"providers":{"primary":null,"child":[route.clone()],"review":null,"compaction":null}});
+        let valid = serde_json::json!({"providers":{"primary":null,"child":[route.clone()],"review":null,"compaction":null}});
         assert!(parse(&serde_json::to_vec(&valid).unwrap()).is_ok());
         let mut legacy = valid.clone();
-        legacy["version"] = 1.into();
+        legacy["version"] = 2.into();
         legacy["providers"]["child"][0]["provider"] = "custom:exact-name".into();
-        let upgraded = PROVIDER_ROUTING
-            .upgrade(&serde_json::to_vec(&legacy).unwrap())
-            .unwrap();
-        let reopened = parse(&upgraded).unwrap();
-        assert_eq!(
-            reopened.providers.child.unwrap()[0].provider.profile(),
-            "custom:exact-name"
-        );
+        let legacy = serde_json::to_vec(&legacy).unwrap();
+        assert!(!(PROVIDER_ROUTING.accepts)(&legacy));
         for provider in [
             serde_json::json!({"kind":"custom","custom_name":null}),
             serde_json::json!({"kind":"openai","custom_name":"exact-name"}),
@@ -509,12 +467,12 @@ mod tests {
             assert!(parse(&serde_json::to_vec(&invalid).unwrap()).is_err());
         }
         for invalid in [
-            serde_json::json!({"version":3,"providers":valid["providers"]}),
-            serde_json::json!({"version":2,"providers":{"primary":null,"child":[],"review":null,"compaction":null}}),
-            serde_json::json!({"version":2,"providers":{"primary":null,"child":[route.clone(),route.clone()],"review":null,"compaction":null}}),
-            serde_json::json!({"version":2,"providers":{"primary":null,"child":[route.clone(),route.clone(),route.clone(),route.clone(),route.clone()],"review":null,"compaction":null}}),
-            serde_json::json!({"version":2,"providers":{"primary":null,"child":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low"}],"review":null,"compaction":null}}),
-            serde_json::json!({"version":2,"providers":valid["providers"],"unknown":true}),
+            serde_json::json!({"version":2,"providers":valid["providers"]}),
+            serde_json::json!({"providers":{"primary":null,"child":[],"review":null,"compaction":null}}),
+            serde_json::json!({"providers":{"primary":null,"child":[route.clone(),route.clone()],"review":null,"compaction":null}}),
+            serde_json::json!({"providers":{"primary":null,"child":[route.clone(),route.clone(),route.clone(),route.clone(),route.clone()],"review":null,"compaction":null}}),
+            serde_json::json!({"providers":{"primary":null,"child":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low"}],"review":null,"compaction":null}}),
+            serde_json::json!({"providers":valid["providers"],"unknown":true}),
         ] {
             assert!(
                 parse(&serde_json::to_vec(&invalid).unwrap()).is_err(),

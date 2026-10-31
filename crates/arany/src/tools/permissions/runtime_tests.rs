@@ -47,7 +47,6 @@ fn old_host_rules_are_inactive_and_preserved() {
     assert_eq!(std::fs::read(archive).unwrap(), bytes);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn restricted_read_paths_stay_out_of_list_search_and_glob_results_unopened() {
     use std::os::unix::fs::PermissionsExt;
@@ -73,7 +72,7 @@ async fn restricted_read_paths_stay_out_of_list_search_and_glob_results_unopened
     }
     let mut runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let settings = br#"{"permissions":{"deny":["Read(./private/**)"],"ask":["Read(**/*.key)","Read(./vault/**)"]}}"#;
     runtime.permissions = Some(super::PermissionSnapshot {
@@ -152,7 +151,7 @@ fn read_restrictions_cover_workspace_skill_files_and_catalog_previews() {
     }
     let mut runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     runtime.config.discover_skills(&workspace).unwrap();
     let settings = br#"{"permissions":{"deny":["Read(./.agents/skills/x/private/**)"],"ask":["Read(./.agents/skills/y/**)"]}}"#;
@@ -196,7 +195,7 @@ fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
     std::fs::create_dir_all(&workspace).unwrap();
     let mut runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     runtime.config.skills.push(super::config::Skill {
         disable_model_invocation: false,
@@ -303,7 +302,6 @@ fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path:
     ];
     let identity = super::workspace_identity(workspace).unwrap();
     let rule = json!({
-        "version":super::unguarded::HOST_POLICY_VERSION,
         "prefix":["inspect","value"],"decision":"allow","pin":pin,
         "workspace_device":identity.device,"workspace_inode":identity.inode,"cwd":""
     });
@@ -314,7 +312,7 @@ fn conflicting_host_rule_config(state: &crate::StateRoot, workspace: &std::path:
     std::fs::write(&file, &before).unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":false,"skills":[],"mcp":[],
+        "workspace_paths":["."],"write":false,"skills":[],"mcp":[],
         "commands":[{"name":"inspect","executable":executable,"sha256":pin.sha256,"interpreter":true,"inputs":[]}]
     })).unwrap()
 }

@@ -2,52 +2,98 @@ use super::{Admission, LoopError, controls};
 use crate::accounts::{chatgpt, credentials};
 use crate::files::bounded_list;
 use crate::terminal::{
-    AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, ShutdownSignal,
-    TerminalInput,
+    AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, SELECTOR_ROWS,
+    ShutdownSignal, TerminalInput, TerminalNotice,
 };
+use arany::RecordKind;
 use arany::{
     CustomProfile, Effort, MAX_CATALOG_MODELS, ModelEntry, NativeApiCredentials, ProviderKind,
-    SessionId, SessionView, StateRoot, list_native_models_with_credentials, resolve_native_effort,
+    SessionId, SessionView, StateRoot, admitted_context_window,
+    list_native_models_with_credentials, resolve_native_effort,
 };
-use arany::{RecordFormat, RecordKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     pin::Pin,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use uuid::Uuid;
 
 const CATALOG_LOADING: &str = "Loading model catalog; Ctrl+C cancels";
+// `/model refresh` opens the picker with a catalog read, for line input without Ctrl+R.
+pub(super) const REFRESH_ARGUMENT: &str = "refresh";
 const MAX_PREFERENCE_BYTES: usize = RecordKind::ModelPreferences.limit();
 const MAX_PREFERENCE_SOURCES: usize = 8;
+// Model lists and windows rarely change, so startup reads a catalog at most once a day.
+const REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_MODEL_FILTER_BYTES: usize = 64;
+const MAX_LINEAR_CHOICE_BYTES: usize = 32;
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+// A tolerant preference and catalog cache: unknown fields are ignored and missing ones default.
+#[derive(Default, Deserialize, Serialize)]
 struct ModelPreferences {
-    version: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected: Option<SavedSelection>,
-    #[serde(deserialize_with = "bounded_sources")]
+    #[serde(default, deserialize_with = "bounded_sources")]
     sources: Vec<SavedModels>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct SavedSelection {
     profile: String,
     account_id: uuid::Uuid,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct SavedModels {
     profile: String,
-    account_id: uuid::Uuid,
+    account_id: Uuid,
     model: Option<String>,
     effort: Option<Effort>,
-    #[serde(deserialize_with = "bounded_models")]
-    catalog: Vec<String>,
+    // Unix seconds of the last catalog read; absent until one succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refreshed_at: Option<u64>,
+    #[serde(default, deserialize_with = "bounded_models")]
+    catalog: Vec<CachedModel>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct CachedModel {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window: Option<u32>,
+}
+
+impl SavedModels {
+    fn rows(&self) -> Vec<ModelEntry> {
+        self.catalog
+            .iter()
+            .map(|model| catalog_entry(&self.profile, model.id.clone(), model.window()))
+            .collect()
+    }
+
+    fn fresh(&self, now: u64) -> bool {
+        self.refreshed_at
+            .and_then(|refreshed_at| now.checked_sub(refreshed_at))
+            .is_some_and(|age| age < REFRESH_AFTER.as_secs())
+    }
+}
+
+impl CachedModel {
+    fn window(&self) -> Option<u32> {
+        self.window
+            .and_then(|tokens| admitted_context_window(u64::from(tokens)))
+    }
+}
+
+impl ModelPreferences {
+    fn source(&self, profile: &str, account_id: Uuid) -> Option<&SavedModels> {
+        self.sources
+            .iter()
+            .find(|source| source.profile == profile && source.account_id == account_id)
+    }
 }
 
 fn bounded_sources<'de, D: serde::Deserializer<'de>>(
@@ -61,94 +107,74 @@ fn bounded_sources<'de, D: serde::Deserializer<'de>>(
 
 fn bounded_models<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<Vec<String>, D::Error> {
-    bounded_list::<D, String, MAX_CATALOG_MODELS>(
+) -> Result<Vec<CachedModel>, D::Error> {
+    bounded_list::<D, CachedModel, MAX_CATALOG_MODELS>(
         deserializer,
         "saved model preference limit exceeded",
     )
 }
 
-pub(crate) const MODEL_PREFERENCES: RecordFormat = RecordFormat {
-    kind: RecordKind::ModelPreferences,
-    field: "version",
-    floor: 1,
-    current: 1,
-    steps: &[],
-    accepts: |bytes| decode_preferences(bytes).is_ok(),
-};
-
 fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
-    let Some(record) = root
-        .read_current(&MODEL_PREFERENCES)
-        .map_err(|_| "saved model preferences unavailable or unsafe")?
-    else {
-        return Ok(ModelPreferences {
-            version: 1,
-            selected: None,
-            sources: Vec::new(),
-        });
-    };
-    decode_preferences(&record)
+    let record = root
+        .record(RecordKind::ModelPreferences)
+        .read()
+        .map_err(|_| "saved model preferences unavailable or unsafe")?;
+    Ok(record.map_or_else(ModelPreferences::default, |record| {
+        decode_preferences(&record)
+    }))
 }
 
-fn decode_preferences(record: &[u8]) -> Result<ModelPreferences, String> {
-    let preferences: ModelPreferences =
-        serde_json::from_slice(record).map_err(|_| "invalid saved model preferences")?;
-    validate_preferences(preferences)
+// Tolerant: an unreadable record reads as empty, and an invalid source or dangling selection is dropped.
+fn decode_preferences(record: &[u8]) -> ModelPreferences {
+    let mut preferences: ModelPreferences = serde_json::from_slice(record).unwrap_or_default();
+    let mut sources = HashSet::new();
+    preferences.sources.retain(|source| {
+        valid_source(source) && sources.insert((source.profile.clone(), source.account_id))
+    });
+    if dangling_selection(&preferences) {
+        preferences.selected = None;
+    }
+    preferences
 }
 
-pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
-    let path = StateRoot::account_path().map_err(|_| "saved model preferences unavailable")?;
-    let Some(root) = crate::files::open_optional_state(&path)
-        .map_err(|_| "saved model preferences unavailable or unsafe")?
-    else {
-        return Ok(false);
+fn valid_source(source: &SavedModels) -> bool {
+    let mut models = HashSet::new();
+    let valid_selection = match source.model.as_deref() {
+        Some(model) if arany::validate_native_model_id(model).is_ok() => {
+            if ProviderKind::parse(&source.profile) == Some(ProviderKind::ChatGpt) {
+                source.effort.is_some()
+            } else {
+                arany::resolve_native_effort_for_run(&source.profile, model, source.effort).is_ok()
+            }
+        }
+        None => source.effort.is_none(),
+        _ => false,
     };
-    root.with_account_replacement_lock(workspace, || {
-        let record = root
-            .read_current(&MODEL_PREFERENCES)
-            .map_err(|_| "saved model preferences unavailable or unsafe")?;
-        Ok(record.is_some_and(|bytes| decode_preferences(&bytes).is_err()))
+    ProviderKind::parse(source.profile.as_str()).is_some_and(ProviderKind::is_native)
+        && source.account_id.get_version() == Some(uuid::Version::SortRand)
+        && valid_selection
+        && source.catalog.len() <= MAX_CATALOG_MODELS
+        && source.catalog.iter().all(|model| {
+            arany::validate_native_model_id(&model.id).is_ok() && models.insert(&model.id)
+        })
+}
+
+fn dangling_selection(preferences: &ModelPreferences) -> bool {
+    preferences.selected.as_ref().is_some_and(|selected| {
+        !preferences.sources.iter().any(|source| {
+            source.profile == selected.profile && source.account_id == selected.account_id
+        })
     })
-    .map_err(|_| "saved model preferences unavailable".to_owned())?
 }
 
 fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreferences, String> {
     let mut sources = HashSet::new();
-    if preferences.version != 1 || preferences.sources.len() > MAX_PREFERENCE_SOURCES {
-        return Err("invalid saved model preferences".into());
-    }
-    for source in &preferences.sources {
-        let mut models = HashSet::new();
-        let valid_selection = match source.model.as_deref() {
-            Some(model) if arany::validate_native_model_id(model).is_ok() => {
-                if ProviderKind::parse(&source.profile) == Some(ProviderKind::ChatGpt) {
-                    source.effort.is_some()
-                } else {
-                    arany::resolve_native_effort_for_run(&source.profile, model, source.effort)
-                        .is_ok()
-                }
-            }
-            None => source.effort.is_none(),
-            _ => false,
-        };
-        if !ProviderKind::parse(source.profile.as_str()).is_some_and(ProviderKind::is_native)
-            || source.account_id.get_version() != Some(uuid::Version::SortRand)
-            || !sources.insert((&source.profile, source.account_id))
-            || !valid_selection
-            || source.catalog.len() > MAX_CATALOG_MODELS
-            || source.catalog.iter().any(|model| {
-                arany::validate_native_model_id(model).is_err() || !models.insert(model)
-            })
-        {
-            return Err("invalid saved model preferences".into());
-        }
-    }
-    if preferences.selected.as_ref().is_some_and(|selected| {
-        !preferences.sources.iter().any(|source| {
-            source.profile == selected.profile && source.account_id == selected.account_id
+    if preferences.sources.len() > MAX_PREFERENCE_SOURCES
+        || preferences.sources.iter().any(|source| {
+            !valid_source(source) || !sources.insert((&source.profile, source.account_id))
         })
-    }) {
+        || dangling_selection(&preferences)
+    {
         return Err("invalid saved model preferences".into());
     }
     Ok(preferences)
@@ -164,34 +190,156 @@ fn matching_source<'a>(
     })
 }
 
-pub(super) fn last_saved_defaults(
+pub(crate) fn last_saved_defaults(
     workspace: &Path,
 ) -> Result<Option<arany::SessionDefaults>, String> {
+    let Some(preferences) = saved_preferences(workspace)? else {
+        return Ok(None);
+    };
+    Ok(preferences
+        .selected
+        .as_ref()
+        .and_then(|selected| preferences.source(&selected.profile, selected.account_id))
+        .map(|source| arany::SessionDefaults {
+            provider: Some(source.profile.clone()),
+            model: source.model.clone(),
+            effort: source.effort,
+            account_id: Some(source.account_id),
+            ..arany::SessionDefaults::default()
+        }))
+}
+
+fn saved_preferences(workspace: &Path) -> Result<Option<ModelPreferences>, String> {
     let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
-    let Some(root) = crate::files::open_optional_state(&path)
+    let Some(root) = arany::StateRoot::open_optional(&path)
         .map_err(|_| "saved selection unavailable or unsafe")?
     else {
         return Ok(None);
     };
-    root.with_account_replacement_lock(workspace, || {
-        let preferences = read_preferences(&root)?;
-        Ok(preferences
-            .selected
-            .as_ref()
-            .and_then(|selected| {
-                preferences.sources.iter().find(|source| {
-                    source.profile == selected.profile && source.account_id == selected.account_id
-                })
-            })
-            .map(|source| arany::SessionDefaults {
-                provider: Some(source.profile.clone()),
-                model: source.model.clone(),
-                effort: source.effort,
-                account_id: Some(source.account_id),
-                ..arany::SessionDefaults::default()
-            }))
+    read_saved_selection(&root, workspace).map(Some)
+}
+
+// A read-only lookup never waits on the account lock another Arany process may hold.
+fn read_saved_selection(root: &StateRoot, workspace: &Path) -> Result<ModelPreferences, String> {
+    root.check_outside_workspace(workspace)
+        .map_err(|_| "saved selection unavailable")?;
+    read_preferences(root)
+}
+
+pub(crate) fn saved_effort(
+    workspace: &Path,
+    profile: &str,
+    model: &str,
+) -> Result<Option<Effort>, String> {
+    let Some(preferences) = saved_preferences(workspace)? else {
+        return Ok(None);
+    };
+    let selected = preferences
+        .selected
+        .as_ref()
+        .map(|selected| selected.account_id);
+    Ok(preferences
+        .sources
+        .iter()
+        .filter(|source| source.profile == profile && source.model.as_deref() == Some(model))
+        .max_by_key(|source| Some(source.account_id) == selected)
+        .and_then(|source| source.effort))
+}
+
+// Returns the cached catalog of a Provider and account; `None` means its catalog was never read.
+async fn cached_catalog(
+    workspace: &Path,
+    profile: &str,
+    account_id: Option<Uuid>,
+) -> Option<SavedModels> {
+    let account_id = account_id?;
+    let (workspace, profile) = (workspace.to_owned(), profile.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let mut preferences = saved_preferences(&workspace).ok()??;
+        let index = preferences.sources.iter().position(|source| {
+            source.profile == profile
+                && source.account_id == account_id
+                && source.refreshed_at.is_some()
+        })?;
+        Some(preferences.sources.swap_remove(index))
     })
-    .map_err(|_| "saved selection unavailable".to_owned())?
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Returns the cached window for a Run without reading any catalog; a miss uses default bounds.
+pub(crate) async fn cached_window(
+    workspace: &Path,
+    profile: &str,
+    account_id: Option<Uuid>,
+    model: &str,
+) -> Option<u32> {
+    cached_catalog(workspace, profile, account_id)
+        .await?
+        .catalog
+        .iter()
+        .find(|cached| cached.id == model)?
+        .window()
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Starts one non-blocking catalog read at process start unless the cached catalog is younger
+/// than a day or the account's secret lives in the OS credential store.
+pub(crate) fn refresh_at_startup(workspace: PathBuf, profile: String, account_id: Option<Uuid>) {
+    if !ProviderKind::parse(&profile).is_some_and(ProviderKind::is_native) {
+        return;
+    }
+    // Detached: runtime shutdown cancels it, and the record publishes by atomic rename.
+    tokio::spawn(async move {
+        let account_id = match account_id {
+            Some(id) => id,
+            None if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) => {
+                match tokio::task::spawn_blocking(chatgpt::selected_account_id).await {
+                    Ok(Ok(id)) => id,
+                    _ => return,
+                }
+            }
+            // An environment key has no account to cache a catalog for.
+            None => return,
+        };
+        if cached_catalog(&workspace, &profile, Some(account_id))
+            .await
+            .is_some_and(|source| source.fresh(now()))
+            || in_os_store(&profile, account_id).await
+        {
+            return;
+        }
+        if let Ok(items) = read_catalog(&workspace, &profile, Some(account_id)).await {
+            let defaults = arany::SessionDefaults {
+                provider: Some(profile),
+                account_id: Some(account_id),
+                ..arany::SessionDefaults::default()
+            };
+            let _ = remember_models(&workspace, &defaults, Some(&items), false).await;
+        }
+    });
+}
+
+// Startup authorization already opened the OS store once; a background read could prompt again.
+async fn in_os_store(profile: &str, account_id: Uuid) -> bool {
+    let slot = match ProviderKind::parse(profile) {
+        Some(ProviderKind::ChatGpt) => {
+            tokio::task::spawn_blocking(move || chatgpt::selected_keyring_slot(account_id).ok())
+                .await
+                .ok()
+                .flatten()
+        }
+        Some(_) | None => credentials::selected_keyring_slot(account_id, profile)
+            .await
+            .ok(),
+    };
+    !matches!(slot, Some(None))
 }
 
 pub(super) async fn restore_saved_models(
@@ -218,21 +366,7 @@ pub(super) async fn restore_saved_models(
             defaults.model = source.model.clone();
             defaults.effort = source.effort;
         }
-        Ok(source
-            .catalog
-            .iter()
-            .map(|id| ModelEntry {
-                id: id.clone(),
-                context_window_tokens: None,
-                runnable: resolve_native_effort(&source.profile, id, None).is_ok(),
-                efforts: Effort::ALL
-                    .into_iter()
-                    .filter(|effort| {
-                        resolve_native_effort(&source.profile, id, Some(*effort)).is_ok()
-                    })
-                    .collect(),
-            })
-            .collect())
+        Ok(source.rows())
     } else {
         if restore_selection && let Ok(state) = StateRoot::open_existing(state_dir) {
             match arany::continue_session(state, workspace.to_path_buf()).await {
@@ -274,10 +408,14 @@ pub(super) async fn remember_models(
         account_id,
         model: defaults.model.clone(),
         effort: defaults.effort,
+        refreshed_at: catalog.map(|_| now()),
         catalog: catalog
             .unwrap_or_default()
             .iter()
-            .map(|item| item.id.clone())
+            .map(|item| CachedModel {
+                id: item.id.clone(),
+                window: item.context_window_tokens,
+            })
             .collect(),
     };
     let replace_catalog = catalog.is_some();
@@ -312,6 +450,7 @@ fn write_preferences(
         let old = preferences.sources.remove(index);
         if !replace_catalog {
             source.catalog = old.catalog;
+            source.refreshed_at = old.refreshed_at;
         }
         if source.model.is_none() || (!remember_selection && old.model.is_some()) {
             source.model = old.model;
@@ -377,13 +516,55 @@ enum Choice {
     Shutdown(ShutdownSignal),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ModelOpen {
+    Cached,
+    Refresh,
+}
+
+// Opening shows the cached catalog; only an explicit refresh, or a Provider and account whose
+// catalog was never read, reads it. `None` waits for that read.
+fn open_catalog(
+    cached: Option<Vec<ModelEntry>>,
+    open: ModelOpen,
+    refresh: &mut CatalogRefresh<'_>,
+) -> Option<Vec<ModelEntry>> {
+    match (cached, open) {
+        (Some(items), ModelOpen::Cached) => Some(items),
+        (Some(items), ModelOpen::Refresh) if !items.is_empty() => {
+            refresh.request();
+            Some(items)
+        }
+        _ => {
+            refresh.request();
+            None
+        }
+    }
+}
+
+fn catalog_entry(profile: &str, id: String, context_window_tokens: Option<u32>) -> ModelEntry {
+    ModelEntry {
+        runnable: resolve_native_effort(profile, &id, None).is_ok(),
+        efforts: Effort::ALL
+            .into_iter()
+            .filter(|effort| resolve_native_effort(profile, &id, Some(*effort)).is_ok())
+            .collect(),
+        id,
+        context_window_tokens,
+    }
+}
+
 pub(super) async fn browse(
-    terminal: &mut AttachedTerminal,
+    ui: super::run::RunUi<'_>,
     admission: &Admission,
     session_id: SessionId,
-    view: &mut SessionView,
-    composer: &mut Composer,
+    open: ModelOpen,
 ) -> Result<ModelBrowse, LoopError> {
+    let super::run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
     let Some(profile) = view.defaults.provider.as_deref() else {
         return Ok(ModelBrowse::Notice(super::Feedback::History(
             "Select /provider first".into(),
@@ -394,51 +575,43 @@ pub(super) async fn browse(
         view.defaults.model.as_deref(),
         view.defaults.account_id,
     );
-    let cached = composer
-        .cached_model_catalog()
-        .filter(|(items, exact)| !items.is_empty() && !exact);
-    let refreshing = cached.is_some();
-    let (mut items, exact_custom) = match cached {
-        Some(items) => items,
-        None => match load_while_owned(terminal, admission, view, composer, profile).await? {
-            Ok(items) => items,
-            Err(outcome) => return Ok(outcome),
-        },
-    };
-    composer.set_model_catalog(profile, &items, exact_custom);
-    if items.is_empty() {
-        return Ok(ModelBrowse::Notice(super::Feedback::History(
-            "No models available for the selected Provider".into(),
-        )));
-    }
+    let cached = cached_catalog(&admission.workspace, profile, view.defaults.account_id)
+        .await
+        .map(|source| source.rows());
     let selection = {
-        let refresh = load_catalog(admission, view, profile);
-        tokio::pin!(refresh);
-        if terminal.is_linear() {
-            terminal
+        let shown: &SessionView = view;
+        let mut refresh =
+            CatalogRefresh::new(move || Box::pin(load_catalog(admission, shown, profile)));
+        let (mut items, exact_custom) = match open_catalog(cached, open, &mut refresh) {
+            Some(items) => (items, false),
+            None => {
+                match load_while_owned(terminal, admission, shown, composer, &mut refresh).await? {
+                    Ok(items) => items,
+                    Err(outcome) => return Ok(outcome),
+                }
+            }
+        };
+        composer.set_model_catalog(profile, &items, exact_custom);
+        if items.is_empty() {
+            return Ok(ModelBrowse::Notice(super::Feedback::History(
+                "No models available for the selected Provider".into(),
+            )));
+        }
+        let picker = Picker {
+            terminal: &mut *terminal,
+            view: shown,
+            composer: &mut *composer,
+            exact_custom,
+            refresh: &mut refresh,
+        };
+        if picker.terminal.is_linear() {
+            picker
+                .terminal
                 .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?;
-            browse_linear(
-                terminal,
-                &items,
-                view,
-                composer,
-                exact_custom,
-                refresh.as_mut(),
-                refreshing,
-            )
-            .await
+            browse_linear(picker, &items).await
         } else {
-            browse_inline(
-                terminal,
-                &mut items,
-                view,
-                composer,
-                exact_custom,
-                refresh.as_mut(),
-                refreshing,
-            )
-            .await
+            browse_inline(picker, &mut items).await
         }
     };
     terminal.close_models();
@@ -455,6 +628,94 @@ pub(super) async fn browse(
                 controls::select_model(admission, session_id, view, &model, effort).await?;
             Ok(ModelBrowse::Notice(super::Feedback::History(notice)))
         }
+    }
+}
+
+struct Picker<'a, 'r> {
+    terminal: &'a mut AttachedTerminal,
+    view: &'a SessionView,
+    composer: &'a mut Composer,
+    exact_custom: bool,
+    refresh: &'a mut CatalogRefresh<'r>,
+}
+
+enum PickerKey {
+    Redraw,
+    Refreshed(Result<(Vec<ModelEntry>, bool), String>),
+    Input { input: TerminalInput, ready: bool },
+}
+
+impl Picker<'_, '_> {
+    // A catalog read lands only at an input boundary, so it never splits a typed line.
+    async fn next_key(&mut self, shown: &ModelPicker<'_>) -> Result<PickerKey, String> {
+        let ready = self
+            .terminal
+            .draw_models(self.view, self.composer, shown)
+            .map_err(|error| error.to_string())?;
+        if self
+            .terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(PickerKey::Redraw);
+        }
+        let at_input_boundary = self.terminal.input_boundary_ready();
+        tokio::select! {
+            result = self.refresh.finish(), if self.refresh.in_flight() && at_input_boundary => {
+                Ok(PickerKey::Refreshed(result))
+            }
+            input = self.terminal.next_input() => Ok(PickerKey::Input {
+                input: input.map_err(|error| error.to_string())?,
+                ready,
+            }),
+        }
+    }
+}
+
+type CatalogLoad<'a> = Pin<Box<dyn Future<Output = Result<(Vec<ModelEntry>, bool), String>> + 'a>>;
+
+// At most one catalog read is in flight; a finished read can be requested again.
+struct CatalogRefresh<'a> {
+    start: Box<dyn FnMut() -> CatalogLoad<'a> + 'a>,
+    pending: Option<CatalogLoad<'a>>,
+}
+
+impl<'a> CatalogRefresh<'a> {
+    fn new(start: impl FnMut() -> CatalogLoad<'a> + 'a) -> Self {
+        Self {
+            start: Box::new(start),
+            pending: None,
+        }
+    }
+
+    fn request(&mut self) -> ModelCatalogState {
+        if self.pending.is_none() {
+            self.pending = Some((self.start)());
+        }
+        ModelCatalogState::Refreshing
+    }
+
+    fn in_flight(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    fn state(&self) -> ModelCatalogState {
+        if self.in_flight() {
+            ModelCatalogState::Refreshing
+        } else {
+            ModelCatalogState::Current
+        }
+    }
+
+    // Cancel-safe: the read stays pending until it completes.
+    async fn finish(&mut self) -> Result<(Vec<ModelEntry>, bool), String> {
+        let Some(pending) = self.pending.as_mut() else {
+            return std::future::pending().await;
+        };
+        let result = pending.await;
+        self.pending = None;
+        result
     }
 }
 
@@ -520,43 +781,10 @@ async fn load_catalog_inner(
     profile: &str,
 ) -> Result<(Vec<ModelEntry>, bool), String> {
     let result = match ProviderKind::parse(profile) {
-        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
-            let key = match view.defaults.account_id {
-                Some(id) => credentials::load_selected(id, profile)
-                    .await
-                    .map_err(|error| error.to_string())?,
-                None => {
-                    NativeApiCredentials::from_env(profile).map_err(|error| error.to_string())?
-                }
-            };
-            list_native_models_with_credentials(profile, &key)
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::ChatGpt) => {
+            read_catalog(&admission.workspace, profile, view.defaults.account_id)
                 .await
                 .map(|items| (items, false))
-                .map_err(|error| error.to_string())
-        }
-        Some(ProviderKind::ChatGpt) => {
-            let expected = view
-                .defaults
-                .account_id
-                .ok_or_else(|| "select a ChatGPT account with /setup first".to_owned())?;
-            let (selected, rows) =
-                chatgpt::selected_models(admission.workspace.clone(), Some(expected))
-                    .await
-                    .map_err(|error| error.to_string())?;
-            if selected != expected {
-                return Err("selected ChatGPT account changed; use /setup".into());
-            }
-            Ok((
-                rows.into_iter()
-                    .map(|row| ModelEntry {
-                        id: row.slug,
-                        context_window_tokens: None,
-                        runnable: false,
-                        efforts: Vec::new(),
-                    })
-                    .collect(),
-                false,
-            ))
         }
         Some(ProviderKind::Custom) | None => {
             let name = ProviderKind::custom_name(profile)
@@ -576,104 +804,67 @@ async fn load_catalog_inner(
     result
 }
 
+// Reads a native or ChatGPT catalog now; callers record it with `remember_models`.
+async fn read_catalog(
+    workspace: &Path,
+    profile: &str,
+    account_id: Option<Uuid>,
+) -> Result<Vec<ModelEntry>, String> {
+    if ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt) {
+        let expected =
+            account_id.ok_or_else(|| "select a ChatGPT account with /setup first".to_owned())?;
+        let (selected, rows) = chatgpt::selected_models(workspace.to_owned(), Some(expected))
+            .await
+            .map_err(|error| error.to_string())?;
+        if selected != expected {
+            return Err("selected ChatGPT account changed; use /setup".into());
+        }
+        return Ok(rows
+            .into_iter()
+            .map(|row| ModelEntry {
+                id: row.slug,
+                context_window_tokens: row.context_window_tokens,
+                runnable: false,
+                efforts: Vec::new(),
+            })
+            .collect());
+    }
+    let key = match account_id {
+        Some(id) => credentials::load_selected(id, profile)
+            .await
+            .map_err(|error| error.to_string())?,
+        None => NativeApiCredentials::from_env(profile).map_err(|error| error.to_string())?,
+    };
+    list_native_models_with_credentials(profile, &key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 async fn load_while_owned(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     view: &SessionView,
     composer: &mut Composer,
-    profile: &str,
+    refresh: &mut CatalogRefresh<'_>,
 ) -> Result<Result<(Vec<ModelEntry>, bool), ModelBrowse>, String> {
     terminal
         .draw_busy_notice(
             view,
             composer,
-            Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING)),
+            Some(TerminalNotice::Transient(CATALOG_LOADING)),
         )
         .map_err(|error| error.to_string())?;
-    let query = load_catalog(admission, view, profile);
-    tokio::pin!(query);
     let outcome = loop {
         let at_input_boundary = terminal.input_boundary_ready();
         tokio::select! {
-            result = &mut query, if at_input_boundary => break result.map_err(|error| {
+            result = refresh.finish(), if at_input_boundary => break result.map_err(|error| {
                 ModelBrowse::Notice(super::Feedback::History(format!("Error: Model catalog unavailable: {error}. Review the selected account or retry /model.")))
             }),
             input = terminal.next_chat_input() => {
                 let input = input.map_err(|error| error.to_string())?;
                 composer.observe_input(input);
-                match input {
-                    TerminalInput::ClipboardPaste => {
-                        let notice = match terminal.request_clipboard_paste() {
-                            Ok(()) => super::Feedback::Transient("Reading clipboard... draft retained".into()),
-                            Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
-                        };
-                        terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Paste => {
-                        let notice = match terminal.paste_into_admitted_workspace(
-                            composer,
-                            &admission.workspace,
-                            admission.workspace_identity,
-                        ) {
-                            Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
-                            Err(error) => super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading")),
-                        };
-                        terminal.draw_busy_notice(view, composer, Some(notice.notice())).map_err(|error| error.to_string())?;
-                    }
-                    input @ (TerminalInput::Character(_)
-                    | TerminalInput::Newline
-                    | TerminalInput::ModifiedEnter(_)
-                    | TerminalInput::Backspace
-                    | TerminalInput::Delete
-                    | TerminalInput::Left
-                    | TerminalInput::Right
-                    | TerminalInput::WordLeft
-                    | TerminalInput::WordRight
-                    | TerminalInput::BackspaceWord
-                    | TerminalInput::Up
-                    | TerminalInput::Down
-                    | TerminalInput::Home
-                    | TerminalInput::End) => {
-                        let notice = if composer.apply(input) == ComposerEdit::AtCapacity {
-                            Some(crate::terminal::TerminalNotice::History("Error: message is too long; shorten it; draft unchanged; catalog loading"))
-                        } else if terminal.is_linear() {
-                            None
-                        } else {
-                            Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))
-                        };
-                        terminal.draw_busy_notice(view, composer, notice).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Interrupt | TerminalInput::EndOfInput | TerminalInput::Escape => {
-                        if !terminal.input_boundary_ready() {
-                            terminal.discard_draft_input();
-                        }
-                        break Err(ModelBrowse::Notice(super::Feedback::Transient("Model catalog cancelled".into())));
-                    }
-                    TerminalInput::Shutdown(signal) => break Err(ModelBrowse::Shutdown(signal)),
-                    TerminalInput::Suspend => {
-                        terminal.suspend_and_resume(composer.input_capacity()).map_err(|error| error.to_string())?;
-                        terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::LineRejected => {
-                        terminal.draw_busy(view, composer, Some("Error: invalid or overlong terminal line; draft unchanged; catalog loading")).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::LineContinued => {
-                        terminal.draw_busy(view, composer, Some(&format!(
-                            "Draft: {} characters; catalog loading; Ctrl+C cancels",
-                            composer.character_count()
-                        ))).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Submit => {
-                        if !terminal.is_linear() {
-                            composer.continue_line();
-                        }
-                        terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
-                        terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
-                    }
-                    TerminalInput::Resize => {
-                        terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
-                    }
-                    _ => {}
+                if let Some(outcome) = loading_input(terminal, admission, view, composer, input)? {
+                    break Err(outcome);
                 }
             }
         }
@@ -684,156 +875,336 @@ async fn load_while_owned(
     Ok(outcome)
 }
 
-async fn browse_inline(
+// Keys typed while the catalog loads edit the held draft; Some ends the wait.
+fn loading_input(
     terminal: &mut AttachedTerminal,
-    items: &mut Vec<ModelEntry>,
+    admission: &Admission,
     view: &SessionView,
     composer: &mut Composer,
-    exact_custom: bool,
-    mut refresh: Pin<&mut impl Future<Output = Result<(Vec<ModelEntry>, bool), String>>>,
-    refreshing: bool,
-) -> Result<Choice, String> {
-    let profile = view.defaults.provider.as_deref().unwrap_or("");
-    let mut anchor = view
-        .defaults
-        .model
-        .as_deref()
-        .filter(|id| items.iter().any(|item| item.id == *id))
-        .unwrap_or(&items[0].id)
-        .to_owned();
-    let mut efforts = initial_efforts(items, view, exact_custom);
-    let mut catalog_state = if refreshing {
-        ModelCatalogState::Refreshing
-    } else {
-        ModelCatalogState::Current
-    };
-    let mut filter = String::new();
-    let (mut visible, mut selected) = matching_models(items, &filter, &anchor);
-    terminal.begin_dialog();
-    loop {
-        let rows = visible
-            .iter()
-            .map(|index| items[*index].clone())
-            .collect::<Vec<_>>();
-        let levels = visible
-            .iter()
-            .map(|index| efforts[*index])
-            .collect::<Vec<_>>();
-        let ready = terminal
-            .draw_models(
-                view,
-                composer,
-                &ModelPicker {
-                    items: &rows,
-                    efforts: &levels,
-                    selected,
-                    exact_custom,
-                    filter: &filter,
-                    invalid: false,
-                    catalog_state,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        if terminal
-            .arm_dialog()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            continue;
+    input: TerminalInput,
+) -> Result<Option<ModelBrowse>, String> {
+    const LOADING: TerminalNotice<'static> = TerminalNotice::Transient(CATALOG_LOADING);
+    let pasted;
+    let notice = match input {
+        TerminalInput::ClipboardPaste | TerminalInput::Paste => {
+            pasted = loading_paste(terminal, admission, composer, input);
+            Some(pasted.notice())
         }
-        let at_input_boundary = terminal.input_boundary_ready();
-        let input = tokio::select! {
-            result = &mut refresh, if catalog_state == ModelCatalogState::Refreshing && at_input_boundary => {
-                match result {
-                    Ok((updated, false)) => {
-                        let mut updated_efforts = initial_efforts(&updated, view, false);
-                        let previous = items.iter().zip(&efforts).map(|(item, effort)| (item.id.as_str(), *effort)).collect::<HashMap<_, _>>();
-                        for (index, item) in updated.iter().enumerate() {
-                            if let Some(effort) = previous.get(item.id.as_str())
-                                && effort_choices(profile, item, false).contains(effort) {
-                                updated_efforts[index] = *effort;
-                            }
-                        }
-                        *items = updated;
-                        efforts = updated_efforts;
-                        composer.set_model_catalog(profile, items, false);
-                        (visible, selected) = matching_models(items, &filter, &anchor);
-                        catalog_state = ModelCatalogState::Updated;
-                    }
-                    _ => catalog_state = ModelCatalogState::RefreshFailed,
-                }
+        input @ (TerminalInput::Character(_)
+        | TerminalInput::Newline
+        | TerminalInput::ModifiedEnter(_)
+        | TerminalInput::Backspace
+        | TerminalInput::Delete
+        | TerminalInput::Left
+        | TerminalInput::Right
+        | TerminalInput::WordLeft
+        | TerminalInput::WordRight
+        | TerminalInput::BackspaceWord
+        | TerminalInput::Up
+        | TerminalInput::Down
+        | TerminalInput::Home
+        | TerminalInput::End) => {
+            if composer.apply(input) == ComposerEdit::AtCapacity {
+                Some(TerminalNotice::History(
+                    "Error: message is too long; shorten it; draft unchanged; catalog loading",
+                ))
+            } else if terminal.is_linear() {
+                None
+            } else {
+                Some(LOADING)
+            }
+        }
+        TerminalInput::Interrupt | TerminalInput::EndOfInput | TerminalInput::Escape => {
+            if !terminal.input_boundary_ready() {
+                terminal.discard_draft_input();
+            }
+            return Ok(Some(ModelBrowse::Notice(super::Feedback::Transient(
+                "Model catalog cancelled".into(),
+            ))));
+        }
+        TerminalInput::Shutdown(signal) => return Ok(Some(ModelBrowse::Shutdown(signal))),
+        TerminalInput::Suspend => {
+            terminal
+                .suspend_and_resume(composer.input_capacity())
+                .map_err(|error| error.to_string())?;
+            Some(LOADING)
+        }
+        TerminalInput::LineRejected | TerminalInput::LineContinued => {
+            draw_loading_line(terminal, view, composer, input)?;
+            return Ok(None);
+        }
+        TerminalInput::Submit => {
+            if !terminal.is_linear() {
+                composer.continue_line();
+            }
+            terminal
+                .restore_draft_input(composer.input_capacity())
+                .map_err(|error| error.to_string())?;
+            Some(LOADING)
+        }
+        TerminalInput::Resize => Some(LOADING),
+        _ => return Ok(None),
+    };
+    terminal
+        .draw_busy_notice(view, composer, notice)
+        .map_err(|error| error.to_string())?;
+    Ok(None)
+}
+
+fn loading_paste(
+    terminal: &mut AttachedTerminal,
+    admission: &Admission,
+    composer: &mut Composer,
+    input: TerminalInput,
+) -> super::Feedback {
+    if input == TerminalInput::ClipboardPaste {
+        return match terminal.request_clipboard_paste() {
+            Ok(()) => super::Feedback::Transient("Reading clipboard... draft retained".into()),
+            Err(error) => super::Feedback::History(format!(
+                "Error: {error}; draft unchanged; catalog loading"
+            )),
+        };
+    }
+    match terminal.paste_into_admitted_workspace(
+        composer,
+        &admission.workspace,
+        admission.workspace_identity,
+    ) {
+        Ok(_) => super::Feedback::Transient(CATALOG_LOADING.into()),
+        Err(error) => {
+            super::Feedback::History(format!("Error: {error}; draft unchanged; catalog loading"))
+        }
+    }
+}
+
+fn draw_loading_line(
+    terminal: &mut AttachedTerminal,
+    view: &SessionView,
+    composer: &Composer,
+    input: TerminalInput,
+) -> Result<(), String> {
+    let status = if input == TerminalInput::LineRejected {
+        "Error: invalid or overlong terminal line; draft unchanged; catalog loading".to_owned()
+    } else {
+        format!(
+            "Draft: {} characters; catalog loading; Ctrl+C cancels",
+            composer.character_count()
+        )
+    };
+    terminal
+        .draw_busy(view, composer, Some(&status))
+        .map_err(|error| error.to_string())
+}
+
+async fn browse_inline(
+    mut picker: Picker<'_, '_>,
+    items: &mut Vec<ModelEntry>,
+) -> Result<Choice, String> {
+    let (view, exact_custom) = (picker.view, picker.exact_custom);
+    let profile = view.defaults.provider.as_deref().unwrap_or("");
+    let mut list = InlineList::new(items, view, exact_custom, picker.refresh.state());
+    picker.terminal.begin_dialog();
+    loop {
+        let (rows, levels) = list.shown();
+        let (input, ready) = match picker
+            .next_key(&ModelPicker {
+                items: &rows,
+                efforts: &levels,
+                selected: list.selected,
+                exact_custom,
+                filter: &list.filter,
+                invalid: false,
+                catalog_state: list.catalog_state,
+                refresh_error: list.refresh_error.as_deref(),
+            })
+            .await?
+        {
+            PickerKey::Redraw => continue,
+            PickerKey::Refreshed(result) => {
+                list.refreshed(result, view, picker.composer);
                 continue;
             }
-            input = terminal.next_input() => input.map_err(|error| error.to_string())?,
+            PickerKey::Input { input, ready } => (input, ready),
         };
-        if !ready
-            && !matches!(
-                input,
-                TerminalInput::Resize
-                    | TerminalInput::Escape
-                    | TerminalInput::Interrupt
-                    | TerminalInput::EndOfInput
-                    | TerminalInput::Shutdown(_)
-                    | TerminalInput::Suspend
-            )
-        {
+        if !ready && !unready_key(input) {
             continue;
         }
         match input {
             TerminalInput::Character(character)
-                if character.is_ascii_graphic() && filter.len() < 64 =>
+                if character.is_ascii_graphic() && list.filter.len() < MAX_MODEL_FILTER_BYTES =>
             {
-                filter.push(character);
-                (visible, selected) = matching_models(items, &filter, &anchor);
+                list.filter.push(character);
+                list.refilter();
             }
             TerminalInput::Backspace => {
-                if filter.pop().is_some() {
-                    (visible, selected) = matching_models(items, &filter, &anchor);
+                if list.filter.pop().is_some() {
+                    list.refilter();
                 }
             }
-            TerminalInput::Up => selected = selected.saturating_sub(1),
-            TerminalInput::Down => selected = (selected + 1).min(visible.len().saturating_sub(1)),
-            TerminalInput::PageUp => selected = selected.saturating_sub(10),
-            TerminalInput::PageDown => {
-                selected = (selected + 10).min(visible.len().saturating_sub(1))
+            TerminalInput::Refresh if !exact_custom => {
+                list.catalog_state = picker.refresh.request();
+                list.refresh_error = None;
             }
-            TerminalInput::Home => selected = 0,
-            TerminalInput::End => selected = visible.len().saturating_sub(1),
             direction @ (TerminalInput::Left | TerminalInput::Right) => {
-                if let Some(index) = visible.get(selected) {
-                    let choices = effort_choices(profile, &items[*index], exact_custom);
-                    let current = choices
-                        .iter()
-                        .position(|effort| *effort == efforts[*index])
-                        .unwrap_or(0);
-                    let next = if direction == TerminalInput::Left {
-                        current.saturating_sub(1)
-                    } else {
-                        (current + 1).min(choices.len() - 1)
-                    };
-                    efforts[*index] = choices[next];
-                }
+                list.cycle_effort(direction == TerminalInput::Left, profile, exact_custom);
             }
             TerminalInput::Submit => {
-                if let Some(index) = visible.get(selected) {
-                    return Ok(Choice::Selected {
-                        model: items[*index].id.clone(),
-                        effort: efforts[*index],
-                    });
+                if let Some(choice) = list.chosen() {
+                    return Ok(choice);
                 }
             }
-            TerminalInput::Suspend => terminal
-                .suspend_and_resume(composer.input_capacity())
+            TerminalInput::Suspend => picker
+                .terminal
+                .suspend_and_resume(picker.composer.input_capacity())
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(Choice::Closed);
             }
             TerminalInput::Shutdown(signal) => return Ok(Choice::Shutdown(signal)),
-            _ => {}
+            input => {
+                if let Some(next) =
+                    input.step_selection(list.selected, list.visible.len().saturating_sub(1))
+                {
+                    list.selected = next;
+                }
+            }
         }
-        if let Some(index) = visible.get(selected) {
-            anchor.clone_from(&items[*index].id);
+        if let Some(index) = list.visible.get(list.selected) {
+            list.anchor.clone_from(&list.items[*index].id);
         }
+    }
+}
+
+fn unready_key(input: TerminalInput) -> bool {
+    matches!(
+        input,
+        TerminalInput::Resize
+            | TerminalInput::Escape
+            | TerminalInput::Interrupt
+            | TerminalInput::EndOfInput
+            | TerminalInput::Shutdown(_)
+            | TerminalInput::Suspend
+    )
+}
+
+struct InlineList<'a> {
+    items: &'a mut Vec<ModelEntry>,
+    efforts: Vec<Option<Effort>>,
+    filter: String,
+    anchor: String,
+    visible: Vec<usize>,
+    selected: usize,
+    catalog_state: ModelCatalogState,
+    refresh_error: Option<String>,
+}
+
+impl<'a> InlineList<'a> {
+    // The selection starts on the Session's model when the catalog lists it.
+    fn new(
+        items: &'a mut Vec<ModelEntry>,
+        view: &SessionView,
+        exact_custom: bool,
+        catalog_state: ModelCatalogState,
+    ) -> Self {
+        let anchor = view
+            .defaults
+            .model
+            .as_deref()
+            .filter(|id| items.iter().any(|item| item.id == *id))
+            .unwrap_or(&items[0].id)
+            .to_owned();
+        let efforts = initial_efforts(items, view, exact_custom);
+        let mut list = Self {
+            items,
+            efforts,
+            filter: String::new(),
+            anchor,
+            visible: Vec::new(),
+            selected: 0,
+            catalog_state,
+            refresh_error: None,
+        };
+        list.refilter();
+        list
+    }
+
+    fn refilter(&mut self) {
+        (self.visible, self.selected) = matching_models(self.items, &self.filter, &self.anchor);
+    }
+
+    fn shown(&self) -> (Vec<ModelEntry>, Vec<Option<Effort>>) {
+        let rows = self
+            .visible
+            .iter()
+            .map(|index| self.items[*index].clone())
+            .collect();
+        let levels = self
+            .visible
+            .iter()
+            .map(|index| self.efforts[*index])
+            .collect();
+        (rows, levels)
+    }
+
+    // A refreshed catalog keeps each surviving model's effort while that model still offers it.
+    fn refreshed(
+        &mut self,
+        result: Result<(Vec<ModelEntry>, bool), String>,
+        view: &SessionView,
+        composer: &mut Composer,
+    ) {
+        let profile = view.defaults.provider.as_deref().unwrap_or("");
+        match result {
+            Ok((updated, false)) => {
+                let mut updated_efforts = initial_efforts(&updated, view, false);
+                let previous = self
+                    .items
+                    .iter()
+                    .zip(&self.efforts)
+                    .map(|(item, effort)| (item.id.as_str(), *effort))
+                    .collect::<HashMap<_, _>>();
+                for (index, item) in updated.iter().enumerate() {
+                    if let Some(effort) = previous.get(item.id.as_str())
+                        && effort_choices(profile, item, false).contains(effort)
+                    {
+                        updated_efforts[index] = *effort;
+                    }
+                }
+                *self.items = updated;
+                self.efforts = updated_efforts;
+                composer.set_model_catalog(profile, self.items, false);
+                self.refilter();
+                self.catalog_state = ModelCatalogState::Updated;
+            }
+            failed => {
+                self.refresh_error = failed.err();
+                self.catalog_state = ModelCatalogState::RefreshFailed;
+            }
+        }
+    }
+
+    fn cycle_effort(&mut self, left: bool, profile: &str, exact_custom: bool) {
+        if let Some(index) = self.visible.get(self.selected) {
+            let choices = effort_choices(profile, &self.items[*index], exact_custom);
+            let current = choices
+                .iter()
+                .position(|effort| *effort == self.efforts[*index])
+                .unwrap_or(0);
+            let next = if left {
+                current.saturating_sub(1)
+            } else {
+                (current + 1).min(choices.len() - 1)
+            };
+            self.efforts[*index] = choices[next];
+        }
+    }
+
+    fn chosen(&self) -> Option<Choice> {
+        let index = self.visible.get(self.selected)?;
+        Some(Choice::Selected {
+            model: self.items[*index].id.clone(),
+            effort: self.efforts[*index],
+        })
     }
 }
 
@@ -858,130 +1229,66 @@ fn matching_models(items: &[ModelEntry], filter: &str, anchor: &str) -> (Vec<usi
     (visible, selected)
 }
 
-async fn browse_linear(
-    terminal: &mut AttachedTerminal,
-    items: &[ModelEntry],
-    view: &SessionView,
-    composer: &mut Composer,
-    exact_custom: bool,
-    mut refresh: Pin<&mut impl Future<Output = Result<(Vec<ModelEntry>, bool), String>>>,
-    refreshing: bool,
-) -> Result<Choice, String> {
+async fn browse_linear(mut picker: Picker<'_, '_>, items: &[ModelEntry]) -> Result<Choice, String> {
+    let (view, exact_custom) = (picker.view, picker.exact_custom);
     let profile = view.defaults.provider.as_deref().unwrap_or("");
-    let mut start = view
-        .defaults
-        .model
-        .as_deref()
-        .and_then(|id| items.iter().position(|item| item.id == id))
-        .unwrap_or(0)
-        / 10
-        * 10;
     let efforts = initial_efforts(items, view, exact_custom);
-    let mut input = String::new();
-    let mut invalid = false;
-    let mut too_long = false;
-    let mut catalog_state = if refreshing {
-        ModelCatalogState::Refreshing
-    } else {
-        ModelCatalogState::Current
-    };
-    terminal.begin_dialog();
+    let mut page = LinearPage::new(items, view, picker.refresh.state());
+    picker.terminal.begin_dialog();
     loop {
-        terminal
-            .draw_models(
-                view,
-                composer,
-                &ModelPicker {
-                    items,
-                    efforts: &efforts,
-                    selected: start,
-                    exact_custom,
-                    filter: "",
-                    invalid,
-                    catalog_state,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-        if terminal
-            .arm_dialog()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            continue;
-        }
-        invalid = false;
-        let at_input_boundary = terminal.input_boundary_ready();
-        let next = tokio::select! {
-            result = &mut refresh, if catalog_state == ModelCatalogState::Refreshing && at_input_boundary => {
-                match result {
-                    Ok((updated, false)) => {
-                        composer.set_model_catalog(profile, &updated, false);
-                        catalog_state = ModelCatalogState::Updated;
-                    }
-                    _ => catalog_state = ModelCatalogState::RefreshFailed,
-                }
+        let key = picker
+            .next_key(&ModelPicker {
+                items,
+                efforts: &efforts,
+                selected: page.start,
+                exact_custom,
+                filter: "",
+                invalid: page.invalid,
+                catalog_state: page.catalog_state,
+                refresh_error: page.refresh_error.as_deref(),
+            })
+            .await?;
+        let next = match key {
+            PickerKey::Redraw => continue,
+            PickerKey::Refreshed(result) => {
+                page.invalid = false;
+                page.refreshed(result, picker.composer, profile);
                 continue;
             }
-            input = terminal.next_input() => input.map_err(|error| error.to_string())?,
+            PickerKey::Input { input, .. } => {
+                page.invalid = false;
+                input
+            }
         };
         match next {
             TerminalInput::Character(character)
                 if (character.is_ascii_graphic() || character == ' ')
-                    && input.len() < 32
-                    && !too_long =>
+                    && page.line.len() < MAX_LINEAR_CHOICE_BYTES
+                    && !page.too_long =>
             {
-                input.push(character)
+                page.line.push(character)
             }
-            TerminalInput::Character(_) => too_long = true,
+            TerminalInput::Character(_) => page.too_long = true,
             TerminalInput::Backspace => {
-                input.pop();
+                page.line.pop();
             }
             TerminalInput::Submit => {
-                let choice = input.trim();
-                match choice {
-                    "q" if !too_long => return Ok(Choice::Closed),
-                    "n" if !too_long && start + 10 < items.len() => start += 10,
-                    "p" if !too_long && start > 0 => start = start.saturating_sub(10),
-                    _ => {
-                        let mut parts = choice.split_ascii_whitespace();
-                        if !too_long
-                            && let Some(number) =
-                                parts.next().and_then(|value| value.parse::<usize>().ok())
-                            && (1..=10).contains(&number)
-                            && let Some(item) = items.get(start + number - 1)
-                        {
-                            let level = match parts.next() {
-                                None => Some(efforts[start + number - 1]),
-                                Some("default") => Some(None),
-                                Some(value) => value.parse::<Effort>().ok().map(Some),
-                            };
-                            if parts.next().is_none()
-                                && let Some(effort) = level
-                                && effort_choices(profile, item, exact_custom).contains(&effort)
-                            {
-                                return Ok(Choice::Selected {
-                                    model: item.id.clone(),
-                                    effort,
-                                });
-                            }
-                        }
-                        invalid = true;
-                    }
+                if let Some(choice) = page.submit(items, &efforts, profile, exact_custom) {
+                    return Ok(choice);
                 }
-                input.clear();
-                too_long = false;
             }
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
-                invalid = true;
-                input.clear();
-                too_long = false;
-                terminal.discard_draft_input();
+                page.invalid = true;
+                page.line.clear();
+                page.too_long = false;
+                picker.terminal.discard_draft_input();
             }
-            TerminalInput::Suspend => terminal
+            TerminalInput::Suspend => picker
+                .terminal
                 .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
-                terminal.discard_draft_input();
+                picker.terminal.discard_draft_input();
                 return Ok(Choice::Closed);
             }
             TerminalInput::Shutdown(signal) => return Ok(Choice::Shutdown(signal)),
@@ -990,9 +1297,225 @@ async fn browse_linear(
     }
 }
 
+struct LinearPage {
+    start: usize,
+    line: String,
+    invalid: bool,
+    too_long: bool,
+    catalog_state: ModelCatalogState,
+    refresh_error: Option<String>,
+}
+
+impl LinearPage {
+    // The first page shown is the one listing the Session's model.
+    fn new(items: &[ModelEntry], view: &SessionView, catalog_state: ModelCatalogState) -> Self {
+        Self {
+            start: view
+                .defaults
+                .model
+                .as_deref()
+                .and_then(|id| items.iter().position(|item| item.id == id))
+                .unwrap_or(0)
+                / SELECTOR_ROWS
+                * SELECTOR_ROWS,
+            line: String::new(),
+            invalid: false,
+            too_long: false,
+            catalog_state,
+            refresh_error: None,
+        }
+    }
+
+    fn refreshed(
+        &mut self,
+        result: Result<(Vec<ModelEntry>, bool), String>,
+        composer: &mut Composer,
+        profile: &str,
+    ) {
+        match result {
+            Ok((updated, false)) => {
+                composer.set_model_catalog(profile, &updated, false);
+                self.catalog_state = ModelCatalogState::Updated;
+            }
+            failed => {
+                self.refresh_error = failed.err();
+                self.catalog_state = ModelCatalogState::RefreshFailed;
+            }
+        }
+    }
+
+    fn submit(
+        &mut self,
+        items: &[ModelEntry],
+        efforts: &[Option<Effort>],
+        profile: &str,
+        exact_custom: bool,
+    ) -> Option<Choice> {
+        let (start, too_long) = (self.start, self.too_long);
+        let choice = self.line.trim();
+        match choice {
+            "q" if !too_long => return Some(Choice::Closed),
+            "n" if !too_long && start + SELECTOR_ROWS < items.len() => self.start += SELECTOR_ROWS,
+            "p" if !too_long && start > 0 => self.start = start.saturating_sub(SELECTOR_ROWS),
+            _ => {
+                if !too_long
+                    && let Some(choice) = linear_choice(
+                        choice,
+                        &items[start..],
+                        &efforts[start..],
+                        profile,
+                        exact_custom,
+                    )
+                {
+                    return Some(choice);
+                }
+                self.invalid = true;
+            }
+        }
+        self.line.clear();
+        self.too_long = false;
+        None
+    }
+}
+
+// A line names a row of the shown page, then optionally an effort or `default`.
+fn linear_choice(
+    choice: &str,
+    page: &[ModelEntry],
+    efforts: &[Option<Effort>],
+    profile: &str,
+    exact_custom: bool,
+) -> Option<Choice> {
+    let mut parts = choice.split_ascii_whitespace();
+    let number = parts.next()?.parse::<usize>().ok()?;
+    if !(1..=SELECTOR_ROWS).contains(&number) {
+        return None;
+    }
+    let item = page.get(number - 1)?;
+    let effort = match parts.next() {
+        None => efforts[number - 1],
+        Some("default") => None,
+        Some(value) => Some(value.parse::<Effort>().ok()?),
+    };
+    (parts.next().is_none() && effort_choices(profile, item, exact_custom).contains(&effort)).then(
+        || Choice::Selected {
+            model: item.id.clone(),
+            effort,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Returns the catalog reads made and whether cached rows showed at once.
+    fn open_with(
+        cached: Option<Vec<ModelEntry>>,
+        open: ModelOpen,
+        refresh_keys: usize,
+    ) -> (u32, bool) {
+        let reads = std::cell::Cell::new(0);
+        let shown = {
+            let mut refresh = CatalogRefresh::new(|| {
+                reads.set(reads.get() + 1);
+                Box::pin(std::future::pending::<
+                    Result<(Vec<ModelEntry>, bool), String>,
+                >())
+            });
+            let shown = open_catalog(cached, open, &mut refresh).is_some();
+            for _ in 0..refresh_keys {
+                refresh.request();
+            }
+            shown
+        };
+        (reads.get(), shown)
+    }
+
+    #[test]
+    fn model_open_reads_the_catalog_only_without_a_cached_entry_or_on_refresh() {
+        let listed = || Some(vec![ModelEntry::exact_custom("cached".into())]);
+        for (cached, open, refresh_keys, expected, case) in [
+            (listed(), ModelOpen::Cached, 0, (0, true), "cached entry"),
+            (
+                Some(Vec::new()),
+                ModelOpen::Cached,
+                0,
+                (0, true),
+                "empty read catalog",
+            ),
+            (None, ModelOpen::Cached, 0, (1, false), "never read"),
+            (listed(), ModelOpen::Cached, 1, (1, true), "Ctrl+R"),
+            (
+                listed(),
+                ModelOpen::Cached,
+                2,
+                (1, true),
+                "Ctrl+R joins the read",
+            ),
+            (listed(), ModelOpen::Refresh, 0, (1, true), "/model refresh"),
+            (
+                listed(),
+                ModelOpen::Refresh,
+                1,
+                (1, true),
+                "Ctrl+R during /model refresh",
+            ),
+            (
+                Some(Vec::new()),
+                ModelOpen::Refresh,
+                0,
+                (1, false),
+                "refresh of nothing",
+            ),
+            (
+                None,
+                ModelOpen::Refresh,
+                0,
+                (1, false),
+                "refresh never read",
+            ),
+        ] {
+            assert_eq!(open_with(cached, open, refresh_keys), expected, "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_reads_once_per_request_and_failure_keeps_rows() {
+        let reads = std::cell::Cell::new(0);
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let mut refresh = CatalogRefresh::new(|| {
+            reads.set(reads.get() + 1);
+            let mut receiver = receiver.clone();
+            Box::pin(async move {
+                receiver.wait_for(|ready| *ready).await.unwrap();
+                Err("Provider unavailable".to_owned())
+            })
+        });
+        assert!(!refresh.in_flight());
+        assert_eq!(refresh.request(), ModelCatalogState::Refreshing);
+        assert_eq!(refresh.request(), ModelCatalogState::Refreshing);
+        assert_eq!(
+            reads.get(),
+            1,
+            "a second key press joins the read in flight"
+        );
+        tokio::select! {
+            biased;
+            _ = refresh.finish() => panic!("read finished before its reply"),
+            () = std::future::ready(()) => {}
+        }
+        assert!(refresh.in_flight(), "an interrupted wait keeps the read");
+        sender.send_replace(true);
+        let mut items = vec![ModelEntry::exact_custom("cached".into())];
+        if let Ok((updated, _)) = refresh.finish().await {
+            items = updated;
+        }
+        assert_eq!(items[0].id, "cached", "a failed refresh keeps the rows");
+        assert!(!refresh.in_flight());
+        refresh.request();
+        assert_eq!(reads.get(), 2, "a finished read can be requested again");
+    }
 
     #[test]
     fn inline_filter_preserves_identity_and_can_recover_from_no_matches() {
@@ -1027,61 +1550,84 @@ mod preference_tests {
         let id = uuid::Uuid::now_v7();
         let source = json!({
             "profile": "chatgpt", "account_id": id, "model": "gpt-6.1-sol",
-            "effort": "medium", "catalog": ["gpt-6.1-sol", "another-model"]
+            "effort": "medium", "refreshed_at": 1,
+            "catalog": [{"id": "gpt-6.1-sol", "window": 272_000}, {"id": "another-model"}]
         });
-        let document = json!({"version": 1, "sources": [source.clone()]});
-        let mut cases = vec![(document.clone(), true)];
-        for (profile, account_id, accepted) in [
+        let document = json!({"sources": [source.clone()]});
+        // Each case keeps this many sources and, when one is named, whether the selection survives.
+        let mut cases = vec![(document.clone(), 1, None)];
+        for (profile, account_id, kept) in [
             ("chatgpt", id, true),
             ("openai", id, false),
             ("chatgpt", uuid::Uuid::now_v7(), false),
         ] {
             let mut changed = document.clone();
             changed["selected"] = json!({"profile": profile, "account_id": account_id});
-            cases.push((changed, accepted));
+            cases.push((changed, 1, Some(kept)));
         }
         let mut absent_model = document.clone();
         absent_model["selected"] = json!({"profile": "chatgpt", "account_id": id});
         absent_model["sources"][0]["model"] = json!(null);
         absent_model["sources"][0]["effort"] = json!(null);
-        cases.push((absent_model, true));
-        for (field, value) in [
-            ("profile", json!("custom:host")),
-            ("account_id", json!("2e664d00-3f9a-40c3-adeb-c6447313a871")),
-            ("effort", json!(null)),
-            ("model", json!("bad\nmodel")),
-            ("catalog", json!(["duplicate", "duplicate"])),
-            ("catalog", json!(["bad\u{1b}model"])),
-            ("runnable", json!(true)),
+        cases.push((absent_model, 1, Some(true)));
+        for (field, value, kept) in [
+            ("profile", json!("custom:host"), 0),
+            (
+                "account_id",
+                json!("2e664d00-3f9a-40c3-adeb-c6447313a871"),
+                0,
+            ),
+            ("effort", json!(null), 0),
+            ("model", json!("bad\nmodel"), 0),
+            (
+                "catalog",
+                json!([{"id": "duplicate"}, {"id": "duplicate"}]),
+                0,
+            ),
+            ("catalog", json!([{"id": "bad\u{1b}model"}]), 0),
+            ("catalog", json!(["gpt-6.1-sol"]), 0),
+            ("catalog", json!([{"id": "gpt-6.1-sol", "window": -1}]), 0),
+            (
+                "catalog",
+                json!([{"id": "gpt-6.1-sol", "runnable": true}]),
+                1,
+            ),
+            ("refreshed_at", json!("today"), 0),
+            ("runnable", json!(true), 1),
         ] {
             let mut changed = document.clone();
             changed["sources"][0][field] = value;
-            cases.push((changed, false));
+            cases.push((changed, kept, None));
         }
         let mut changed = document.clone();
         changed["version"] = json!(2);
-        cases.push((changed, false));
+        cases.push((changed, 1, None));
         let mut changed = document.clone();
         changed["sources"] = json!([source.clone(), source.clone()]);
-        cases.push((changed, false));
+        cases.push((changed, 1, None));
         let mut changed = document.clone();
         changed["sources"] = json!(vec![source.clone(); MAX_PREFERENCE_SOURCES + 1]);
-        cases.push((changed, false));
+        cases.push((changed, 0, None));
         for count in [MAX_CATALOG_MODELS, MAX_CATALOG_MODELS + 1] {
             let mut changed = document.clone();
             changed["sources"][0]["catalog"] = json!(
                 (0..count)
-                    .map(|index| format!("model-{index}"))
+                    .map(|index| json!({"id": format!("model-{index}")}))
                     .collect::<Vec<_>>()
             );
-            cases.push((changed, count == MAX_CATALOG_MODELS));
+            cases.push((changed, usize::from(count == MAX_CATALOG_MODELS), None));
         }
-        for (document, accepted) in cases {
+        cases.push((json!("not an object"), 0, None));
+        for (document, sources, selected) in cases {
             root.record(RecordKind::ModelPreferences)
                 .replace(&serde_json::to_vec(&document).unwrap())
                 .unwrap();
             let reopened = StateRoot::open_existing(root.path()).unwrap();
-            assert_eq!(read_preferences(&reopened).is_ok(), accepted);
+            let preferences = read_preferences(&reopened).unwrap();
+            assert_eq!(preferences.sources.len(), sources, "{document}");
+            if let Some(kept) = selected {
+                assert_eq!(preferences.selected.is_some(), kept, "{document}");
+            }
         }
         root.record(RecordKind::ModelPreferences)
             .replace(&serde_json::to_vec(&document).unwrap())
@@ -1119,12 +1665,15 @@ mod preference_tests {
         choice.catalog.clear();
         write_preferences(&root, choice, false, true).unwrap();
         let mut stale_refresh = original.clone();
-        stale_refresh.catalog = vec!["fresh-model".into()];
+        stale_refresh.catalog = vec![CachedModel {
+            id: "fresh-model".into(),
+            window: None,
+        }];
         write_preferences(&root, stale_refresh, true, false).unwrap();
         let reopened = StateRoot::open_existing(root.path()).unwrap();
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources[0].effort, Some(Effort::High));
-        assert_eq!(current.sources[0].catalog, ["fresh-model"]);
+        assert_eq!(current.sources[0].catalog[0].id, "fresh-model");
         assert_eq!(current.selected.as_ref().unwrap().account_id, id);
         let mut other_refresh = original.clone();
         other_refresh.account_id = uuid::Uuid::now_v7();
@@ -1148,7 +1697,10 @@ mod preference_tests {
         assert!(current.sources.iter().all(|source| source.account_id != id));
         let mut large = original;
         large.catalog = (0..MAX_CATALOG_MODELS)
-            .map(|index| format!("{index:04}{}", "x".repeat(124)))
+            .map(|index| CachedModel {
+                id: format!("{index:04}{}", "x".repeat(124)),
+                window: Some(272_000),
+            })
             .collect();
         write_preferences(&root, large.clone(), true, true).unwrap();
         large.account_id = uuid::Uuid::now_v7();
@@ -1156,5 +1708,131 @@ mod preference_tests {
         let current = read_preferences(&reopened).unwrap();
         assert_eq!(current.sources.len(), 1, "byte quota evicts older sources");
         assert_eq!(current.sources[0].account_id, large.account_id);
+    }
+
+    #[test]
+    fn saved_selection_lookup_ignores_a_held_account_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let reader = StateRoot::open_existing(root.path()).unwrap();
+        let source = SavedModels {
+            profile: "chatgpt".into(),
+            account_id: uuid::Uuid::now_v7(),
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some(Effort::High),
+            refreshed_at: None,
+            catalog: Vec::new(),
+        };
+        write_preferences(&root, source, true, true).unwrap();
+        let preferences = root
+            .with_account_replacement_lock(&workspace, || read_saved_selection(&reader, &workspace))
+            .unwrap()
+            .unwrap();
+        assert_eq!(preferences.sources[0].effort, Some(Effort::High));
+        assert!(read_saved_selection(&reader, reader.path()).is_err());
+    }
+
+    #[test]
+    fn catalog_reads_cache_windows_and_read_time_beside_the_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let day = REFRESH_AFTER.as_secs();
+        let selection = SavedModels {
+            profile: "chatgpt".into(),
+            account_id: id,
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some(Effort::Medium),
+            refreshed_at: None,
+            catalog: Vec::new(),
+        };
+        write_preferences(&root, selection.clone(), false, true).unwrap();
+        let source = |root: &StateRoot| {
+            read_preferences(root)
+                .unwrap()
+                .source("chatgpt", id)
+                .cloned()
+        };
+        assert_eq!(
+            source(&root).unwrap().refreshed_at,
+            None,
+            "a remembered selection is not a catalog read"
+        );
+
+        let cached = |id: &str, window| CachedModel {
+            id: id.into(),
+            window,
+        };
+        let read = SavedModels {
+            model: None,
+            effort: None,
+            refreshed_at: Some(10 * day),
+            catalog: vec![
+                cached("gpt-6.1-sol", Some(272_000)),
+                cached("tiny", Some(1)),
+                cached("unlisted", None),
+            ],
+            ..selection.clone()
+        };
+        write_preferences(&root, read, true, false).unwrap();
+        let stored = source(&root).unwrap();
+        assert_eq!(
+            stored.model.as_deref(),
+            Some("gpt-6.1-sol"),
+            "the selection is kept"
+        );
+        assert_eq!(
+            stored
+                .rows()
+                .iter()
+                .map(|row| row.context_window_tokens)
+                .collect::<Vec<_>>(),
+            [Some(272_000), None, None],
+            "out-of-range windows stay absent"
+        );
+        for (now, fresh) in [
+            (10 * day - 1, false),
+            (10 * day, true),
+            (11 * day - 1, true),
+            (11 * day, false),
+        ] {
+            assert_eq!(stored.fresh(now), fresh, "{now}");
+        }
+
+        let mut choice = selection;
+        choice.effort = Some(Effort::High);
+        write_preferences(&root, choice, false, true).unwrap();
+        let stored = source(&root).unwrap();
+        assert_eq!(stored.effort, Some(Effort::High));
+        assert_eq!(
+            stored.refreshed_at,
+            Some(10 * day),
+            "a selection keeps the read time"
+        );
+        assert_eq!(
+            stored.catalog.len(),
+            3,
+            "a selection keeps the cached catalog"
+        );
+
+        root.record(RecordKind::ModelPreferences)
+            .replace(
+                json!({"sources": [{
+                    "profile": "chatgpt", "account_id": id, "model": null, "effort": null,
+                    "catalog": [{"id": "gpt-6.1-sol"}]
+                }]})
+                .to_string()
+                .as_bytes(),
+            )
+            .unwrap();
+        let stored = source(&root).unwrap();
+        assert_eq!(
+            stored.refreshed_at, None,
+            "a missing read time defaults to never read"
+        );
+        assert_eq!(stored.catalog, [cached("gpt-6.1-sol", None)]);
+        assert!(!stored.fresh(10 * day));
     }
 }

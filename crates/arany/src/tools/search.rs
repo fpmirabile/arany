@@ -4,7 +4,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 use std::time::Instant;
 
-const MAX_PATTERN_BYTES: usize = 512;
+pub(super) const MAX_PATTERN_BYTES: usize = 512;
 const PREVIEW_CHARS: usize = 512;
 
 // Every refusal fits the 128-byte minimum result budget after its fixed prefix and suffix.
@@ -36,6 +36,8 @@ pub(super) struct Search<'a> {
     rows: Vec<Value>,
     more: bool,
     deadline: Instant,
+    skipped_large: u64,
+    skipped_binary: u64,
 }
 
 impl<'a> Search<'a> {
@@ -76,6 +78,8 @@ impl<'a> Search<'a> {
             rows: Vec::new(),
             more: false,
             deadline,
+            skipped_large: 0,
+            skipped_binary: 0,
         })
     }
 
@@ -100,9 +104,23 @@ impl<'a> Search<'a> {
         include.is_match(relative)
     }
 
+    pub(super) fn has_rows(&self) -> bool {
+        !self.rows.is_empty()
+    }
+
+    // A scan bound reached after the first row ends the page early; the caller resumes at next_offset.
+    pub(super) fn truncate(&mut self) {
+        self.more = true;
+    }
+
+    pub(super) fn skip_large(&mut self) {
+        self.skipped_large += 1;
+    }
+
     // Ok(true) once the page and its lookahead are complete; later files need no scan.
     pub(super) fn scan(&mut self, file: &str, content: &[u8]) -> Result<bool, ToolError> {
         let Ok(text) = std::str::from_utf8(content) else {
+            self.skipped_binary += 1;
             return Ok(false);
         };
         for (index, line) in text.lines().enumerate() {
@@ -132,7 +150,16 @@ impl<'a> Search<'a> {
             let next = self
                 .more
                 .then(|| u64::from(self.offset) + self.rows.len() as u64);
-            let output = json!({"entries":self.rows,"limit":self.limit,"may_be_truncated":self.more,"next_offset":next}).to_string();
+            let mut page = json!({"entries":self.rows,"limit":self.limit,"may_be_truncated":self.more,"next_offset":next});
+            for (field, count) in [
+                ("skipped_large", self.skipped_large),
+                ("skipped_binary", self.skipped_binary),
+            ] {
+                if count > 0 {
+                    page[field] = json!(count);
+                }
+            }
+            let output = page.to_string();
             if output.len() <= result_bytes {
                 if had_rows && self.rows.is_empty() {
                     return Err(ToolError::Limit);

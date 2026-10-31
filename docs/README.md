@@ -13,13 +13,12 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Implementation invariants and pitfalls | Tests that pin them; a one-line `//` comment only for a non-obvious reason beside the code; fixture procedures in [testing details](../agents/references/testing-details.md) |
 | Agreed observable product behavior | [Domain specs](./specs/README.md); every domain has one |
 | Physical architecture, data model and dependency direction | [System overview](./architecture/system-overview.md) |
-| Architectural decisions, reasons and trade-offs | [Decision register](./research/next-step-decision-register.md), or a focused ADR when warranted |
-| Source investigation, alternatives and research retention | [Research index](./research/README.md) and its [completion policy](./research/README.md#retention-and-completion) |
-| Security findings and scoped supply-chain evidence | [Dependency inventory](./security/beta-dependency-inventory.md) and `docs/security/findings/` |
+| Architectural decisions, reasons and trade-offs | [Owning spec](./specs/README.md), or a focused ADR when warranted |
+| Security findings and scoped supply-chain evidence | [Dependency inventory](./security/beta-dependency-inventory.md) and [release-blocking findings](./security/findings.md) |
 | Proposed changes and temporary execution work | [Planning](../planning/README.md) |
 | Open defects, deferred functionality and user-owned checks | [Next steps](../NEXT_STEPS.md) |
 | Completed changes and check results | Git/PR/CI history and the implementation handoff; no living chronological ledger |
-| Testing design and trade-offs | [Testing strategy](./research/testing-strategy-for-rust-cli-harness.md); working requirements remain in [testing rules](../agents/testing.md) |
+| Testing design and trade-offs | [Testing rules](../agents/testing.md) |
 | User instructions | [Account setup](./setup.md), [local tools](./tools.md), [development diagnostics](./specs/diagnostics.md) |
 | Repeatable development procedures | [Project skills](../agents/skills/README.md) |
 | Domain vocabulary | [CONTEXT.md](../CONTEXT.md) |

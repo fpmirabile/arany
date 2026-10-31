@@ -4,6 +4,9 @@ pub use api::ApiUsage;
 use super::{AgentRunId, Event, ReplayError, RunId, SessionId, SessionView};
 use crate::provider::{ProviderKind, ProviderRole, Usage};
 
+// Pending reservations, plan windows and usage groups each fit the Session's Event ceiling.
+const MAX_USAGE_ENTRIES: usize = crate::store::MAX_SESSION_EVENTS;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TokenCount {
     pub known: Option<u64>,
@@ -85,85 +88,117 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
     if limits.is_some_and(|limits| !limits.valid()) {
         return Err(ReplayError::InvalidTransition);
     }
-    let (run_id, actor, role, usage, route, settle) = match event {
+    let Some(attempt) = attempt(view, event)? else {
+        return Ok(());
+    };
+    let (run_id, actor, role) = (attempt.run_id, attempt.actor, attempt.role);
+    let (provider, model) = attempt_route(view, &attempt)?;
+    let chatgpt = ProviderKind::parse(&provider) == Some(ProviderKind::ChatGpt);
+    if limits.is_some_and(|limits| limits.api.is_none()) && !chatgpt {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if limits.is_some_and(|limits| limits.api.is_some()) && chatgpt {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if !chatgpt {
+        api::apply(view, event, (run_id, actor, role), limits)?;
+    }
+    if chatgpt {
+        record_plan_usage(view, event, &attempt, (&provider, &model), limits)?;
+    }
+    if attempt.settle
+        && let Some(index) = view
+            .usage
+            .pending
+            .iter()
+            .rposition(|pending| *pending == (view.id, run_id, actor))
+    {
+        view.usage.pending.remove(index);
+    }
+    add_usage(view, run_id, provider, model, attempt.usage)
+}
+
+struct Attempt {
+    run_id: RunId,
+    actor: Option<AgentRunId>,
+    role: ProviderRole,
+    usage: Usage,
+    route: Option<(String, String)>,
+    settle: bool,
+}
+
+fn attempt(view: &mut SessionView, event: &Event) -> Result<Option<Attempt>, ReplayError> {
+    Ok(Some(match event {
         Event::GoalProviderCallReserved {
             run_id,
             agent_run_id,
             ..
-        } => {
-            if view.usage.pending.len() >= 10_000 {
-                return Err(ReplayError::InvalidTransition);
-            }
-            view.usage
-                .pending
-                .push((view.id, *run_id, Some(*agent_run_id)));
-            return Ok(());
-        }
-        Event::GoalCompactionCallReserved { run_id, .. } => {
-            if view.usage.pending.len() >= 10_000 {
-                return Err(ReplayError::InvalidTransition);
-            }
-            view.usage.pending.push((view.id, *run_id, None));
-            return Ok(());
-        }
+        } => return reserve(view, *run_id, Some(*agent_run_id)),
+        Event::GoalCompactionCallReserved { run_id, .. } => return reserve(view, *run_id, None),
         Event::ProviderCallRecorded {
             run_id,
             agent_run_id,
             record,
-        } => (
-            *run_id,
-            Some(*agent_run_id),
-            ProviderRole::for_phase(record.phase),
-            Usage {
+        } => Attempt {
+            run_id: *run_id,
+            actor: Some(*agent_run_id),
+            role: ProviderRole::for_phase(record.phase),
+            usage: Usage {
                 input_tokens: record.input_tokens,
                 output_tokens: record.output_tokens,
                 cache_read_input_tokens: record.cache_read_input_tokens,
                 cache_creation_input_tokens: record.cache_creation_input_tokens,
             },
-            None,
-            true,
-        ),
-        Event::ContextCompacted { record, .. } | Event::GoalContextCompacted { record, .. } => (
-            record.covered_run_id,
-            None,
-            ProviderRole::Compaction,
-            Usage {
-                input_tokens: record.input_tokens,
-                output_tokens: record.output_tokens,
-                cache_read_input_tokens: record.cache_read_input_tokens,
-                cache_creation_input_tokens: record.cache_creation_input_tokens,
-            },
-            Some((record.provider.clone(), record.model.clone())),
-            true,
-        ),
+            route: None,
+            settle: true,
+        },
+        Event::ContextCompacted { record, .. } | Event::GoalContextCompacted { record, .. } => {
+            Attempt {
+                run_id: record.covered_run_id,
+                actor: None,
+                role: ProviderRole::Compaction,
+                usage: Usage {
+                    input_tokens: record.input_tokens,
+                    output_tokens: record.output_tokens,
+                    cache_read_input_tokens: record.cache_read_input_tokens,
+                    cache_creation_input_tokens: record.cache_creation_input_tokens,
+                },
+                route: Some((record.provider.clone(), record.model.clone())),
+                settle: true,
+            }
+        }
         Event::ProviderFallbackUsed {
             run_id,
             agent_run_id,
             fallback,
-        } => (
-            *run_id,
-            Some(*agent_run_id),
-            fallback.role,
-            Usage::default(),
-            Some((fallback.from.profile.clone(), fallback.from.model.clone())),
-            false,
-        ),
+        } => Attempt {
+            run_id: *run_id,
+            actor: Some(*agent_run_id),
+            role: fallback.role,
+            usage: Usage::default(),
+            route: Some((fallback.from.profile.clone(), fallback.from.model.clone())),
+            settle: false,
+        },
         Event::ProviderRetryScheduled {
             run_id,
             agent_run_id,
             retry,
-        } => (
-            *run_id,
-            Some(*agent_run_id),
-            retry.role,
-            Usage::default(),
-            None,
-            false,
-        ),
-        _ => return Ok(()),
-    };
-    let (provider, model) = match route {
-        Some(route) => route,
+        } => Attempt {
+            run_id: *run_id,
+            actor: Some(*agent_run_id),
+            role: retry.role,
+            usage: Usage::default(),
+            route: None,
+            settle: false,
+        },
+        _ => return Ok(None),
+    }))
+}
+
+fn attempt_route(view: &SessionView, attempt: &Attempt) -> Result<(String, String), ReplayError> {
+    let (run_id, actor, role) = (attempt.run_id, attempt.actor, attempt.role);
+    Ok(match &attempt.route {
+        Some(route) => route.clone(),
         None => {
             let run = view
                 .runs
@@ -187,109 +222,129 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
                 (config.provider.profile(), config.model.clone())
             }
         }
-    };
-    let chatgpt = ProviderKind::parse(&provider) == Some(ProviderKind::ChatGpt);
-    if limits.is_some_and(|limits| limits.api.is_none()) && !chatgpt {
+    })
+}
+
+fn reserve(
+    view: &mut SessionView,
+    run_id: RunId,
+    actor: Option<AgentRunId>,
+) -> Result<Option<Attempt>, ReplayError> {
+    if view.usage.pending.len() >= MAX_USAGE_ENTRIES {
         return Err(ReplayError::InvalidTransition);
     }
-    if limits.is_some_and(|limits| limits.api.is_some()) && chatgpt {
-        return Err(ReplayError::InvalidTransition);
-    }
-    if !chatgpt {
-        api::apply(view, event, (run_id, actor, role), limits)?;
-    }
-    if chatgpt {
-        let run = view
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .ok_or(ReplayError::InvalidTransition)?;
-        let account = match event {
-            Event::ContextCompacted { record, .. } | Event::GoalContextCompacted { record, .. } => {
-                record.chatgpt_provenance.as_ref().map(|p| p.account_id)
-            }
-            Event::ProviderFallbackUsed { fallback, .. } => {
-                fallback.from.chatgpt_provenance().map(|p| p.account_id)
-            }
-            _ => {
-                let actor = actor.ok_or(ReplayError::InvalidTransition)?;
-                let identity = run
-                    .provider_fallbacks
-                    .iter()
-                    .rev()
-                    .find(|(id, fallback)| *id == actor && fallback.role == role)
-                    .map(|(_, f)| &f.to)
-                    .or_else(|| {
-                        run.provider_chain(actor, role)
-                            .and_then(|chain| chain.first())
-                    });
-                identity
-                    .and_then(|i| i.chatgpt_provenance())
-                    .or_else(|| {
-                        run.config
-                            .as_ref()
-                            .and_then(|c| c.chatgpt_provenance.as_ref())
-                    })
-                    .map(|p| p.account_id)
-            }
-        };
-        if limits.is_some() && account.is_none() {
-            return Err(ReplayError::InvalidTransition);
+    view.usage.pending.push((view.id, run_id, actor));
+    Ok(None)
+}
+
+fn plan_account(
+    view: &SessionView,
+    event: &Event,
+    attempt: &Attempt,
+) -> Result<Option<uuid::Uuid>, ReplayError> {
+    let (run_id, actor, role) = (attempt.run_id, attempt.actor, attempt.role);
+    let run = view
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    Ok(match event {
+        Event::ContextCompacted { record, .. } | Event::GoalContextCompacted { record, .. } => {
+            record.chatgpt_provenance.as_ref().map(|p| p.account_id)
         }
-        let index = view.usage.plan_limits.iter().position(|group| {
-            group.account == account
-                && group.session_id == view.id
-                && group.run_id == run_id
-                && group.provider == provider
-                && group.model == model
-        });
-        let index = match index {
-            Some(index) => index,
-            None => {
-                if view.usage.plan_limits.len() >= 10_000 {
-                    return Err(ReplayError::InvalidTransition);
-                }
-                view.usage.plan_limits.push(PlanUsage {
-                    account,
-                    session_id: view.id,
-                    run_id,
-                    provider: provider.clone(),
-                    model: model.clone(),
-                    primary: None,
-                    secondary: None,
-                    latest_unavailable: None,
-                    latest_unreported: true,
+        Event::ProviderFallbackUsed { fallback, .. } => {
+            fallback.from.chatgpt_provenance().map(|p| p.account_id)
+        }
+        _ => {
+            let actor = actor.ok_or(ReplayError::InvalidTransition)?;
+            let identity = run
+                .provider_fallbacks
+                .iter()
+                .rev()
+                .find(|(id, fallback)| *id == actor && fallback.role == role)
+                .map(|(_, f)| &f.to)
+                .or_else(|| {
+                    run.provider_chain(actor, role)
+                        .and_then(|chain| chain.first())
                 });
-                view.usage.plan_limits.len() - 1
-            }
-        };
-        let group = &mut view.usage.plan_limits[index];
-        group.latest_unreported = limits.is_none();
-        group.latest_unavailable = limits.and_then(|limits| limits.unavailable);
-        if let Some(limits) = limits {
-            for (old, new) in [
-                (&mut group.primary, &limits.primary),
-                (&mut group.secondary, &limits.secondary),
-            ] {
-                if let Some(new) = new
-                    && old
+            identity
+                .and_then(|i| i.chatgpt_provenance())
+                .or_else(|| {
+                    run.config
                         .as_ref()
-                        .is_none_or(|old| new.observed_at >= old.observed_at)
-                {
-                    *old = Some(new.clone());
-                }
+                        .and_then(|c| c.chatgpt_provenance.as_ref())
+                })
+                .map(|p| p.account_id)
+        }
+    })
+}
+
+fn record_plan_usage(
+    view: &mut SessionView,
+    event: &Event,
+    attempt: &Attempt,
+    (provider, model): (&str, &str),
+    limits: Option<&crate::provider::RateLimits>,
+) -> Result<(), ReplayError> {
+    let run_id = attempt.run_id;
+    let account = plan_account(view, event, attempt)?;
+    if limits.is_some() && account.is_none() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let index = view.usage.plan_limits.iter().position(|group| {
+        group.account == account
+            && group.session_id == view.id
+            && group.run_id == run_id
+            && group.provider == provider
+            && group.model == model
+    });
+    let index = match index {
+        Some(index) => index,
+        None => {
+            if view.usage.plan_limits.len() >= MAX_USAGE_ENTRIES {
+                return Err(ReplayError::InvalidTransition);
+            }
+            view.usage.plan_limits.push(PlanUsage {
+                account,
+                session_id: view.id,
+                run_id,
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                primary: None,
+                secondary: None,
+                latest_unavailable: None,
+                latest_unreported: true,
+            });
+            view.usage.plan_limits.len() - 1
+        }
+    };
+    let group = &mut view.usage.plan_limits[index];
+    group.latest_unreported = limits.is_none();
+    group.latest_unavailable = limits.and_then(|limits| limits.unavailable);
+    if let Some(limits) = limits {
+        for (old, new) in [
+            (&mut group.primary, &limits.primary),
+            (&mut group.secondary, &limits.secondary),
+        ] {
+            if let Some(new) = new
+                && old
+                    .as_ref()
+                    .is_none_or(|old| new.observed_at >= old.observed_at)
+            {
+                *old = Some(new.clone());
             }
         }
     }
-    if settle
-        && let Some(index) = view
-            .usage
-            .pending
-            .iter()
-            .rposition(|pending| *pending == (view.id, run_id, actor))
-    {
-        view.usage.pending.remove(index);
-    }
+    Ok(())
+}
+
+fn add_usage(
+    view: &mut SessionView,
+    run_id: RunId,
+    provider: String,
+    model: String,
+    usage: Usage,
+) -> Result<(), ReplayError> {
     let groups = &mut view.usage.groups;
     let index = groups.iter().position(|group| {
         group.session_id == view.id
@@ -300,8 +355,8 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
     let index = match index {
         Some(index) => index,
         None => {
-            // A group needs a canonical attempt within the 10,000-Event lineage ceiling.
-            if groups.len() >= 10_000 {
+            // A group needs a canonical attempt within the lineage Event ceiling.
+            if groups.len() >= MAX_USAGE_ENTRIES {
                 return Err(ReplayError::InvalidTransition);
             }
             groups.push(UsageGroup {

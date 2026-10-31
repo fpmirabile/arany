@@ -1,4 +1,4 @@
-use super::catalog::{Family, Site};
+use super::catalog::Site;
 use super::config::Config;
 use super::permissions::HiddenPaths;
 use super::toolchains::{RuntimeGrant, validate_selection};
@@ -20,6 +20,7 @@ const RUST_GUARD_FLAGS: &str = "--cfg\x1farany_guard";
 pub(super) const TASK_BYTES_CAP: usize = 1024 * 1024;
 // Only a task carrying one base64 agent definition file may exceed the common cap.
 const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
+#[cfg(not(target_os = "macos"))]
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -27,8 +28,6 @@ const PAYLOAD_KILL_WAIT: Duration = Duration::from_secs(1);
 // The launcher measures its runtime from GO, so the grace covers its kill wait, the report write and GO delivery.
 #[cfg(any(target_os = "macos", test))]
 const PAYLOAD_REPORT_GRACE: Duration = PAYLOAD_KILL_WAIT.saturating_add(Duration::from_secs(1));
-#[cfg(any(target_os = "macos", test))]
-pub(super) const DISCOVERY_DONE: &[u8] = b"DISCOVERY_DONE\n";
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn payload_report_deadline(
@@ -39,42 +38,17 @@ pub(super) fn payload_report_deadline(
 }
 
 #[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
-mod landlock;
-#[cfg(target_os = "linux")]
 mod linux;
 mod network;
 #[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
 pub(in crate::tools) use linux::overlay::selection_failure;
 pub(super) use network::set_environment as set_proxy_environment;
-#[cfg(target_os = "linux")]
-mod profile;
-#[cfg(target_os = "linux")]
-pub(super) use landlock::spawn_confined;
-
-pub(super) fn git_writes_available() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        landlock::available()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        true
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod git_stage;
-#[cfg(target_os = "macos")]
-pub(super) use git_stage::GitStage;
-#[cfg(target_os = "macos")]
-use git_stage::{GitWork, read_plan_report, receive_git_input};
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+mod profile;
+#[cfg(target_os = "macos")]
+pub(super) use macos::disk_floor_reached;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
@@ -82,9 +56,7 @@ pub(super) use macos::{
     RUNTIME_COMPAT_BYTES, RUNTIME_COMPAT_FILE, SystemPrograms, macos_enforcement_digest,
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
-#[cfg(target_os = "linux")]
 mod cache_directory;
 mod cache_recovery;
 pub use cache_recovery::recover_build_cache;
@@ -99,20 +71,37 @@ pub(super) mod transfer;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
     check_available()?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     return admission::recover_private(ids).await;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+}
+
+pub(super) const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+pub(super) fn runtime_roots() -> Vec<&'static str> {
+    #[cfg(target_os = "macos")]
     {
-        let _ = ids;
-        Err(ToolError::ProtectionUnavailable)
+        vec!["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::iter::once(RUNTIME_ROOT)
+            .chain(linux::system_targets())
+            .collect()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        vec![RUNTIME_ROOT]
     }
 }
 
-pub(super) fn runtime_roots() -> &'static [&'static str] {
-    if cfg!(target_os = "macos") {
-        &["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
-    } else {
-        &[RUNTIME_ROOT]
+pub(super) fn reserved_target(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::reject_profile_overlap(path).is_err()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -139,6 +128,9 @@ struct Task {
     #[serde(deserialize_with = "Option::deserialize")]
     command_deadline: Option<[u8; 8]>,
     config: Config,
+    // The Run's grants when this command's grants differ; the intent's policy digest pins them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_grants: Option<Vec<RuntimeGrant>>,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,19 +147,17 @@ struct Task {
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
     workspace: std::path::PathBuf,
+    // An editor command runs directly in its editor's workspace instead of a selected copy.
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    editor_tree: Option<std::path::PathBuf>,
     #[cfg(target_os = "macos")]
     guard_executable: std::path::PathBuf,
     #[cfg(target_os = "macos")]
     system_programs: Option<SystemPrograms>,
     #[cfg(target_os = "macos")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    git_stage: Option<GitStage>,
-    #[cfg(target_os = "macos")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     proxy_port: Option<u16>,
-    #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    git_fault: Option<crate::fault::git_write::GitWriteStage>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -182,19 +172,30 @@ pub(super) struct BuildCacheTransfer {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum CacheCandidate {
     Received,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(
+            dead_code,
+            reason = "only the Linux overlay capture refuses or loses a candidate"
+        )
+    )]
     Rejected,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(
+            dead_code,
+            reason = "only the Linux overlay capture refuses or loses a candidate"
+        )
+    )]
     Failed,
+    #[cfg_attr(
+        all(target_os = "macos", not(test)),
+        expect(
+            dead_code,
+            reason = "only the Linux overlay capture refuses or loses a candidate"
+        )
+    )]
     Uncertain,
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn cache_transfer_deadline(
-    intent: &EffectIntent,
-    ceiling: Option<tokio::time::Instant>,
-) -> tokio::time::Instant {
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-    ceiling.map_or(deadline, |ceiling| deadline.min(ceiling))
 }
 
 impl BuildCacheTransfer {
@@ -215,7 +216,6 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
-    #[cfg(target_os = "linux")]
     pub(super) directory: Option<cache_directory::Session>,
     pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
@@ -241,33 +241,18 @@ pub(super) fn build_cache_session(
     )
     .map_err(map_cache_error)?;
     let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
-    let lease = match state.begin_build_cache_with_limits(
-        identity.clone(),
-        intent.limits.cache_bytes,
-        intent.limits.cache_candidate_bytes,
-    ) {
+    let lease = match state
+        .begin_build_cache_with_limit(identity.clone(), intent.limits.cache_candidate_bytes)
+    {
         Ok(lease) => lease,
-        #[cfg(target_os = "linux")]
         Err(StoreError::StorageFull) if cache_directory::selected(intent) => {
             return Err(ToolError::Limit);
-        }
-        Err(StoreError::StorageFull) if intent.limits.cache_candidate_bytes > 0 => {
-            match state.begin_build_cache_with_limits(
-                identity.clone(),
-                intent.limits.cache_bytes,
-                0,
-            ) {
-                Ok(lease) => lease,
-                Err(StoreError::StorageFull) => return Ok(None),
-                Err(error) => return Err(map_cache_error(error)),
-            }
         }
         Err(StoreError::StorageFull) => return Ok(None),
         Err(error) => return Err(map_cache_error(error)),
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
-        #[cfg(target_os = "linux")]
         directory: None,
         lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
@@ -326,7 +311,9 @@ pub(super) async fn publish_cache_candidate(
         (CacheCandidate::Uncertain, _) => CacheUpdate::Uncertain,
         (CacheCandidate::Rejected, _) => CacheUpdate::Rejected,
         (CacheCandidate::Failed, _) => CacheUpdate::Failed,
-        (CacheCandidate::Received, None) if observation.intent.limits.cache_requested_bytes > 0 => {
+        (CacheCandidate::Received, None)
+            if observation.intent.limits.cache_requested_bytes.enabled() =>
+        {
             CacheUpdate::Rejected
         }
         (CacheCandidate::Received, None) => CacheUpdate::NotApplicable,
@@ -335,13 +322,9 @@ pub(super) async fn publish_cache_candidate(
         }
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                #[cfg(target_os = "linux")]
                 if cache.directory.is_some() {
                     return cache_directory::publish(cache);
                 }
-                #[cfg(any(target_os = "macos", test))]
-                return publish_archive(cache);
-                #[cfg(all(not(target_os = "macos"), not(test)))]
                 CacheUpdate::Failed
             });
             match tokio::time::timeout_at(deadline, publication).await {
@@ -359,27 +342,6 @@ pub(super) async fn publish_cache_candidate(
     debug_assert!(observation.valid());
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn publish_archive(cache: BuildCacheSession) -> CacheUpdate {
-    let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
-        return CacheUpdate::Uncertain;
-    };
-    let mut candidate = match lease.open_candidate() {
-        Ok(candidate) => candidate,
-        Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
-            return CacheUpdate::Rejected;
-        }
-        Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
-        Err(_) => return CacheUpdate::Failed,
-    };
-    match lease.publish(&mut candidate, &cache.transfer.exclusions) {
-        Ok(()) => CacheUpdate::Published,
-        Err(StoreError::StorageFull) if !lease.publication_uncertain() => CacheUpdate::Rejected,
-        Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
-        Err(_) => CacheUpdate::Failed,
-    }
-}
-
 impl Task {
     fn runtime_started(&self) -> Result<Option<std::time::Instant>, ToolError> {
         match self.command_deadline {
@@ -391,6 +353,18 @@ impl Task {
                 .ok_or(ToolError::Limit),
             None => Ok(runtime_start_at_go()),
         }
+    }
+
+    fn policy_digest(&self) -> Result<[u8; 32], ToolError> {
+        let Some(grants) = &self.policy_grants else {
+            return Ok(self.config.digest());
+        };
+        validate_selection(grants)?;
+        Ok(Config {
+            runtime_grants: grants.clone(),
+            ..self.config.clone()
+        }
+        .digest())
     }
 
     fn enforcement_digest(&self) -> Result<[u8; 32], ToolError> {
@@ -406,6 +380,13 @@ impl Task {
             self.system_programs.as_ref(),
         )
     }
+}
+
+// The grants one command runs with; only Linux hides protected names beneath approved folders.
+pub(super) fn mask_grants(grants: Vec<RuntimeGrant>) -> Vec<RuntimeGrant> {
+    #[cfg(target_os = "linux")]
+    let grants = linux::masks::mask(grants);
+    grants
 }
 
 pub(super) fn intent_enforcement_digest(
@@ -464,10 +445,6 @@ struct Ready {
 #[serde(rename_all = "snake_case")]
 pub enum GuardCheck {
     Inspection,
-    ListingUnavailable,
-    DeviceUnlisted,
-    DetachFailed,
-    ImageStillListed,
     MountStillPresent,
     WorkerClosed,
     WorkerPanicked,
@@ -492,10 +469,6 @@ impl GuardCheck {
             Self::SelectionInputVanished => Some(SelectionCause::InputVanished),
             Self::SelectionInputConflict => Some(SelectionCause::InputConflict),
             Self::Inspection
-            | Self::ListingUnavailable
-            | Self::DeviceUnlisted
-            | Self::DetachFailed
-            | Self::ImageStillListed
             | Self::MountStillPresent
             | Self::WorkerClosed
             | Self::WorkerPanicked
@@ -514,10 +487,6 @@ impl GuardCheck {
     pub fn label(self) -> &'static str {
         match self {
             Self::Inspection => "inspection",
-            Self::ListingUnavailable => "listing unavailable",
-            Self::DeviceUnlisted => "device unlisted before detach",
-            Self::DetachFailed => "detach failed",
-            Self::ImageStillListed => "image still listed",
             Self::MountStillPresent => "mount still present",
             Self::WorkerClosed => "worker closed before its report",
             Self::WorkerPanicked => "worker panicked",
@@ -714,14 +683,9 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     {
         macos::check_available()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err(ToolError::ProtectionUnavailable)
-    }
 }
 
 pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8; 32], ToolError> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let jobs = ToolLimits::default().build_jobs;
     #[cfg(target_os = "linux")]
     {
@@ -730,10 +694,6 @@ pub(super) fn enforcement_digest(runtime_grants: &[RuntimeGrant]) -> Result<[u8;
     #[cfg(target_os = "macos")]
     {
         bind_runtime_grants(macos::enforcement_digest()?, runtime_grants, jobs)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err(ToolError::ProtectionUnavailable)
     }
 }
 
@@ -755,7 +715,7 @@ fn bind_runtime_grants(
     if runtime_grants.is_empty() {
         return Ok(profile);
     }
-    let mut bytes = b"arany-runtime-profile-v3:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+    let mut bytes = b"arany-runtime-profile-v4:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
     if runtime_grants
         .iter()
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
@@ -790,8 +750,6 @@ fn verify_runtime_grants(
         grant.verify_at(&grant.mounted_path(cache_enabled)?)?;
         #[cfg(target_os = "macos")]
         grant.verify_host()?;
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        return Err(ToolError::ProtectionUnavailable);
     }
     Ok(())
 }
@@ -818,8 +776,6 @@ fn attest_runtime_mounts(
     linux::verify_runtime_mounts(grants, cache_enabled)?;
     #[cfg(target_os = "macos")]
     macos::verify_runtime_mounts(grants)?;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    return Err(ToolError::ProtectionUnavailable);
     Ok(())
 }
 
@@ -839,6 +795,12 @@ fn attest_task_mounts(
         *stage = BootstrapStage::RuntimeMounts;
         if linux::overlay::selected(&task.intent, &task.config) {
             linux::overlay::verify_helper(overlay.ok_or(ToolError::ProtectionUnavailable)?, task)?;
+        } else if task.intent.target.editor() {
+            linux::verify_editor_mount()?;
+            linux::overlay::cache::verify_helper(
+                task.cache.as_ref().map(|cache| cache.view_bytes),
+                task,
+            )?;
         } else {
             linux::verify_copy_mount(task.intent.limits.project_bytes)?;
         }
@@ -853,7 +815,10 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
                 command_deadline: selection_phase::primary_command(intent).then_some([u8::MAX; 8]),
-                config: runtime.config.clone(),
+                config: runtime
+                    .process_config(&intent.call)
+                    .map_or_else(|_| runtime.config.clone(), std::borrow::Cow::into_owned),
+                policy_grants: Some(runtime.config.runtime_grants.clone()),
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -879,108 +844,16 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
             })
             .is_ok()
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (runtime, intent);
-        false
-    }
-}
-
-struct DiscoveryWait<'a> {
-    runtime: &'a ToolRuntime,
-    id: uuid::Uuid,
-}
-
-impl Drop for DiscoveryWait<'_> {
-    fn drop(&mut self) {
-        self.runtime.queue_changed(self.id, false);
-    }
 }
 
 async fn admit_operation(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<admission::Permit, ToolError> {
-    if !super::discovery::possible(&intent.call) {
-        return admission::acquire(intent.id, intent.limits.runtime_ms, |queued| {
-            runtime.queue_changed(intent.id, queued)
-        })
-        .await;
-    }
-    let wait = super::discovery::TYPED_WAIT
-        .min(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
-    let _waiting = DiscoveryWait {
-        runtime,
-        id: intent.id,
-    };
-    discovery_capacity(
-        wait,
-        admission::acquire(
-            intent.id,
-            u32::try_from(wait.as_millis()).map_err(|_| ToolError::Limit)?,
-            |queued| runtime.queue_changed(intent.id, queued),
-        ),
-    )
-    .await
-}
-
-async fn discovery_capacity<T>(
-    wait: Duration,
-    operation: impl Future<Output = Result<T, ToolError>>,
-) -> Result<T, ToolError> {
-    let deadline = tokio::time::Instant::now() + wait;
-    let result = tokio::time::timeout_at(deadline, operation).await;
-    if tokio::time::Instant::now() >= deadline {
-        return Err(ToolError::QueueFull);
-    }
-    match result {
-        Err(_) | Ok(Err(ToolError::Limit)) => Err(ToolError::QueueFull),
-        Ok(result) => result,
-    }
-}
-
-async fn discovery_work<T>(
-    intent: &EffectIntent,
-    operation: impl Future<Output = Result<T, ToolError>>,
-) -> Result<T, ToolError> {
-    if !super::discovery::possible(&intent.call) {
-        return operation.await;
-    }
-    let duration = super::selection::DISCOVERY_TIME
-        .min(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
-    tokio::time::timeout(duration, operation)
-        .await
-        .map_err(|_| ToolError::Timeout(String::new()))?
-}
-
-#[cfg(any(target_os = "macos", test))]
-async fn wait_discovery_completion<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    intent: &EffectIntent,
-) -> Result<(), ToolError> {
-    discovery_work(intent, async {
-        let prefix = reader.fill_buf().await.map_err(|_| ToolError::Operation)?;
-        if prefix.first() != DISCOVERY_DONE.first() {
-            return match read_worker_report(reader, intent).await {
-                Err(error) => Err(error),
-                Ok(_) => Err(ToolError::Operation),
-            };
-        }
-        if read_line_capped(reader, DISCOVERY_DONE.len()).await? != DISCOVERY_DONE {
-            return Err(ToolError::Operation);
-        }
-        Ok(())
+    admission::acquire(intent.id, intent.limits.runtime_ms, |queued| {
+        runtime.queue_changed(intent.id, queued)
     })
     .await
-}
-
-#[cfg(any(target_os = "macos", test))]
-async fn read_discovery_report<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    intent: &EffectIntent,
-) -> Result<ToolObservation, ToolError> {
-    wait_discovery_completion(reader, intent).await?;
-    read_worker_report(reader, intent).await
 }
 
 impl ToolRuntime {
@@ -1016,88 +889,37 @@ pub(super) async fn execute(
         &mut dispatched,
     ))
     .await;
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let result = Err(ToolError::ProtectionUnavailable);
-    // Unless cleanup failed the unit is stopped, so leftover Git locks are reported, never moved.
-    let stale = if dispatched
-        && intent.call.is_git()
-        && intent.call.mutates()
-        && !matches!(
-            result,
-            Err(ToolError::GuardRejected(GuardStage::ProcessCleanup))
-        ) {
-        match super::git::recover_locks(&runtime.workspace, intent.id) {
-            Ok(()) => None,
-            Err(error @ ToolError::StaleGitLocks(_)) => Some(error.to_string()),
-            Err(error) => {
-                crate::diagnostics::tool_failure("Guard", &error);
-                None
-            }
-        }
-    } else {
-        None
-    };
     let result = crate::fault::guard_result(intent.id, result);
     #[cfg(target_os = "linux")]
     let result = result
         .map_err(|error| linux::supervisor::namespace_failure(error, &runtime.guard_executable));
-    let result = if known_read_stop(&intent.call) {
-        read_stop_result(intent, dispatched, stop.is_cancelled(), result)
+    if intent.call.is_web() {
+        web_stop_result(intent, dispatched, stop.is_cancelled(), result)
     } else {
         dispatch_result(intent, dispatched, result)
-    };
-    let Some(report) = stale else {
-        return result;
-    };
-    let cache = super::guard_error_cache_update(&intent.call, runtime.cache_state.is_some());
-    Ok(report_stale_locks(
-        uncertain_after_stale(intent, result, cache),
-        &report,
-    ))
+    }
 }
 
-// Discovery and web calls publish nothing, so confirmed teardown after a stop is a known outcome.
-fn known_read_stop(call: &ToolCall) -> bool {
-    super::discovery::possible(call) || call.is_web()
-}
-
-fn read_stop_result(
+// Web calls publish nothing, so confirmed teardown after a stop is a known outcome.
+fn web_stop_result(
     intent: &EffectIntent,
     dispatched: bool,
     cancelled: bool,
     result: Result<ToolObservation, ToolError>,
 ) -> Result<ToolObservation, ToolError> {
-    let discovery = super::discovery::possible(&intent.call);
-    let cause = match &result {
-        Err(ToolError::Timeout(_)) if dispatched && discovery => {
-            Some(crate::tools::LimitCause::Timeout)
-        }
-        Err(ToolError::Limit) if dispatched && discovery => {
-            Some(crate::tools::LimitCause::Resource)
-        }
-        Err(ToolError::Operation) if cancelled => None,
+    match &result {
+        Err(ToolError::Operation) if cancelled => {}
         Err(ToolError::GuardBootstrap(BootstrapFailure {
             check: Some(GuardCheck::Cancelled),
             ..
-        })) if cancelled => None,
+        })) if cancelled => {}
         _ => return dispatch_result(intent, dispatched, result),
-    };
+    }
     Ok(ToolObservation {
         spill: None,
         intent: intent.clone(),
-        disposition: if cause.is_some() {
-            ToolDisposition::Limit
-        } else {
-            ToolDisposition::Cancelled
-        },
-        output: if cause.is_some() {
-            "Discovery stopped at its resource or time limit"
-        } else if discovery {
-            "Discovery cancelled"
-        } else {
-            "Web request cancelled"
-        }
-        .into(),
+        disposition: ToolDisposition::Cancelled,
+        output: "Web request cancelled".into(),
         attestation: dispatched.then(|| {
             Attestation::Guard(GuardReceipt {
                 contract_version: 1,
@@ -1107,35 +929,11 @@ fn read_stop_result(
             })
         }),
         enforcement_cause: None,
-        limit_cause: cause,
+        limit_cause: None,
         approval_cause: None,
         guard_stage: None,
         cache_update: CacheUpdate::NotApplicable,
     })
-}
-
-fn uncertain_after_stale(
-    intent: &EffectIntent,
-    result: Result<ToolObservation, ToolError>,
-    cache: CacheUpdate,
-) -> ToolObservation {
-    match result {
-        Ok(observation) if observation.disposition == ToolDisposition::Uncertain => observation,
-        other => super::uncertain_observation(
-            intent.clone(),
-            other.err().unwrap_or(ToolError::Uncertain),
-            cache,
-        ),
-    }
-}
-
-// The owner removes these by hand, so the report leads the journaled observation.
-pub(super) fn report_stale_locks(
-    mut observation: ToolObservation,
-    report: &str,
-) -> ToolObservation {
-    observation.output = format!("{report}. {}", observation.output);
-    observation
 }
 
 pub(super) fn dispatch_result(
@@ -1161,46 +959,6 @@ pub(super) async fn drain_stderr(
             let _ = task.await;
             None
         }
-    }
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<T, ToolError>>>(
-    attempts: usize,
-    pause: Duration,
-    deadline: tokio::time::Instant,
-    mut operation: impl FnMut() -> Fut,
-) -> Result<T, ToolError> {
-    let mut attempt = 1;
-    loop {
-        match operation().await {
-            Err(error @ (ToolError::ProtectionUnavailable | ToolError::Operation))
-                if attempt < attempts && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep_until(
-                    deadline.min(tokio::time::Instant::now() + pause * attempt as u32),
-                )
-                .await;
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(error);
-                }
-                attempt += 1;
-            }
-            result => return result,
-        }
-    }
-}
-
-// A device gone at the re-check may still be detaching; never detach it, and let a fresh attempt confirm.
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn require_listed<T: PartialEq>(
-    mut listed: impl Iterator<Item = T>,
-    device: T,
-) -> Result<(), ToolError> {
-    if listed.any(|candidate| candidate == device) {
-        Ok(())
-    } else {
-        Err(ToolError::ProtectionUnavailable)
     }
 }
 
@@ -1412,158 +1170,6 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(observation)
 }
 
-#[cfg(target_os = "macos")]
-pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    lease: &BuildCacheLease,
-) -> Result<(), ToolError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let Some((file, size)) = lease.archive().map_err(map_cache_error)? else {
-        writer
-            .write_all(&0u64.to_le_bytes())
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        return Ok(());
-    };
-    if size > crate::tools::types::MAX_BUILD_CACHE_BYTES {
-        return Err(ToolError::Limit);
-    }
-    let mut file = tokio::fs::File::from_std(file.into_std());
-    writer
-        .write_all(&size.to_le_bytes())
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    let mut remaining = size;
-    let mut buffer = vec![0u8; 32 * 1024];
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        let count = file
-            .read(&mut buffer[..wanted])
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        if count == 0 {
-            return Err(ToolError::Operation);
-        }
-        writer
-            .write_all(&buffer[..count])
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        remaining -= count as u64;
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    lease: &Arc<BuildCacheLease>,
-) -> Result<CacheCandidate, ToolError> {
-    use tokio::io::AsyncReadExt;
-
-    let marker = read_line_capped(reader, 32).await?;
-    if marker == b"CACHE_REJECTED\n" {
-        return Ok(CacheCandidate::Rejected);
-    }
-    if marker == b"CACHE_FAILED\n" {
-        return Ok(CacheCandidate::Failed);
-    }
-    if marker != b"CACHE_CANDIDATE\n" {
-        return Err(ToolError::Operation);
-    }
-    let mut length = [0; 8];
-    reader
-        .read_exact(&mut length)
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    let length = u64::from_le_bytes(length);
-    if length == 0 || length > lease.candidate_limit() {
-        return Err(ToolError::Limit);
-    }
-    let lease = Arc::clone(lease);
-    let synced = drain_candidate(
-        reader,
-        length,
-        move || {
-            lease.candidate_writer().ok().map(|file| CandidateStaging {
-                file,
-                _lease: lease,
-            })
-        },
-        |staged| {
-            let completion = crate::fault::candidate_sync(&staged._lease);
-            let synced = completion.is_ok() && staged.file.sync_all().is_ok();
-            drop(staged);
-            crate::fault::candidate_sync_finished(completion);
-            synced
-        },
-    )
-    .await?;
-    Ok(if synced {
-        CacheCandidate::Received
-    } else {
-        CacheCandidate::Failed
-    })
-}
-
-// Drop the file before the lease can reclaim its reservation and identity lock.
-#[cfg(any(target_os = "macos", test))]
-struct CandidateStaging {
-    file: cap_std::fs::File,
-    _lease: Arc<BuildCacheLease>,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl Write for CandidateStaging {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.file.write(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-// Keep draining after a staging write failure so the archive stream stays aligned.
-#[cfg(any(target_os = "macos", test))]
-async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
-    reader: &mut R,
-    length: u64,
-    stage: impl FnOnce() -> Option<W> + Send + 'static,
-    finish: impl FnOnce(W) -> bool + Send + 'static,
-) -> Result<bool, ToolError> {
-    let (chunks, mut pending) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
-    let writer = tokio::task::spawn_blocking(move || {
-        let mut staged = stage();
-        let mut remaining = length;
-        let mut failed = false;
-        while let Some(bytes) = pending.blocking_recv() {
-            remaining -= bytes.len() as u64;
-            if !failed && let Some(writer) = staged.as_mut() {
-                failed = writer.write_all(&bytes).is_err();
-            }
-        }
-        let Some(mut writer) = staged else {
-            return false;
-        };
-        remaining == 0 && !failed && writer.flush().is_ok() && finish(writer)
-    });
-    let mut remaining = length;
-    let mut read = Ok(());
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(32 * 1024)).unwrap_or(32 * 1024);
-        let mut buffer = vec![0u8; wanted];
-        if reader.read_exact(&mut buffer).await.is_err() || chunks.send(buffer).await.is_err() {
-            read = Err(ToolError::Operation);
-            break;
-        }
-        remaining -= wanted as u64;
-    }
-    drop(chunks);
-    let staged = writer.await.map_err(|_| ToolError::Operation)?;
-    read.map(|()| staged)
-}
-
 // Seatbelt blocks Tokio's signal wake socket, so macOS closes stdin and polls try_wait when reaping.
 pub(super) async fn reap_owned_child(
     child: &mut Child,
@@ -1633,6 +1239,7 @@ pub(super) async fn capture_command(
     mut child: Child,
     cap: usize,
     deadline: Duration,
+    stop: impl std::future::Future<Output = ()>,
 ) -> Result<
     (
         Option<std::process::ExitStatus>,
@@ -1646,26 +1253,32 @@ pub(super) async fn capture_command(
     let mut stdout = super::output::Window::capturing(cap);
     let mut stderr = super::output::Window::capturing(cap);
     let result = tokio::time::timeout(deadline, async {
-        tokio::try_join!(
-            async {
-                reap_owned_child(&mut child)
-                    .await
-                    .map_err(|_| ToolError::Operation)
-            },
-            super::output::read_window_into(out, &mut stdout),
-            super::output::read_window_into(err, &mut stderr)
-        )
+        tokio::select! {
+            biased;
+            result = async {
+                tokio::try_join!(
+                    async {
+                        reap_owned_child(&mut child)
+                            .await
+                            .map_err(|_| ToolError::Operation)
+                    },
+                    super::output::read_window_into(out, &mut stdout),
+                    super::output::read_window_into(err, &mut stderr)
+                )
+            } => Some(result),
+            () = stop => None,
+        }
     })
     .await;
-    if let Ok(Ok((status, (), ()))) = result {
+    if let Ok(Some(Ok((status, (), ())))) = result {
         return Ok((Some(status), stdout, stderr));
     }
     let _ = child.start_kill();
     let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
     match result {
-        Err(_) => Ok((None, stdout, stderr)),
-        Ok(Err(error)) => Err(error),
-        Ok(Ok(_)) => unreachable!(),
+        Err(_) | Ok(None) => Ok((None, stdout, stderr)),
+        Ok(Some(Err(error))) => Err(error),
+        Ok(Some(Ok(_))) => unreachable!(),
     }
 }
 
@@ -1714,10 +1327,7 @@ fn send_ready(task: &Task) -> Result<(), ToolError> {
         pid: std::process::id(),
         #[cfg(target_os = "linux")]
         namespaces: profile::Namespaces::read()?,
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         profile_digest: task.enforcement_digest()?,
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        profile_digest: [0; 32],
     };
     #[cfg(target_os = "linux")]
     if !ready.namespaces.isolated_from(&task.parent_namespaces) {
@@ -1740,7 +1350,9 @@ fn bootstrap_locations(
     *stage = BootstrapStage::Capabilities;
     let root = macos::install(task, stage)?;
     let workspace = if task.intent.call.is_process() {
-        root.join("workspace")
+        task.editor_tree
+            .clone()
+            .unwrap_or_else(|| root.join("workspace"))
     } else {
         task.workspace.clone()
     };
@@ -1761,18 +1373,17 @@ fn bootstrap_locations(
 pub(super) struct GuardContext<'a> {
     pub(super) captured: std::sync::Mutex<Option<Vec<u8>>>,
     #[cfg(target_os = "linux")]
-    pub(super) command_before: Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>,
+    pub(super) command_before: Option<(
+        super::fs::command::CommandBaseline,
+        super::fs::CommandSelection,
+    )>,
     pub(super) intent: &'a EffectIntent,
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) secret: Option<String>,
-    pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
-    pub(super) git_plan: std::sync::Mutex<Option<Vec<u8>>>,
-    #[cfg(target_os = "macos")]
-    pub(super) git: GitWork,
     #[cfg(target_os = "macos")]
     proxy_port: Option<u16>,
     runtime_started: Option<std::time::Instant>,
@@ -1781,15 +1392,9 @@ pub(super) struct GuardContext<'a> {
 }
 
 impl GuardContext<'_> {
-    async fn dispatch(
-        self,
-    ) -> (
-        (Result<String, ToolError>, Option<Vec<u8>>),
-        Option<Vec<u8>>,
-    ) {
+    async fn dispatch(self) -> (Result<String, ToolError>, Option<Vec<u8>>) {
         let result = super::dispatch::run(&self).await;
-        let plan = self.git_plan.into_inner().ok().flatten();
-        ((result, self.captured.into_inner().ok().flatten()), plan)
+        (result, self.captured.into_inner().ok().flatten())
     }
 
     pub(super) fn remaining_runtime(&self) -> Duration {
@@ -1847,13 +1452,18 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     }
     network::validate(task)?;
     #[cfg(target_os = "macos")]
-    if task.git_stage.is_some() != (task.intent.call.is_git() && task.intent.call.mutates()) {
+    if task.editor_tree.is_some()
+        != (task.intent.target.editor() && matches!(task.intent.call, ToolCall::Command { .. }))
+        || task
+            .editor_tree
+            .as_ref()
+            .is_some_and(|tree| !tree.is_absolute())
+    {
         return Err(ToolError::Configuration);
     }
     if !task.intent.valid()
-        || !(task.intent.call.facts().site == Site::Guard
-            || super::discovery::possible(&task.intent.call))
-        || task.intent.policy_digest != task.config.digest()
+        || task.intent.call.facts().site != Site::Guard
+        || task.intent.policy_digest != task.policy_digest()?
         || !(super::command_tools::prefix::allowed(&task.config, &task.intent)
             || task.handover.is_some() && task.config.write)
         || task.intent.enforcement_digest != task.enforcement_digest()?
@@ -1888,14 +1498,6 @@ fn receive_handover(
     let changeset = transfer::decode_handover(&task.intent, &bytes, &task.config)?;
     super::fs::worker_publication_paths(&super::fs::open_directory(workspace)?, &changeset.files)?;
     Ok(Some(changeset))
-}
-
-fn send_plan(plan: Option<Vec<u8>>, stdout: &mut impl Write) -> Result<(), ToolError> {
-    if let Some(plan) = plan {
-        transfer::write_frame(stdout, &plan, super::git::WRITE_FRAME_BYTES)?;
-        stdout.flush().map_err(|_| ToolError::Operation)?;
-    }
-    Ok(())
 }
 
 fn send_result(
@@ -1980,13 +1582,6 @@ pub(super) fn helper_main() -> ExitCode {
         )?;
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
-        let family = task.intent.call.facts().family;
-        if matches!(family, Family::File | Family::Git)
-            && super::fs::identity(&super::fs::open_directory(workspace)?)?
-                != (task.intent.workspace_device, task.intent.workspace_inode)
-        {
-            return Err(ToolError::ChangedInput);
-        }
         let definition = definition_bytes(&task)?;
         let handover = receive_handover(&task, &mut stdin, workspace)?;
         #[cfg(target_os = "linux")]
@@ -2002,36 +1597,14 @@ pub(super) fn helper_main() -> ExitCode {
             stage = BootstrapStage::Workspace;
             prepare_command_baseline(&task, workspace, &mut stdin)?
         };
-        stage = BootstrapStage::Handshake;
-        send_ready(&task)?;
-        #[cfg(target_os = "macos")]
-        let git = receive_git_input(&task, &mut stdin)?;
-        let mut go = [0; 3];
-        stdin
-            .read_exact(&mut go)
-            .map_err(|_| ToolError::Operation)?;
-        let runtime_started = task.runtime_started()?;
-        // Admitted preparation and GO have their own deadlines.
-        if go != *b"GO\n" {
-            return Err(ToolError::Configuration);
-        }
-        verify_intent_runtime_grants(&task.intent, &task.config)?;
-        attest_task_mounts(
+        let runtime_started = await_go(
             &task,
+            &mut stdin,
+            handover.is_some(),
             &mut stage,
             #[cfg(target_os = "linux")]
             overlay.as_ref(),
         )?;
-        if handover.is_some() {
-            let mut trailing = [0; 1];
-            if stdin
-                .read(&mut trailing)
-                .map_err(|_| ToolError::Operation)?
-                != 0
-            {
-                return Err(ToolError::Configuration);
-            }
-        }
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -2052,25 +1625,56 @@ pub(super) fn helper_main() -> ExitCode {
             workspace,
             hook_stdin: task.hook_stdin.as_deref(),
             secret: task.secret.clone(),
-            hidden: &task.hidden,
             definition,
-            git_plan: Default::default(),
-            #[cfg(target_os = "macos")]
-            git,
             #[cfg(target_os = "macos")]
             proxy_port: task.proxy_port,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
-        let (result, plan) = runtime.block_on(site.dispatch());
+        let result = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
-        let mut stdout = std::io::stdout().lock();
-        send_result(task, result, &mut stdout)?;
-        send_plan(plan, &mut stdout)?;
-        Ok(())
+        send_result(task, result, &mut std::io::stdout().lock())
     })();
     bootstrap_exit(stage, result)
+}
+
+fn await_go(
+    task: &Task,
+    stdin: &mut std::io::BufReader<impl Read>,
+    handover: bool,
+    stage: &mut BootstrapStage,
+    #[cfg(target_os = "linux")] overlay: Option<&linux::overlay::Attestation>,
+) -> Result<Option<std::time::Instant>, ToolError> {
+    *stage = BootstrapStage::Handshake;
+    send_ready(task)?;
+    let mut go = [0; 3];
+    stdin
+        .read_exact(&mut go)
+        .map_err(|_| ToolError::Operation)?;
+    let runtime_started = task.runtime_started()?;
+    // Admitted preparation and GO have their own deadlines.
+    if go != *b"GO\n" {
+        return Err(ToolError::Configuration);
+    }
+    verify_intent_runtime_grants(&task.intent, &task.config)?;
+    attest_task_mounts(
+        task,
+        stage,
+        #[cfg(target_os = "linux")]
+        overlay,
+    )?;
+    if handover {
+        let mut trailing = [0; 1];
+        if stdin
+            .read(&mut trailing)
+            .map_err(|_| ToolError::Operation)?
+            != 0
+        {
+            return Err(ToolError::Configuration);
+        }
+    }
+    Ok(runtime_started)
 }
 
 fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
@@ -2100,7 +1704,6 @@ fn parser_config(config: &Config) -> Config {
         skills: Vec::new(),
         mcp: Vec::new(),
         git: None,
-        git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
         network: None,
@@ -2110,28 +1713,35 @@ fn parser_config(config: &Config) -> Config {
 }
 
 fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
-    use base64::Engine as _;
     match (&task.intent.call, &task.definition) {
         (ToolCall::ParseAgentDefinition { raw_digest, .. }, Some(encoded)) => {
-            if encoded.len() > DEFINITION_TASK_BYTES {
-                return Err(ToolError::Limit);
-            }
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|_| ToolError::Configuration)?;
-            if bytes.len() > 64 * 1024 {
-                return Err(ToolError::Limit);
-            }
-            if digest(&bytes) != *raw_digest
-                || base64::engine::general_purpose::STANDARD.encode(&bytes) != *encoded
-            {
-                return Err(ToolError::ChangedInput);
-            }
-            Ok(Some(bytes))
+            decode_definition(raw_digest, encoded).map(Some)
         }
         (ToolCall::ParseAgentDefinition { .. }, _) | (_, Some(_)) => Err(ToolError::Configuration),
         (_, None) => Ok(None),
     }
+}
+
+pub(super) fn decode_definition(
+    raw_digest: &[u8; 32],
+    encoded: &str,
+) -> Result<Vec<u8>, ToolError> {
+    use base64::Engine as _;
+    if encoded.len() > DEFINITION_TASK_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ToolError::Configuration)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(ToolError::Limit);
+    }
+    if digest(&bytes) != *raw_digest
+        || base64::engine::general_purpose::STANDARD.encode(&bytes) != *encoded
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    Ok(bytes)
 }
 
 pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {
@@ -2143,10 +1753,14 @@ pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, To
         let bin = grant.path.join("bin");
         paths.push(bin.to_str().ok_or(ToolError::Path)?.to_owned());
     }
-    for grant in runtime_grants.iter().filter(|grant| grant.kind.is_multi()) {
+    for grant in runtime_grants.iter().filter(|grant| grant.kind.on_path()) {
         paths.push(grant.path.to_str().ok_or(ToolError::Path)?.to_owned());
     }
-    paths.extend(["/usr/bin".into(), "/bin".into()]);
+    for system in SYSTEM_PATH.split(':') {
+        if !paths.iter().any(|path| path == system) {
+            paths.push(system.into());
+        }
+    }
     Ok(paths.join(":"))
 }
 
@@ -2167,10 +1781,13 @@ pub(super) fn payload<'a>(
     args: &[String],
     cwd: &str,
     root: &Path,
-    runtime_grants: &[RuntimeGrant],
-    cache_enabled: bool,
-    limits: &ToolLimits,
+    environment: PayloadEnvironment<'_>,
 ) -> Result<Command, ToolError> {
+    let PayloadEnvironment {
+        runtime_grants,
+        cache_enabled,
+        limits,
+    } = environment;
     let source = source.into();
     let program = source.definition();
     let resources = if cfg!(target_os = "macos") {
@@ -2180,8 +1797,11 @@ pub(super) fn payload<'a>(
     };
     let workspace = root.join("workspace");
     let scratch = root.join("scratch");
-    let cache = root.join("cache");
-    let cache_base = if cache_enabled { &cache } else { &scratch };
+    #[cfg(target_os = "macos")]
+    let view = macos::cache_view(root);
+    #[cfg(not(target_os = "macos"))]
+    let view = root.join("cache");
+    let cache_base = if cache_enabled { &view } else { &scratch };
     let executable = source.executable(&resources)?;
     let bytes = super::fs::read_regular(
         super::fs::open_absolute(executable.to_str().ok_or(ToolError::Path)?)?,
@@ -2193,23 +1813,7 @@ pub(super) fn payload<'a>(
     let path = runtime_path(runtime_grants)?;
     let payload_args: Vec<_> = args
         .iter()
-        .map(|arg| {
-            if cfg!(target_os = "macos") {
-                for (alias, target) in [
-                    ("workspace", &workspace),
-                    ("scratch", &scratch),
-                    ("cache", &cache),
-                    ("inputs", &resources.join("inputs")),
-                    ("skills", &resources.join("skills")),
-                    ("programs", &resources.join("programs")),
-                ] {
-                    if let Ok(relative) = Path::new(arg).strip_prefix(format!("/{alias}")) {
-                        return target.join(relative).into_os_string();
-                    }
-                }
-            }
-            std::ffi::OsString::from(arg)
-        })
+        .map(|arg| guest_path(arg, root, &resources))
         .collect();
     let mut command = Command::new(executable);
     command
@@ -2237,18 +1841,58 @@ pub(super) fn payload<'a>(
         args
     };
     command.args(payload_args);
+    runtime_environment(&mut command, runtime_grants, limits);
+    Ok(command)
+}
+
+pub(super) struct PayloadEnvironment<'a> {
+    pub(super) runtime_grants: &'a [RuntimeGrant],
+    pub(super) cache_enabled: bool,
+    pub(super) limits: &'a ToolLimits,
+}
+
+// macOS has no Guard mounts, so an argument naming a Guard path points into the private root.
+fn guest_path(arg: &str, root: &Path, resources: &Path) -> std::ffi::OsString {
+    if cfg!(target_os = "macos") {
+        for (alias, target) in [
+            ("workspace", root.join("workspace")),
+            ("scratch", root.join("scratch")),
+            ("cache", root.join("cache")),
+            ("inputs", resources.join("inputs")),
+            ("skills", resources.join("skills")),
+            ("programs", resources.join("programs")),
+        ] {
+            if let Ok(relative) = Path::new(arg).strip_prefix(format!("/{alias}")) {
+                return target.join(relative).into_os_string();
+            }
+        }
+    }
+    std::ffi::OsString::from(arg)
+}
+
+fn runtime_environment(
+    command: &mut Command,
+    runtime_grants: &[RuntimeGrant],
+    limits: &ToolLimits,
+) {
     for (name, root) in runtime_grants.iter().filter_map(RuntimeGrant::manager_home) {
         command.env(name, root);
+    }
+    for (name, settings) in runtime_grants
+        .iter()
+        .filter_map(RuntimeGrant::homebrew_rustup_settings)
+    {
+        command.env(name, settings);
     }
     if runtime_grants
         .iter()
         .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
     {
-        command.env("CARGO_ENCODED_RUSTFLAGS", RUST_GUARD_FLAGS);
+        command
+            .env("CARGO_ENCODED_RUSTFLAGS", RUST_GUARD_FLAGS)
+            .env("CARGO_BUILD_JOBS", limits.build_jobs.to_string());
         if limits.resource_class == ToolResourceClass::Build {
-            command
-                .env("CARGO_NET_OFFLINE", "true")
-                .env("CARGO_BUILD_JOBS", limits.build_jobs.to_string());
+            command.env("CARGO_NET_OFFLINE", "true");
         }
     }
     if cfg!(target_os = "macos")
@@ -2258,7 +1902,6 @@ pub(super) fn payload<'a>(
     {
         command.env("SDKROOT", &sdk.path);
     }
-    Ok(command)
 }
 
 #[cfg(target_os = "linux")]
@@ -2266,8 +1909,14 @@ fn prepare_command_baseline(
     task: &Task,
     workspace: &Path,
     stdin: &mut impl Read,
-) -> Result<Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>, ToolError> {
-    if linux::overlay::selected(&task.intent, &task.config) {
+) -> Result<
+    Option<(
+        super::fs::command::CommandBaseline,
+        super::fs::CommandSelection,
+    )>,
+    ToolError,
+> {
+    if linux::overlay::selected(&task.intent, &task.config) || task.intent.target.editor() {
         return Ok(None);
     }
     let command_before = if matches!(task.intent.call, ToolCall::Command { .. }) {
@@ -2278,7 +1927,10 @@ fn prepare_command_baseline(
             .map_err(|_| ToolError::Operation)?;
         let selection = super::fs::CommandSelection::receive(stdin)?;
         super::fs::copy_command_seed()?;
-        Some((super::fs::command_snapshot(workspace)?, selection))
+        Some((
+            super::fs::command_baseline(Path::new(super::fs::COMMAND_SEED), workspace)?,
+            selection,
+        ))
     } else {
         None
     };
@@ -2360,43 +2012,12 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn discovery_capacity_expiry_is_busy_and_discards_the_waiter() {
-        let wait = super::super::discovery::TYPED_WAIT;
-        let start = tokio::time::Instant::now();
-        let result: Result<(), ToolError> = discovery_capacity(wait, std::future::pending()).await;
-        assert!(matches!(result, Err(ToolError::QueueFull)));
-        assert_eq!(tokio::time::Instant::now() - start, wait);
-        for error in [ToolError::Limit, ToolError::QueueFull] {
-            let result: Result<(), ToolError> =
-                discovery_capacity(Duration::ZERO, async { Err(error) }).await;
-            assert!(matches!(result, Err(ToolError::QueueFull)));
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discovery_work_timeout_keeps_the_shorter_action_deadline() {
-        for duration in [
-            Duration::from_millis(25),
-            super::super::selection::DISCOVERY_TIME,
-        ] {
-            let mut intent = intent(ToolCall::List { path: ".".into() });
-            intent.limits.runtime_ms = u32::try_from(duration.as_millis()).unwrap();
-            let start = tokio::time::Instant::now();
-            let result: Result<(), ToolError> =
-                discovery_work(&intent, std::future::pending()).await;
-            assert!(matches!(result, Err(ToolError::Timeout(_))));
-            assert_eq!(tokio::time::Instant::now() - start, duration);
-        }
-    }
-
     #[test]
     fn cancelled_web_teardown_is_cancelled_and_other_dispatched_errors_stay_unknown() {
         let intent = intent(ToolCall::WebFetch {
             url: "https://example.com/".into(),
         });
-        assert!(known_read_stop(&intent.call));
-        let observation = read_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
+        let observation = web_stop_result(&intent, true, true, Err(ToolError::Operation)).unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Cancelled);
         assert_eq!(observation.output, "Web request cancelled");
         assert!(matches!(
@@ -2408,80 +2029,8 @@ mod tests {
             (true, ToolError::Limit),
             (true, ToolError::Timeout(String::new())),
         ] {
-            assert!(read_stop_result(&intent, true, cancelled, Err(error)).is_err());
+            assert!(web_stop_result(&intent, true, cancelled, Err(error)).is_err());
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discovery_completion_keeps_cleanup_outside_the_selection_window() {
-        use tokio::io::AsyncWriteExt;
-        let mut intent = intent(ToolCall::List { path: ".".into() });
-        intent.policy_digest = [1; 32];
-        intent.enforcement_digest = [2; 32];
-        let observation = ToolObservation {
-            spill: None,
-            intent: intent.clone(),
-            disposition: ToolDisposition::Succeeded,
-            output: "{\"entries\":[],\"truncated\":false}".into(),
-            attestation: Some(Attestation::Guard(GuardReceipt {
-                contract_version: 1,
-                intent_digest: intent.digest(),
-                enforcement_digest: intent.enforcement_digest,
-                limits: intent.limits.clone(),
-            })),
-            enforcement_cause: None,
-            limit_cause: None,
-            approval_cause: None,
-            guard_stage: None,
-            cache_update: CacheUpdate::NotApplicable,
-        };
-        assert!(observation.attested_for(&intent));
-        let mut report = serde_json::to_vec(&observation).unwrap();
-        report.push(b'\n');
-        let (mut peer, stream) = tokio::io::duplex(report.len());
-        let mut reader = tokio::io::BufReader::new(stream);
-        let sending = async move {
-            peer.write_all(DISCOVERY_DONE).await.unwrap();
-            tokio::time::sleep(super::super::selection::DISCOVERY_TIME + Duration::from_secs(1))
-                .await;
-            peer.write_all(&report).await.unwrap();
-        };
-        let receiving = async {
-            let reported =
-                tokio::time::timeout(TEARDOWN_WAIT, read_discovery_report(&mut reader, &intent))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(reported, observation);
-        };
-        tokio::join!(sending, receiving);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn discovery_completion_bounds_work_and_preserves_bootstrap_failures() {
-        let mut intent = intent(ToolCall::List { path: ".".into() });
-        let duration = Duration::from_millis(25);
-        intent.limits.runtime_ms = u32::try_from(duration.as_millis()).unwrap();
-        let (_peer, stream) = tokio::io::duplex(DISCOVERY_DONE.len());
-        let mut reader = tokio::io::BufReader::new(stream);
-        let started = tokio::time::Instant::now();
-        assert!(matches!(
-            wait_discovery_completion(&mut reader, &intent).await,
-            Err(ToolError::Timeout(_))
-        ));
-        assert_eq!(started.elapsed(), duration);
-        let mut malformed = &b"DISCOVERY_BAD\n"[..];
-        assert!(matches!(
-            wait_discovery_completion(&mut malformed, &intent).await,
-            Err(ToolError::Operation)
-        ));
-        let mut failure = &b"{\"stage\":\"storage_cleanup\",\"check\":\"detach_failed\"}\n"[..];
-        assert!(matches!(
-            wait_discovery_completion(&mut failure, &intent).await,
-            Err(ToolError::GuardBootstrap(failure))
-                if failure.failure_stage() == FailureStage::StorageCleanup
-                    && failure.check() == Some(GuardCheck::DetachFailed)
-        ));
     }
 
     #[test]
@@ -2513,6 +2062,7 @@ mod tests {
             device: 1,
             inode: 1,
             root: None,
+            masks: Vec::new(),
         };
         let args = ["build".into(), "--jobs=3".into()];
         for selected in [false, true] {
@@ -2527,12 +2077,14 @@ mod tests {
                     &args,
                     "",
                     &root,
-                    grants,
-                    false,
-                    &ToolLimits {
-                        resource_class: class,
-                        build_jobs: u32::from(class == ToolResourceClass::Build) + 1,
-                        ..ToolLimits::default()
+                    PayloadEnvironment {
+                        runtime_grants: grants,
+                        cache_enabled: false,
+                        limits: &ToolLimits {
+                            resource_class: class,
+                            build_jobs: u32::from(class == ToolResourceClass::Build) + 1,
+                            ..ToolLimits::default()
+                        },
                     },
                 )
                 .unwrap();
@@ -2558,7 +2110,7 @@ mod tests {
                 );
                 assert_eq!(
                     environment.get("CARGO_BUILD_JOBS").copied(),
-                    build.then_some("2")
+                    selected.then_some(if build { "2" } else { "1" })
                 );
                 for absent in [
                     "RUSTUP_HOME",
@@ -2577,7 +2129,7 @@ mod tests {
         }
         let profile = [7; 32];
         assert_eq!(bind_runtime_grants(profile, &[], 1).unwrap(), profile);
-        let mut expected = b"arany-runtime-profile-v3:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+        let mut expected = b"arany-runtime-profile-v4:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
         expected.extend_from_slice(b";selected-rust:build-offline=true;build-jobs=1;encoded-rustflags=--cfg\x1farany_guard;private-output-capture-v1");
         expected
             .extend_from_slice(&(super::super::spill::MAX_SPILL_RESULT_BYTES as u64).to_le_bytes());
@@ -2643,8 +2195,9 @@ mod tests {
             index: 0,
             raw_digest: digest(&raw),
         };
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
+            policy_grants: None,
             command_deadline: None,
             config,
             intent: intent(call),
@@ -2659,15 +2212,13 @@ mod tests {
             #[cfg(target_os = "macos")]
             workspace: "/private/fixture/workspace".into(),
             #[cfg(target_os = "macos")]
+            editor_tree: None,
+            #[cfg(target_os = "macos")]
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
             #[cfg(target_os = "macos")]
-            git_stage: None,
-            #[cfg(target_os = "macos")]
             proxy_port: None,
-            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-            git_fault: None,
         };
         let encoded = encode_task(&task).unwrap();
         assert!(encoded.len() <= TASK_BYTES_CAP + 1);
@@ -2711,10 +2262,11 @@ mod tests {
                 serde_json::json!({"name": format!("program{index}"), "executable": format!("/usr/bin/{}", "x".repeat(4900)), "sha256": "0".repeat(64), "interpreter": false, "inputs": []})
             })
             .collect();
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
             command_deadline: None,
             config,
+            policy_grants: None,
             intent: intent(call.clone()),
             cache: None,
             hook_stdin: None,
@@ -2743,8 +2295,9 @@ mod tests {
 
     #[test]
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
-        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
+            policy_grants: None,
             command_deadline: None,
             config,
             intent: intent(ToolCall::Write {
@@ -2763,15 +2316,13 @@ mod tests {
             #[cfg(target_os = "macos")]
             workspace: "/private/fixture/workspace".into(),
             #[cfg(target_os = "macos")]
+            editor_tree: None,
+            #[cfg(target_os = "macos")]
             guard_executable: "/private/fixture/arany".into(),
             #[cfg(target_os = "macos")]
             system_programs: None,
             #[cfg(target_os = "macos")]
-            git_stage: None,
-            #[cfg(target_os = "macos")]
             proxy_port: None,
-            #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-            git_fault: None,
         };
         let mut frame = encode_task(&task).unwrap();
         assert!(frame.len() <= TASK_BYTES_CAP + 1);
@@ -2811,6 +2362,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
@@ -2833,6 +2385,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
@@ -3018,6 +2571,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         let (disposition, output, enforcement_cause, limit_cause) =
             super::super::dispatch::outcome(&intent, expired.map(|_| String::new()));
@@ -3032,50 +2586,6 @@ mod tests {
             ),
             Err(ToolError::Operation)
         ));
-    }
-
-    #[tokio::test]
-    async fn an_unlisted_device_is_refused_retryably_and_retried_within_the_bound() {
-        assert!(require_listed(["disk4", "disk5"].into_iter(), "disk4").is_ok());
-        assert!(matches!(
-            require_listed(["disk5"].into_iter(), "disk4"),
-            Err(ToolError::ProtectionUnavailable)
-        ));
-        let recheck = |listings: &'static [&'static [&'static str]]| {
-            let attempt = std::cell::Cell::new(0);
-            move || {
-                let listed = listings[attempt.get().min(listings.len() - 1)];
-                attempt.set(attempt.get() + 1);
-                std::future::ready(require_listed(listed.iter().copied(), "disk4"))
-            }
-        };
-        let far = tokio::time::Instant::now() + Duration::from_secs(60);
-        assert!(
-            retry_transient(8, Duration::ZERO, far, recheck(&[&[], &["disk4"]]))
-                .await
-                .is_ok(),
-            "a later attempt re-lists before acting"
-        );
-        let calls = std::cell::Cell::new(0);
-        let unlisted = recheck(&[&[]]);
-        let never_listed = retry_transient(8, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            unlisted()
-        })
-        .await;
-        assert!(matches!(
-            never_listed,
-            Err(ToolError::ProtectionUnavailable)
-        ));
-        assert_eq!(calls.get(), 8);
-        let lapsed = retry_transient(
-            8,
-            Duration::ZERO,
-            tokio::time::Instant::now(),
-            recheck(&[&[]]),
-        )
-        .await;
-        assert!(matches!(lapsed, Err(ToolError::ProtectionUnavailable)));
     }
 
     #[test]
@@ -3098,6 +2608,7 @@ mod tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             });
             command.policy_digest = [1; 32];
             command.enforcement_digest = [2; 32];
@@ -3153,6 +2664,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -3206,12 +2718,15 @@ mod tests {
         );
         assert_eq!(
             check(
-                br#"{"stage":"storage_cleanup","check":"detach_failed"}
+                br#"{"stage":"storage_cleanup","check":"mount_still_present"}
 "#
                 .to_vec()
             )
             .await,
-            Some((FailureStage::StorageCleanup, Some(GuardCheck::DetachFailed))),
+            Some((
+                FailureStage::StorageCleanup,
+                Some(GuardCheck::MountStillPresent)
+            )),
             "a worker's own closed failure passes through unchanged"
         );
         assert_eq!(
@@ -3247,68 +2762,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn transient_retry_is_bounded_and_keeps_terminal_errors() {
-        let calls = std::cell::Cell::new(0);
-        let far = tokio::time::Instant::now() + Duration::from_secs(60);
-        let recovered = retry_transient(3, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            let attempt = calls.get();
-            async move {
-                if attempt < 3 {
-                    Err(ToolError::ProtectionUnavailable)
-                } else {
-                    Ok(attempt)
-                }
-            }
-        })
-        .await;
-        assert!(matches!(recovered, Ok(3)));
-
-        calls.set(0);
-        let exhausted: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            async { Err(ToolError::Operation) }
-        })
-        .await;
-        assert!(matches!(exhausted, Err(ToolError::Operation)));
-        assert_eq!(calls.get(), 3);
-
-        calls.set(0);
-        let expired: Result<(), _> =
-            retry_transient(3, Duration::ZERO, tokio::time::Instant::now(), || {
-                calls.set(calls.get() + 1);
-                async { Err(ToolError::Operation) }
-            })
-            .await;
-        assert!(matches!(expired, Err(ToolError::Operation)));
-        assert_eq!(calls.get(), 1);
-
-        calls.set(0);
-        let soon = tokio::time::Instant::now() + Duration::from_millis(20);
-        let lapsed: Result<(), _> = retry_transient(3, Duration::from_secs(5), soon, || {
-            calls.set(calls.get() + 1);
-            async { Err(ToolError::Operation) }
-        })
-        .await;
-        assert!(matches!(lapsed, Err(ToolError::Operation)));
-        assert_eq!(
-            calls.get(),
-            1,
-            "no attempt starts after the pause reaches the deadline"
-        );
-
-        calls.set(0);
-        let terminal: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
-            calls.set(calls.get() + 1);
-            async { Err(ToolError::Path) }
-        })
-        .await;
-        assert!(matches!(terminal, Err(ToolError::Path)));
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[cfg(unix)]
     #[tokio::test]
     async fn enforcement_causes_require_guard_evidence() {
         let mut observation = command_observation();
@@ -3394,7 +2847,7 @@ mod tests {
                 std::time::Instant::now() + super::super::selection::TEST_RUNTIME,
             )
             .unwrap();
-            let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
+            let snapshot = super::super::fs::test_baseline(workspace.path()).unwrap();
             let output_path = workspace.path().join(path);
             std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
             std::fs::write(&output_path, b"protected fixture content").unwrap();
@@ -3449,6 +2902,7 @@ mod tests {
             device: 1,
             inode: 2,
             root: None,
+            masks: Vec::new(),
         }
     }
 
@@ -3474,7 +2928,6 @@ mod tests {
 
     fn config(runtime_grants: Vec<RuntimeGrant>) -> Config {
         Config {
-            version: 1,
             workspace_paths: vec![".".into()],
             write: false,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -3484,7 +2937,6 @@ mod tests {
             mcp: Vec::new(),
             runtime_grants,
             git: None,
-            git_identity: None,
             locale: Default::default(),
             environment_sha256: None,
             network: None,
@@ -3505,6 +2957,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -3527,17 +2980,14 @@ mod tests {
     #[test]
     fn storage_cleanup_failure_carries_a_closed_check_without_changing_its_stage() {
         let failure: BootstrapFailure =
-            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#).unwrap();
+            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"mount_still_present"}"#)
+                .unwrap();
         assert_eq!(failure.failure_stage(), FailureStage::StorageCleanup);
-        assert_eq!(failure.check(), Some(GuardCheck::DetachFailed));
+        assert_eq!(failure.check(), Some(GuardCheck::MountStillPresent));
         assert_eq!(
             serde_json::to_string(&failure).unwrap(),
-            r#"{"stage":"storage_cleanup","check":"detach_failed"}"#
+            r#"{"stage":"storage_cleanup","check":"mount_still_present"}"#
         );
-        let unlisted: BootstrapFailure =
-            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"device_unlisted"}"#)
-                .unwrap();
-        assert_eq!(unlisted.check(), Some(GuardCheck::DeviceUnlisted));
         let bare: BootstrapFailure = serde_json::from_str(r#"{"stage":"payload"}"#).unwrap();
         assert_eq!(bare.check(), None);
         assert_eq!(
@@ -3585,6 +3035,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }),
             disposition: ToolDisposition::Denied,
             enforcement_cause: None,
@@ -3643,6 +3094,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         command.policy_digest = [1; 32];
         command.enforcement_digest = [2; 32];
@@ -3656,6 +3108,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         ] {
             let mut other = command.clone();
@@ -3691,6 +3144,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
         assert!(matches!(
@@ -3699,7 +3153,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn drifted_runtime_grant_rejects_commands_and_keeps_file_intents() {
         use std::os::unix::fs::PermissionsExt;
@@ -3720,6 +3173,7 @@ mod tests {
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         }]);
         let file = intent(ToolCall::Read {
             path: "selected.txt".into(),
@@ -3732,6 +3186,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         assert!(verify_intent_runtime_grants(&process, &config).is_ok());
 
@@ -3756,16 +3211,6 @@ mod tests {
         (state, identity)
     }
 
-    fn empty_archive(identity: &BuildCacheIdentity) -> Vec<u8> {
-        let mut bytes = b"ARANYCACHE\0\x01".to_vec();
-        bytes.extend((identity.path.len() as u16).to_le_bytes());
-        bytes.extend(identity.device.to_le_bytes());
-        bytes.extend(identity.inode.to_le_bytes());
-        bytes.extend(identity.path.as_bytes());
-        bytes.extend([0; 12]);
-        bytes
-    }
-
     pub(super) fn command_observation() -> ToolObservation {
         let mut intent = intent(ToolCall::Command {
             program: "cargo".into(),
@@ -3773,6 +3218,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -3797,528 +3243,8 @@ mod tests {
         }
     }
 
-    fn cache_session(
-        state: &crate::store::StateRoot,
-        identity: &BuildCacheIdentity,
-    ) -> BuildCacheSession {
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let candidate_bytes = lease.candidate_limit();
-        BuildCacheSession {
-            #[cfg(target_os = "linux")]
-            directory: None,
-            lease: Arc::new(lease),
-            transfer: BuildCacheTransfer {
-                identity: identity.clone(),
-                exclusions: Vec::new(),
-                view_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
-                candidate_bytes,
-            },
-        }
-    }
-
     pub(super) fn far_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_secs(60)
-    }
-
-    #[tokio::test]
-    async fn cache_publication_never_replaces_a_succeeded_command() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        for original in [
-            command_observation(),
-            super::cache_tests::timeout_observation(),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let (state, identity) = cache_fixture(temp.path());
-
-            let session = cache_session(&state, &identity);
-            let mut corrupt = session.lease.candidate_writer().unwrap();
-            corrupt.write_all(b"not an archive").unwrap();
-            drop(corrupt);
-            let mut observation = original.clone();
-            publish_cache_candidate(
-                &mut observation,
-                CacheCandidate::Received,
-                Some(session),
-                far_deadline(),
-            )
-            .await;
-            assert_eq!(observation.disposition, original.disposition);
-            assert_eq!(observation.cache_update, CacheUpdate::Failed);
-
-            let session = cache_session(&state, &identity);
-            let mut valid = session.lease.candidate_writer().unwrap();
-            valid.write_all(&empty_archive(&identity)).unwrap();
-            valid.sync_all().unwrap();
-            drop(valid);
-            let mut observation = original.clone();
-            publish_cache_candidate(
-                &mut observation,
-                CacheCandidate::Received,
-                Some(session),
-                far_deadline(),
-            )
-            .await;
-            assert_eq!(observation.disposition, original.disposition);
-            assert_eq!(observation.cache_update, CacheUpdate::Published);
-            assert!(observation.valid());
-            for candidate in [CacheCandidate::Rejected, CacheCandidate::Received] {
-                let session = cache_session(&state, &identity);
-                let mut invalid = session.lease.candidate_writer().unwrap();
-                invalid.write_all(b"invalid").unwrap();
-                drop(invalid);
-                let mut rejected = original.clone();
-                publish_cache_candidate(
-                    &mut rejected,
-                    candidate,
-                    Some(session),
-                    tokio::time::Instant::now(),
-                )
-                .await;
-                assert_eq!(rejected.cache_update, CacheUpdate::Rejected);
-                assert_eq!(rejected.disposition, original.disposition);
-                assert_eq!(
-                    committed_archive(&state, &identity),
-                    empty_archive(&identity)
-                );
-            }
-        }
-    }
-
-    fn captured_archive(root: &Path, identity: &BuildCacheIdentity, marker: &[u8]) -> Vec<u8> {
-        let source = root.join(format!("source-{}", marker.len()));
-        std::fs::create_dir_all(source.join("target")).unwrap();
-        std::fs::write(source.join("target/marker"), marker).unwrap();
-        let source =
-            cap_std::fs::Dir::open_ambient_dir(&source, cap_std::ambient_authority()).unwrap();
-        let mut bytes = Vec::new();
-        crate::store::capture_archive(&source, identity, &[], &mut bytes).unwrap();
-        bytes
-    }
-
-    async fn publish_archive(
-        state: &crate::store::StateRoot,
-        identity: &BuildCacheIdentity,
-        bytes: &[u8],
-    ) {
-        let session = cache_session(state, identity);
-        let mut candidate = session.lease.candidate_writer().unwrap();
-        candidate.write_all(bytes).unwrap();
-        candidate.sync_all().unwrap();
-        drop(candidate);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.cache_update, CacheUpdate::Published);
-    }
-
-    fn committed_archive(
-        state: &crate::store::StateRoot,
-        identity: &BuildCacheIdentity,
-    ) -> Vec<u8> {
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let (mut file, length) = lease.archive().unwrap().unwrap();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(length, bytes.len() as u64);
-        bytes
-    }
-
-    #[tokio::test]
-    async fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
-        let prior = captured_archive(temp.path(), &identity, b"prior");
-        let candidate = captured_archive(temp.path(), &identity, b"candidate");
-        assert_ne!(prior, candidate);
-        publish_archive(&state, &identity, &prior).await;
-
-        let session = cache_session(&state, &identity);
-        let mut valid = session.lease.candidate_writer().unwrap();
-        valid.write_all(&candidate).unwrap();
-        valid.sync_all().unwrap();
-        drop(valid);
-        crate::fault::FaultPlan::fail_commit_marker(&identity);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert_eq!(observation.cache_update, CacheUpdate::Uncertain);
-        assert!(observation.valid());
-        assert!(observation.stops_run());
-
-        // The commit marker never reached disk, so recovery rolls back to the prior archive.
-        assert_eq!(committed_archive(&state, &identity), prior);
-    }
-
-    #[tokio::test]
-    async fn candidate_sync_orders_publication_and_cancellation_keeps_the_prior_archive() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
-        let prior = captured_archive(temp.path(), &identity, b"prior");
-        let candidate = captured_archive(temp.path(), &identity, &vec![b'C'; 2 * 32 * 1024 + 1]);
-        publish_archive(&state, &identity, &prior).await;
-
-        for action in ["cancel", "timeout", "fail", "publish"] {
-            let session = cache_session(&state, &identity);
-            let mut stream = b"CACHE_CANDIDATE\n".to_vec();
-            stream.extend((candidate.len() as u64).to_le_bytes());
-            stream.extend(&candidate);
-            stream.extend(b"CACHE_DONE\n");
-            let mut reader = tokio::io::BufReader::new(stream.as_slice());
-            let (entered, release, finished) =
-                crate::fault::FaultPlan::gate_candidate_sync(&identity);
-            if action == "fail" {
-                crate::fault::FaultPlan::fail_candidate_sync(&identity);
-            }
-            let mut receive = Box::pin(receive_cache_candidate(&mut reader, &session.lease));
-            tokio::select! {
-                biased;
-                _ = &mut receive => panic!("candidate returned before sync: {action}"),
-                result = entered => {
-                    result.unwrap();
-                }
-            }
-            let (mut committed, _) = session.lease.archive().unwrap().unwrap();
-            let mut bytes = Vec::new();
-            committed.read_to_end(&mut bytes).unwrap();
-            assert_eq!(bytes, prior);
-
-            if matches!(action, "cancel" | "timeout") {
-                if action == "timeout" {
-                    assert!(
-                        tokio::time::timeout_at(tokio::time::Instant::now(), &mut receive)
-                            .await
-                            .is_err()
-                    );
-                }
-                drop(receive);
-                drop(session);
-                let reservation = state
-                    .path()
-                    .join("build-cache")
-                    .join(format!("reserve-{}.reserve", identity.token()));
-                let candidate_path = state
-                    .path()
-                    .join("build-cache")
-                    .join(format!("candidate-{}.arc", identity.token()));
-                assert!(reservation.exists(), "reservation released during {action}");
-                assert!(
-                    candidate_path.exists(),
-                    "candidate unlinked during {action}"
-                );
-                assert!(matches!(
-                    state.begin_build_cache(identity.clone()),
-                    Err(StoreError::BuildCacheBusy)
-                ));
-                let (_, held_capacity) = state
-                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
-                    .unwrap();
-                release.send(()).unwrap();
-                finished.await.unwrap();
-                assert!(!reservation.exists(), "reservation retained after {action}");
-                assert!(
-                    !candidate_path.exists(),
-                    "candidate retained after {action}"
-                );
-                let (_, released_capacity) = state
-                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
-                    .unwrap();
-                assert!(released_capacity > held_capacity);
-                assert_eq!(committed_archive(&state, &identity), prior);
-                continue;
-            }
-            release.send(()).unwrap();
-            let outcome = receive.await.unwrap();
-            assert!(
-                outcome
-                    == if action == "fail" {
-                        CacheCandidate::Failed
-                    } else {
-                        CacheCandidate::Received
-                    },
-                "unexpected candidate outcome: {action}"
-            );
-            let mut trailer = String::new();
-            reader.read_line(&mut trailer).await.unwrap();
-            assert_eq!(trailer, "CACHE_DONE\n");
-            let mut observation = command_observation();
-            publish_cache_candidate(&mut observation, outcome, Some(session), far_deadline()).await;
-            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-            assert_eq!(
-                observation.cache_update,
-                if action == "fail" {
-                    CacheUpdate::Failed
-                } else {
-                    CacheUpdate::Published
-                }
-            );
-            assert_eq!(
-                &committed_archive(&state, &identity),
-                if action == "fail" { &prior } else { &candidate }
-            );
-        }
-    }
-
-    struct FailAfter {
-        remaining: usize,
-        flush_fails: bool,
-    }
-
-    impl Write for FailAfter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let accepted = bytes.len().min(self.remaining);
-            self.remaining -= accepted;
-            Ok(accepted)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            if self.flush_fails {
-                Err(std::io::Error::other("injected flush failure"))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn candidate_read_error_waits_for_the_writer_to_stop() {
-        struct GatedWriter {
-            entered: Option<tokio::sync::oneshot::Sender<()>>,
-            release: std::sync::mpsc::Receiver<()>,
-            stopped: Option<tokio::sync::oneshot::Sender<()>>,
-        }
-
-        impl Write for GatedWriter {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                let _ = self.entered.take().unwrap().send(());
-                self.release
-                    .recv_timeout(Duration::from_secs(10))
-                    .map_err(std::io::Error::other)?;
-                Ok(bytes.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                panic!("truncated candidate reached flush");
-            }
-        }
-
-        impl Drop for GatedWriter {
-            fn drop(&mut self) {
-                let _ = self.stopped.take().unwrap().send(());
-            }
-        }
-
-        let (entered, writing) = tokio::sync::oneshot::channel();
-        let (release, gate) = std::sync::mpsc::sync_channel(1);
-        let (stopped, mut completion) = tokio::sync::oneshot::channel();
-        let archive = vec![b'A'; 32 * 1024];
-        let mut reader = archive.as_slice();
-        let mut receive = Box::pin(drain_candidate(
-            &mut reader,
-            archive.len() as u64 + 1,
-            move || {
-                Some(GatedWriter {
-                    entered: Some(entered),
-                    release: gate,
-                    stopped: Some(stopped),
-                })
-            },
-            |_| panic!("truncated candidate reached sync"),
-        ));
-        let early = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! {
-                biased;
-                result = &mut receive => Some(result),
-                result = writing => {
-                    result.unwrap();
-                    None
-                }
-            }
-        })
-        .await;
-        release.send(()).unwrap();
-        let early = early.unwrap();
-        let returned_early = early.is_some();
-        let result = match early {
-            Some(result) => result,
-            None => tokio::time::timeout(Duration::from_secs(5), receive)
-                .await
-                .unwrap(),
-        };
-        let stopped_before_return = completion.try_recv().is_ok();
-        if !stopped_before_return {
-            tokio::time::timeout(Duration::from_secs(5), completion)
-                .await
-                .unwrap()
-                .unwrap();
-        }
-        assert!(
-            !returned_early,
-            "read error returned while the writer was held"
-        );
-        assert!(
-            stopped_before_return,
-            "staging survived the read error return"
-        );
-        assert!(matches!(result, Err(ToolError::Operation)));
-    }
-
-    #[tokio::test]
-    async fn candidate_drain_keeps_framing_and_skips_sync_after_failures() {
-        let archive = vec![b'A'; 2 * 32 * 1024 + 1];
-        let reactor = std::thread::current().id();
-        for (create_fails, remaining, flush_fails, truncated) in [
-            (true, usize::MAX, false, false),
-            (false, 4, false, false),
-            (false, usize::MAX, true, false),
-            (false, usize::MAX, false, true),
-        ] {
-            let mut stream = archive.clone();
-            if truncated {
-                stream.pop();
-            } else {
-                stream.extend(b"CACHE_DONE\n");
-            }
-            let mut reader = tokio::io::BufReader::new(stream.as_slice());
-            let (synced, completion) = tokio::sync::oneshot::channel();
-            let staged = drain_candidate(
-                &mut reader,
-                archive.len() as u64,
-                move || {
-                    assert_ne!(std::thread::current().id(), reactor);
-                    (!create_fails).then_some(FailAfter {
-                        remaining,
-                        flush_fails,
-                    })
-                },
-                move |_| {
-                    let _ = synced.send(());
-                    true
-                },
-            )
-            .await;
-            assert!(
-                completion.await.is_err(),
-                "failed staging reached candidate sync"
-            );
-            if truncated {
-                assert!(matches!(staged, Err(ToolError::Operation)));
-                continue;
-            }
-            assert!(!staged.unwrap());
-            let mut trailer = String::new();
-            reader.read_line(&mut trailer).await.unwrap();
-            assert_eq!(trailer, "CACHE_DONE\n");
-        }
-    }
-
-    #[tokio::test]
-    async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
-        if crate::test_process::isolate_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let (state, identity) = cache_fixture(temp.path());
-        let session = cache_session(&state, &identity);
-        let mut valid = session.lease.candidate_writer().unwrap();
-        valid.write_all(&empty_archive(&identity)).unwrap();
-        valid.sync_all().unwrap();
-        drop(valid);
-        let mut observation = command_observation();
-        publish_cache_candidate(
-            &mut observation,
-            CacheCandidate::Received,
-            Some(session),
-            far_deadline(),
-        )
-        .await;
-        assert_eq!(observation.cache_update, CacheUpdate::Published);
-
-        let lease = Arc::new(state.begin_build_cache(identity.clone()).unwrap());
-        // Occupies the candidate name, so the create_new staging step fails.
-        drop(lease.candidate_writer().unwrap());
-
-        let archive = b"ARCHIVE\nbytes";
-        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
-        stream.extend((archive.len() as u64).to_le_bytes());
-        stream.extend(archive);
-        stream.extend(b"CACHE_DONE\n");
-        let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        let candidate = receive_cache_candidate(&mut reader, &lease).await.unwrap();
-        assert!(matches!(candidate, CacheCandidate::Failed));
-        let mut trailer = String::new();
-        reader.read_line(&mut trailer).await.unwrap();
-        assert_eq!(trailer, "CACHE_DONE\n");
-        drop(lease);
-
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let (mut file, length) = lease.archive().unwrap().unwrap();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(length, bytes.len() as u64);
-        assert_eq!(bytes, empty_archive(&identity));
-    }
-
-    #[test]
-    fn stale_git_locks_lead_the_uncertain_observation_the_owner_sees() {
-        let commit = intent(ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec![".".into()],
-            staged: false,
-        });
-        let report = ToolError::StaleGitLocks(".git/index.lock, .git/refs/heads/main.lock".into());
-        let observation = report_stale_locks(
-            super::super::uncertain_observation(
-                commit,
-                ToolError::Uncertain,
-                CacheUpdate::NotApplicable,
-            ),
-            &report.to_string(),
-        );
-        assert_eq!(observation.disposition, ToolDisposition::Uncertain);
-        assert!(
-            observation.output.starts_with(
-                "Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/main.lock; remove them after checking that no git process is running. "
-            ),
-            "{}",
-            observation.output
-        );
-        assert!(observation.output.contains("Do not retry automatically"));
-    }
-
-    #[test]
-    fn stale_locks_turn_a_failed_observation_uncertain() {
-        let commit = intent(ToolCall::GitCommit {
-            message: "m".into(),
-            paths: vec![".".into()],
-            staged: false,
-        });
-        let mut failed = super::super::uncertain_observation(
-            commit.clone(),
-            ToolError::Uncertain,
-            CacheUpdate::NotApplicable,
-        );
-        failed.disposition = ToolDisposition::Failed;
-        let settled = uncertain_after_stale(&commit, Ok(failed), CacheUpdate::NotApplicable);
-        assert_eq!(settled.disposition, ToolDisposition::Uncertain);
     }
 
     #[test]
@@ -4327,7 +3253,6 @@ mod tests {
         let shell = dir.path().join("sh");
         std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &shell).unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({
-            "version": 1,
             "workspace_paths": ["src"],
             "write": true,
             "commands": [{
@@ -4343,6 +3268,7 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
+                policy_grants: None,
                 command_deadline: None,
                 definition: None,
                 handover: None,
@@ -4373,15 +3299,13 @@ mod tests {
                 #[cfg(target_os = "macos")]
                 workspace: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]
+                editor_tree: None,
+                #[cfg(target_os = "macos")]
                 guard_executable: std::path::PathBuf::new(),
                 #[cfg(target_os = "macos")]
                 system_programs: None,
                 #[cfg(target_os = "macos")]
-                git_stage: None,
-                #[cfg(target_os = "macos")]
                 proxy_port: None,
-                #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-                git_fault: None,
             };
             let digest = probe.enforcement_digest().unwrap();
             let mut task = probe;
@@ -4395,6 +3319,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         assert!(validate_task(&task(command.clone())).is_ok());
         assert!(matches!(
@@ -4408,7 +3333,7 @@ mod tests {
             Err(ToolError::Configuration)
         ));
         for (call, allowed) in [
-            (ToolCall::List { path: "src".into() }, true),
+            (ToolCall::List { path: "src".into() }, false),
             (
                 ToolCall::Write {
                     path: "src/selected.txt".into(),
@@ -4443,14 +3368,20 @@ mod command_output_tests {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let (status, out, err) =
-                capture_command(command.spawn().unwrap(), 4096, Duration::from_secs(10))
-                    .await
-                    .unwrap();
+            let (status, out, err) = capture_command(
+                command.spawn().unwrap(),
+                4096,
+                Duration::from_secs(10),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
             let output = super::super::process::fit_command(
-                status.and_then(|status| status.code()),
-                &out,
-                &err,
+                crate::tools::process::CommandRun {
+                    exit_code: status.and_then(|status| status.code()),
+                    stdout: &out,
+                    stderr: &err,
+                },
                 Default::default(),
                 4096,
                 super::super::process::Truncation::Allow,

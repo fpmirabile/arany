@@ -79,7 +79,7 @@ impl WorkerTool {
             ToolCall::Move { .. } => Self::Move,
             ToolCall::Skill { .. } => Self::Skill,
             ToolCall::McpList { .. } => Self::McpList,
-            ToolCall::Command { .. } => Self::Command,
+            ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => Self::Command,
             ToolCall::WebFetch { .. } => Self::WebFetch,
             ToolCall::WebSearch { .. } => Self::WebSearch,
             _ => return None,
@@ -211,6 +211,9 @@ impl WorkerGrant {
                 ToolCall::Command { program, cwd, .. } => {
                     self.commands.contains(program) && (cwd == "." || within(cwd, &self.read_paths))
                 }
+                ToolCall::CommandUnguarded { cwd, .. } => {
+                    cwd.is_empty() || cwd == "." || within(cwd, &self.read_paths)
+                }
                 _ => false,
             }
     }
@@ -227,7 +230,8 @@ pub struct WorkerPolicy {
 impl WorkerPolicy {
     pub(crate) fn valid(&self) -> bool {
         self.parent_grant.valid()
-            && (1..=8).contains(&self.concurrency)
+            && (1..=crate::session::CollaborationPolicy::MAX_ACTIVE_CHILDREN)
+                .contains(&self.concurrency)
             && (1..=17).contains(&self.max_turns)
             && self.max_tools <= 16
     }
@@ -363,6 +367,8 @@ pub enum WorkerCause {
     Budget,
     SnapshotDrift,
     CriterionUnverified,
+    ChangesTooLarge,
+    IntegrationConflict,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -439,6 +445,46 @@ pub enum ChangesetSource {
         source_intent_digest: [u8; 32],
         changeset: crate::tools::CommandChangeset,
     },
+    // An editor's one integration of its workspace; content stays in that workspace until publication.
+    EditorWorkspace {
+        files: Vec<EditorChange>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditorChange {
+    pub path: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub before: Option<super::rewind::FileState>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub after: Option<super::rewind::FileState>,
+}
+
+// The user's "Editor changes" settings bound one integration; the Goal pins them at admission.
+pub const DEFAULT_EDITOR_CHANGE_FILES: u32 = 512;
+pub const DEFAULT_EDITOR_CHANGE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_EDITOR_CHANGE_FILES: u32 = WORKER_FILES as u32;
+pub const MAX_EDITOR_CHANGE_BYTES: u64 = 1024 * 1024 * 1024;
+
+pub(crate) fn valid_editor_changes(files: &[EditorChange]) -> bool {
+    !files.is_empty()
+        && files.len() <= WORKER_FILES
+        && files.iter().enumerate().all(|(index, change)| {
+            writable_path(&change.path)
+                && change.before != change.after
+                && change
+                    .before
+                    .iter()
+                    .chain(&change.after)
+                    .all(|state| state.valid())
+                && files[..index].iter().all(|earlier| {
+                    earlier.path < change.path
+                        && !std::path::Path::new(&change.path).starts_with(&earlier.path)
+                })
+        })
+        && serde_json::to_vec(files)
+            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
 }
 impl ChangesetSource {
     pub(crate) fn valid(&self) -> bool {
@@ -459,6 +505,7 @@ impl ChangesetSource {
             } => {
                 *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid()
             }
+            Self::EditorWorkspace { files } => valid_editor_changes(files),
         }
     }
 }
@@ -565,41 +612,10 @@ pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<Vec<WorkerFileFact>, Re
         {
             return Err(ReplayError::InvalidPayload);
         }
-        let mut version =
-            |v: &Option<BorrowedVersion<'_>>| -> Result<WorkerBaseVersion, ReplayError> {
-                let Some(v) = v else {
-                    return Ok(WorkerBaseVersion::Absent);
-                };
-                if !crate::validate::valid_digest(&v.sha256)
-                    || v.content.len() > (1024usize * 1024).div_ceil(3) * 4
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                let content = base64::engine::general_purpose::STANDARD
-                    .decode(v.content.as_bytes())
-                    .map_err(|_| ReplayError::InvalidPayload)?;
-                if content.len() > 1024 * 1024
-                    || base64::engine::general_purpose::STANDARD.encode(&content) != v.content
-                    || crate::validate::hex_digest(&content) != v.sha256
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                total = total
-                    .checked_add(content.len())
-                    .ok_or(ReplayError::InvalidPayload)?;
-                if total > 2 * WORKER_CONTENT_BYTES {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(WorkerBaseVersion::File {
-                    sha256: v.sha256.to_string(),
-                    bytes: u32::try_from(content.len()).map_err(|_| ReplayError::InvalidPayload)?,
-                    executable: v.executable,
-                })
-            };
         facts.push(WorkerFileFact {
             path: file.path.to_string(),
-            before: version(&file.before)?,
-            after: version(&file.after)?,
+            before: rewind_version(&file.before, &mut total)?,
+            after: rewind_version(&file.after, &mut total)?,
         });
     }
     for before in [true, false] {
@@ -617,6 +633,40 @@ pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<Vec<WorkerFileFact>, Re
         }
     }
     Ok(facts)
+}
+
+fn rewind_version(
+    v: &Option<BorrowedVersion<'_>>,
+    total: &mut usize,
+) -> Result<WorkerBaseVersion, ReplayError> {
+    let Some(v) = v else {
+        return Ok(WorkerBaseVersion::Absent);
+    };
+    if !crate::validate::valid_digest(&v.sha256)
+        || v.content.len() > crate::tools::types::MAX_FILE_BYTES.div_ceil(3) * 4
+    {
+        return Err(ReplayError::InvalidPayload);
+    }
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(v.content.as_bytes())
+        .map_err(|_| ReplayError::InvalidPayload)?;
+    if content.len() > crate::tools::types::MAX_FILE_BYTES
+        || base64::engine::general_purpose::STANDARD.encode(&content) != v.content
+        || crate::validate::hex_digest(&content) != v.sha256
+    {
+        return Err(ReplayError::InvalidPayload);
+    }
+    *total = total
+        .checked_add(content.len())
+        .ok_or(ReplayError::InvalidPayload)?;
+    if *total > 2 * WORKER_CONTENT_BYTES {
+        return Err(ReplayError::InvalidPayload);
+    }
+    Ok(WorkerBaseVersion::File {
+        sha256: v.sha256.to_string(),
+        bytes: u32::try_from(content.len()).map_err(|_| ReplayError::InvalidPayload)?,
+        executable: v.executable,
+    })
 }
 
 fn canonical(value: &impl Serialize, bytes: &[u8]) -> bool {
@@ -666,6 +716,8 @@ impl WorkerOutcome {
                     | WorkerCause::Budget
                     | WorkerCause::SnapshotDrift
                     | WorkerCause::CriterionUnverified
+                    | WorkerCause::ChangesTooLarge
+                    | WorkerCause::IntegrationConflict
             ) | (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         )
     }

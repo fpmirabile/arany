@@ -70,6 +70,26 @@ pub struct WorkspacePermissions {
     pub(super) runtime_grants: Vec<RuntimeGrant>,
     candidates: Vec<Candidate>,
     discovery_error: Option<String>,
+    git_hooks: Option<GitHooksAnswer>,
+    repository: Option<String>,
+}
+
+// The user's answer for one exact set of hook files, so a new or edited hook asks again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GitHooksAnswer {
+    accepted: bool,
+    sha256: [u8; 32],
+}
+
+/// The Git hooks active for a folder, and the user's saved answer when it covers exactly these files.
+#[derive(Clone, Debug)]
+pub struct GitHooksQuestion {
+    pub names: Vec<String>,
+    pub directory: PathBuf,
+    pub pre_commit_framework: bool,
+    pub saved: Option<bool>,
+    digest: [u8; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -86,8 +106,6 @@ pub struct RuntimeProfileOption {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TrustRecordError {
-    #[error("workspace-permissions.json uses unsupported version {0}; this Arany reads version 2")]
-    UnsupportedVersion(u64),
     #[error("workspace-permissions.json is malformed")]
     Malformed,
     #[error(
@@ -106,12 +124,6 @@ pub enum TrustRecordError {
     Changed,
 }
 
-impl TrustRecordError {
-    pub fn is_resettable(&self) -> bool {
-        matches!(self, Self::UnsupportedVersion(_) | Self::Malformed)
-    }
-}
-
 impl From<TrustRecordError> for ToolError {
     fn from(_: TrustRecordError) -> Self {
         ToolError::Configuration
@@ -121,7 +133,6 @@ impl From<TrustRecordError> for ToolError {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Permissions {
-    version: u8,
     workspaces: Vec<Entry>,
 }
 
@@ -133,6 +144,11 @@ struct Entry {
     inode: u64,
     mode: ApprovalMode,
     runtime_grants: Vec<RuntimeGrant>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    git_hooks: Option<GitHooksAnswer>,
+    // The push URL a human named as this folder's own repository; never read from the repository.
+    #[serde(deserialize_with = "Option::deserialize")]
+    repository: Option<String>,
 }
 
 fn record_error(error: StoreError) -> TrustRecordError {
@@ -152,15 +168,12 @@ fn state_error(error: StoreError) -> TrustRecordError {
 
 pub(crate) const WORKSPACE_PERMISSIONS: RecordFormat = RecordFormat {
     kind: RecordKind::WorkspacePermissions,
-    field: "version",
-    floor: 2,
-    current: 2,
-    steps: &[],
     accepts: |bytes| parse(bytes).is_ok(),
 };
 
 fn read_bytes(root: &StateRoot) -> Result<Option<Vec<u8>>, TrustRecordError> {
-    root.read_current(&WORKSPACE_PERMISSIONS)
+    root.record(WORKSPACE_PERMISSIONS.kind)
+        .read()
         .map_err(record_error)
 }
 
@@ -168,7 +181,6 @@ fn read(root: &StateRoot) -> Result<Permissions, TrustRecordError> {
     match read_bytes(root)? {
         Some(bytes) => parse(&bytes),
         None => Ok(Permissions {
-            version: 2,
             workspaces: Vec::new(),
         }),
     }
@@ -177,13 +189,6 @@ fn read(root: &StateRoot) -> Result<Permissions, TrustRecordError> {
 fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
     let value =
         super::skills::parse_json(bytes, 64 * 1024).map_err(|_| TrustRecordError::Malformed)?;
-    let version = value
-        .get("version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or(TrustRecordError::Malformed)?;
-    if version != 2 {
-        return Err(TrustRecordError::UnsupportedVersion(version));
-    }
     let record: Permissions =
         serde_json::from_value(value).map_err(|_| TrustRecordError::Malformed)?;
     if record.workspaces.len() > 128
@@ -192,6 +197,16 @@ fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
                 || entry.path.as_os_str().len() > MAX_PATH_BYTES
                 || entry.inode == 0
                 || validate_selection(&entry.runtime_grants).is_err()
+                // PATH directories and their link targets are granted per Run, never saved.
+                || entry.runtime_grants.iter().any(|grant| {
+                    !grant.masks.is_empty()
+                        || matches!(
+                            grant.kind,
+                            super::toolchains::RuntimeKind::UserPrograms
+                                | super::toolchains::RuntimeKind::LinkTarget
+                                | super::toolchains::RuntimeKind::ExtraRead
+                        )
+                })
         })
     {
         return Err(TrustRecordError::Malformed);
@@ -316,6 +331,8 @@ impl WorkspacePermissions {
                     runtime_grants: Vec::new(),
                     candidates: Vec::new(),
                     discovery_error: None,
+                    git_hooks: None,
+                    repository: None,
                 })
             }
             Err(error) => Err(state_error(error)),
@@ -368,7 +385,95 @@ impl WorkspacePermissions {
             runtime_grants,
             candidates: Vec::new(),
             discovery_error: None,
+            git_hooks: entry.and_then(|entry| entry.git_hooks.clone()),
+            repository: entry.and_then(|entry| entry.repository.clone()),
         })
+    }
+
+    /// Detects the folder's active Git hooks with the Git a Run would resolve; `None` when there are none.
+    pub async fn git_hooks(&self, state_dir: &Path) -> Option<GitHooksQuestion> {
+        let hooks =
+            super::git::folder_hooks(&self.path, &state_dir.join(super::editors::EDITORS)).await?;
+        Some(GitHooksQuestion {
+            saved: self
+                .git_hooks
+                .as_ref()
+                .filter(|answer| answer.sha256 == hooks.digest)
+                .map(|answer| answer.accepted),
+            names: hooks.names,
+            directory: hooks.directory,
+            pre_commit_framework: hooks.pre_commit_framework,
+            digest: hooks.digest,
+        })
+    }
+
+    /// Saves the answer for exactly the asked hook files in this folder's trust entry.
+    pub fn remember_git_hooks(
+        &mut self,
+        question: &GitHooksQuestion,
+        accepted: bool,
+    ) -> Result<(), ToolError> {
+        self.remember_hooks_digest(question.digest, accepted)
+    }
+
+    pub(crate) fn remember_hooks_digest(
+        &mut self,
+        digest: [u8; 32],
+        accepted: bool,
+    ) -> Result<(), ToolError> {
+        if !self.trusted {
+            return Err(ToolError::Configuration);
+        }
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
+        let previous = self.git_hooks.replace(GitHooksAnswer {
+            accepted,
+            sha256: digest,
+        });
+        let saved = self.save(&root, true, self.mode, self.runtime_grants.clone());
+        if saved.is_err() {
+            self.git_hooks = previous;
+        }
+        saved
+    }
+
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
+    /// Names the push URL Arany treats as this folder's own repository, or forgets it.
+    pub fn remember_repository(&mut self, push_url: Option<String>) -> Result<(), ToolError> {
+        if !self.trusted
+            || push_url
+                .as_deref()
+                .is_some_and(|url| !super::git::host::valid_push_url(url))
+        {
+            return Err(ToolError::Configuration);
+        }
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
+        let previous = std::mem::replace(&mut self.repository, push_url);
+        let saved = self.save(&root, true, self.mode, self.runtime_grants.clone());
+        if saved.is_err() {
+            self.repository = previous;
+        }
+        saved
+    }
+
+    pub(crate) fn saved_repository(workspace: &Path) -> Option<String> {
+        Self::open(workspace).ok()?.repository
+    }
+
+    // A configured Run (serve, ACP, exec) honors the answer saved with the folder's trust entry.
+    pub(crate) fn saved_git_hooks(workspace: &Path) -> Option<[u8; 32]> {
+        Self::open(workspace).ok()?.accepted_git_hooks()
+    }
+
+    pub(crate) fn accepted_git_hooks(&self) -> Option<[u8; 32]> {
+        self.git_hooks
+            .as_ref()
+            .filter(|answer| answer.accepted)
+            .map(|answer| answer.sha256)
     }
 
     pub fn remember_profiles(
@@ -452,6 +557,8 @@ impl WorkspacePermissions {
                     } else {
                         Vec::new()
                     },
+                    git_hooks: self.git_hooks.clone(),
+                    repository: self.repository.clone(),
                 });
             }
             let bytes = serde_json::to_vec(&record).map_err(|_| ToolError::Configuration)?;
@@ -497,7 +604,6 @@ impl WorkspacePermissions {
             }]
         };
         let config = Config {
-            version: 1,
             workspace_paths: vec![".".into()],
             write: true,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -506,8 +612,7 @@ impl WorkspacePermissions {
             skills: Vec::new(),
             mcp: Vec::new(),
             runtime_grants: self.runtime_grants.clone(),
-            git: super::git::discover(),
-            git_identity: super::git::user_identity(),
+            git: None,
             locale: Default::default(),
             environment_sha256: None,
             network: None,
@@ -515,51 +620,6 @@ impl WorkspacePermissions {
         };
         config.validate()?;
         Ok(config)
-    }
-}
-
-/// Pins the current unsupported or malformed record so a consented reset deletes exactly it.
-pub struct TrustReset {
-    root: StateRoot,
-    workspace: PathBuf,
-    bytes: Vec<u8>,
-}
-
-impl WorkspacePermissions {
-    pub fn prepare_reset(workspace: &Path) -> Result<TrustReset, TrustRecordError> {
-        let account = StateRoot::account_path().map_err(state_error)?;
-        let root = StateRoot::open_existing(&account).map_err(state_error)?;
-        prepare_reset_with(workspace, root)
-    }
-}
-
-fn prepare_reset_with(workspace: &Path, root: StateRoot) -> Result<TrustReset, TrustRecordError> {
-    let bytes = read_bytes(&root)?.ok_or(TrustRecordError::Changed)?;
-    match parse(&bytes) {
-        Err(error) if error.is_resettable() => Ok(TrustReset {
-            root,
-            workspace: workspace.to_owned(),
-            bytes,
-        }),
-        Err(error) => Err(error),
-        Ok(_) => Err(TrustRecordError::Changed),
-    }
-}
-
-impl TrustReset {
-    pub fn apply(self) -> Result<(), TrustRecordError> {
-        self.root
-            .with_account_replacement_lock(&self.workspace, || {
-                let current = read_bytes(&self.root)?;
-                if current.as_deref() != Some(self.bytes.as_slice()) {
-                    return Err(TrustRecordError::Changed);
-                }
-                self.root
-                    .record(RecordKind::WorkspacePermissions)
-                    .remove()
-                    .map_err(record_error)
-            })
-            .map_err(state_error)?
     }
 }
 
@@ -622,6 +682,7 @@ mod tests {
                 device: 1,
                 inode: 2,
                 root: None,
+                masks: Vec::new(),
             };
             Candidate {
                 label: grant.profile_label(),
@@ -651,6 +712,8 @@ mod tests {
                 runtime_grants: vec![ordered[0].grant.clone()],
                 candidates,
                 discovery_error: None,
+                git_hooks: None,
+                repository: None,
             };
             assert_eq!(
                 access
@@ -704,7 +767,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn runtime_discovery_is_bounded_metadata_only_and_pins_exact_versions() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager, discover};
@@ -970,6 +1032,7 @@ channel = "stable"
             device: 1,
             inode: 1,
             root: None,
+            masks: Vec::new(),
         };
         let compiler = grant(compiler, None, "/Library/Developer/CommandLineTools/usr");
         let sdk = grant(
@@ -1069,19 +1132,6 @@ channel = "stable"
         std::fs::write(workspace.join(".env"), "synthetic excluded fixture").unwrap();
         std::os::unix::fs::symlink(temp.path(), workspace.join("outside")).unwrap();
         std::fs::hard_link(workspace.join("README.md"), workspace.join("linked.md")).unwrap();
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            assert_eq!(
-                fs::workspace_entries(&workspace, "", "").unwrap(),
-                vec!["docs/"]
-            );
-            let nested = fs::workspace_entries(&workspace, "docs", "hello");
-            assert!(
-                matches!(&nested, Err(ToolError::ProtectionUnavailable)),
-                "{nested:?}"
-            );
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             assert_eq!(
                 fs::workspace_entries(&workspace, "", "").unwrap(),
@@ -1162,7 +1212,6 @@ channel = "stable"
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn stale_runtime_grant_stays_pinned_for_rejection_and_removal() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1182,6 +1231,7 @@ channel = "stable"
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         };
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         access
@@ -1202,7 +1252,6 @@ channel = "stable"
         assert!(choices[0].label.ends_with("(no longer detected)"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn runtime_grant_identity_drift_fails_verification_and_changes_token() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1220,6 +1269,7 @@ channel = "stable"
                 device,
                 inode,
                 root: None,
+                masks: Vec::new(),
             }
         };
         let original = grant_at(&cache);
@@ -1236,7 +1286,6 @@ channel = "stable"
         assert_ne!(grant_at(&cache).token().unwrap(), original_token);
     }
 
-    #[cfg(unix)]
     #[test]
     fn discovery_failure_stays_local_to_the_chooser_and_keeps_saved_profiles() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1268,6 +1317,7 @@ channel = "stable"
                     device,
                     inode,
                     root: None,
+                    masks: Vec::new(),
                 }],
             )
             .unwrap();
@@ -1286,7 +1336,6 @@ channel = "stable"
         assert!(!choices[0].label.contains("no longer detected"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn confirming_unchanged_trust_keeps_a_stale_pin_without_reverifying() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1307,6 +1356,7 @@ channel = "stable"
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         };
         let token = grant.token().unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
@@ -1336,7 +1386,6 @@ channel = "stable"
         assert_eq!(restored.stale_runtime_notices(), [STALE_CARGO_NOTICE]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn remembering_a_grant_inside_the_workspace_is_rejected_and_keeps_the_record() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -1356,6 +1405,7 @@ channel = "stable"
             device,
             inode,
             root: None,
+            masks: Vec::new(),
         };
         let token = grant.token().unwrap();
         let mut access = WorkspacePermissions::load(&workspace, &root).unwrap();
@@ -1416,10 +1466,8 @@ channel = "stable"
             config.commands[0].verify().unwrap();
             assert!(config.mcp.is_empty());
         }
-        assert_eq!(
-            access.config(&path).unwrap().git.map(|git| git.sha256),
-            super::super::git::discover().map(|git| git.sha256)
-        );
+        // Run admission, not trust, resolves Git from PATH.
+        assert!(access.config(&path).unwrap().git.is_none());
         let restored = WorkspacePermissions::load(&path, &root).unwrap();
         assert!(restored.is_trusted());
         assert_eq!(restored.mode(), ApprovalMode::AutoEdits);
@@ -1447,20 +1495,17 @@ channel = "stable"
                 .unwrap()
                 .is_trusted()
         );
-        for (record, cause) in [
-            (
-                br#"{"version":1,"workspaces":[]}"#.as_slice(),
-                TrustRecordError::UnsupportedVersion(1),
-            ),
-            (
-                br#"{"version":2,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#.as_slice(),
-                TrustRecordError::Malformed,
-            ),
+        for record in [
+            br#"{"version":2,"workspaces":[]}"#.as_slice(),
+            br#"{"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#,
         ] {
             root.record(RecordKind::WorkspacePermissions).replace(record).unwrap();
-            assert_eq!(WorkspacePermissions::load(&path, &root).err(), Some(cause));
+            assert_eq!(
+                WorkspacePermissions::load(&path, &root).err(),
+                Some(TrustRecordError::Malformed)
+            );
+            assert!(!(WORKSPACE_PERMISSIONS.accepts)(record));
         }
-        #[cfg(unix)]
         {
             std::fs::remove_file(root.path().join("workspace-permissions.json")).unwrap();
             std::os::unix::fs::symlink(
@@ -1473,56 +1518,6 @@ channel = "stable"
                 Some(TrustRecordError::RecordNotPrivate)
             );
         }
-    }
-
-    #[test]
-    fn unsupported_trust_record_resets_only_with_the_pinned_bytes() {
-        let temp = tempfile::tempdir().unwrap();
-        let state = temp.path().join("state");
-        let root = StateRoot::admit(&state).unwrap();
-        let path = temp.path().join("project");
-        std::fs::create_dir(&path).unwrap();
-        let file = state.join("workspace-permissions.json");
-        let version_one = br#"{"version":1,"workspaces":[]}"#;
-        root.record(RecordKind::WorkspacePermissions)
-            .replace(version_one)
-            .unwrap();
-
-        let reset = prepare_reset_with(&path, root.try_clone().unwrap()).unwrap();
-        root.record(RecordKind::WorkspacePermissions)
-            .replace(br#"{"version":1,"workspaces":[] }"#)
-            .unwrap();
-        assert_eq!(reset.apply(), Err(TrustRecordError::Changed));
-        assert!(file.exists());
-
-        let reset = prepare_reset_with(&path, root.try_clone().unwrap()).unwrap();
-        reset.apply().unwrap();
-        assert!(!file.exists());
-        assert!(
-            !WorkspacePermissions::load(&path, &root)
-                .unwrap()
-                .is_trusted()
-        );
-
-        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
-        access
-            .save(&root, true, ApprovalMode::AutoEdits, Vec::new())
-            .unwrap();
-        let before = std::fs::read(&file).unwrap();
-        assert_eq!(
-            prepare_reset_with(&path, root.try_clone().unwrap()).err(),
-            Some(TrustRecordError::Changed)
-        );
-        assert_eq!(std::fs::read(&file).unwrap(), before);
-
-        assert!(TrustRecordError::UnsupportedVersion(1).is_resettable());
-        assert!(TrustRecordError::Malformed.is_resettable());
-        assert!(!TrustRecordError::RecordNotPrivate.is_resettable());
-        assert!(!TrustRecordError::StateNotPrivate.is_resettable());
-        assert!(!TrustRecordError::StateInsideWorkspace.is_resettable());
-        assert!(!TrustRecordError::StateUnavailable.is_resettable());
-        assert!(!TrustRecordError::Workspace.is_resettable());
-        assert!(!TrustRecordError::Changed.is_resettable());
     }
 
     #[test]
@@ -1540,9 +1535,8 @@ channel = "stable"
         assert!(!error.to_string().contains("not json"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn oversize_trust_record_is_named_as_not_private_and_never_reset() {
+    fn oversize_trust_record_is_named_as_not_private() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
@@ -1555,8 +1549,6 @@ channel = "stable"
         let error = WorkspacePermissions::load(&path, &root).err().unwrap();
         assert_eq!(error, TrustRecordError::RecordNotPrivate);
         assert!(error.to_string().contains("within 64 KiB"));
-        assert!(!error.is_resettable());
-        assert!(prepare_reset_with(&path, root.try_clone().unwrap()).is_err());
         assert!(record.exists());
     }
 }

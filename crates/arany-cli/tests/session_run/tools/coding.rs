@@ -31,12 +31,12 @@ impl Provider for Journey {
                 limit: None,
             },
             2 => ToolCall::Edit {
-                path: "src/main.c".into(), expected_digest: hash(b"int main(void) { return 1; }\n"),
+                path: "src/main.c".into(), expected_digest: Some(hash(b"int main(void) { return 1; }\n")),
                 old: "return 1".into(), new: "return 2".into(),
             },
             3 => ToolCall::MultiEdit {
                 file_path: "src/main.c".into(),
-                expected_digest: hash(b"int main(void) { return 2; }\n"),
+                expected_digest: Some(hash(b"int main(void) { return 2; }\n")),
                 edits: vec![
                     arany::LiteralEdit { old_string: "return 2".into(), new_string: "return 3".into(), replace_all: false },
                     arany::LiteralEdit { old_string: "return 3".into(), new_string: "return 0".into(), replace_all: false },
@@ -60,15 +60,13 @@ impl Provider for Journey {
                 args: vec!["src/check.sh".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            },
+                timeout_ms: None, additional_reads: None },
             8 => ToolCall::Command {
                 program: "bash".into(),
                 args: vec!["-c".into(), "set -eu; test \"$(cat src/command-output.txt)\" = 'command create'; test \"$(cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            },
+                timeout_ms: None, additional_reads: None },
             9 => ToolCall::Skill {
                 name: "synthetic".into(),
                 resource: None,
@@ -182,7 +180,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     let peer_body = include_bytes!("../../fixtures/mcp-tools.py");
     private_file(&peer, peer_body);
     let python = std::fs::canonicalize("/usr/bin/python3").unwrap();
-    let config = json!({"version":1,"workspace_paths":["src", ".agents/skills"],"write":true,
+    let config = json!({"workspace_paths":["src", ".agents/skills"],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
         "skills":[],
         "mcp":[{"name":"synthetic","program":{"name":"python","executable":python,"sha256":hash(&std::fs::read(&python).unwrap()),"interpreter":true,"inputs":[{"path":peer,"destination":"mcp.py","sha256":hash(peer_body)}]},"args":["/inputs/python/mcp.py"],"tools":["echo"]}]});

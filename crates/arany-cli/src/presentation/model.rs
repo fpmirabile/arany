@@ -46,45 +46,6 @@ impl PresentationModel {
             .filter(|run| run.status == RunStatus::Active)
             .and_then(|run| run.config.as_ref());
         let setup_required = !preparing && requires_setup(view, run.map(|run| run.status));
-        let model = pinned
-            .map(|config| config.model.as_str())
-            .or(view.defaults.model.as_deref())
-            .unwrap_or("model unset");
-        let mut fields = vec![state.to_owned()];
-        if width >= 14 {
-            let model_label = if width >= 50 {
-                let pinned_provider = pinned.map(|config| config.provider.profile());
-                let provider = pinned_provider
-                    .as_deref()
-                    .or(view.defaults.provider.as_deref())
-                    .unwrap_or("provider unset");
-                let provider = safe_truncate(provider, if width >= 80 { 12 } else { 8 });
-                let model_limit = if width >= 120 {
-                    32
-                } else if width >= 80 {
-                    20
-                } else {
-                    width
-                        .saturating_sub(state.len() + 4 + UnicodeWidthStr::width(provider.as_str()))
-                };
-                format!("{provider}/{}", model_id_preview(model, model_limit))
-            } else {
-                model_id_preview(model, width.saturating_sub(state.len() + 3))
-            };
-            if !model_label.is_empty() {
-                fields.push(model_label);
-            }
-        }
-        if width >= 80 {
-            let title = safe_truncate(
-                &view.conversation_title(),
-                if width >= 120 { 32 } else { 12 },
-            );
-            let occupied = UnicodeWidthStr::width(fields.join(" · ").as_str());
-            if occupied + 3 + UnicodeWidthStr::width(title.as_str()) <= width {
-                fields.push(title);
-            }
-        }
         let status_line = if setup_required && width >= 23 {
             "setup required · /setup".to_owned()
         } else if setup_required && width >= 14 {
@@ -94,73 +55,14 @@ impl PresentationModel {
         } else if width < 14 {
             safe_truncate(state, width)
         } else {
-            safe_truncate(&fields.join(" · "), width)
+            safe_truncate(
+                &status_fields(view, pinned, state, width).join(" · "),
+                width,
+            )
         };
         let mut activity_lines = run
             .filter(|run| run.status == RunStatus::Active)
-            .map(|run| {
-                let mut lines: Vec<_> =
-                    run.agents
-                        .iter()
-                        .take(MAX_VISIBLE_AGENTS)
-                        .map(|agent| {
-                            let role = match agent.role {
-                                AgentRole::Primary => "primary".to_owned(),
-                                AgentRole::Child => format!("child {}", agent.ordinal),
-                            };
-                            let status = if agent.role == AgentRole::Primary
-                                && agent.status == AgentStatus::Active
-                            {
-                                "working"
-                            } else {
-                                agent_state_label(agent.status)
-                            };
-                            let prefix = format!("{role} · {status}");
-                            let tool = run.tools.last().into_iter().chain(agent.tools.last()).find(
-                                |tool| {
-                                    tool.intent.agent_run_id == agent.id
-                                        && tool.observation.is_none()
-                                },
-                            );
-                            let detail = tool
-                                .map(|tool| tool.intent.call.label())
-                                .or(agent.summary.as_deref())
-                                .or_else(|| {
-                                    (agent.status == AgentStatus::Active).then_some(
-                                        if agent.role == AgentRole::Child {
-                                            "Queued or awaiting response; Ctrl+C cancels"
-                                        } else {
-                                            "Waiting for response; Ctrl+C cancels"
-                                        },
-                                    )
-                                })
-                                .or(agent.objective.as_deref());
-                            match detail {
-                                Some(detail) if !detail.is_empty() => {
-                                    let prefix = format!("{prefix} · ");
-                                    let remaining = width
-                                        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
-                                    if remaining == 0 {
-                                        safe_truncate(&format!("{prefix}…"), width)
-                                    } else {
-                                        format!("{prefix}{}", safe_truncate(detail, remaining))
-                                    }
-                                }
-                                _ => safe_truncate(&prefix, width),
-                            }
-                        })
-                        .collect();
-                if run.agents.len() > MAX_VISIBLE_AGENTS {
-                    lines.push(safe_truncate(
-                        &format!(
-                            "+{} more agents (use /agents)",
-                            run.agents.len() - MAX_VISIBLE_AGENTS
-                        ),
-                        width,
-                    ));
-                }
-                lines
-            })
+            .map(|run| run_activity(run, width))
             .unwrap_or_default();
         if preparing {
             activity_lines.push(safe_truncate("Preparing message · Ctrl+C cancels", width));
@@ -184,6 +86,129 @@ impl PresentationModel {
                 DraftAction::Submit
             },
         }
+    }
+}
+
+// The state, then the Provider and model, then the title, as the width allows.
+fn status_fields(
+    view: &SessionView,
+    pinned: Option<&arany::RunConfig>,
+    state: &str,
+    width: usize,
+) -> Vec<String> {
+    let model = pinned
+        .map(|config| config.model.as_str())
+        .or(view.defaults.model.as_deref())
+        .unwrap_or("model unset");
+    let mut fields = vec![state.to_owned()];
+    if sandbox_off(view) {
+        fields.push(SANDBOX_OFF_NOTICE.into());
+    }
+    if width >= 14 {
+        let model_label = if width >= 50 {
+            let pinned_provider = pinned.map(|config| config.provider.profile());
+            let provider = pinned_provider
+                .as_deref()
+                .or(view.defaults.provider.as_deref())
+                .unwrap_or("provider unset");
+            let provider = safe_truncate(provider, if width >= 80 { 12 } else { 8 });
+            let model_limit = if width >= 120 {
+                32
+            } else if width >= 80 {
+                20
+            } else {
+                width.saturating_sub(state.len() + 4 + UnicodeWidthStr::width(provider.as_str()))
+            };
+            format!("{provider}/{}", model_id_preview(model, model_limit))
+        } else {
+            model_id_preview(model, width.saturating_sub(state.len() + 3))
+        };
+        if !model_label.is_empty() {
+            fields.push(model_label);
+        }
+    }
+    if width >= 80 {
+        let title = safe_truncate(
+            &view.conversation_title(),
+            if width >= 120 { 32 } else { 12 },
+        );
+        let occupied = UnicodeWidthStr::width(fields.join(" · ").as_str());
+        if occupied + 3 + UnicodeWidthStr::width(title.as_str()) <= width {
+            fields.push(title);
+        }
+    }
+    fields
+}
+
+pub(crate) const SANDBOX_OFF_NOTICE: &str = "sandbox off: commands run on your machine";
+
+// The last Run's pinned Guard state, so the notice stays after it ends and needs no new probe.
+pub(crate) fn sandbox_off(view: &SessionView) -> bool {
+    view.runs
+        .last()
+        .and_then(|run| run.config.as_ref())
+        .and_then(|config| config.tool_policy.as_ref())
+        .is_some_and(|policy| policy.guard.host_fallback())
+}
+
+fn run_activity(run: &arany::RunView, width: usize) -> Vec<String> {
+    let mut lines: Vec<_> = run
+        .agents
+        .iter()
+        .take(MAX_VISIBLE_AGENTS)
+        .map(|agent| agent_activity(run, agent, width))
+        .collect();
+    if run.agents.len() > MAX_VISIBLE_AGENTS {
+        lines.push(safe_truncate(
+            &format!(
+                "+{} more agents (use /agents)",
+                run.agents.len() - MAX_VISIBLE_AGENTS
+            ),
+            width,
+        ));
+    }
+    lines
+}
+
+fn agent_activity(run: &arany::RunView, agent: &arany::AgentView, width: usize) -> String {
+    let role = match agent.role {
+        AgentRole::Primary => "primary".to_owned(),
+        AgentRole::Child => format!("child {}", agent.ordinal),
+    };
+    let status = if agent.role == AgentRole::Primary && agent.status == AgentStatus::Active {
+        "working"
+    } else {
+        agent_state_label(agent.status)
+    };
+    let prefix = format!("{role} · {status}");
+    let tool = run
+        .tools
+        .last()
+        .into_iter()
+        .chain(agent.tools.last())
+        .find(|tool| tool.intent.agent_run_id == agent.id && tool.observation.is_none());
+    let detail = tool
+        .map(|tool| tool.intent.call.label())
+        .or(agent.summary.as_deref())
+        .or_else(|| {
+            (agent.status == AgentStatus::Active).then_some(if agent.role == AgentRole::Child {
+                "Queued or awaiting response; Ctrl+C cancels"
+            } else {
+                "Waiting for response; Ctrl+C cancels"
+            })
+        })
+        .or(agent.objective.as_deref());
+    match detail {
+        Some(detail) if !detail.is_empty() => {
+            let prefix = format!("{prefix} · ");
+            let remaining = width.saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
+            if remaining == 0 {
+                safe_truncate(&format!("{prefix}…"), width)
+            } else {
+                format!("{prefix}{}", safe_truncate(detail, remaining))
+            }
+        }
+        _ => safe_truncate(&prefix, width),
     }
 }
 
@@ -429,41 +454,19 @@ mod tests {
             objective: "task".into(),
             images: Vec::new(),
             config: Some(RunConfig {
-                supervisor: None,
-                worker_policy: None,
-                agent_definitions: None,
-                roster: None,
-                providers: None,
                 provider: arany::ProviderRecord::parse("anthropic").expect("Provider record"),
                 model: "claude-sonnet-5".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                context_window_tokens: None,
                 policy: CollaborationPolicy::Team {
                     max_active_children: 8,
                 },
-                output_token_cap: 4096,
-                provider_concurrency: 1,
-                workspace_device: 1,
                 workspace_inode: 1,
-                user_instruction_digest: None,
-                instruction_sources: Vec::new(),
-                launch_directory: String::new(),
-                include_digests: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
                 context_usage: Some(ContextUsage {
                     used_bytes: 32_000,
                     budget_bytes: 65_536,
                     compactable_bytes: 20_000,
                     tool_history_bytes: 0,
                 }),
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
+                ..arany::test_support::run_config()
             }),
             agents: std::iter::once(AgentView {
                 tool_refusal: None,
@@ -608,6 +611,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let guard = arany::GuardReceipt {
             contract_version: 1,
@@ -922,19 +926,10 @@ mod tests {
                     | ProviderCallDisposition::InvalidResponse
             );
             ProviderCallRecord {
-                rate_limits: None,
-                delegation: None,
-                phase: arany::AgentPhase::RootPlan,
                 disposition,
                 response_id: reported.then(|| "PRIVATE_RESPONSE_ID".into()),
                 input_tokens: reported.then_some(123),
-                output_tokens: None,
-                wire_provenance: None,
-                refusal: None,
-                failure_reason: None,
-                requested_tools: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                ..arany::test_support::provider_call_record()
             }
         };
         let run = &mut view.runs[0];

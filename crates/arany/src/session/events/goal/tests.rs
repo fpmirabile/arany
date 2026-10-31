@@ -87,6 +87,7 @@ fn a_later_git_switch_invalidates_a_satisfied_command_criterion() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
         call: Box::new(call.clone()),
@@ -223,6 +224,7 @@ fn success_criterion_rejects_inspection_and_internal_tools() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }),
         },
         budget: GoalBudget::default(),
@@ -287,12 +289,12 @@ fn delete_and_move_scope_and_file_success_follow_both_paths() {
     for call in [
         ToolCall::Delete {
             path: "src/source".into(),
-            expected_digest: digest.clone(),
+            expected_digest: Some(digest.clone()),
         },
         ToolCall::Move {
             source: "src/source".into(),
             destination: "src/target".into(),
-            expected_digest: digest.clone(),
+            expected_digest: Some(digest.clone()),
         },
     ] {
         assert!(contract.allows_call(&call));
@@ -311,7 +313,7 @@ fn delete_and_move_scope_and_file_success_follow_both_paths() {
         assert!(!contract.allows_call(&ToolCall::Move {
             source: source.into(),
             destination: destination.into(),
-            expected_digest: digest.clone()
+            expected_digest: Some(digest.clone())
         }));
     }
     contract.success_criterion = GoalSuccessCriterion::WorkspaceFileDigest {
@@ -322,7 +324,7 @@ fn delete_and_move_scope_and_file_success_follow_both_paths() {
         ToolCall::Move {
             source: "src/source".into(),
             destination: "src/target".into(),
-            expected_digest: digest.clone(),
+            expected_digest: Some(digest.clone()),
         },
         ToolDisposition::Succeeded,
         serde_json::json!({"removed":{"sha256":digest,"bytes":8,"executable":false}}).to_string(),

@@ -6,8 +6,8 @@ use super::super::{
 };
 use super::{
     ActiveTurn, ApprovalChannel, ClientMessage, Completion, DisplayFollower, Fault, Inbound,
-    OutputControl, REWIND_BUSY_QUEUE, Refused, ServerMessage, complete, controls, emit, internal,
-    observe, params, response, send,
+    OutputControl, REWIND_BUSY_QUEUE, Refused, ServerIo, ServerMessage, complete, controls, emit,
+    internal, observe, params, response, send,
 };
 use arany::{
     Engine, EngineError, Event, RunCancellation, RunControls, RunRequest, RunSteering, SessionId,
@@ -176,12 +176,14 @@ impl ServerLoop {
                         control.clone(),
                         &self.outbound,
                         self.history.dispatch(
-                            &self.engine,
-                            &self.state,
+                            history::Context {
+                                engine: &self.engine,
+                                state: &self.state,
+                                outbound: &self.outbound,
+                                opt_out: &self.opt_out,
+                            },
                             &mut self.threads,
                             request,
-                            &self.outbound,
-                            &self.opt_out,
                         ),
                     )
                     .await
@@ -240,8 +242,10 @@ impl ServerLoop {
         }
         self.rewind_preview = None;
         let (result, pending) = rewind::preview(
-            &self.engine,
-            &self.state,
+            rewind::Context {
+                engine: &self.engine,
+                state: &self.state,
+            },
             &self.threads,
             params(request.params)?,
         )
@@ -271,8 +275,10 @@ impl ServerLoop {
             .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
         let cancellation = RunCancellation::new();
         let mut restoration = Box::pin(rewind::restore(
-            &self.engine,
-            &self.state,
+            rewind::Context {
+                engine: &self.engine,
+                state: &self.state,
+            },
             &mut self.threads,
             &mut self.rewind_preview,
             params(request.params)?,
@@ -553,38 +559,11 @@ impl ServerLoop {
         &mut self,
         method: &str,
         params: Option<Value>,
-    ) -> Result<
-        (
-            arany::AdmittedProviders,
-            RunRequest,
-            RunControls,
-            arany::ApprovalInbox,
-            u64,
-        ),
-        Fault,
-    > {
+    ) -> Result<PreparedTurn, Fault> {
         if let Some(native) = &mut self.native
             && let Some(submission) = native.pending.take()
         {
-            let first = match submission
-                .request
-                .session_id
-                .filter(|_| submission.controls.approvals.is_some())
-            {
-                Some(id) => threads::load_view(&self.state, id)
-                    .await?
-                    .last_sequence
-                    .checked_add(1)
-                    .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?,
-                None => 1,
-            };
-            return Ok((
-                submission.providers,
-                submission.request,
-                submission.controls,
-                submission.inbox,
-                first,
-            ));
+            return self.native_turn(submission).await;
         }
         let mut input = controls::Submission::parse(method, params)?;
         if self.active.is_some() {
@@ -602,19 +581,7 @@ impl ServerLoop {
             return Err(Fault::engine(EngineError::ProviderSetupBlocked));
         }
         let goal = input.goal(loaded, &view)?;
-        let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
-        let approvals = if self.threads.approval_channel == ApprovalChannel::Terminal {
-            approvals
-        } else if self.host_session_approval {
-            approvals.without_prefix_rules()
-        } else {
-            approvals.once_only()
-        };
-        let approvals = if self.threads.approval_channel == ApprovalChannel::Restricted {
-            approvals.without_human_only()
-        } else {
-            approvals
-        };
+        let (approvals, inbox) = self.turn_approvals(loaded.approval_mode);
         let first_sequence = view
             .last_sequence
             .checked_add(1)
@@ -650,6 +617,48 @@ impl ServerLoop {
             inbox,
             first_sequence,
         ))
+    }
+
+    // An attached submission carries its own Run; its Events start after the Session's head.
+    async fn native_turn(&self, submission: embedded::Submission) -> Result<PreparedTurn, Fault> {
+        let first = match submission
+            .request
+            .session_id
+            .filter(|_| submission.controls.approvals.is_some())
+        {
+            Some(id) => threads::load_view(&self.state, id)
+                .await?
+                .last_sequence
+                .checked_add(1)
+                .ok_or_else(|| Fault::engine(EngineError::InvalidHistory))?,
+            None => 1,
+        };
+        Ok((
+            submission.providers,
+            submission.request,
+            submission.controls,
+            submission.inbox,
+            first,
+        ))
+    }
+
+    // The terminal keeps every approval scope; Serve clients get session or once-only scopes, and a
+    // restricted client never sees human-only approvals.
+    fn turn_approvals(&self, mode: arany::ApprovalMode) -> (ToolApprovals, arany::ApprovalInbox) {
+        let (approvals, inbox) = ToolApprovals::new(mode);
+        let approvals = if self.threads.approval_channel == ApprovalChannel::Terminal {
+            approvals
+        } else if self.host_session_approval {
+            approvals.without_prefix_rules()
+        } else {
+            approvals.once_only()
+        };
+        let approvals = if self.threads.approval_channel == ApprovalChannel::Restricted {
+            approvals.without_human_only()
+        } else {
+            approvals
+        };
+        (approvals, inbox)
     }
 
     async fn submit_run(
@@ -709,15 +718,17 @@ impl ServerLoop {
         approval_end: RunCancellation,
     ) -> approvals::Approvals {
         approvals::Approvals::start(
-            inbox,
-            cancel,
-            thread_id,
+            approvals::ApprovalRun {
+                inbox,
+                cancel,
+                finished: approval_end,
+                thread_id,
+            },
             approvals::Channel {
                 outbound: self.outbound.clone(),
                 next_id: self.next_server_id.clone(),
                 approval_channel: self.threads.approval_channel,
             },
-            approval_end,
             {
                 let state = self.state.clone();
                 move |intent| approvals::started_at(state.clone(), thread_id, intent)
@@ -965,41 +976,26 @@ impl ServerLoop {
 pub(in crate::cli) async fn run_configured(
     engine: Engine,
     state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    io: ServerIo,
     threads: Threads,
-    stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
-    run_shared(
-        Arc::new(engine),
-        state,
-        inbound,
-        outbound,
-        threads,
-        stopping,
-        None,
-    )
-    .await
+    run_shared(Arc::new(engine), state, io, threads, None).await
 }
 
 pub(in crate::cli) async fn run_embedded(
     engine: Arc<Engine>,
     state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    io: ServerIo,
     native: embedded::Native,
-    stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
     run_shared(
         engine,
         state,
-        inbound,
-        outbound,
+        io,
         Threads {
             approval_channel: ApprovalChannel::Terminal,
             ..Default::default()
         },
-        stopping,
         Some(native),
     )
     .await
@@ -1008,14 +1004,11 @@ pub(in crate::cli) async fn run_embedded(
 async fn run_shared(
     engine: Arc<Engine>,
     state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    io: ServerIo,
     threads: Threads,
-    stopping: watch::Sender<bool>,
     native: Option<embedded::Native>,
 ) -> Result<(), String> {
-    let mut server =
-        ServerLoop::configured(engine, state, inbound, outbound, threads, stopping, native);
+    let mut server = ServerLoop::configured(engine, state, io, threads, native);
     server.start_embedded().await?;
     let result = server.run().await;
     server.on_stop(result).await
@@ -1066,12 +1059,15 @@ impl ServerLoop {
     fn configured(
         engine: Arc<Engine>,
         state: PathBuf,
-        inbound: mpsc::Receiver<ClientMessage>,
-        outbound: mpsc::Sender<ServerMessage>,
+        io: ServerIo,
         threads: Threads,
-        stopping: watch::Sender<bool>,
         native: Option<embedded::Native>,
     ) -> Self {
+        let ServerIo {
+            inbound,
+            outbound,
+            stopping,
+        } = io;
         let local = native
             .as_ref()
             .and_then(|native| native.pending.as_ref())
@@ -1106,6 +1102,14 @@ impl ServerLoop {
         }
     }
 }
+
+type PreparedTurn = (
+    arany::AdmittedProviders,
+    RunRequest,
+    RunControls,
+    arany::ApprovalInbox,
+    u64,
+);
 
 #[cfg(test)]
 mod tests;

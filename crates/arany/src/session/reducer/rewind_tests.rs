@@ -12,6 +12,7 @@ fn compiled_bytes(view: &SessionView, items: &[crate::provider::CompactionItem])
             previous_summary: None,
             items: items.to_vec(),
             max_output_tokens: 1024,
+            prompts: Default::default(),
         },
     ))
     .unwrap()
@@ -91,7 +92,6 @@ fn apply(view: &mut SessionView, event: Event) {
     assert_eq!(
         Event::decode(
             event.kind(),
-            event.version(),
             &event.payload().unwrap(),
             event.scope().0,
             event.scope().1
@@ -486,29 +486,22 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
     assert!(!selected.files[0].history_drift);
     assert_eq!(selected.files[0].expected_current, None);
     let event = started(&view, target(&view));
-    let version = event.version();
     let payload = event.payload().unwrap();
     let exact = format!(
         "{payload}{}",
         " ".repeat(MAX_REWIND_EVENT_BYTES - payload.len())
     );
-    assert!(Event::decode(event.kind(), version, &exact, None, None).is_ok());
+    assert!(Event::decode(event.kind(), &exact, None, None).is_ok());
     assert!(matches!(
-        Event::decode(event.kind(), version, &(exact + " "), None, None),
+        Event::decode(event.kind(), &(exact + " "), None, None),
         Err(ReplayError::InvalidPayload)
     ));
     assert!(matches!(
-        Event::decode(event.kind(), version, &payload, Some(view.runs[0].id), None),
+        Event::decode(event.kind(), &payload, Some(view.runs[0].id), None),
         Err(ReplayError::InvalidPayload)
     ));
     assert!(matches!(
-        Event::decode(
-            event.kind(),
-            version,
-            &payload,
-            None,
-            Some(AgentRunId::new())
-        ),
+        Event::decode(event.kind(), &payload, None, Some(AgentRunId::new())),
         Err(ReplayError::InvalidPayload)
     ));
     let Event::WorkspaceRewindStarted { mut record } = event.clone() else {
@@ -519,23 +512,16 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
         .collect();
     assert!(serde_json::to_vec(&record).unwrap().len() > MAX_REWIND_EVENT_BYTES);
     assert!(!record.valid());
-    for version in [0, version - 1, version + 1] {
-        assert!(matches!(
-            Event::decode(event.kind(), version, &payload, None, None),
-            Err(ReplayError::UnknownEvent)
-        ));
-    }
     for invalid in [
         payload.replacen("\"kept\":[]", "\"kept\":[],\"kept\":[]", 1),
         payload.replacen("\"kept\":[]", "\"unknown\":[]", 1),
         format!("{} ", " ".repeat(MAX_REWIND_EVENT_BYTES)),
     ] {
-        assert!(Event::decode(event.kind(), version, &invalid, None, None).is_err());
+        assert!(Event::decode(event.kind(), &invalid, None, None).is_err());
     }
     let mut open = view.clone();
     apply(&mut open, event);
     let event = finished(&open, RewindOutcome::Restored);
-    let version = event.version();
     let payload = event.payload().unwrap();
     for (run, agent, bytes) in [
         (Some(view.runs[0].id), None, payload.clone()),
@@ -543,16 +529,15 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
         (None, None, " ".repeat(MAX_REWIND_EVENT_BYTES + 1)),
     ] {
         assert!(matches!(
-            Event::decode(event.kind(), version, &bytes, run, agent),
+            Event::decode(event.kind(), &bytes, run, agent),
             Err(ReplayError::InvalidPayload)
         ));
     }
     for field in ["checkpoint", "attestation"] {
         let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         v.as_object_mut().unwrap().remove(field);
-        assert!(Event::decode(event.kind(), version, &v.to_string(), None, None).is_err());
+        assert!(Event::decode(event.kind(), &v.to_string(), None, None).is_err());
     }
-    assert!(Event::decode(event.kind(), 0, &payload, None, None).is_err());
     let mut r = match event {
         Event::WorkspaceRewindFinished { record } => record,
         _ => unreachable!(),
@@ -633,7 +618,8 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
         (1, 1024 * 1024 + 1, false),
     ] {
         let (_, mut view) = fixture();
-        let template = view.runs[0].agents[1].tools[0].clone();
+        let mut template = view.runs[0].agents[1].tools[0].clone();
+        template.intent.target = crate::session::EffectTarget::Workspace;
         view.runs[0].agents[1].tools.clear();
         for index in 0..files {
             let mut tool = template.clone();
@@ -641,7 +627,7 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
             let digest = "a".repeat(64);
             tool.intent.call = ToolCall::Delete {
                 path: format!("src/{index:04}"),
-                expected_digest: digest.clone(),
+                expected_digest: Some(digest.clone()),
             };
             let observation = tool.observation.as_mut().unwrap();
             observation.intent = tool.intent.clone();
@@ -665,6 +651,7 @@ fn rewind_planner_refuses_first_file_and_byte_overflow_and_preserves_exec_only_c
     }
     let (_, mut view) = fixture();
     let t = &mut view.runs[0].agents[1].tools[0];
+    t.intent.target = crate::session::EffectTarget::Workspace;
     let digest = "a".repeat(64);
     if let ToolCall::Write {
         expected_digest, ..
@@ -702,8 +689,8 @@ fn compaction_record(
         recent_files: crate::session::recent_files_across(&view.runs, view.last_sequence),
         provider: "openai".into(),
         model: "test".into(),
-        prompt_version: 1,
-        schema_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 1,
         source_tokens_estimate: 1,

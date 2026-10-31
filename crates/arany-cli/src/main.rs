@@ -1,11 +1,14 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("Arany supports Linux and macOS; on Windows use WSL2");
+
 mod accounts;
 mod cli;
 mod files;
 use arany_cli::{presentation, terminal, terminal::report_error};
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use arany::test_support::process as test_process;
 
 use crate::presentation::render_session;
@@ -137,9 +140,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
         }
     };
     if cli.command.is_none() {
-        let result = runtime.block_on(cli::attached::run(cli.attached, telemetry));
-        report_account_migration_notice();
-        return match result {
+        return match runtime.block_on(cli::attached::run(cli.attached, telemetry)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 arany::record_development_failure(arany::DevelopmentFailure::AttachedExit);
@@ -155,7 +156,6 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
     let storage = matches!(cli.command, Some(Command::Storage(_)));
     let serving = matches!(cli.command, Some(Command::Serve(_) | Command::Acp(_)));
     let result = runtime.block_on(run(cli.command.expect("checked subcommand"), telemetry));
-    report_account_migration_notice();
     if serving {
         // A cancelled stdio read may still occupy Tokio's blocking pool.
         runtime.shutdown_timeout(std::time::Duration::ZERO);
@@ -187,12 +187,6 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
             report_error(error);
             ExitCode::FAILURE
         }
-    }
-}
-
-fn report_account_migration_notice() {
-    if let Some(notice) = accounts::chatgpt::take_migration_notice() {
-        let _ = writeln!(std::io::stderr(), "{notice}");
     }
 }
 
@@ -423,7 +417,6 @@ mod tests {
             tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>()).await
         });
         assert!(result.is_err());
-        #[cfg(unix)]
         runtime.block_on(async {
             let (socket, _peer) = tokio::net::UnixStream::pair().expect("local socket pair");
             socket.writable().await.expect("runtime I/O driver");

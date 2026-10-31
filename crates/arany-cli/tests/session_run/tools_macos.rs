@@ -95,7 +95,6 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                 if !matches!(
                     case,
                     "journey"
-                        | "git"
                         | "refusal"
                         | "denied"
                         | "headless"
@@ -108,7 +107,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "depth-32"
                         | "depth-33"
                         | "nonzero"
-                        | "ai-approve"
+                        | "auto"
                         | "deny"
                         | "drop"
                         | "cancel"
@@ -397,19 +396,19 @@ fn guarded_offline_rust_build_uses_selected_runtime_and_sdk() {
         "tools::native_offline_rust_build_helper",
         Some(&sysroot),
         registry.as_deref(),
-        None,
+        false,
     );
 }
 
 pub(super) fn native_journey(helper: &str) {
-    native_journey_with_rust_sysroot(helper, None, None, None);
+    native_journey_with_rust_sysroot(helper, None, None, false);
 }
 
 fn native_journey_with_rust_sysroot(
     helper: &str,
     rust_sysroot: Option<&Path>,
     registry: Option<&Path>,
-    rustup_proxy: Option<&Path>,
+    real_user_programs: bool,
 ) {
     let _gate = crate::process::NATIVE_GATE
         .lock()
@@ -451,6 +450,8 @@ fn native_journey_with_rust_sysroot(
         )
         .env("ARANY_TEST_FILE_JOURNEY_ROOT", &fixture_root)
         .env("HOME", fixture_root.join("home"))
+        // Runs resolve Git from PATH; the Command Line Tools Git is the only one on it here.
+        .env("PATH", "/Library/Developer/CommandLineTools/usr/bin")
         .env("XDG_STATE_HOME", fixture_root.join("environment-state"))
         .env("XDG_DATA_HOME", fixture_root.join("environment-data"))
         .current_dir(&fixture_root);
@@ -461,8 +462,8 @@ fn native_journey_with_rust_sysroot(
     if let Some(registry) = registry {
         command.env("ARANY_TEST_CARGO_REGISTRY", registry);
     }
-    if let Some(proxy) = rustup_proxy {
-        user_programs::configure_proxy(&mut command, &fixture_root, proxy);
+    if real_user_programs {
+        user_programs::use_real_user_programs(&mut command);
     }
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         command.bounded_output_for(
@@ -492,7 +493,6 @@ fn native_journey_with_rust_sysroot(
         trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
-    super::tools_git::latency::forward(&output.stdout);
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if line.starts_with("offline Cargo ")
             || (registry.is_some() && line.starts_with("repository "))
@@ -659,7 +659,7 @@ async fn native_file_journey_helper() {
     private_file(&peer, MCP_SCRIPT.as_bytes());
     let shell_digest = hash(&std::fs::read("/bin/sh").unwrap());
     let config = json!({
-        "version":1,"workspace_paths":["src",".agents/skills"],"write":true,
+        "workspace_paths":["src",".agents/skills"],"write":true,
         "commands":[{"name":"shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,"inputs":[]}],
         "skills":[],
         "mcp":[{"name":"synthetic","program":{"name":"mcp-shell","executable":"/bin/sh","sha256":shell_digest,"interpreter":true,
@@ -678,12 +678,12 @@ async fn native_file_journey_helper() {
             limit: None,
         },
         ToolCall::Edit {
-            path: "src/main.txt".into(), expected_digest: hash(b"before\n"),
+            path: "src/main.txt".into(), expected_digest: Some(hash(b"before\n")),
             old: "before".into(), new: "first".into(),
         },
         ToolCall::MultiEdit {
             file_path: "src/main.txt".into(),
-            expected_digest: hash(b"first\n"),
+            expected_digest: Some(hash(b"first\n")),
             edits: vec![
                 arany::LiteralEdit { old_string: "first".into(), new_string: "middle".into(), replace_all: false },
                 arany::LiteralEdit { old_string: "middle".into(), new_string: "after".into(), replace_all: false },
@@ -727,8 +727,7 @@ async fn native_file_journey_helper() {
             args: vec!["-c".into(), "set -eu; if /bin/cat /etc/passwd >/dev/null 2>&1; then exit 90; fi; if /bin/cat /usr/bin/sudo >/dev/null 2>&1; then exit 91; fi; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf 'command create\\n' > src/command-output.txt; printf 'command modify\\n' > src/generated/note.txt; /usr/bin/find src/deleted.txt -type f -delete; printf native-command-success".into()],
             cwd: "".into(),
             resource_class: None,
-            timeout_ms: None,
-        },
+            timeout_ms: None, additional_reads: None },
         ToolCall::McpList {
             server: "synthetic".into(),
         },
@@ -747,7 +746,7 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Edit {
             path: "src/main.txt".into(),
-            expected_digest: hash(b"before\n"),
+            expected_digest: Some(hash(b"before\n")),
             old: "after".into(),
             new: "must not apply".into(),
         },
@@ -901,6 +900,8 @@ async fn native_file_journey_helper() {
                 assert!(matches!(
                     observation.intent.call,
                     ToolCall::Read { .. }
+                        | ToolCall::List { .. }
+                        | ToolCall::Glob { .. }
                         | ToolCall::Search { .. }
                         | ToolCall::Skill { .. }
                         | ToolCall::Write { .. }
@@ -914,7 +915,11 @@ async fn native_file_journey_helper() {
                 if observation.disposition == ToolDisposition::Succeeded
                     && !matches!(
                         observation.intent.call,
-                        ToolCall::Read { .. } | ToolCall::Search { .. } | ToolCall::Skill { .. }
+                        ToolCall::Read { .. }
+                            | ToolCall::List { .. }
+                            | ToolCall::Glob { .. }
+                            | ToolCall::Search { .. }
+                            | ToolCall::Skill { .. }
                     )
                 {
                     assert!(receipt.is_some());
@@ -938,6 +943,7 @@ async fn native_file_journey_helper() {
             }
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
             arany::Attestation::Host(_) => panic!("macOS journeys never run host Tools"),
+            arany::Attestation::Git(_) => panic!("macOS journeys never run Git"),
         }
     }
     let command: serde_json::Value =
@@ -972,8 +978,7 @@ async fn native_file_journey_helper() {
                 args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/command-output.txt)\" = 'command create'; test \"$(/bin/cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            }],
+                timeout_ms: None, additional_reads: None }],
             linked_file: None,
         });
     let fresh = arany::test_support::engine::open(
@@ -1024,13 +1029,13 @@ async fn native_file_journey_helper() {
     assert_eq!(replay.runs[1], fresh_outcome.run);
     store.close().await.unwrap();
     trace_case(root, "refusal");
-    let discovery = outcome
+    let admitted = outcome
         .run
         .tools
         .iter()
         .find(|tool| matches!(tool.intent.call, ToolCall::List { .. }))
-        .expect("recorded Guard discovery intent");
-    guard_refuses_before_go(root, &workspace, &discovery.intent);
+        .expect("recorded non-process intent");
+    guard_refuses_before_go(root, &workspace, &admitted.intent);
     stopped_effects_survive_closed_replay(root, &workspace, &config).await;
     shell::refuse_options(root, &workspace, &config).await;
 }
@@ -1082,7 +1087,7 @@ int main(int argc, char **argv) {
     assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = json!({
-        "version":1,"workspace_paths":["src"],"write":true,
+        "workspace_paths":["src"],"write":true,
         "commands":[
             {"name":"shell","executable":"/bin/sh","sha256":hash(&std::fs::read("/bin/sh").unwrap()),"interpreter":true,"inputs":[]},
             {"name":"native-links","executable":executable,"sha256":hash(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}
@@ -1107,12 +1112,13 @@ fn build_goal_request() -> arany::GoalRequest {
         build_memory_bytes: 512 * 1024 * 1024,
         build_processes: 32,
         build_project_bytes: 128 * 1024 * 1024,
-        build_cache_bytes: 64 * 1024 * 1024,
+        build_cache_bytes: arany::BuildCacheSize::Bytes(64 * 1024 * 1024),
         ..arany::ToolResourceSettings::default()
     };
     goal
 }
 
+const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
 const RUNTIME_CACHE_CANARY: &str = "ARANY_RUNTIME_CACHE_PERSISTENCE_CANARY";
 #[async_trait::async_trait]
 impl Provider for RuntimeJourney {
@@ -1201,6 +1207,93 @@ async fn native_offline_rust_build_helper() {
     trace_case(root, "rust-build");
     assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
 
+    let rust_sysroot = private_rust_sysroot(root);
+    if std::env::var_os("ARANY_TEST_CARGO_REGISTRY").is_some() {
+        repository::run(root).await;
+        return;
+    }
+    let workspace = root.join("workspace");
+    let (mut permissions, [rust_token, compiler_token, sdk_token], apple_sdk) =
+        offline_rust_workspace(root, &workspace, &rust_sysroot);
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::Request,
+            std::slice::from_ref(&rust_token),
+        )
+        .unwrap();
+    let rust_only = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
+    let denied_apple = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "set -eu; if {{ IFS= read -r _; }} < '{apple_sdk}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1 || exit 42; printf 'unselected-apple-sdk-denied\\n'"
+            ),
+        ],
+        cwd: String::new(),
+        resource_class: None,
+        timeout_ms: None,
+        additional_reads: None,
+    };
+    let mut requested = arany::test_support::scenario::request(
+        &workspace,
+        "Verify the Apple SDK stays denied without its profile while PATH grants the compiler",
+    );
+    requested.title = Some("Unselected Apple runtimes".into());
+    requested.include_paths.clear();
+    requested.goal = build_goal_request();
+    let (denied, denied_requests) = run_offline_build_case(
+        &root.join("state-denied-apple"),
+        requested,
+        rust_only,
+        denied_apple.clone(),
+        60_000,
+    )
+    .await;
+    assert_eq!(denied.run.status, RunStatus::Finished);
+    assert_eq!(denied.run.tools.len(), 1);
+    let denied_observation = denied.run.tools[0]
+        .observation
+        .as_ref()
+        .expect("denied Apple runtime receipt");
+    let denied_output: serde_json::Value =
+        serde_json::from_str(&denied_observation.output).unwrap();
+    assert_eq!(denied_output["exit_code"], 0);
+    assert_eq!(denied_output["stdout"], "unselected-apple-sdk-denied\n");
+    assert_guarded_build_observation(denied_observation);
+    assert_provider_journal(&denied_requests, &denied_apple);
+    assert_closed_build_replay(root, "state-denied-apple", &denied).await;
+
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection(&StateRoot::account_path().unwrap());
+    let selected = [rust_token, compiler_token, sdk_token];
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::Request, &selected)
+        .unwrap();
+    arany::test_support::scenario::guarded_offline_cargo_journey(
+        root,
+        &workspace,
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+    )
+    .await;
+    let team = tempfile::tempdir_in(root).unwrap();
+    let (mut permissions, tokens, _) =
+        offline_rust_workspace(root, &team.path().join("workspace"), &rust_sysroot);
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::Request, &tokens)
+        .unwrap();
+    arany::test_support::worker_teams::cargo_editor_journey(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        team,
+    )
+    .await;
+}
+
+fn private_rust_sysroot(root: &Path) -> std::path::PathBuf {
     let source_sysroot =
         std::env::var_os("ARANY_TEST_RUST_SYSROOT").expect("validated parent Rust sysroot");
     let source_sysroot = setup_context("source Rust sysroot validation", || {
@@ -1239,18 +1332,20 @@ async fn native_offline_rust_build_helper() {
         rust_sysroot
     );
 
-    if std::env::var_os("ARANY_TEST_CARGO_REGISTRY").is_some() {
-        repository::run(root).await;
-        return;
-    }
-    let workspace = root.join("workspace");
+    rust_sysroot
+}
+
+fn offline_rust_workspace(
+    root: &Path,
+    workspace: &Path,
+    rust_sysroot: &Path,
+) -> (arany::WorkspacePermissions, [String; 3], String) {
     std::fs::DirBuilder::new()
         .mode(0o700)
-        .create(&workspace)
+        .create(workspace)
         .unwrap();
-    arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), &workspace);
-    const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
-    let permissions = arany::WorkspacePermissions::open(&workspace)
+    arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), workspace);
+    let permissions = arany::WorkspacePermissions::open(workspace)
         .unwrap()
         .prepare_profile_selection(&StateRoot::account_path().unwrap());
     let choices = permissions.runtime_profile_choices();
@@ -1273,82 +1368,119 @@ async fn native_offline_rust_build_helper() {
     setup_context("Apple runtime baseline probes", || {
         assert_apple_runtime_baseline(root, &sdk.path)
     });
-    assert_eq!(rust.version.as_deref(), versioned_name.to_str());
+    assert_eq!(
+        rust.version.as_deref(),
+        rust_sysroot.file_name().unwrap().to_str()
+    );
     assert_eq!(compiler.version, None);
     assert!(sdk.version.is_some());
-    let apple_sdk = sdk.path.to_str().unwrap();
-    let rust_token = rust.token.clone();
-    let compiler_token = compiler.token.clone();
-    let sdk_token = sdk.token.clone();
+    let apple_sdk = sdk.path.to_str().unwrap().to_owned();
+    let tokens = [
+        rust.token.clone(),
+        compiler.token.clone(),
+        sdk.token.clone(),
+    ];
+    (permissions, tokens, apple_sdk)
+}
 
-    let mut permissions = permissions;
+// Owner-run measurement: a trivial default-class command, then cold and incremental Build checks sharing one State.
+#[tokio::test]
+#[ignore = "isolated helper owned by the native command latency probe"]
+async fn native_command_latency_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let rust_sysroot = private_rust_sysroot(root);
+    let workspace = root.join("workspace");
+    let (mut permissions, tokens, _) = offline_rust_workspace(root, &workspace, &rust_sysroot);
     permissions
-        .remember_profiles(
-            true,
-            arany::ApprovalMode::Request,
-            std::slice::from_ref(&rust_token),
-        )
+        .remember_profiles(true, arany::ApprovalMode::Request, &tokens)
         .unwrap();
-    let rust_only = arany::WorkspacePermissions::open(&workspace)
-        .unwrap()
-        .prepare_profile_selection(&StateRoot::account_path().unwrap());
-    let denied_apple = ToolCall::Command {
-        program: "sh".into(),
-        args: vec![
-            "-c".into(),
-            format!(
-                "set -eu; if {{ IFS= read -r _; }} < '{apple_sdk}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; if '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1; then exit 42; fi; printf 'unselected-apple-runtimes-denied\\n'"
-            ),
-        ],
-        cwd: String::new(),
-        resource_class: None,
-        timeout_ms: None,
-    };
-    let mut requested = arany::test_support::scenario::request(
-        &workspace,
-        "Verify Apple compiler and SDK access remain denied without those profiles",
-    );
-    requested.title = Some("Unselected Apple runtimes".into());
-    requested.include_paths.clear();
-    requested.goal = build_goal_request();
-    let (denied, denied_requests) = run_offline_build_case(
-        &root.join("state-denied-apple"),
-        requested,
-        rust_only,
-        denied_apple.clone(),
-        60_000,
-    )
-    .await;
-    assert_eq!(denied.run.status, RunStatus::Finished);
-    assert_eq!(denied.run.tools.len(), 1);
-    let denied_observation = denied.run.tools[0]
-        .observation
-        .as_ref()
-        .expect("denied Apple runtime receipt");
-    let denied_output: serde_json::Value =
-        serde_json::from_str(&denied_observation.output).unwrap();
-    assert_eq!(denied_output["exit_code"], 0);
-    assert_eq!(
-        denied_output["stdout"],
-        "unselected-apple-runtimes-denied\n"
-    );
-    assert_guarded_build_observation(denied_observation);
-    assert_provider_journal(&denied_requests, &denied_apple);
-    assert_closed_build_replay(root, "state-denied-apple", &denied).await;
-
     let mut permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
         .prepare_profile_selection(&StateRoot::account_path().unwrap());
-    let selected = [rust_token, compiler_token, sdk_token];
+    let selected = permissions
+        .runtime_profile_choices()
+        .iter()
+        .filter(|choice| choice.selected)
+        .map(|choice| choice.token.clone())
+        .collect::<Vec<_>>();
     permissions
         .remember_profiles(true, arany::ApprovalMode::Request, &selected)
         .unwrap();
-    arany::test_support::scenario::guarded_offline_cargo_journey(
-        root,
-        &workspace,
-        Path::new(env!("CARGO_BIN_EXE_arany")),
-    )
-    .await;
+    for (case, script, class) in [
+        ("true 1", "true", arany::ToolResourceClass::Default),
+        ("true 2", "true", arany::ToolResourceClass::Default),
+        ("true 3", "true", arany::ToolResourceClass::Default),
+        (
+            "cargo check cold",
+            "cargo check --locked",
+            arany::ToolResourceClass::Build,
+        ),
+        (
+            "cargo check warm 1",
+            "cargo check --locked",
+            arany::ToolResourceClass::Build,
+        ),
+        (
+            "cargo check warm 2",
+            "cargo check --locked",
+            arany::ToolResourceClass::Build,
+        ),
+    ] {
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: String::new(),
+            resource_class: Some(class),
+            timeout_ms: None,
+            additional_reads: None,
+        };
+        let mut requested =
+            arany::test_support::scenario::request(&workspace, "Measure one guarded command");
+        requested.include_paths.clear();
+        requested.goal = build_goal_request();
+        let permissions = arany::WorkspacePermissions::open(&workspace)
+            .unwrap()
+            .prepare_profile_selection(&StateRoot::account_path().unwrap());
+        let started = std::time::Instant::now();
+        let (outcome, _) =
+            run_offline_build_case(&root.join("state"), requested, permissions, call, 60_000).await;
+        let elapsed = started.elapsed();
+        let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Succeeded,
+            "{case}: {}",
+            observation.output
+        );
+        let stderr =
+            serde_json::from_str::<serde_json::Value>(&observation.output).unwrap()["stderr"]
+                .as_str()
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("Compiling") || line.contains("Finished"))
+                .collect::<Vec<_>>()
+                .join(" | ");
+        println!(
+            "offline Cargo latency {case}: {} ms; cache {:?}; {stderr}",
+            elapsed.as_millis(),
+            observation.cache_update
+        );
+    }
+}
+
+#[test]
+#[ignore = "owner-run native macOS command latency probe; requires ARANY_TEST_RUST_SYSROOT"]
+fn guarded_command_latency_probe() {
+    let sysroot = std::env::var_os("ARANY_TEST_RUST_SYSROOT")
+        .expect("set ARANY_TEST_RUST_SYSROOT to one physical versioned macOS Rust sysroot");
+    let sysroot = validate_rust_sysroot(Path::new(&sysroot));
+    native_journey_with_rust_sysroot(
+        "tools::native_command_latency_helper",
+        Some(&sysroot),
+        None,
+        false,
+    );
 }
 
 async fn run_offline_build_case(
@@ -1387,20 +1519,12 @@ async fn run_offline_build_case(
     let approve = async {
         let mut calls = Vec::new();
         while let Some(approval) = inbox.next().await {
-            assert!(
-                !approval.allow_auto_edits,
-                "commands cannot offer file-edit remembering"
-            );
-            let matches = calls.is_empty() && approval.intent.call == call;
             calls.push(approval.intent.call.clone());
-            approval.decide(matches);
-            if calls.len() == 2 {
-                break;
-            }
+            approval.decide(false);
         }
         calls
     };
-    let (outcome, approved_calls) = tokio::time::timeout(
+    let (outcome, asked) = tokio::time::timeout(
         Duration::from_millis(u64::from(timeout_ms)) + Duration::from_secs(60),
         async { tokio::join!(run, approve) },
     )
@@ -1408,7 +1532,10 @@ async fn run_offline_build_case(
     .expect("bounded native offline build run");
     engine.close().await.unwrap();
     let outcome = outcome.unwrap_or_else(|error| panic!("native build Engine failed: {error}"));
-    assert_eq!(approved_calls, [call], "one exact native build approval");
+    assert!(
+        asked.is_empty(),
+        "a sandboxed build asks nothing: {asked:?}"
+    );
     (outcome, requests)
 }
 
@@ -1614,12 +1741,13 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let refused_requests = Arc::new(Mutex::new(Vec::new()));
     let refused_state = root.join("state-mounted");
     let provider = Arc::new(RuntimeJourney {
         requests: refused_requests.clone(),
-        calls: vec![runtime_call.clone()],
+        calls: vec![runtime_call],
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
     });
@@ -1657,21 +1785,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         engine_controls,
     );
-    let approve = async {
-        let approval = inbox
-            .next()
-            .await
-            .expect("one approval for the mounted-runtime command");
-        assert_eq!(approval.intent.call, runtime_call);
-        approval.decide(true);
-    };
-    let (refused, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(run, approve)
-    })
-    .await
-    .expect("bounded mounted-runtime refusal journey");
-    let refused = refused.unwrap();
+    let refused = tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("bounded mounted-runtime refusal journey")
+        .unwrap();
     engine.close().await.unwrap();
+    drop(approvals);
+    assert!(
+        inbox.next().await.is_none(),
+        "a sandboxed command asks nothing"
+    );
     assert_eq!(
         refused.run.status,
         RunStatus::Failed,
@@ -1747,12 +1870,11 @@ async fn native_runtime_mount_journey_helper() {
         ],
         cwd: String::new(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let seed_requests = Arc::new(Mutex::new(Vec::new()));
     let seed_engine_provider = Arc::new(RuntimeJourney {
         requests: seed_requests,
-        calls: vec![cache_seed.clone()],
+        calls: vec![cache_seed],
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
     });
@@ -1787,24 +1909,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         seed_engine_controls,
     );
-    let approve_seed = async {
-        let approval = seed_inbox
-            .next()
-            .await
-            .expect("private cache seed approval");
-        assert!(
-            approval.intent.call == cache_seed,
-            "private cache seed approval intent differs"
-        );
-        approval.decide(true);
-    };
-    let (seed_outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(seed_run, approve_seed)
-    })
-    .await
-    .expect("bounded private cache seed");
-    let seed_outcome = seed_outcome.unwrap();
+    let seed_outcome = tokio::time::timeout(Duration::from_secs(90), seed_run)
+        .await
+        .expect("bounded private cache seed")
+        .unwrap();
     seed_engine.close().await.unwrap();
+    drop(seed_approvals);
+    assert!(
+        seed_inbox.next().await.is_none(),
+        "a sandboxed cache seed asks nothing"
+    );
     assert_eq!(
         seed_outcome.run.status,
         RunStatus::Finished,
@@ -1884,6 +1998,7 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let cache_read = ToolCall::Command {
         program: "sh".into(),
@@ -1896,6 +2011,7 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let cache_overflow = ToolCall::Command {
         program: "sh".into(),
@@ -1905,8 +2021,7 @@ async fn native_runtime_mount_journey_helper() {
         ],
         cwd: String::new(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let accepted_calls = vec![cache_write, cache_read, cache_overflow];
     let provider = Arc::new(RuntimeJourney {
         requests: accepted_requests.clone(),
@@ -1934,7 +2049,7 @@ async fn native_runtime_mount_journey_helper() {
     ] {
         let mut goal = build_goal_request();
         goal.resource_settings.build_project_bytes = project_bytes;
-        goal.resource_settings.build_cache_bytes = cache_bytes;
+        goal.resource_settings.build_cache_bytes = arany::BuildCacheSize::Bytes(cache_bytes);
         let invalid = run_with(
             &engine,
             &provider,
@@ -1975,26 +2090,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         engine_controls,
     );
-    let approve = async {
-        for call in &accepted_calls {
-            let approval = inbox
-                .next()
-                .await
-                .expect("approval for a selected-runtime command");
-            assert!(
-                &approval.intent.call == call,
-                "selected-runtime approval intent differs"
-            );
-            approval.decide(true);
-        }
-    };
-    let (accepted, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(run, approve)
-    })
-    .await
-    .expect("bounded selected-runtime success journey");
-    let accepted = accepted.unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("bounded selected-runtime success journey")
+        .unwrap();
     engine.close().await.unwrap();
+    drop(approvals);
+    assert!(
+        inbox.next().await.is_none(),
+        "sandboxed selected-runtime commands ask nothing"
+    );
     assert_eq!(
         accepted.run.status,
         RunStatus::Finished,
@@ -2015,9 +2120,12 @@ async fn native_runtime_mount_journey_helper() {
         assert_eq!(limits.memory_bytes, 512 * 1024 * 1024);
         assert_eq!(limits.max_processes, 32);
         assert_eq!(limits.project_bytes, 128 * 1024 * 1024);
-        assert_eq!(limits.cache_requested_bytes, 64 * 1024 * 1024);
-        assert!(limits.cache_bytes >= 40 * 1024 * 1024);
-        assert!(limits.cache_bytes <= limits.cache_requested_bytes);
+        assert_eq!(
+            limits.cache_requested_bytes,
+            arany::BuildCacheSize::Bytes(64 * 1024 * 1024)
+        );
+        assert!(limits.cache_candidate_bytes >= 40 * 1024 * 1024);
+        assert!(limits.cache_candidate_bytes <= 64 * 1024 * 1024);
         assert!(limits.cache_candidate_bytes <= limits.cache_bytes);
         let receipt = observation
             .attestation
@@ -2186,12 +2294,11 @@ async fn native_runtime_mount_journey_helper() {
         ],
         cwd: String::new(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let verify_requests = Arc::new(Mutex::new(Vec::new()));
     let verify_engine_provider = Arc::new(RuntimeJourney {
         requests: verify_requests,
-        calls: vec![verify_cache.clone()],
+        calls: vec![verify_cache],
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
     });
@@ -2227,21 +2334,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         verify_engine_controls,
     );
-    let approve_verify = async {
-        let approval = verify_inbox.next().await.expect("cache recovery approval");
-        assert!(
-            approval.intent.call == verify_cache,
-            "cache recovery approval intent differs"
-        );
-        approval.decide(true);
-    };
-    let (verified, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(verify_run, approve_verify)
-    })
-    .await
-    .expect("bounded cache recovery journey");
-    let verified = verified.unwrap();
+    let verified = tokio::time::timeout(Duration::from_secs(90), verify_run)
+        .await
+        .expect("bounded cache recovery journey")
+        .unwrap();
     verify_engine.close().await.unwrap();
+    drop(verify_approvals);
+    assert!(
+        verify_inbox.next().await.is_none(),
+        "a sandboxed command asks nothing"
+    );
     assert_eq!(verified.run.status, RunStatus::Finished);
     let retained = verified.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(retained.cache_update, arany::CacheUpdate::Published);
@@ -2335,7 +2437,8 @@ int main(void) {
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
         );
-        if case == "headless" {
+        // Sandboxed commands ask nothing; an ask rule keeps the human gate these cases stop at.
+        if matches!(case, "headless" | "denied" | "cancelled") {
             private_file(
                 &state_path.join("permissions.json"),
                 br#"{"permissions":{"ask":["Bash"]}}"#,
@@ -2353,6 +2456,7 @@ int main(void) {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else {
             let script = if case == "overflow" {
@@ -2366,6 +2470,7 @@ int main(void) {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         };
         let provider = Arc::new(Journey {
@@ -2672,6 +2777,11 @@ fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &
         assert_eq!(verdict.basis, PermissionSource::Rule);
         assert!(!verdict.approved);
     }
+    if case == "denied" {
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert_eq!(verdict.source, PermissionSource::Human);
+        assert!(!verdict.approved);
+    }
     assert_eq!(
         tool.observation.as_ref().unwrap().approval_cause,
         Some(cause)
@@ -2699,10 +2809,13 @@ fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &
 }
 
 fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::EffectIntent) {
+    use base64::Engine as _;
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
+    const DEFINITION: &[u8] = b"---\nname: refusal\ndescription: Guard refusal base\n---\n";
+    let config_bytes =
+        br#"{"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
         ("missing_command_deadline", "admission"),
@@ -2710,7 +2823,6 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         ("unknown_task_field", "admission"),
         ("invalid_go", "admission"),
         ("early_go", "admission"),
-        ("stale_workspace", "workspace"),
         ("resource_mismatch", "admission"),
         ("catalogue_tamper", "admission"),
         ("truncated_task", "admission"),
@@ -2728,11 +2840,11 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
                 content: "must not be created".into(),
             }
         } else {
-            ToolCall::List { path: "src".into() }
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: Sha256::digest(DEFINITION).into(),
+            }
         };
-        if case == "stale_workspace" {
-            intent.workspace_inode += 1;
-        }
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
@@ -2740,7 +2852,8 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
             "command_deadline": null,
             "config": serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
             "intent": intent,
-            "definition": null,
+            "definition": matches!(intent.call, ToolCall::ParseAgentDefinition { .. })
+                .then(|| base64::engine::general_purpose::STANDARD.encode(DEFINITION)),
             "handover": null,
             "workspace": workspace,
             "guard_executable": env!("CARGO_BIN_EXE_arany")
@@ -2759,7 +2872,8 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
                 json!({"programs":[["/bin/launchctl",[0,0,0,0,0,0,0]]]});
         }
         let mut task = serde_json::to_vec(&task_value).unwrap();
-        const TASK_BYTES_CAP: usize = 1024 * 1024;
+        // A definition task may exceed the common 1 MiB cap by its base64 definition.
+        const TASK_BYTES_CAP: usize = 1024 * 1024 + (64 * 1024_usize).div_ceil(3) * 4;
         match case {
             "malformed_task" => task = b"{".to_vec(),
             "maximum_task" => task.resize(TASK_BYTES_CAP, b' '),
@@ -2897,7 +3011,10 @@ async fn native_approval_rows_helper() {
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         let state_path = root.join(format!("approval-state-{name}"));
         let state = StateRoot::admit(&state_path).unwrap();
-        private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state_path.join("tools.json"),
+            br#"{"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         if let Some(settings) = settings {
             private_file(
                 &state_path.join("permissions.json"),

@@ -163,7 +163,7 @@ pub(super) fn decode_command_deadline(
 pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
     match result {
         Ok(_) => b"SELECT_DONE\n",
-        Err(ToolError::Limit) => b"SELECT_LIMIT\n",
+        Err(ToolError::Limit | ToolError::DiskSpace(_)) => b"SELECT_LIMIT\n",
         Err(ToolError::Timeout(_) | ToolError::ProjectSelection(SelectionCause::TimedOut)) => {
             b"SELECT_TIMEOUT\n"
         }
@@ -173,9 +173,11 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
         Err(ToolError::NotFound | ToolError::ProjectSelection(SelectionCause::InputVanished)) => {
             b"SELECT_NOT_FOUND\n"
         }
-        Err(ToolError::Conflict | ToolError::ProjectSelection(SelectionCause::InputConflict)) => {
-            b"SELECT_CONFLICT\n"
-        }
+        Err(
+            ToolError::Conflict
+            | ToolError::Conflicts(_)
+            | ToolError::ProjectSelection(SelectionCause::InputConflict),
+        ) => b"SELECT_CONFLICT\n",
         Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
         Err(
             ToolError::SpillUnavailable
@@ -200,9 +202,7 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::Uncertain
             | ToolError::StaleGitLocks(_)
             | ToolError::GuardRejected(_)
-            | ToolError::GuardBootstrap(_)
-            | ToolError::HostHelperSearch
-            | ToolError::CredentialIncludes,
+            | ToolError::GuardBootstrap(_),
         ) => b"SELECT_REJECTED\n",
     }
 }
@@ -268,17 +268,20 @@ pub(in crate::tools::guard) mod tests {
             root.path(),
             crate::tools::tests::config_value(),
         );
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Command {
-                program: "shell".into(),
-                args: vec![],
-                cwd: String::new(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "shell".into(),
+                    args: vec![],
+                    cwd: String::new(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         let duration = Duration::from_millis(u64::from(intent.limits.runtime_ms));
         let now = tokio::time::Instant::now();
         let preparation = crate::tools::guard::RESERVATION_OVERHEAD;

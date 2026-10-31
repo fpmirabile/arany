@@ -1,24 +1,16 @@
 use crate::session::events::*;
 
 #[test]
-fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
-    let current = payload_version("ProviderCallRecorded").expect("payload version");
+fn provider_call_record_rejects_inconsistent_cache_fields() {
     let run = RunId::new();
     let agent = AgentRunId::new();
     let mut record = ProviderCallRecord {
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
-        disposition: ProviderCallDisposition::Finished,
-        requested_tools: 0,
         response_id: Some("response-1".into()),
         input_tokens: Some(100),
         output_tokens: Some(10),
         cache_read_input_tokens: Some(40),
         cache_creation_input_tokens: Some(20),
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
+        ..crate::test_support::provider_call_record()
     };
     assert!(record.validate().is_ok());
     record.cache_read_input_tokens = Some(81);
@@ -56,46 +48,19 @@ fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
     };
     let payload = event.payload().expect("current payload");
     assert_eq!(
-        Event::decode(
-            "ProviderCallRecorded",
-            current,
-            &payload,
-            Some(run),
-            Some(agent),
-        )
-        .expect("current replay"),
+        Event::decode("ProviderCallRecorded", &payload, Some(run), Some(agent),)
+            .expect("current replay"),
         event
-    );
-    assert!(
-        Event::decode(
-            "ProviderCallRecorded",
-            current - 1,
-            &payload,
-            Some(run),
-            Some(agent),
-        )
-        .is_err(),
-        "payload version 5 is not current"
     );
 }
 
 #[test]
 fn rejects_unbounded_or_unearned_provider_metadata() {
-    let current = payload_version("ProviderCallRecorded").expect("payload version");
     let mut record = ProviderCallRecord {
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
-        disposition: ProviderCallDisposition::Finished,
         response_id: Some("response-1".into()),
         input_tokens: Some(100),
         output_tokens: Some(10),
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
-        requested_tools: 0,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
+        ..crate::test_support::provider_call_record()
     };
     assert!(record.validate().is_ok());
     record.response_id = Some("bad\nidentifier".into());
@@ -157,30 +122,10 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
         record: decoded,
     };
     let payload = event.payload().expect("current payload");
-    assert_eq!(event.version(), current);
     assert_eq!(
-        Event::decode(
-            "ProviderCallRecorded",
-            current,
-            &payload,
-            run_id,
-            agent_run_id
-        )
-        .unwrap(),
+        Event::decode("ProviderCallRecorded", &payload, run_id, agent_run_id).unwrap(),
         event
     );
-    for version in [0, 1, 2, 3, 4, 5, current + 1] {
-        assert!(
-            Event::decode(
-                "ProviderCallRecorded",
-                version,
-                &payload,
-                run_id,
-                agent_run_id
-            )
-            .is_err()
-        );
-    }
     for (reason, expected) in [
         (
             ProviderFailureReason::AccountAccess,
@@ -231,19 +176,9 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
             ProviderCallDisposition::TaskPanic,
         ] {
             let record = ProviderCallRecord {
-                rate_limits: None,
-                delegation: None,
-                phase: crate::provider::AgentPhase::RootPlan,
                 disposition,
-                response_id: None,
-                input_tokens: None,
-                output_tokens: None,
-                wire_provenance: None,
-                refusal: None,
                 failure_reason: Some(reason),
-                requested_tools: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
+                ..crate::test_support::provider_call_record()
             };
             assert_eq!(
                 record.validate().is_ok(),
@@ -259,43 +194,19 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
                 record,
             };
             let payload = event.payload().expect("current payload");
-            assert_eq!(event.version(), current);
             assert_eq!(
-                Event::decode(
-                    "ProviderCallRecorded",
-                    current,
-                    &payload,
-                    run_id,
-                    agent_run_id,
-                )
-                .expect("current replay"),
+                Event::decode("ProviderCallRecorded", &payload, run_id, agent_run_id,)
+                    .expect("current replay"),
                 event
             );
-            for version in [0, 1, 2, 3, 4, 5, current + 1] {
-                assert!(
-                    Event::decode(
-                        "ProviderCallRecorded",
-                        version,
-                        &payload,
-                        run_id,
-                        agent_run_id
-                    )
-                    .is_err(),
-                    "version {version}"
-                );
-            }
             for scope in [(None, agent_run_id), (run_id, None)] {
-                assert!(
-                    Event::decode("ProviderCallRecorded", current, &payload, scope.0, scope.1)
-                        .is_err()
-                );
+                assert!(Event::decode("ProviderCallRecorded", &payload, scope.0, scope.1).is_err());
             }
             let mut invalid: serde_json::Value = serde_json::from_str(&payload).expect("v4 JSON");
             invalid["failure_reason"] = "unknown_reason".into();
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
-                    current,
                     &invalid.to_string(),
                     run_id,
                     agent_run_id
@@ -306,7 +217,6 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
-                    current,
                     &invalid.to_string(),
                     run_id,
                     agent_run_id
@@ -317,7 +227,6 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
             assert!(
                 Event::decode(
                     "ProviderCallRecorded",
-                    current,
                     &invalid.to_string(),
                     run_id,
                     agent_run_id
@@ -337,14 +246,7 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
         record.phase = phase;
         let payload = serde_json::to_string(&record).expect("scoped failure payload");
         assert_eq!(
-            Event::decode(
-                "ProviderCallRecorded",
-                current,
-                &payload,
-                run_id,
-                agent_run_id,
-            )
-            .is_ok(),
+            Event::decode("ProviderCallRecorded", &payload, run_id, agent_run_id,).is_ok(),
             phase == crate::provider::AgentPhase::ChildWork,
             "criterion failure phase: {phase:?}"
         );
@@ -354,33 +256,34 @@ fn rejects_unbounded_or_unearned_provider_metadata() {
 #[test]
 fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     let record = ProviderCallRecord {
-        rate_limits: None,
-        delegation: None,
-        phase: crate::provider::AgentPhase::RootPlan,
         disposition: ProviderCallDisposition::PlanRecorded,
-        requested_tools: 0,
         response_id: Some("response_plan".into()),
         input_tokens: Some(8),
         output_tokens: Some(4),
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
-        wire_provenance: None,
-        failure_reason: None,
-        refusal: None,
+        ..crate::test_support::provider_call_record()
     };
     let value = serde_json::to_value(&record).unwrap();
-    let current = payload_version("ProviderCallRecorded").expect("known kind");
-    let decode = |payload: &serde_json::Value, version| {
+    let decode = |payload: &serde_json::Value| {
         Event::decode(
             "ProviderCallRecorded",
-            version,
             &payload.to_string(),
             Some(RunId::new()),
             Some(AgentRunId::new()),
         )
     };
-    assert!(decode(&value, current).is_ok());
-    assert!(decode(&value, current - 1).is_err());
+    assert!(decode(&value).is_ok());
+    let mut measured = value.clone();
+    measured["context_bytes"] = serde_json::json!(4096);
+    assert!(decode(&measured).is_ok());
+    let mut child = measured.clone();
+    child["phase"] = serde_json::json!("child_work");
+    child["disposition"] = serde_json::json!("finished");
+    assert!(decode(&child).is_err(), "only primary requests measure");
+    measured["context_bytes"] = serde_json::json!(crate::session::MAX_WINDOW_CONTENT_BYTES + 1);
+    assert!(decode(&measured).is_err());
+    let mut missing = value.clone();
+    missing.as_object_mut().unwrap().remove("context_bytes");
+    assert!(decode(&missing).is_err());
     for (key, invalid) in [
         ("phase", serde_json::json!("child_work")),
         ("phase", serde_json::json!("tool_review")),
@@ -393,6 +296,6 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     ] {
         let mut malformed = value.clone();
         malformed[key] = invalid;
-        assert!(decode(&malformed, current).is_err(), "{key}");
+        assert!(decode(&malformed).is_err(), "{key}");
     }
 }

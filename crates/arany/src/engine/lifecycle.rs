@@ -246,7 +246,7 @@ pub async fn rename_session(
     session_id: SessionId,
     title: String,
 ) -> Result<(), EngineError> {
-    if title.is_empty() || title.len() > 128 {
+    if !crate::session::valid_session_title(&title) {
         return Err(EngineError::InvalidRequest);
     }
     append_idle_event(
@@ -311,7 +311,7 @@ pub(super) async fn fork_with_store(
 }
 
 pub(super) fn validate_session_title(title: Option<&str>) -> Result<(), EngineError> {
-    if title.is_some_and(|value| value.is_empty() || value.len() > 128) {
+    if title.is_some_and(|value| !crate::session::valid_session_title(value)) {
         return Err(EngineError::InvalidRequest);
     }
     Ok(())

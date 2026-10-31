@@ -1,8 +1,10 @@
 use crate::accounts::{chatgpt, credentials};
+use crate::cli::attached::models::cached_window;
 use crate::cli::native_run_key_from_env;
 use arany::{
-    AnthropicProvider, CustomProvider, Effort, NativeApiCredentials, OpenAiProvider, Provider,
-    ProviderKind, StateRoot, resolve_native_effort_for_run, validate_native_model_id,
+    AnthropicProvider, ChatGptProvider, CustomProvider, Effort, NativeApiCredentials,
+    OpenAiProvider, Provenance, Provider, ProviderKind, StateRoot, resolve_native_effort_for_run,
+    validate_native_model_id,
 };
 use std::{
     path::{Path, PathBuf},
@@ -173,16 +175,21 @@ async fn select_provider_inner(
         }
         Some(ProviderKind::Anthropic) => {
             let credentials = native_key(selection.profile, selection.account_id).await?;
-            let root = admit_evidence_root(state_dir)?;
-            let provider = AnthropicProvider::from_credentials_with_evidence(
-                root,
+            let provider = AnthropicProvider::from_credentials_with_effort(
                 selection.model.to_owned(),
                 selection.effort,
                 credentials,
                 selection.account_id,
             )
             .map_err(|_| SelectionError::AnthropicKeyUnavailable)?;
-            Ok(Arc::new(provider))
+            let window = cached_window(
+                selection.workspace,
+                selection.profile,
+                selection.account_id,
+                selection.model,
+            )
+            .await;
+            Ok(Arc::new(provider.with_context_window(window)))
         }
         Some(ProviderKind::ChatGpt) => {
             let account_id = selection
@@ -199,7 +206,9 @@ async fn select_provider_inner(
             )
             .await
             .map_err(SelectionError::ChatGpt)?;
-            Ok(Arc::new(provider))
+            Ok(Arc::new(
+                with_cached_chatgpt_window(selection.workspace, provider).await,
+            ))
         }
         Some(ProviderKind::Custom) | None => {
             if selection.account_id.is_some() {
@@ -217,8 +226,18 @@ async fn select_provider_inner(
     }
 }
 
-fn admit_evidence_root(state_dir: &Path) -> Result<StateRoot, SelectionError> {
-    StateRoot::admit(state_dir).map_err(|_| SelectionError::StateUnavailable)
+// Run admission reads no catalog; the admitted account's window comes from the catalog cache.
+async fn with_cached_chatgpt_window(
+    workspace: &Path,
+    provider: ChatGptProvider,
+) -> ChatGptProvider {
+    let identity = provider.identity();
+    let account_id = match &identity.provenance {
+        Provenance::ChatGpt(provenance) => Some(provenance.account_id),
+        Provenance::Native { .. } | Provenance::Custom(_) => None,
+    };
+    let window = cached_window(workspace, &identity.profile, account_id, &identity.model).await;
+    provider.with_context_window(window)
 }
 
 async fn native_key(
@@ -285,10 +304,8 @@ pub(crate) async fn select_env_provider(
                     arany::ProviderError::Rejected => SelectionError::InvalidAnthropicWorkspace,
                     _ => SelectionError::AnthropicEnvKeyUnavailable,
                 })?;
-            let root = admit_evidence_root(state_dir)?;
             Arc::new(
-                AnthropicProvider::from_credentials_with_evidence(
-                    root,
+                AnthropicProvider::from_credentials_with_effort(
                     model.to_owned(),
                     effort,
                     credentials,
@@ -297,16 +314,17 @@ pub(crate) async fn select_env_provider(
                 .map_err(|_| SelectionError::AnthropicEnvKeyUnavailable)?,
             )
         }
-        ProviderArg::Chatgpt => Arc::new(
-            chatgpt::provider_for_run(
-                workspace,
+        ProviderArg::Chatgpt => {
+            let provider = chatgpt::provider_for_run(
+                workspace.clone(),
                 None,
                 model.to_owned(),
                 effort.expect("validated ChatGPT effort"),
             )
             .await
-            .map_err(SelectionError::ChatGpt)?,
-        ),
+            .map_err(SelectionError::ChatGpt)?;
+            Arc::new(with_cached_chatgpt_window(&workspace, provider).await)
+        }
         ProviderArg::Custom(name) => {
             let root = StateRoot::open_existing(state_dir)
                 .map_err(|_| SelectionError::StateUnavailable)?;
@@ -323,52 +341,6 @@ pub(crate) async fn select_env_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn anthropic_selection_starts_without_state_and_rejects_unsafe_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("state");
-        let root = admit_evidence_root(&missing).unwrap();
-        let credentials =
-            NativeApiCredentials::new("anthropic", "fixture-key".into(), None).unwrap();
-        let provider = AnthropicProvider::from_credentials_with_evidence(
-            root,
-            "claude-sonnet-5".into(),
-            Some(Effort::Low),
-            credentials,
-            None,
-        )
-        .unwrap();
-        assert_eq!(provider.context_window_tokens_for_run().await, None);
-
-        let empty = temp.path().join("empty-state");
-        std::fs::create_dir(&empty).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let root = admit_evidence_root(&empty).unwrap();
-        assert!(root.path().join("events.sqlite3").exists());
-        let credentials =
-            NativeApiCredentials::new("anthropic", "fixture-key".into(), None).unwrap();
-        let provider = AnthropicProvider::from_credentials_with_evidence(
-            root,
-            "claude-sonnet-5".into(),
-            Some(Effort::Low),
-            credentials,
-            None,
-        )
-        .unwrap();
-        assert_eq!(provider.context_window_tokens_for_run().await, None);
-
-        #[cfg(unix)]
-        {
-            let unsafe_state = temp.path().join("unsafe-state");
-            std::os::unix::fs::symlink(temp.path(), &unsafe_state).unwrap();
-            assert!(admit_evidence_root(&unsafe_state).is_err());
-        }
-    }
 
     #[test]
     fn selection_error_display_preserves_cli_text() {

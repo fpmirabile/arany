@@ -1,19 +1,18 @@
 use crate::provider::compaction_input;
-use crate::provider::conversation::{Block, Conversation, Role};
+use crate::provider::conversation::{Block, Conversation, Message, Role};
 use crate::provider::decode::{argument_limit, function_outcome, review_outcome, tool_function};
-use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, PromptRole, ProviderError, ProviderOutcome,
     ProviderRequest, ProviderResponse, ProviderTurn, ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 const ADAPTER: &str = "openai";
 const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
+const HARNESS_FIELD: &str = "harness";
 
 pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
     encode_request_within(request, MAX_REQUEST_BYTES)
@@ -63,11 +62,7 @@ pub(super) fn allowed_functions(
     tools: &[ToolSpec],
     outcome: &Value,
 ) -> Vec<String> {
-    let exhausted = request
-        .input
-        .tools
-        .as_ref()
-        .is_some_and(ToolContext::answer_only);
+    let exhausted = request.input.answer_only();
     tools
         .iter()
         .filter(|_| !exhausted)
@@ -279,18 +274,22 @@ fn tool_failure_stage(
             Stage::OutcomeToolPath
         }
         ToolCall::Delete {
-            expected_digest, ..
+            expected_digest: Some(digest),
+            ..
         }
         | ToolCall::Move {
-            expected_digest, ..
-        } if !valid_digest(expected_digest) => Stage::OutcomeToolDigest,
-        ToolCall::Edit {
-            expected_digest, ..
+            expected_digest: Some(digest),
+            ..
+        }
+        | ToolCall::Edit {
+            expected_digest: Some(digest),
+            ..
         }
         | ToolCall::MultiEdit {
-            expected_digest, ..
-        } if !valid_digest(expected_digest) => Stage::OutcomeToolDigest,
-        ToolCall::Write {
+            expected_digest: Some(digest),
+            ..
+        }
+        | ToolCall::Write {
             expected_digest: Some(digest),
             ..
         } if !valid_digest(digest) => Stage::OutcomeToolDigest,
@@ -432,64 +431,105 @@ fn input_items(conversation: &Conversation) -> Result<Vec<Value>, ProviderError>
     let mut unanswered: Vec<String> = Vec::new();
     for message in &conversation.messages {
         match message.role {
-            Role::Assistant => {
-                let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
-                    return Err(ProviderError::Rejected);
-                };
-                let replay = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
-                unanswered = replay
-                    .iter()
-                    .filter(|item| {
-                        item["type"] == "function_call" && item["name"] == "arany_delegate"
-                    })
-                    .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
-                    .collect();
-                items.extend(replay);
-            }
-            Role::User => {
-                let answered = |call_id: &str| {
-                    message.blocks.iter().any(
-                        |block| matches!(block, Block::ToolResult { id, .. } if id.as_str() == call_id),
-                    )
-                };
-                for call_id in std::mem::take(&mut unanswered) {
-                    if !answered(&call_id) {
-                        items.push(json!({"type": "function_call_output", "call_id": call_id, "output": DELEGATED_OUTPUT}));
-                    }
-                }
-                let mut parts = Vec::new();
-                for block in &message.blocks {
-                    match block {
-                        Block::Text(text) if text.is_empty() => {}
-                        Block::Text(text) => {
-                            parts.push(json!({"type": "input_text", "text": text}))
-                        }
-                        Block::Image { label, image } => {
-                            parts.push(json!({"type": "input_text", "text": label}));
-                            parts.push(json!({
-                                "type": "input_image",
-                                "image_url": format!("data:image/png;base64,{}", image.base64()),
-                                "detail": "auto",
-                            }));
-                        }
-                        Block::ToolResult { id, output, .. } => {
-                            if !parts.is_empty() {
-                                items.push(
-                                    json!({"role": "user", "content": std::mem::take(&mut parts)}),
-                                );
-                            }
-                            items.push(json!({"type": "function_call_output", "call_id": id.as_str(), "output": output.to_string()}));
-                        }
-                        Block::AssistantTurn(_) => return Err(ProviderError::Rejected),
-                    }
-                }
-                if !parts.is_empty() {
-                    items.push(json!({"role": "user", "content": parts}));
-                }
-            }
+            Role::Assistant => unanswered = assistant_items(message, &mut items)?,
+            Role::User => user_items(message, std::mem::take(&mut unanswered), &mut items)?,
         }
     }
     Ok(items)
+}
+
+fn assistant_items(
+    message: &Message,
+    items: &mut Vec<Value>,
+) -> Result<Vec<String>, ProviderError> {
+    let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
+        return Err(ProviderError::Rejected);
+    };
+    let replay = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
+    let unanswered = replay
+        .iter()
+        .filter(|item| item["type"] == "function_call" && item["name"] == "arany_delegate")
+        .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
+        .collect();
+    items.extend(replay);
+    Ok(unanswered)
+}
+
+fn user_items(
+    message: &Message,
+    unanswered: Vec<String>,
+    items: &mut Vec<Value>,
+) -> Result<(), ProviderError> {
+    let answered = |call_id: &str| {
+        message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::ToolResult { id, .. } if id.as_str() == call_id))
+    };
+    for call_id in unanswered {
+        if !answered(&call_id) {
+            items.push(json!({"type": "function_call_output", "call_id": call_id, "output": DELEGATED_OUTPUT}));
+        }
+    }
+    // A user message after function outputs would end the turn and drop its reasoning.
+    let last_result = message
+        .blocks
+        .iter()
+        .rposition(|block| matches!(block, Block::ToolResult { .. }));
+    let harness: Map<String, Value> = message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Harness { scope, data } => Some(((*scope).to_owned(), data.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut parts = Vec::new();
+    for (index, block) in message.blocks.iter().enumerate() {
+        match block {
+            Block::Harness { .. } if last_result.is_some() => {}
+            Block::Harness { scope, data } => parts.push(json!({
+                "type": "input_text",
+                "text": crate::provider::render::data_text(scope, data),
+            })),
+            Block::Text(text) if text.is_empty() => {}
+            Block::Text(text) => parts.push(json!({"type": "input_text", "text": text})),
+            Block::Image { label, image } => {
+                parts.push(json!({"type": "input_text", "text": label}));
+                parts.push(json!({
+                    "type": "input_image",
+                    "image_url": format!("data:image/png;base64,{}", image.base64()),
+                    "detail": "auto",
+                }));
+            }
+            Block::ToolResult { id, output, .. } => {
+                if !parts.is_empty() {
+                    items.push(json!({"role": "user", "content": std::mem::take(&mut parts)}));
+                }
+                let output = if Some(index) == last_result && !harness.is_empty() {
+                    with_harness(output, harness.clone())
+                } else {
+                    output.clone()
+                };
+                items.push(json!({"type": "function_call_output", "call_id": id.as_str(), "output": output.to_string()}));
+            }
+            Block::AssistantTurn(_) => return Err(ProviderError::Rejected),
+        }
+    }
+    if !parts.is_empty() {
+        items.push(json!({"role": "user", "content": parts}));
+    }
+    Ok(())
+}
+
+// Harness facts stay labelled beside the result instead of becoming a user message.
+fn with_harness(output: &Value, harness: Map<String, Value>) -> Value {
+    let mut fields = match output {
+        Value::Object(fields) if !fields.contains_key(HARNESS_FIELD) => fields.clone(),
+        _ => Map::from_iter([("result".to_owned(), output.clone())]),
+    };
+    fields.insert(HARNESS_FIELD.to_owned(), Value::Object(harness));
+    Value::Object(fields)
 }
 
 fn function_json(spec: ToolSpec) -> Value {
@@ -508,7 +548,7 @@ fn compaction_body_inner(request: &CompactionRequest, effort: Option<Effort>) ->
     let input = compaction_input(request);
     let mut body = response_body(
         &request.model,
-        COMPACTION_INSTRUCTIONS,
+        &request.prompts.compaction_instructions(),
         json!(input.to_string()),
         request.max_output_tokens,
         effort,
@@ -626,9 +666,7 @@ fn provider_usage(usage: Option<&WireUsage>) -> Usage {
 impl WireItem {
     pub(super) fn completed_id(&self) -> Option<&str> {
         self.id.as_deref().filter(|id| {
-            !id.is_empty()
-                && id.len() <= 128
-                && id.bytes().all(|byte| byte.is_ascii_graphic())
+            crate::provider::valid_wire_id(id)
                 && (!matches!(self.kind.as_str(), "message" | "function_call")
                     || self.status.as_deref() == Some("completed"))
         })
@@ -742,11 +780,10 @@ impl WireResponse {
                         || item.phase.is_some()
                         || item.role.is_some()
                         || !item.completed_id().is_some_and(|id| ids.insert(id))
-                        || item.call_id.as_deref().is_none_or(|id| {
-                            id.is_empty()
-                                || id.len() > 128
-                                || !id.bytes().all(|byte| byte.is_ascii_graphic())
-                        })
+                        || item
+                            .call_id
+                            .as_deref()
+                            .is_none_or(|id| !crate::provider::valid_wire_id(id))
                     {
                         return Err(ResponseError::Message);
                     }
@@ -756,7 +793,7 @@ impl WireResponse {
                         call_id: item.call_id.clone().unwrap_or_default(),
                     });
                 }
-                "message" if calls.is_empty() => {
+                "message" => {
                     if item.role.as_deref() != Some("assistant")
                         || item
                             .status
@@ -773,7 +810,9 @@ impl WireResponse {
                         return Err(ResponseError::Message);
                     }
                 }
-                _ => return Err(ResponseError::Message),
+                kind if kind.ends_with("_call") => return Err(ResponseError::Message),
+                // Unknown non-call items stay in the raw replay but never decide an outcome.
+                _ => {}
             }
         }
         if calls.is_empty() {
@@ -789,10 +828,7 @@ impl WireResponse {
         if self.model != model {
             return Err(ResponseError::Model);
         }
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
-        {
+        if !crate::provider::valid_wire_id(&self.id) {
             return Err(ResponseError::Identifier);
         }
         Ok(())
@@ -804,6 +840,7 @@ impl WireResponse {
     ) -> Result<(String, Option<WireUsage>, String), ResponseError> {
         self.validate_envelope(model)?;
         let mut text = None;
+        let mut commentary = None;
         for item in self.output {
             match item.kind.as_str() {
                 "reasoning" => {}
@@ -826,7 +863,7 @@ impl WireResponse {
                         message.push_str(&part.text.ok_or(ResponseError::Content)?);
                     }
                     match item.phase.as_deref() {
-                        Some("commentary") if text.is_none() => {}
+                        Some("commentary") if text.is_none() => commentary = Some(message),
                         None | Some("final_answer") => {
                             if let Some((_, explicit)) = text {
                                 return Err(if explicit && item.phase.is_some() {
@@ -841,14 +878,16 @@ impl WireResponse {
                         Some(_) => return Err(ResponseError::Phase),
                     }
                 }
-                _ => return Err(ResponseError::Message),
+                kind if kind.ends_with("_call") => return Err(ResponseError::Message),
+                _ => {}
             }
         }
-        Ok((
-            self.id,
-            self.usage,
-            text.ok_or(ResponseError::MissingFinalMessage)?.0,
-        ))
+        // Without a final message the last commentary is the answer.
+        let answer = text
+            .map(|(text, _)| text)
+            .or(commentary)
+            .ok_or(ResponseError::MissingFinalMessage)?;
+        Ok((self.id, self.usage, answer))
     }
 }
 

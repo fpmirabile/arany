@@ -75,30 +75,7 @@ impl Flow {
                 self.literal_source(source, range.clone(), self.style())?;
                 self.literal = Some(range);
             }
-            Event::Text(text) => {
-                let slashes = source.as_bytes()[gap_start..range.start]
-                    .iter()
-                    .rev()
-                    .take_while(|byte| {
-                        #[cfg(test)]
-                        {
-                            self.scanned_bytes += 1;
-                        }
-                        **byte == b'\\'
-                    })
-                    .count();
-                let escaped = slashes % 2 == 1;
-                let outer = range.start - usize::from(escaped)..range.end;
-                let atomic =
-                    **text != source[range.clone()] && source[range.clone()].starts_with('&');
-                let origin = Origin {
-                    content: range,
-                    outer,
-                    atomic,
-                    entities: false,
-                };
-                self.append(source, text, origin, self.style())?;
-            }
+            Event::Text(text) => self.text_event(source, text, range, gap_start)?,
             Event::Code(text) => {
                 let slice = &source[range.clone()];
                 let open = slice.bytes().take_while(|byte| *byte == b'`').count();
@@ -114,6 +91,36 @@ impl Flow {
             _ => {}
         }
         Ok(())
+    }
+    // An odd run of backslashes before the text marks it escaped; an entity stays one atom.
+    fn text_event(
+        &mut self,
+        source: &str,
+        text: &str,
+        range: Range<usize>,
+        gap_start: usize,
+    ) -> Result<(), ()> {
+        let slashes = source.as_bytes()[gap_start..range.start]
+            .iter()
+            .rev()
+            .take_while(|byte| {
+                #[cfg(test)]
+                {
+                    self.scanned_bytes += 1;
+                }
+                **byte == b'\\'
+            })
+            .count();
+        let escaped = slashes % 2 == 1;
+        let outer = range.start - usize::from(escaped)..range.end;
+        let atomic = *text != source[range.clone()] && source[range.clone()].starts_with('&');
+        let origin = Origin {
+            content: range,
+            outer,
+            atomic,
+            entities: false,
+        };
+        self.append(source, text, origin, self.style())
     }
     pub(super) fn take(&mut self) -> Vec<Cell> {
         std::mem::take(&mut self.cells)

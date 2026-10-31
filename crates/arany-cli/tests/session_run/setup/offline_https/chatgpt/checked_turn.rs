@@ -4,15 +4,6 @@ pub(super) fn assert_route_refusals(root: &StateRoot, expected_index: &[u8]) {
     for args in [
         &["provider", "models", "chatgpt"][..],
         &[
-            "provider",
-            "check",
-            "chatgpt",
-            "gpt-6.1-sol",
-            "--effort",
-            "medium",
-            "--accept-cost",
-        ][..],
-        &[
             "exec",
             "--provider",
             "chatgpt",

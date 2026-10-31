@@ -1,54 +1,65 @@
 use super::*;
 
 #[test]
-fn nested_ancestor_sync_failure_keeps_conversion_and_application_unavailable_on_reopen() {
+fn nested_ancestor_sync_failure_keeps_application_unavailable_on_reopen() {
     if crate::test_process::isolate_test() {
         return;
     }
-    for (conversion, ancestor) in [true, false].into_iter().flat_map(|conversion| {
-        ["cargo", "cargo/registry", ".npm", ".cache/pip"].map(|ancestor| (conversion, ancestor))
-    }) {
+    for ancestor in ["cargo", "cargo/registry", ".npm", ".cache/pip"] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         private_dir(&workspace);
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
         let identity = identity(&workspace);
-        let source = temp.path().join("source");
         let paths = [
             "cargo/registry/cache/entry",
             ".npm/_cacache/entry",
             ".cache/pip/wheels/entry",
         ];
-        for path in paths {
-            std::fs::create_dir_all(source.join(path).parent().unwrap()).unwrap();
-            std::fs::write(source.join(path), b"prior").unwrap();
-        }
-        publish(
-            &state,
-            identity.clone(),
-            &archive(&identity, &source, &[]),
-            &[],
+        let source = upper(
+            &temp.path().join("source"),
+            &paths.map(|path| (path, b"prior".as_slice())),
         );
         let mut lease = state.begin_build_cache(identity.clone()).unwrap();
-        if conversion {
-            crate::fault::FaultPlan::fail_record_sync(identity.token().into(), ancestor);
-            assert!(lease.prepare_directory().is_err(), "conversion {ancestor}");
-        } else {
-            let lower = lease.prepare_directory().unwrap();
-            std::fs::write(source.join(paths[0]), b"updated").unwrap();
-            let upper = Dir::open_ambient_dir(&source, cap_std::ambient_authority()).unwrap();
-            crate::fault::FaultPlan::fail_record_sync(identity.token().into(), ancestor);
-            assert!(
-                lease
-                    .publish_directory(&lower, &upper, &[CacheChange::File(paths[0].into())], &[])
-                    .is_err(),
-                "application {ancestor}"
-            );
-            assert!(lease.publication_uncertain());
-            assert!(!file_exists(&lease.dir, &stamp_name(&identity.token())).unwrap());
-            assert!(!file_exists(&lease.dir, &archive_name(&identity.token())).unwrap());
+        let lower = lease.prepare_directory().unwrap();
+        let mut changes = paths
+            .iter()
+            .flat_map(|path| {
+                Path::new(path)
+                    .ancestors()
+                    .skip(1)
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map(|parent| parent.to_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|parent| validate_path(parent).is_ok())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(CacheChange::Directory)
+            .collect::<Vec<_>>();
+        changes.extend(paths.map(|path| CacheChange::File(path.into())));
+        lease
+            .publish_directory(&lower, &source, &changes, &[], 0)
+            .unwrap();
+        for path in paths {
+            std::fs::write(temp.path().join("source").join(path), b"updated").unwrap();
         }
+        crate::fault::FaultPlan::fail_record_sync(identity.token().into(), ancestor);
+        assert!(
+            lease
+                .publish_directory(
+                    &lower,
+                    &source,
+                    &paths.map(|path| CacheChange::File(path.into())),
+                    &[],
+                    0
+                )
+                .is_err(),
+            "application {ancestor}"
+        );
+        assert!(lease.publication_uncertain());
+        drop(lower);
         drop(lease);
         let state = StateRoot::open_existing(&state_path).unwrap();
         assert!(

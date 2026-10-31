@@ -11,7 +11,9 @@ pub async fn delay_withdrawal(
     rejected: tokio::sync::oneshot::Sender<()>,
     committed: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut pending = approvals.begin_local(&intent, false, None).await;
+    let mut pending = approvals
+        .begin_local(&intent, crate::tools::ApprovalOffers::default())
+        .await;
     if reject.await.is_err() {
         return;
     }
@@ -40,7 +42,7 @@ pub async fn seed_host_prefix(
         .mode(0o600)
         .open(root.path().join("tools.json"))
         .expect("private host Tool configuration")
-        .write_all(br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#)
+        .write_all(br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#)
         .expect("host Tool configuration");
     let engine = super::engine::open(
         root,

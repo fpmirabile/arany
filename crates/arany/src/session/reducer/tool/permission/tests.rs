@@ -107,7 +107,6 @@ fn permission_verdict_replay_requires_pending_intent_and_blocks_denied_effects()
         assert_eq!(
             Event::decode(
                 "ToolStarted",
-                crate::session::payload_version("ToolStarted").unwrap(),
                 &verdict.payload().unwrap(),
                 Some(run),
                 Some(agent)
@@ -230,6 +229,7 @@ fn unguarded_scenario(
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         );
         apply(
@@ -823,8 +823,6 @@ fn change_host_prefix_proof(
         "reference" => host.source_intent = Some([6; 32]),
         "digest" => pin.permissions_digest = Some([4; 32]),
         "unpinned" => policy.permissions_digest = None,
-        "auto" => verdict.mode = Some(PermissionMode::Auto),
-        "edits" => verdict.mode = Some(PermissionMode::AcceptEdits),
         "plan" => verdict.mode = Some(PermissionMode::Plan),
         "no-mode" => verdict.mode = None,
         "hook" => verdict.hook_restriction = Some(Decision::Ask),
@@ -872,7 +870,12 @@ fn host_prefix_replay_checks_each_approval_proof() {
         agent_run_id: scenario.agent,
         verdict: Some(verdict),
     };
-    for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
+    for mode in [
+        PermissionMode::Default,
+        PermissionMode::DontAsk,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Auto,
+    ] {
         let (scenario, mut verdict) = host_prefix_scenario();
         verdict.mode = Some(mode);
         assert!(
@@ -889,8 +892,6 @@ fn host_prefix_replay_checks_each_approval_proof() {
         "reference",
         "digest",
         "unpinned",
-        "auto",
-        "edits",
         "plan",
         "no-mode",
         "hook",
@@ -1024,6 +1025,11 @@ fn host_git_reducer_requires_human_verdict_host_receipt_and_stops_unknown_remote
         intent.host = Some(crate::tools::types::HostIntent {
             source_oid: "1".repeat(40),
             refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            destination: if matches!(intent.call, ToolCall::GitPush { .. }) {
+                "https://github.com/example/project.git".into()
+            } else {
+                String::new()
+            },
         });
         intent.limits.network = crate::tools::types::NetworkGrant::Host;
         apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1134,6 +1140,7 @@ fn host_pr_list_accepts_only_a_pinned_typed_rule_or_human_verdict() {
     intent.host = Some(crate::tools::types::HostIntent {
         source_oid: "gh-pr-list-v1".into(),
         refspec: "fixed-list".into(),
+        destination: String::new(),
     });
     intent.limits.network = crate::tools::types::NetworkGrant::Host;
     apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1238,6 +1245,7 @@ fn pending_host_pr_view() -> (SessionView, RunId, AgentRunId, crate::tools::Effe
     intent.host = Some(crate::tools::types::HostIntent {
         source_oid: "gh-pr-view-v1".into(),
         refspec: "fixed-view-v1".into(),
+        destination: String::new(),
     });
     intent.limits.network = crate::tools::types::NetworkGrant::Host;
     apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1407,6 +1415,7 @@ fn host_pr_list_accepts_a_human_plan_verdict_through_tool_completion() {
     intent.host = Some(crate::tools::types::HostIntent {
         source_oid: "gh-pr-list-v1".into(),
         refspec: "fixed-list".into(),
+        destination: String::new(),
     });
     intent.limits.network = crate::tools::types::NetworkGrant::Host;
     apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
@@ -1470,6 +1479,7 @@ fn narrowed_host_pr_list_result_replays_within_its_pinned_budget() {
                 intent.host = Some(crate::tools::types::HostIntent {
                     source_oid: "gh-pr-list-v1".into(),
                     refspec: "fixed-list".into(),
+                    destination: String::new(),
                 });
                 intent.limits.network = crate::tools::types::NetworkGrant::Host;
                 intent.limits.result_bytes = budget;
@@ -1580,6 +1590,7 @@ fn minimum_budget_host_pr_list_preparation_refusal_finishes_and_replays() {
                 intent.host = Some(crate::tools::types::HostIntent {
                     source_oid: "gh-pr-list-v1".into(),
                     refspec: "fixed-list".into(),
+                    destination: String::new(),
                 });
                 intent.limits.network = crate::tools::types::NetworkGrant::Host;
                 intent.limits.result_bytes = budget;
@@ -1669,16 +1680,15 @@ fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
         verdict_event(&intent, mode, decision, basis, source, approved)
     };
     let allowed = |mode| event(mode, Decision::Allow, typed, typed, true);
-    for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
-        assert!(!rejected(&view, allowed(Some(mode))), "{mode:?}");
-    }
     for mode in [
-        PermissionMode::Plan,
+        PermissionMode::Default,
+        PermissionMode::DontAsk,
         PermissionMode::AcceptEdits,
         PermissionMode::Auto,
     ] {
-        assert!(rejected(&view, allowed(Some(mode))), "{mode:?}");
+        assert!(!rejected(&view, allowed(Some(mode))), "{mode:?}");
     }
+    assert!(rejected(&view, allowed(Some(PermissionMode::Plan))));
     assert!(rejected(&view, allowed(None)));
     let default = Some(PermissionMode::Default);
     assert!(rejected(
@@ -1734,19 +1744,16 @@ fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
             false
         )
     ));
-    for mode in [
-        PermissionMode::Plan,
-        PermissionMode::AcceptEdits,
-        PermissionMode::Auto,
-    ] {
-        assert!(
-            rejected(
-                &view,
-                event(Some(mode), Decision::Allow, typed, typed, false)
-            ),
-            "{mode:?}"
-        );
-    }
+    assert!(rejected(
+        &view,
+        event(
+            Some(PermissionMode::Plan),
+            Decision::Allow,
+            typed,
+            typed,
+            false
+        )
+    ));
     let mut once = view.clone();
     apply(&mut once, allowed(default)).unwrap();
     assert!(rejected(&once, allowed(default)));
@@ -1839,4 +1846,63 @@ fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
     .unwrap();
     let intent = child_intent(run, researcher, commit);
     assert!(rejected(&child, tool_proposed(run, researcher, &intent)));
+}
+
+#[test]
+fn hooked_git_writes_reject_ai_review_and_mode_approvals() {
+    use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+    let commit = ToolCall::GitCommit {
+        message: "m".into(),
+        paths: vec!["src/lib.rs".into()],
+        staged: false,
+    };
+    {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let policy = view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap();
+        policy.permissions_digest = Some([3; 32]);
+        policy.git = Some(crate::tools::types::GitRunPin {
+            executable: "/usr/bin/git".into(),
+            sha256: "0".repeat(64),
+            hooks: Some([4; 32]),
+            repository: None,
+        });
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = child_intent(run, agent, commit.clone());
+        apply(&mut view, tool_proposed(run, agent, &intent)).unwrap();
+        let mode = Some(PermissionMode::Default);
+        let human = verdict_event(
+            &intent,
+            mode,
+            Decision::Ask,
+            PermissionSource::Mode,
+            PermissionSource::Human,
+            true,
+        );
+        assert!(!rejected(&view, human));
+        let reviewed = verdict_event(
+            &intent,
+            Some(PermissionMode::Auto),
+            Decision::Ask,
+            PermissionSource::Mode,
+            PermissionSource::AiReview,
+            true,
+        );
+        assert!(rejected(&view, reviewed));
+        let ruled = verdict_event(
+            &intent,
+            mode,
+            Decision::Allow,
+            PermissionSource::Rule,
+            PermissionSource::Rule,
+            true,
+        );
+        assert!(!rejected(&view, ruled));
+    }
 }

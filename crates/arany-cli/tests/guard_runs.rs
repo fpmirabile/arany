@@ -15,9 +15,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[cfg(unix)]
 pub use arany::test_support::process;
-use arany::test_support::{engine as engine_support, scenario::*};
+use arany::test_support::{
+    engine as engine_support, private_file, scenario::*, sha256_hex as hash,
+};
 
 use engine_support::{run_to_end, run_with};
 
@@ -41,10 +42,6 @@ mod permissions;
 
 #[path = "guard_runs/unguarded.rs"]
 mod unguarded;
-
-#[cfg(target_os = "linux")]
-#[path = "guard_runs/git_writes.rs"]
-mod git_writes;
 
 fn tool_report(observation: Option<&arany::ToolObservation>) -> String {
     observation.map_or_else(
@@ -270,8 +267,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .config
                 .as_ref()
                 .expect("pinned config")
-                .include_digests,
-            vec![include_digest]
+                .include_sources,
+            vec![arany::IncludeSource {
+                path: "notes/facts.txt".into(),
+                digest: include_digest
+            }]
         );
 
         std::fs::write(workspace.join("AGENTS.md"), "Changed instruction")
@@ -470,7 +470,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ] {
                 let mut actual = calls[index].clone();
                 let facts = actual.input.goal_context_facts.take();
-                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: vec![arany::WorkspaceGuidance { path: "AGENTS.md".into(), text: "Changed instruction".into() }], includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
+                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: vec![arany::WorkspaceGuidance { path: "AGENTS.md".into(), text: "Changed instruction".into() }], includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, plan_offered: index == 0 || index == 2, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
                 if phase == AgentPhase::ChildWork {
                     assert!(facts.is_none(), "child calls do not receive primary Goal state");
                 } else {
@@ -591,12 +591,10 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], arany::test_support::payload_version("MessageAccepted"));
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(&realistic_objective[..64 * 1024]));
-                assert_eq!(accepted[4]["event_version"], arany::test_support::payload_version("MessageAccepted"));
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 64 * 1024 + 36, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -615,14 +613,10 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             [first.session_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        let message_version = arany::test_support::payload_version("MessageAccepted");
-        for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
+        for fault in ["missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let mut version = message_version;
             let mut agent_scope = None;
             match fault {
-                "unsupported version" => version = message_version - 1,
-                "unknown version" => version = message_version + 1,
                 "missing images" => { invalid.as_object_mut().unwrap().remove("images"); }
                 "empty Message" => { invalid["text"] = "".into(); invalid["images"] = serde_json::json!([]); },
                 "five images" => invalid["images"] = serde_json::to_value(vec![second_image.clone(); 5]).unwrap(),
@@ -636,13 +630,13 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 "agent scope" => agent_scope = Some(AgentRunId::new().to_string()),
                 _ => unreachable!(),
             }
-            connection.execute("UPDATE events SET event_version=?1, payload=?2, agent_run_id=?3 WHERE sequence=?4",
-                rusqlite::params![version, invalid.to_string(), agent_scope, sequence]).unwrap();
+            connection.execute("UPDATE events SET payload=?1, agent_run_id=?2 WHERE sequence=?3",
+                rusqlite::params![invalid.to_string(), agent_scope, sequence]).unwrap();
             let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=?1, payload=?2, agent_run_id=NULL WHERE sequence=?3", rusqlite::params![message_version, payload, sequence]).unwrap();
+        connection.execute("UPDATE events SET payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);
@@ -1526,7 +1520,7 @@ async fn tool_step_events(
     std::fs::write(
         &config,
         format!(
-            r#"{{"version":1,"workspace_paths":["notes"],"write":{},"commands":[],"skills":[],"mcp":[]}}"#,
+            r#"{{"workspace_paths":["notes"],"write":{},"commands":[],"skills":[],"mcp":[]}}"#,
             setup.write
         ),
     )
@@ -1559,7 +1553,10 @@ async fn tool_step_events(
     .expect("Tool Run");
     if setup.write && outcome.run.status == RunStatus::Finished {
         assert_eq!(
-            std::fs::read(workspace.join("notes/new.txt")).expect("unplanned Write published"),
+            ["notes/new.txt", "notes/AGENTS.md"]
+                .iter()
+                .find_map(|path| std::fs::read(workspace.join(path)).ok())
+                .expect("unplanned Write published"),
             b"New"
         );
     }
@@ -1642,19 +1639,6 @@ fn write_plan() -> arany::GoalPlanContract {
     }
 }
 
-fn private_file(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
-fn hash(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn budget() -> arany::GoalBudget {
     arany::GoalBudget {
         max_provider_calls: Some(16),
@@ -1723,7 +1707,7 @@ fn write_notes_tools(state: &Path) {
     let config = state.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
@@ -1745,13 +1729,14 @@ async fn primary_tool_step_events_match_the_snapshot() {
     let git = arany::ToolCall::GitStatus {
         path: "notes".into(),
     };
-    let write = || {
+    let write_to = |path: &str| {
         tool_outcome(arany::ToolCall::Write {
-            path: "notes/new.txt".into(),
+            path: path.into(),
             expected_digest: None,
             content: "New".into(),
         })
     };
+    let write = || write_to("notes/new.txt");
     let granted = |approvals| StepSetup {
         write: true,
         approvals,
@@ -1799,8 +1784,9 @@ async fn primary_tool_step_events_match_the_snapshot() {
         ),
         (
             "reviewed mutation",
+            // Auto approval reviews only protected paths among Workspace edits.
             vec![
-                write(),
+                write_to("notes/AGENTS.md"),
                 ProviderOutcome::Review(arany::ReviewVerdict::Approve),
                 finish("answer"),
             ],
@@ -2134,7 +2120,7 @@ mod goals {
             let (outcome, input_tokens, output_tokens) = match request.phase {
                 AgentPhase::RootPlan => (
                     crate::tool_outcome(arany::ToolCall::Write {
-                        path: "notes/a.txt".into(),
+                        path: "notes/AGENTS.md".into(),
                         expected_digest: None,
                         content: "x".into(),
                     }),
@@ -2197,7 +2183,7 @@ mod goals {
         .expect("exhaustion ends the Run as a durable failure");
         assert_eq!(outcome.run.status, RunStatus::Failed);
         assert!(
-            !workspace.join("notes/a.txt").exists(),
+            !workspace.join("notes/AGENTS.md").exists(),
             "the exact-cap Tool was not dispatched"
         );
         engine.close().await.expect("engine shutdown");
@@ -2372,11 +2358,11 @@ mod goals {
         let pause = steering.clone();
         let provider = ScriptedProvider::new(vec![
             arany::test_support::scenario::plan_outcome(change_facts_plan(
-                "notes/facts.txt",
+                "notes/AGENTS.md",
                 "changed",
             )),
             crate::tool_outcome(arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 expected_digest: None,
                 content: "changed".into(),
             }),
@@ -2435,9 +2421,9 @@ mod goals {
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(change_facts_plan("notes/a.txt", "x")),
+            arany::test_support::scenario::plan_outcome(change_facts_plan("notes/AGENTS.md", "x")),
             crate::tool_outcome(arany::ToolCall::Write {
-                path: "notes/a.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 expected_digest: None,
                 content: "x".into(),
             }),
@@ -2717,7 +2703,7 @@ mod routing {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
         let state = temp.path().join("state");
         let write = arany::ToolCall::Write {
-            path: "notes/result.txt".into(),
+            path: "notes/AGENTS.md".into(),
             expected_digest: None,
             content: "done".into(),
         };
@@ -2731,7 +2717,7 @@ mod routing {
             command_timeout_ms: None,
             budget: arany::GoalBudget::default(),
             success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                path: "notes/result.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 content: "done".into(),
             },
         };
@@ -2816,7 +2802,7 @@ mod routing {
             1
         );
         assert_eq!(
-            std::fs::read_to_string(workspace.join("notes/result.txt")).unwrap(),
+            std::fs::read_to_string(workspace.join("notes/AGENTS.md")).unwrap(),
             "done"
         );
     }
@@ -2862,7 +2848,11 @@ mod routing {
         );
         let engine = guarded_engine(&state);
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
         pin_roster(&mut bindings, Some(vec![first.clone(), fallback.clone()]));
@@ -2940,7 +2930,11 @@ mod routing {
         );
         let engine = guarded_engine(&state);
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
         bindings.roles.compaction = vec![first.clone(), second.clone()];
@@ -3015,7 +3009,11 @@ mod routing {
         );
         let engine = guarded_engine(&state);
         let config = state.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
         bindings.roles.compaction = vec![first.clone(), second.clone()];
@@ -3057,7 +3055,7 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
     let config = state.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("grant");
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600))
@@ -3118,7 +3116,7 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
 }
 
 #[test]
-#[cfg_attr(not(arany_ci), ignore = "native discovery Guard on Linux and macOS")]
+#[cfg_attr(not(arany_ci), ignore = "native Tool admission on Linux and macOS")]
 fn missing_skill_path_is_attested_failed_and_the_run_continues() {
     let _gate = process::NATIVE_GATE
         .lock()
@@ -3143,7 +3141,11 @@ async fn missing_skill_path_recovery() {
     let state = temp.path().join("state");
     let engine = guarded_engine(&state);
     let config = state.join("tools.json");
-    std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(
+        &config,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
     std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
     let read = |path: &str| {
         tool_outcome(arany::ToolCall::Read {
@@ -3218,7 +3220,7 @@ fn assert_missing_skill_recovery(run: &arany::RunView) {
     );
     assert!(matches!(
         listed.attestation,
-        Some(arany::Attestation::Guard { .. })
+        Some(arany::Attestation::InProcess { .. })
     ));
     assert!(listed.output.contains(".agents"));
 }
@@ -3258,7 +3260,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>()
                 };
-                let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+                let config = serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
                     "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"files":{"SKILL.md":hash},"disable_model_invocation":true
                 }]});
                 let config_path = state_path.join("tools.json");
@@ -3396,7 +3398,7 @@ fn invoked_skill_crash_window_resumes_without_rereading_or_rerunning() {
     let body = b"---\nname: ask-matt\ndescription: Guide the task\n---\nPinned guidance.\n";
     std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     let state_path = temp.path().join("state");
-    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+    let config = serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
         "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,
         "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
     }]});
@@ -3506,7 +3508,7 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
     std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
     let state_path = temp.path().join("state");
     let engine = guarded_engine(&state_path);
-    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+    let config = serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
         "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"disable_model_invocation":true,
         "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
     }]});
@@ -3566,32 +3568,29 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
     let state = temp.path().join("state");
     let engine = guarded_engine(&state);
     write_notes_tools(&state);
-    let write = || arany::ToolCall::Write {
-        path: "notes/new/file.txt".into(),
-        expected_digest: None,
-        content: "New".into(),
-    };
     let provider = Arc::new(ScriptedProvider::new(vec![
-        tool_outcome(write()),
         tool_outcome(arany::ToolCall::Mkdir {
             path: "notes/new/deeper".into(),
         }),
         tool_outcome(arany::ToolCall::Edit {
             path: "notes/missing.txt".into(),
-            expected_digest: Sha256::digest(b"old")
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            expected_digest: Some(
+                Sha256::digest(b"old")
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            ),
             old: "old".into(),
             new: "new".into(),
         }),
-        tool_outcome(arany::ToolCall::Mkdir {
-            path: "notes/new".into(),
+        tool_outcome(arany::ToolCall::Write {
+            path: "notes/new/file.txt".into(),
+            expected_digest: None,
+            content: "New".into(),
         }),
-        tool_outcome(write()),
-        arany::test_support::goals::finish_with("Created the parent and wrote the file"),
+        arany::test_support::goals::finish_with("Wrote the file and its missing parent"),
     ]));
-    let mut input = request(&workspace, "Write a note after creating its parent");
+    let mut input = request(&workspace, "Write a note in a new folder");
     input.include_paths.clear();
     let result = run_with(
         &engine,
@@ -3619,12 +3618,11 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
         .unwrap()
         .unwrap();
     assert_eq!(view.runs[0], result.run);
-    assert_eq!(view.runs[0].tools.len(), 5);
+    assert_eq!(view.runs[0].tools.len(), 3);
     for (index, text) in [
         (0, "Parent directory not found; create it with Mkdir first"),
-        (1, "Parent directory not found; create it with Mkdir first"),
         (
-            2,
+            1,
             "File or directory not found; List the parent directory to check the path",
         ),
     ] {
@@ -3632,7 +3630,7 @@ async fn missing_file_targets_fail_with_site_attestation_and_recover_explicitly(
         assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
         assert_eq!(observation.output, text);
     }
-    for step in &view.runs[0].tools[3..] {
+    for step in &view.runs[0].tools[2..] {
         assert_eq!(
             step.observation.as_ref().unwrap().disposition,
             arany::ToolDisposition::Succeeded

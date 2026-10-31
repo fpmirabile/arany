@@ -16,7 +16,7 @@ The single feature this plan delivers, the harness responsibility it serves and 
 
 ## Research
 
-Verified facts with citations: the affected contract, editing rules, implementation and existing tests, and peer harness behavior read from source. Findings that outlive this plan go to `docs/research/` and are linked here.
+Verified facts with citations: the affected contract, editing rules, implementation and existing tests, and the proven designs it follows, read from source. Findings that outlive this plan go to the owning spec and are linked here.
 
 ## Contract and scenarios
 

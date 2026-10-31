@@ -2,14 +2,17 @@ use super::*;
 use crate::tools::types::{MAX_COMMAND_TIMEOUT_MS, MIN_COMMAND_TIMEOUT_MS};
 use std::path::Path;
 
-pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
-pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
+pub const MAX_GOAL_PROVIDER_CALLS: u32 = 1024;
+pub const MAX_GOAL_ACTIVE_MS: u64 = 8 * 60 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
 pub const MAX_GOAL_PLAN_COMMANDS: usize = 8;
 pub const MAX_GOAL_PLAN_MCP_TOOLS: usize = 64;
 pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
 pub const MAX_GOAL_PLAN_CONTRACT_BYTES: usize = 8 * 1024;
+const MAX_GOAL_MISSION_BYTES: usize = 2048;
+const MAX_GOAL_CRITERION_CONTENT_BYTES: usize = 8 * 1024;
+const MAX_GOAL_PLAN_PATH_BYTES: usize = 512;
 pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
 pub(crate) const STORE_ACTION_OVERHEAD_MS: u64 = 5_000;
 pub const MAX_BUDGET_REFUSAL_BYTES: usize = 1024;
@@ -416,8 +419,6 @@ impl GoalPlanContract {
         state: &mut GoalSuccessState,
         observation: &crate::tools::ToolObservation,
     ) {
-        use crate::tools::{ToolCall, ToolDisposition};
-
         if observation.intent.target != crate::session::worker::EffectTarget::Workspace {
             return;
         }
@@ -446,65 +447,7 @@ impl GoalPlanContract {
                     satisfied,
                     pending_integration,
                 },
-            ) => {
-                if let ToolCall::ApplyChangeset {
-                    source:
-                        crate::session::worker::ChangesetSource::CommandReceipt {
-                            source_intent_digest,
-                            ..
-                        },
-                } = &observation.intent.call
-                    && *pending_integration == Some(*source_intent_digest)
-                {
-                    *satisfied = observation.disposition == ToolDisposition::Succeeded
-                        && observation.attested_for(&observation.intent);
-                    *pending_integration = None;
-                    return;
-                }
-                if observation.intent.scoped_call() == call.as_ref() {
-                    if observation.disposition != ToolDisposition::Succeeded
-                        || !observation.attested_for(&observation.intent)
-                    {
-                        *satisfied = false;
-                        *pending_integration = None;
-                        return;
-                    }
-                    if matches!(&**call, ToolCall::Command { .. }) {
-                        let Ok(result) = serde_json::from_str::<crate::tools::types::CommandResult>(
-                            &observation.output,
-                        ) else {
-                            *satisfied = false;
-                            *pending_integration = None;
-                            return;
-                        };
-                        let command_succeeded = result.valid() && result.exit_code == Some(0);
-                        *satisfied = command_succeeded && result.changeset.files.is_empty();
-                        *pending_integration = (command_succeeded
-                            && !result.changeset.files.is_empty())
-                        .then(|| observation.intent.digest());
-                    } else {
-                        *satisfied = true;
-                        *pending_integration = None;
-                    }
-                    return;
-                }
-                if matches!(&**call, ToolCall::Command { .. })
-                    && *satisfied
-                    && matches!(
-                        &observation.intent.call,
-                        ToolCall::Write { .. }
-                            | ToolCall::Edit { .. }
-                            | ToolCall::Delete { .. }
-                            | ToolCall::Move { .. }
-                            | ToolCall::MultiEdit { .. }
-                            | ToolCall::ApplyChangeset { .. }
-                            | ToolCall::McpCall { .. }
-                            | ToolCall::GitSwitch { .. }
-                    )
-                {
-                    *satisfied = false;
-                }
-            }
+            ) => observe_tool_call(call, satisfied, pending_integration, observation),
             (
                 GoalSuccessCriterion::WorkspaceFileDigest { path, .. },
                 GoalSuccessState::WorkspaceFile { sha256 },
@@ -571,7 +514,7 @@ fn file_observation_digest(
             if source == path {
                 None
             } else if destination == path {
-                Some(expected_digest.clone())
+                expected_digest.clone()
             } else {
                 return None;
             }
@@ -583,6 +526,12 @@ fn file_observation_digest(
             .iter()
             .find(|change| change.path == path)
             .and_then(|change| change.after.as_ref().map(|version| version.sha256.clone())),
+        ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+        } => files
+            .iter()
+            .find(|change| change.path == path)
+            .and_then(|change| change.after.as_ref().map(|state| state.sha256.clone())),
         ToolCall::McpCall { .. } | ToolCall::GitSwitch { .. } => return Some(None),
         _ => return None,
     };
@@ -647,11 +596,13 @@ impl GoalPlanContract {
                 self.commands.contains(program)
             }
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
-            } => changeset
-                .files
-                .iter()
-                .all(|change| self.allows_path(&change.path)),
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                    | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
+            } => call
+                .changeset_paths()
+                .into_iter()
+                .all(|path| self.allows_path(path)),
             ToolCall::McpCall { server, tool, .. } => self
                 .mcp_tools
                 .iter()
@@ -683,7 +634,36 @@ impl GoalPlanContract {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self.paths.is_empty()
+        if self.invalid_shape() {
+            return Err(ReplayError::InvalidPayload);
+        }
+        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_GOAL_PLAN_CONTRACT_BYTES)
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        bounded(&self.mission, MAX_GOAL_MISSION_BYTES)?;
+        self.validate_criterion()?;
+        if self.invalid_entries() {
+            return Err(ReplayError::InvalidPayload);
+        }
+        match &self.success_criterion {
+            GoalSuccessCriterion::ToolCallSucceeded { call } if !self.allows_call(call) => {
+                return Err(ReplayError::InvalidPayload);
+            }
+            GoalSuccessCriterion::WorkspaceFileDigest { path, .. }
+            | GoalSuccessCriterion::WorkspaceFileContent { path, .. }
+                if !self.allows_path(path) =>
+            {
+                return Err(ReplayError::InvalidPayload);
+            }
+            _ => {}
+        }
+        self.budget.validate()?;
+        Ok(())
+    }
+
+    fn invalid_shape(&self) -> bool {
+        self.paths.is_empty()
             && self.commands.is_empty()
             && self.skills.is_empty()
             && self.mcp_tools.is_empty()
@@ -712,17 +692,16 @@ impl GoalPlanContract {
                 .mcp_tools
                 .windows(2)
                 .any(|pair| (&pair[0].server, &pair[0].tool) >= (&pair[1].server, &pair[1].tool))
-        {
-            return Err(ReplayError::InvalidPayload);
-        }
-        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_GOAL_PLAN_CONTRACT_BYTES)
-        {
-            return Err(ReplayError::InvalidPayload);
-        }
-        bounded(&self.mission, 2048)?;
+    }
+
+    fn validate_criterion(&self) -> Result<(), ReplayError> {
         match &self.success_criterion {
             GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                if !call.valid() || !call.facts().goal_success {
+                // Committed intents carry a concrete digest, so an omitted one could never match.
+                if !call.valid()
+                    || !call.facts().goal_success
+                    || call.pending_precondition().is_some()
+                {
                     return Err(ReplayError::InvalidPayload);
                 }
             }
@@ -734,14 +713,20 @@ impl GoalPlanContract {
                 }
             }
             GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
-                if !crate::validate::valid_relative(path, false) || content.len() > 8 * 1024 {
+                if !crate::validate::valid_relative(path, false)
+                    || content.len() > MAX_GOAL_CRITERION_CONTENT_BYTES
+                {
                     return Err(ReplayError::InvalidPayload);
                 }
             }
         }
-        if self.paths.iter().any(|path| {
+        Ok(())
+    }
+
+    fn invalid_entries(&self) -> bool {
+        self.paths.iter().any(|path| {
             path != "." && !crate::validate::valid_relative(path, false)
-                || path.len() > 512
+                || path.len() > MAX_GOAL_PLAN_PATH_BYTES
                 || self
                     .paths
                     .iter()
@@ -765,23 +750,6 @@ impl GoalPlanContract {
                     || !crate::validate::valid_name(&binding.tool)
                     || binding.tool.len() > 128
             })
-        {
-            return Err(ReplayError::InvalidPayload);
-        }
-        match &self.success_criterion {
-            GoalSuccessCriterion::ToolCallSucceeded { call } if !self.allows_call(call) => {
-                return Err(ReplayError::InvalidPayload);
-            }
-            GoalSuccessCriterion::WorkspaceFileDigest { path, .. }
-            | GoalSuccessCriterion::WorkspaceFileContent { path, .. }
-                if !self.allows_path(path) =>
-            {
-                return Err(ReplayError::InvalidPayload);
-            }
-            _ => {}
-        }
-        self.budget.validate()?;
-        Ok(())
     }
 }
 
@@ -814,6 +782,71 @@ impl GoalReport {
             return Err(ReplayError::InvalidPayload);
         }
         Ok(())
+    }
+}
+
+fn observe_tool_call(
+    call: &crate::tools::ToolCall,
+    satisfied: &mut bool,
+    pending_integration: &mut Option<[u8; 32]>,
+    observation: &crate::tools::ToolObservation,
+) {
+    use crate::tools::{ToolCall, ToolDisposition};
+    if let ToolCall::ApplyChangeset {
+        source:
+            crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest,
+                ..
+            },
+    } = &observation.intent.call
+        && *pending_integration == Some(*source_intent_digest)
+    {
+        *satisfied = observation.disposition == ToolDisposition::Succeeded
+            && observation.attested_for(&observation.intent);
+        *pending_integration = None;
+        return;
+    }
+    if observation.intent.scoped_call() == call {
+        if observation.disposition != ToolDisposition::Succeeded
+            || !observation.attested_for(&observation.intent)
+        {
+            *satisfied = false;
+            *pending_integration = None;
+            return;
+        }
+        if matches!(call, ToolCall::Command { .. }) {
+            let Ok(result) =
+                serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+            else {
+                *satisfied = false;
+                *pending_integration = None;
+                return;
+            };
+            let command_succeeded = result.valid() && result.exit_code == Some(0);
+            *satisfied = command_succeeded && result.changeset.files.is_empty();
+            *pending_integration = (command_succeeded && !result.changeset.files.is_empty())
+                .then(|| observation.intent.digest());
+        } else {
+            *satisfied = true;
+            *pending_integration = None;
+        }
+        return;
+    }
+    if matches!(call, ToolCall::Command { .. })
+        && *satisfied
+        && matches!(
+            &observation.intent.call,
+            ToolCall::Write { .. }
+                | ToolCall::Edit { .. }
+                | ToolCall::Delete { .. }
+                | ToolCall::Move { .. }
+                | ToolCall::MultiEdit { .. }
+                | ToolCall::ApplyChangeset { .. }
+                | ToolCall::McpCall { .. }
+                | ToolCall::GitSwitch { .. }
+        )
+    {
+        *satisfied = false;
     }
 }
 

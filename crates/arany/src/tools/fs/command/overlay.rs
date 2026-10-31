@@ -450,9 +450,14 @@ impl Capture<'_> {
                 .as_ref()
                 .and_then(|entry| entry.content.as_ref())
                 .map_or(0, Vec::len);
+        let before = before.and_then(|entry| {
+            entry
+                .content
+                .map(|content| FileVersion::from_bytes(&content, entry.executable))
+        });
         self.totals
             .changes
-            .push(&joined(self.prefix, path), before.as_ref(), after, bytes)
+            .push(&joined(self.prefix, path), before, after, bytes)
     }
 }
 

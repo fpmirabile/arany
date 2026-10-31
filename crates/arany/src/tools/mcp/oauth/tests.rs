@@ -16,7 +16,6 @@ fn grant() -> Grant {
 
 fn record(grant: Grant) -> Vec<u8> {
     serde_json::to_vec(&Tokens {
-        schema: 1,
         servers: BTreeMap::from([("remote".to_owned(), grant)]),
     })
     .unwrap()
@@ -96,7 +95,6 @@ fn token_record_round_trips_and_rejects_unsafe_content() {
     value["servers"]["remote"]["unknown"] = true.into();
     assert!(Tokens::decode(&serde_json::to_vec(&value).unwrap()).is_err());
     let mut crowded = Tokens {
-        schema: 1,
         servers: BTreeMap::new(),
     };
     for index in 0..=MAX_MCP_SERVERS {

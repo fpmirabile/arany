@@ -96,7 +96,7 @@ fn validate_finish(
                 && run.agents[index].tools.iter().any(|tool| {
                     tool.observation
                         .as_ref()
-                        .is_some_and(|observation| observation.stops_run())
+                        .is_some_and(|observation| observation.stops_tool_step())
                 }))
     {
         return Err(ReplayError::InvalidTransition);
@@ -107,7 +107,7 @@ fn validate_finish(
                 || tool
                     .observation
                     .as_ref()
-                    .is_some_and(|observation| observation.stops_run())
+                    .is_some_and(|observation| observation.stops_tool_step())
         })
     {
         return Err(ReplayError::InvalidTransition);
@@ -122,8 +122,19 @@ fn validate_completion(
     finish: &Finish<'_>,
     over_token_cap: bool,
 ) -> Result<(), ReplayError> {
+    // An editor's answer may be followed by the review of its integration.
+    let agent = &run.agents[index];
+    let answer = if agent.assignment.is_some() {
+        agent
+            .provider_calls
+            .iter()
+            .rev()
+            .find(|call| call.phase != crate::provider::AgentPhase::ToolReview)
+    } else {
+        agent.provider_calls.last()
+    };
     if finish.disposition == AgentDisposition::Finished
-        && run.agents[index].provider_calls.last().is_none_or(|call| {
+        && answer.is_none_or(|call| {
             call.disposition != ProviderCallDisposition::Finished
                 || call.phase == crate::provider::AgentPhase::ToolReview
         })

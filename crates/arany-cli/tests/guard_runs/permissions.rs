@@ -12,6 +12,8 @@ mod environment;
 mod hooks;
 #[path = "permissions/host.rs"]
 mod host;
+#[path = "permissions/masks.rs"]
+mod masks;
 #[path = "permissions/modes.rs"]
 mod modes;
 #[path = "permissions/rules.rs"]
@@ -29,6 +31,7 @@ fn call(kind: &str) -> arany::ToolCall {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         "mcp" => arany::ToolCall::McpCall {
             server: "server".into(),
@@ -38,6 +41,12 @@ fn call(kind: &str) -> arany::ToolCall {
         },
         "edit" => arany::ToolCall::Write {
             path: "notes/new.txt".into(),
+            expected_digest: None,
+            content: "done".into(),
+        },
+        // Auto approval reviews a Workspace edit only on a protected path.
+        "protected_edit" => arany::ToolCall::Write {
+            path: "notes/AGENTS.md".into(),
             expected_digest: None,
             content: "done".into(),
         },
@@ -87,7 +96,7 @@ impl Fixture {
         server_program["inputs"] =
             json!([{"path":script,"destination":"server.sh","sha256":hash(source.as_bytes())}]);
         private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
-            "version":1,"workspace_paths":["notes"],"write":write,"commands":[program],"skills":[],
+            "workspace_paths":["notes"],"write":write,"commands":[program],"skills":[],
             "mcp":[{"name":"server","program":server_program,"args":["/inputs/server/server.sh"],"tools":["echo"]}]
         })).unwrap());
         if let Some(settings) = settings {

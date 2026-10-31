@@ -1,32 +1,32 @@
+mod hooks;
 pub(crate) mod host;
+mod runner;
+mod worktree;
 mod write;
 
-pub(crate) use write::recover_locks;
+pub(crate) use hooks::Hooks;
+pub(crate) use runner::{Environment, resolve, stale_locks};
+pub(crate) use worktree::{PREFIX as WORKTREE_PREFIX, Worktree};
 
-use super::ToolError;
-use super::config::{GitIdentity, Program};
-use super::executable::{EXECUTABLES, git_root, has_magic};
-use super::guard::GuardContext;
 use super::permissions::HiddenPaths;
 use super::selection::{CONTROL_BYTES, Selector};
-use super::types::{MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall};
-use crate::validate::{
-    FORBIDDEN_NAMES, MAX_REVISION_BYTES, MAX_REVISION_RANGE_BYTES, forbidden, hex_digest,
-    valid_relative, valid_revision,
+use super::types::{
+    Attestation, EffectIntent, GitReceipt, MAX_GIT_LOG_COMMITS, ToolCall, ToolDisposition,
+    ToolObservation,
 };
-use cap_fs_ext::{DirExt, MetadataExt as CapMetadataExt};
+use super::{Cancellation, ToolError, ToolRuntime};
+use crate::validate::{
+    FORBIDDEN_NAMES, MAX_REVISION_BYTES, MAX_REVISION_RANGE_BYTES, forbidden, valid_relative,
+    valid_revision,
+};
+use cap_fs_ext::MetadataExt as CapMetadataExt;
 use cap_std::fs::Dir;
+use runner::{Captured, GIT_CAPTURE_BYTES, Git, Io, STDERR_BYTES};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::future::Future;
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
@@ -183,14 +183,12 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     })
 }
 
-const GIT_CAPTURE_BYTES: usize = 256 * 1024;
-const STDERR_BYTES: usize = 4 * 1024;
 const ERROR_BYTES: usize = 1024;
 const MAX_ROWS: usize = 256;
 const MAX_SUBJECT_CHARS: usize = 256;
 const MAX_FILTERED_LOG_COMMITS: u32 = 1000;
 const MAX_BRANCH_COUNT_COMMITS: usize = 1000;
-pub(super) const DISCLOSURE_CONTRACT: &[u8] = b";typed-git-ignore-disclosure-v1:status-diff-log-paths-and-patches-filtered-before-bounds;tracked-ignored-paths-hidden;log-subjects-require-visible-path-evidence;path-read-stderr-suppressed;replay-never-reruns-selection";
+const DISCLOSURE_CONTRACT: &[u8] = b";typed-git-ignore-disclosure-v1:status-diff-log-paths-and-patches-filtered-before-bounds;tracked-ignored-paths-hidden;log-subjects-require-visible-path-evidence;path-read-stderr-suppressed;replay-never-reruns-selection";
 // Semantic unit fixtures allow slow native spawns; production retains its row deadline.
 const MAX_BRANCH_ROW_RUNTIME: Duration = if cfg!(test) {
     Duration::from_secs(10)
@@ -199,22 +197,12 @@ const MAX_BRANCH_ROW_RUNTIME: Duration = if cfg!(test) {
 };
 const BRANCH_CLEANUP_RESERVE: Duration = Duration::from_secs(1);
 const ENVELOPE_BYTES: usize = 1024;
-const HEAD_BYTES: usize = 256;
 const REF_BYTES: usize = 1024;
-const CONFIG_BYTES: usize = 64 * 1024;
 const MAX_GIT_RUNTIME: Duration = Duration::from_millis(super::types::GIT_TIMEOUT_MS as u64);
-pub(super) const VIEW: &str = "git-view";
-pub(super) const HOME: &str = "git-home";
-const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n\tquotePath = false\n";
-const LINKED: [(&str, bool, bool); 4] = [
-    ("objects", true, true),
-    ("refs", true, true),
-    ("packed-refs", false, false),
-    ("shallow", false, false),
-];
-const NO_REPOSITORY: &str = "The Workspace root has no .git directory; typed Git reads need a repository rooted at the Workspace.";
-const UNSUPPORTED_LAYOUT: &str = "The Workspace .git is not a plain repository directory (linked worktree, submodule checkout, gitfile, symlink or missing data); typed Git reads do not support it.";
-const UNSUPPORTED_FORMAT: &str = "The repository uses Git extensions (such as SHA-256 objects, reftable refs or partial clone) that typed Git reads do not support.";
+const NO_REPOSITORY: &str =
+    "The Workspace root has no .git; typed Git needs a repository rooted at the Workspace.";
+const GIT_CHANGED: &str =
+    "The Git pinned for this Run changed on disk; nothing ran. The next Run pins the new Git.";
 
 enum LogRevision<'a> {
     Single,
@@ -237,264 +225,6 @@ fn valid_log_revision(revision: &str) -> bool {
     log_revision(revision).is_some()
 }
 
-fn executable_bytes(executable: &str) -> Result<Vec<u8>, ToolError> {
-    use std::os::unix::fs::MetadataExt;
-    let file = super::fs::open_absolute(executable)?;
-    let metadata = file.metadata().map_err(|_| ToolError::Operation)?;
-    if !metadata.is_file()
-        || metadata.mode() & 0o6022 != 0
-        || metadata.len() > MAX_SNAPSHOT_BYTES as u64
-    {
-        return Err(ToolError::ChangedInput);
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_SNAPSHOT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ToolError::Operation)?;
-    if bytes.len() > MAX_SNAPSHOT_BYTES || !has_magic(&bytes, EXECUTABLES.git_magics) {
-        return Err(ToolError::ChangedInput);
-    }
-    Ok(bytes)
-}
-
-fn verify_pin(git: &Program) -> Result<(), ToolError> {
-    if hex_digest(&executable_bytes(&git.executable)?) != git.sha256 {
-        return Err(ToolError::ChangedInput);
-    }
-    Ok(())
-}
-
-// Check root ownership on the host because root appears unmapped inside the user namespace.
-pub(super) fn verify_host_executable(git: &Program) -> Result<(), ToolError> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata =
-        std::fs::symlink_metadata(&git.executable).map_err(|_| ToolError::ChangedInput)?;
-    if metadata.uid() != 0 {
-        return Err(ToolError::ChangedInput);
-    }
-    verify_pin(git)
-}
-
-pub(super) fn discover() -> Option<Program> {
-    EXECUTABLES.git.iter().find_map(|candidate| {
-        let executable = std::fs::canonicalize(candidate.path).ok()?;
-        if !git_root(&executable) {
-            return None;
-        }
-        let executable = executable.to_str()?.to_owned();
-        let sha256 = hex_digest(&executable_bytes(&executable).ok()?);
-        let program = Program {
-            name: "git".into(),
-            executable,
-            sha256,
-            interpreter: false,
-            inputs: Vec::new(),
-        };
-        verify_host_executable(&program).ok()?;
-        Some(program)
-    })
-}
-
-const USER_CONFIG_BYTES: u64 = 64 * 1024;
-
-fn read_user_config(path: &Path) -> Option<Vec<u8>> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
-        .open(path)
-        .ok()
-        .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))?;
-    let mut bytes = Vec::new();
-    file.take(USER_CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= USER_CONFIG_BYTES).then_some(bytes)
-}
-
-// Parsed as data only: includes and every key except user.name/user.email are ignored.
-pub(super) fn user_identity() -> Option<GitIdentity> {
-    let home = directories::BaseDirs::new()?.home_dir().to_owned();
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    // Git reads the XDG file first, so ~/.gitconfig wins for each key.
-    let (mut name, mut email) = (None, None);
-    for path in [xdg.join("git/config"), home.join(".gitconfig")] {
-        let Some(bytes) = read_user_config(&path) else {
-            continue;
-        };
-        let (found_name, found_email) = user_section(&String::from_utf8_lossy(&bytes));
-        name = found_name.or(name);
-        email = found_email.or(email);
-    }
-    let identity = GitIdentity {
-        name: name?,
-        email: email?,
-    };
-    identity.valid().then_some(identity)
-}
-
-fn user_section(text: &str) -> (Option<String>, Option<String>) {
-    let (mut name, mut email) = (None, None);
-    let mut in_user = false;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(header) = line.strip_prefix('[') {
-            in_user = header
-                .split_once(']')
-                .is_some_and(|(section, _)| section.trim().eq_ignore_ascii_case("user"));
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=').filter(|_| in_user) else {
-            continue;
-        };
-        let value = value.trim();
-        let value = match value.strip_prefix('"') {
-            Some(quoted) => quoted.strip_suffix('"'),
-            None => Some(
-                value
-                    .split(['#', ';'])
-                    .next()
-                    .unwrap_or_default()
-                    .trim_end(),
-            ),
-        };
-        // Escapes would need Git's full value grammar; such a value is ignored.
-        let Some(value) = value.filter(|value| !value.contains(['\\', '"'])) else {
-            continue;
-        };
-        match key.trim().to_ascii_lowercase().as_str() {
-            "name" => name = Some(value.to_owned()),
-            "email" => email = Some(value.to_owned()),
-            _ => {}
-        }
-    }
-    (name, email)
-}
-
-enum Prepared {
-    Ready(Repository),
-    Unsupported(&'static str),
-}
-
-struct Repository {
-    git_dir: Dir,
-    identity: (u64, u64),
-    head: Vec<u8>,
-    index: Option<(Vec<u8>, std::time::SystemTime)>,
-    links: Vec<&'static str>,
-    config: Vec<u8>,
-}
-
-fn inspect_layout(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
-    let root = super::fs::open_directory(workspace)?;
-    match root.symlink_metadata(".git") {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Ok(Err(UNSUPPORTED_LAYOUT)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Err(NO_REPOSITORY));
-        }
-        Err(_) => return Err(ToolError::Path),
-    }
-    let git_dir = root
-        .open_dir_nofollow(".git")
-        .map_err(|_| ToolError::Path)?;
-    // An oversized, linked, multi-link or special HEAD/config is an unsupported layout, not a Tool fault.
-    let head = match read_optional(&git_dir, "HEAD", HEAD_BYTES) {
-        Ok(Some(head)) => head,
-        Ok(None) | Err(ToolError::Limit | ToolError::Path) => {
-            return Ok(Err(UNSUPPORTED_LAYOUT));
-        }
-        Err(error) => return Err(error),
-    };
-    if !valid_head(&head) {
-        return Ok(Err(UNSUPPORTED_FORMAT));
-    }
-    let config = match read_optional(&git_dir, "config", CONFIG_BYTES) {
-        Ok(Some(config)) if uses_extensions(&config) => {
-            return Ok(Err(UNSUPPORTED_FORMAT));
-        }
-        Ok(config) => config.unwrap_or_default(),
-        Err(ToolError::Limit | ToolError::Path) => {
-            return Ok(Err(UNSUPPORTED_LAYOUT));
-        }
-        Err(error) => return Err(error),
-    };
-    let mut links = Vec::with_capacity(LINKED.len());
-    for (name, directory, required) in LINKED {
-        match git_dir.symlink_metadata(name) {
-            Ok(metadata)
-                if (directory && metadata.is_dir()) || (!directory && metadata.is_file()) =>
-            {
-                links.push(name);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {}
-            _ => return Ok(Err(UNSUPPORTED_LAYOUT)),
-        }
-    }
-    Ok(Ok(Repository {
-        identity: super::fs::identity(&git_dir)?,
-        git_dir,
-        head,
-        index: None,
-        links,
-        config,
-    }))
-}
-
-fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
-    let mut repository = match inspect_layout(workspace)? {
-        Ok(repository) => repository,
-        Err(reason) => return Ok(Err(reason)),
-    };
-    repository.index = match open_optional(&repository.git_dir, "index").and_then(|file| {
-        file.map(|file| {
-            let modified = file
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .map_err(|_| ToolError::Path)?;
-            Ok((super::fs::read_regular(file, MAX_SNAPSHOT_BYTES)?, modified))
-        })
-        .transpose()
-    }) {
-        Ok(index) => index,
-        Err(ToolError::Path) => return Ok(Err(UNSUPPORTED_LAYOUT)),
-        Err(error) => return Err(error),
-    };
-    Ok(Ok(repository))
-}
-
-// The fixed config, HEAD and index copies every view starts from.
-fn write_view_base(repository: &Repository, view: &Path, config: &[u8]) -> Result<(), ToolError> {
-    std::fs::create_dir(view).map_err(|_| ToolError::Operation)?;
-    std::fs::write(view.join("config"), config).map_err(|_| ToolError::Operation)?;
-    std::fs::write(view.join("HEAD"), &repository.head).map_err(|_| ToolError::Operation)?;
-    if let Some((index, modified)) = &repository.index {
-        // Git's racy-stat check compares entry times with the index mtime; a fresh mtime hides same-size edits.
-        std::fs::File::create_new(view.join("index"))
-            .and_then(|mut file| {
-                std::io::Write::write_all(&mut file, index)?;
-                file.set_modified(*modified)
-            })
-            .map_err(|_| ToolError::Operation)?;
-    }
-    Ok(())
-}
-
-fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
-    let repository = match inspect(workspace)? {
-        Ok(repository) => repository,
-        Err(message) => return Ok(Prepared::Unsupported(message)),
-    };
-    write_view_base(&repository, view, VIEW_CONFIG)?;
-    for name in &repository.links {
-        std::os::unix::fs::symlink(workspace.join(".git").join(name), view.join(name))
-            .map_err(|_| ToolError::Operation)?;
-    }
-    Ok(Prepared::Ready(repository))
-}
-
 fn read_optional(git_dir: &Dir, name: &str, cap: usize) -> Result<Option<Vec<u8>>, ToolError> {
     open_optional(git_dir, name)?
         .map(|file| super::fs::read_regular(file, cap))
@@ -513,68 +243,6 @@ fn open_optional(git_dir: &Dir, name: &str) -> Result<Option<std::fs::File>, Too
         Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(_) => Err(ToolError::Path),
     }
-}
-
-// A branch's object name, from its loose file or else `packed-refs`, never following links.
-fn resolve(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
-    if let Some(oid) = loose_ref(git_dir, name)? {
-        return Ok(Some(oid));
-    }
-    let Some(packed) = read_optional(git_dir, "packed-refs", MAX_SNAPSHOT_BYTES)? else {
-        return Ok(None);
-    };
-    for line in packed.split(|byte| *byte == b'\n') {
-        if let Some((oid, reference)) = std::str::from_utf8(line)
-            .ok()
-            .and_then(|line| line.split_once(' '))
-            && reference == name
-        {
-            return object_id(oid.as_bytes()).map(|oid| Some(oid.to_owned()));
-        }
-    }
-    Ok(None)
-}
-
-fn loose_ref(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
-    let (parent, leaf) = name.rsplit_once('/').ok_or(ToolError::Operation)?;
-    let mut directory = git_dir.try_clone().map_err(|_| ToolError::Operation)?;
-    let mut loose = true;
-    for part in parent.split('/') {
-        match directory.open_dir_nofollow(part) {
-            Ok(next) => directory = next,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                loose = false;
-                break;
-            }
-            Err(_) => return Err(ToolError::Path),
-        }
-    }
-    if loose && let Some(bytes) = read_optional(&directory, leaf, REF_BYTES)? {
-        let oid = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-        return object_id(oid).map(|oid| Some(oid.to_owned()));
-    }
-    Ok(None)
-}
-
-fn valid_head(head: &[u8]) -> bool {
-    let head = head.strip_suffix(b"\n").unwrap_or(head);
-    head.strip_prefix(b"ref: refs/")
-        .is_some_and(|name| !name.is_empty() && name.iter().all(u8::is_ascii_graphic))
-        || head.len() == 40
-            && head
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-}
-
-fn uses_extensions(config: &[u8]) -> bool {
-    String::from_utf8_lossy(config)
-        .trim_start_matches('\u{feff}')
-        .lines()
-        .any(|line| {
-            line.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("[extensions")
-        })
 }
 
 fn pathspecs(path: &str) -> Vec<String> {
@@ -599,112 +267,130 @@ fn owned(items: &[&str]) -> Vec<String> {
 }
 
 fn invocations(call: &ToolCall, filtered: bool) -> Result<Vec<Vec<String>>, ToolError> {
-    let mut runs = Vec::new();
-    match call {
-        ToolCall::GitStatus { path } => {
-            // No revisions are passed here, and `--` already ends options, so there is no `--end-of-options`.
-            let mut argv = owned(&[
-                "--no-pager",
-                "--no-optional-locks",
-                "status",
-                "--porcelain=v2",
-                "-z",
-                "--branch",
-                "--untracked-files=normal",
-                "--ignore-submodules=all",
-                "--no-renames",
-                "--",
-            ]);
-            argv.extend(pathspecs(path));
-            runs.push(argv);
-        }
+    Ok(match call {
+        ToolCall::GitStatus { path } => vec![status_argv(path)],
         ToolCall::GitDiff {
             path,
             base,
             head,
             staged,
-        } => {
-            for mode in [
-                &["--numstat", "-z"][..],
-                &["--patch", "--unified=3", "--submodule=short"][..],
-            ] {
-                let mut argv = owned(&["--no-pager", "--no-optional-locks", "diff"]);
-                argv.extend(owned(mode));
-                argv.extend(owned(&[
-                    "--no-color",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-renames",
-                    "--ignore-submodules=all",
-                ]));
-                if *staged {
-                    argv.push("--cached".into());
-                }
-                argv.push("--end-of-options".into());
-                argv.extend(base.iter().chain(head.iter()).cloned());
-                argv.push("--".into());
-                argv.extend(pathspecs(path));
-                runs.push(argv);
-            }
-        }
+        } => diff_argvs(path, base.as_deref(), head.as_deref(), *staged),
         ToolCall::GitLog {
             path,
             revision,
             max_count,
-        } => {
-            let mut argv = owned(&[
-                "--no-pager",
-                "--no-optional-locks",
-                "log",
-                "--no-color",
-                "--no-show-signature",
-            ]);
-            if filtered {
-                // Rename detection reports only the destination, which would hide a visible source.
-                argv.extend(owned(&[
-                    "--name-only",
-                    "--no-renames",
-                    "--diff-merges=first-parent",
-                ]));
-                argv.push(format!("--max-count={MAX_FILTERED_LOG_COMMITS}"));
-            } else {
-                argv.push(format!("--max-count={max_count}"));
-            }
-            argv.push("--format=tformat:%H%x00%P%x00%an%x00%at%x00%s".into());
-            argv.push("--end-of-options".into());
-            argv.extend(revision.iter().cloned());
-            argv.push("--".into());
-            argv.extend(pathspecs(path));
-            runs.push(argv);
-        }
+        } => vec![log_argv(path, revision.as_deref(), *max_count, filtered)],
         ToolCall::GitBranch {
             name: None,
             scope,
             max_count,
             ..
-        } => {
-            let mut argv = owned(&[
-                "--no-pager",
-                "--no-optional-locks",
-                "for-each-ref",
-                "--sort=refname",
-                "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(symref)%00%(objecttype)",
-            ]);
-            argv.push(format!(
-                "--count={}",
-                max_count.unwrap_or(MAX_ROWS as u32) + 1
-            ));
-            match scope.as_deref().unwrap_or("local") {
-                "local" => argv.push("refs/heads/".into()),
-                "remote" => argv.push("refs/remotes/".into()),
-                "all" => argv.extend(owned(&["refs/heads/", "refs/remotes/"])),
-                _ => return Err(ToolError::Configuration),
-            }
-            runs.push(argv);
+        } => vec![branch_list_argv(scope.as_deref(), *max_count)?],
+        _ => return Err(ToolError::Configuration),
+    })
+}
+
+fn status_argv(path: &str) -> Vec<String> {
+    // No revisions are passed here, and `--` already ends options, so there is no `--end-of-options`.
+    let mut argv = owned(&[
+        "--no-pager",
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--untracked-files=normal",
+        "--ignore-submodules=all",
+        "--no-renames",
+        "--",
+    ]);
+    argv.extend(pathspecs(path));
+    argv
+}
+
+fn diff_argvs(
+    path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    staged: bool,
+) -> Vec<Vec<String>> {
+    let mut runs = Vec::new();
+    for mode in [
+        &["--numstat", "-z"][..],
+        &["--patch", "--unified=3", "--submodule=short"][..],
+    ] {
+        let mut argv = owned(&["--no-pager", "--no-optional-locks", "diff"]);
+        argv.extend(owned(mode));
+        argv.extend(owned(&[
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--ignore-submodules=all",
+        ]));
+        if staged {
+            argv.push("--cached".into());
         }
+        argv.push("--end-of-options".into());
+        argv.extend(
+            base.iter()
+                .chain(head.iter())
+                .map(|revision| (*revision).to_owned()),
+        );
+        argv.push("--".into());
+        argv.extend(pathspecs(path));
+        runs.push(argv);
+    }
+
+    runs
+}
+
+fn log_argv(path: &str, revision: Option<&str>, max_count: u32, filtered: bool) -> Vec<String> {
+    let mut argv = owned(&[
+        "--no-pager",
+        "--no-optional-locks",
+        "log",
+        "--no-color",
+        "--no-show-signature",
+    ]);
+    if filtered {
+        // Rename detection reports only the destination, which would hide a visible source.
+        argv.extend(owned(&[
+            "--name-only",
+            "--no-renames",
+            "--diff-merges=first-parent",
+        ]));
+        argv.push(format!("--max-count={MAX_FILTERED_LOG_COMMITS}"));
+    } else {
+        argv.push(format!("--max-count={max_count}"));
+    }
+    argv.push("--format=tformat:%H%x00%P%x00%an%x00%at%x00%s".into());
+    argv.push("--end-of-options".into());
+    argv.extend(revision.map(str::to_owned));
+    argv.push("--".into());
+    argv.extend(pathspecs(path));
+    argv
+}
+
+fn branch_list_argv(scope: Option<&str>, max_count: Option<u32>) -> Result<Vec<String>, ToolError> {
+    let mut argv = owned(&[
+        "--no-pager",
+        "--no-optional-locks",
+        "for-each-ref",
+        "--sort=refname",
+        "--format=%(refname)%00%(objectname)%00%(HEAD)%00%(symref)%00%(objecttype)%00%(upstream)%00%(upstream:track,nobracket)",
+    ]);
+    argv.push(format!(
+        "--count={}",
+        max_count.unwrap_or(MAX_ROWS as u32) + 1
+    ));
+    match scope.unwrap_or("local") {
+        "local" => argv.push("refs/heads/".into()),
+        "remote" => argv.push("refs/remotes/".into()),
+        "all" => argv.extend(owned(&["refs/heads/", "refs/remotes/"])),
         _ => return Err(ToolError::Configuration),
     }
-    Ok(runs)
+    Ok(argv)
 }
 
 fn comparison_revisions(call: &ToolCall) -> Option<(&str, &str)> {
@@ -726,15 +412,12 @@ fn comparison_revisions(call: &ToolCall) -> Option<(&str, &str)> {
 }
 
 async fn resolve_revision(
-    git: &Path,
-    env: &[(&'static str, OsString)],
-    workspace: &Path,
+    git: &Git<'_>,
     revision: &str,
     deadline: tokio::time::Instant,
 ) -> Result<Captured, ToolError> {
     let expression = format!("{revision}^{{commit}}");
-    spawn_git(
-        git,
+    git.run(
         &owned(&[
             "--no-pager",
             "--no-optional-locks",
@@ -743,8 +426,7 @@ async fn resolve_revision(
             "--end-of-options",
             &expression,
         ]),
-        env,
-        workspace,
+        Io::default(),
         deadline,
     )
     .await
@@ -797,9 +479,7 @@ async fn capture_with_disclosure(
 }
 
 struct ComparisonContext<'a> {
-    git: &'a Path,
-    env: &'a [(&'static str, OsString)],
-    workspace: &'a Path,
+    git: &'a Git<'a>,
     deadline: tokio::time::Instant,
     max_bytes: usize,
     hidden: &'a HiddenPaths,
@@ -812,9 +492,7 @@ impl ComparisonContext<'_> {
         };
         let mut oids = Vec::with_capacity(2);
         for revision in [base, head] {
-            let capture =
-                resolve_revision(self.git, self.env, self.workspace, revision, self.deadline)
-                    .await?;
+            let capture = resolve_revision(self.git, revision, self.deadline).await?;
             if capture.overflow {
                 return Ok(ComparisonResolution::Failed(failure(
                     "git revision output exceeded its capture bound",
@@ -850,25 +528,21 @@ impl ComparisonContext<'_> {
 }
 
 struct PreparedGitRead<'a> {
-    workspace: &'a Path,
-    git: &'a Program,
+    git: &'a Git<'a>,
     call: &'a ToolCall,
     hidden: &'a HiddenPaths,
     max_bytes: usize,
     deadline: tokio::time::Instant,
-    env: Vec<(&'static str, OsString)>,
 }
 
 impl PreparedGitRead<'_> {
-    async fn run(self, repository: &Repository) -> Result<String, ToolError> {
+    async fn run(self) -> Result<String, ToolError> {
         let budget = self
             .max_bytes
             .checked_sub(ENVELOPE_BYTES)
             .ok_or(ToolError::Limit)?;
         let comparison = match (ComparisonContext {
-            git: Path::new(&self.git.executable),
-            env: &self.env,
-            workspace: self.workspace,
+            git: self.git,
             deadline: self.deadline,
             max_bytes: self.max_bytes,
             hidden: self.hidden,
@@ -884,9 +558,19 @@ impl PreparedGitRead<'_> {
             || self.call.clone(),
             |comparison| with_comparison_oids(self.call, comparison),
         );
+        let history_complete = match call {
+            ToolCall::GitBranch { .. } => match self.history_complete().await {
+                Ok(complete) => complete,
+                Err(ToolError::Timeout(_)) => {
+                    return Ok(branch_result(false, Vec::new(), None, true, true).to_string());
+                }
+                Err(error) => return Err(error),
+            },
+            _ => true,
+        };
         let captured = capture_with_disclosure(
-            self.capture_outputs(&call, repository),
-            self.workspace,
+            self.capture_outputs(&call, history_complete),
+            &self.git.work_tree,
             self.hidden,
             path_git_read(&call),
             self.deadline,
@@ -900,7 +584,7 @@ impl PreparedGitRead<'_> {
             DisclosedCapture::Failed(output) => return Ok(output),
         };
         let mut value = self
-            .render(&call, &outputs, repository, budget, &mut disclosure)
+            .render(&call, &outputs, history_complete, budget, &mut disclosure)
             .await?;
         if let Some(comparison) = &comparison
             && let Value::Object(fields) = &mut value
@@ -914,27 +598,32 @@ impl PreparedGitRead<'_> {
         Ok(text)
     }
 
+    // Shallow history makes ancestry and parentless tips incomplete.
+    async fn history_complete(&self) -> Result<bool, ToolError> {
+        let captured = self
+            .git
+            .run(
+                &owned(&["rev-parse", "--is-shallow-repository"]),
+                Io::default(),
+                self.deadline,
+            )
+            .await?;
+        Ok(captured.stdout != b"true\n")
+    }
+
     async fn capture_outputs(
         &self,
         call: &ToolCall,
-        repository: &Repository,
+        history_complete: bool,
     ) -> Result<CapturedOutputs, ToolError> {
         let branch_read = matches!(call, ToolCall::GitBranch { name: None, .. });
         let mut outputs = Vec::new();
         let filtered = !self.hidden.is_empty() || matches!(call, ToolCall::GitLog { .. });
         for argv in invocations(call, filtered)? {
-            let capture = match spawn_git(
-                Path::new(&self.git.executable),
-                &argv,
-                &self.env,
-                self.workspace,
-                self.deadline,
-            )
-            .await
-            {
+            let capture = match self.git.run(&argv, Io::default(), self.deadline).await {
                 Err(ToolError::Timeout(_)) if branch_read => {
                     return Ok(CapturedOutputs::Failed(
-                        branch_result(repository, Vec::new(), None, true, true).to_string(),
+                        branch_result(history_complete, Vec::new(), None, true, true).to_string(),
                     ));
                 }
                 result => result?,
@@ -951,7 +640,7 @@ impl PreparedGitRead<'_> {
         &self,
         call: &ToolCall,
         outputs: &[Captured],
-        repository: &Repository,
+        history_complete: bool,
         budget: usize,
         disclosure: &mut GitDisclosure,
     ) -> Result<Value, ToolError> {
@@ -976,12 +665,10 @@ impl PreparedGitRead<'_> {
                 [list],
             ) => {
                 BranchRead {
-                    git: Path::new(&self.git.executable),
-                    env: &self.env,
-                    workspace: self.workspace,
+                    git: self.git,
                     deadline: self.deadline,
                     hidden: self.hidden,
-                    repository,
+                    history_complete,
                     budget,
                 }
                 .output(list, max_count.unwrap_or(MAX_ROWS as u32), base.as_deref())
@@ -1049,307 +736,374 @@ fn path_git_read(call: &ToolCall) -> bool {
     )
 }
 
-fn environment(view: &Path, workspace: &Path, scratch: &Path) -> Vec<(&'static str, OsString)> {
-    vec![
-        ("GIT_DIR", view.into()),
-        ("GIT_WORK_TREE", workspace.into()),
-        ("HOME", scratch.join(HOME).into_os_string()),
-        ("PATH", "/usr/bin:/bin".into()),
-        ("GIT_CONFIG_NOSYSTEM", "1".into()),
-        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
-        ("GIT_ATTR_NOSYSTEM", "1".into()),
-        ("GIT_OPTIONAL_LOCKS", "0".into()),
-        ("GIT_NO_REPLACE_OBJECTS", "1".into()),
-        ("GIT_NO_LAZY_FETCH", "1".into()),
-        ("GIT_TERMINAL_PROMPT", "0".into()),
-        ("LC_ALL", "C".into()),
-        ("TZ", "UTC".into()),
-    ]
-}
+const WRITES_LEFT_TO_USER: &str = "Commits, branch creation and switches are left to the user; leave changes in the working tree.";
+const HOOKS_NOT_RUN: &str = "Repository hooks did not run: the user has not accepted them for this folder, or they changed since; accept them with /permissions in the terminal.";
 
-struct Captured {
-    status: Option<i32>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    overflow: bool,
-}
-
-// Drain excess stderr to avoid killing a verbose writer; cut stdout off to stop overlong output.
-async fn read_prefix(
-    mut reader: impl tokio::io::AsyncRead + Unpin,
-    cap: usize,
-    drain: bool,
-) -> Result<(Vec<u8>, bool), ToolError> {
-    let mut bytes = Vec::new();
-    (&mut reader)
-        .take(cap as u64 + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    let overflow = bytes.len() > cap;
-    bytes.truncate(cap);
-    if overflow && drain {
-        let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
-    }
-    Ok((bytes, overflow))
-}
-
-async fn spawn_git(
-    git: &Path,
-    argv: &[String],
-    env: &[(&'static str, OsString)],
-    workspace: &Path,
-    deadline: tokio::time::Instant,
-) -> Result<Captured, ToolError> {
-    spawn_git_with(git, argv, env, workspace, deadline, Io::default()).await
-}
-
-// Optional stdin, the stdout capture bound, and the only path a write's Git child may modify.
-struct Io<'a> {
-    stdin: Option<&'a [u8]>,
-    stdout_bytes: usize,
-    writable: Option<&'a Path>,
-}
-
-impl Default for Io<'_> {
-    fn default() -> Self {
-        Self {
-            stdin: None,
-            stdout_bytes: GIT_CAPTURE_BYTES,
-            writable: None,
-        }
-    }
-}
-
-// A write's Git child may modify only `writable` (its private view); publication stays with the Guard.
-fn spawn_confined_before(
-    command: &mut tokio::process::Command,
-    writable: &Path,
-    deadline: tokio::time::Instant,
-) -> Result<tokio::process::Child, ToolError> {
-    if tokio::time::Instant::now() >= deadline {
-        return Err(ToolError::Timeout(String::new()));
-    }
-    #[cfg(target_os = "linux")]
-    {
-        super::guard::spawn_confined(command, &[writable, Path::new("/dev/null")])
-    }
-    // The executor unit's Seatbelt profile is already installed and every child inherits it.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = writable;
-        super::guard::spawn_before(command, deadline)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (command, writable);
-        Err(ToolError::ProtectionUnavailable)
-    }
-}
-
-async fn spawn_git_with(
-    git: &Path,
-    argv: &[String],
-    env: &[(&'static str, OsString)],
-    workspace: &Path,
-    deadline: tokio::time::Instant,
-    io: Io<'_>,
-) -> Result<Captured, ToolError> {
-    let Io {
-        stdin,
-        stdout_bytes,
-        writable,
-    } = io;
-    let mut command = tokio::process::Command::new(git);
-    command
-        .args(argv)
-        .env_clear()
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .current_dir(workspace)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
+// With accepted hooks and no human to ask, a Git write is offered only where a user-owned allow rule covers it.
+pub(super) fn offers_write(runtime: &ToolRuntime, call: &ToolCall) -> bool {
+    use super::permissions::{Decision, PermissionSource};
+    runtime.git_hooks.is_none()
+        || runtime.human_approvals
+        || runtime.permissions().is_some_and(|config| {
+            let (decision, basis, _) = config.evaluate_skill_file(call, None);
+            decision == Decision::Allow
+                && matches!(
+                    basis,
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule
+                )
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = match writable {
-        Some(writable) => spawn_confined_before(&mut command, writable, deadline)?,
-        None => super::guard::spawn_before(&mut command, deadline)?,
-    };
-    let input = child.stdin.take();
-    let stdout = child.stdout.take().ok_or(ToolError::Operation)?;
-    let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
-    let result = tokio::time::timeout_at(deadline, async {
-        // Feed stdin while draining stdout, or a full pipe deadlocks both sides.
-        let feed = async {
-            if let (Some(mut input), Some(bytes)) = (input, stdin) {
-                tokio::io::AsyncWriteExt::write_all(&mut input, bytes)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-            }
-            Ok::<_, ToolError>(())
+}
+
+pub(super) fn catalog(runtime: &ToolRuntime) -> Value {
+    let write = runtime.config.write;
+    let offered = |name: &str| {
+        let call = match name {
+            "git_commit" => ToolCall::GitCommit {
+                message: "commit".into(),
+                paths: vec![".".into()],
+                staged: false,
+            },
+            "git_switch" => ToolCall::GitSwitch {
+                branch: "main".into(),
+            },
+            _ => ToolCall::GitBranch {
+                name: Some("branch".into()),
+                start_point: None,
+                scope: None,
+                base: None,
+                max_count: None,
+            },
         };
-        let ((stdout, overflow), (stderr, _), ()) = tokio::try_join!(
-            read_prefix(stdout, stdout_bytes, false),
-            read_prefix(stderr, STDERR_BYTES, true),
-            feed
-        )?;
-        let status = super::guard::reap_owned_child(&mut child)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        Ok::<_, ToolError>(Captured {
-            status: status.code(),
-            stdout,
-            stderr,
-            overflow,
+        offers_write(runtime, &call)
+    };
+    let branch_create = write && offered("git_branch");
+    let operations: Vec<_> = super::catalog::git_operations(write, true)
+        .into_iter()
+        .filter(|name| !matches!(*name, "git_push" | "gh_pr_create") || write)
+        .filter(|name| {
+            !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view")
+                || runtime.config.pinned_gh().is_some()
         })
-    })
-    .await;
-    match result {
-        Ok(result) => result,
-        Err(_) => {
-            let _ = child.start_kill();
-            Err(timeout_after_reap(super::guard::reap_owned_child(&mut child)).await)
-        }
+        .filter(|name| !matches!(*name, "git_commit" | "git_switch") || offered(name))
+        .collect();
+    let local_writes = operations
+        .iter()
+        .any(|name| matches!(*name, "git_commit" | "git_switch"));
+    let mut value = json!({"write": branch_create || local_writes, "host": true,
+        "operations": operations, "scope": super::catalog::GIT_SCOPE});
+    if write && !branch_create {
+        value["branch_create"] = json!(false);
+    }
+    if write && !(branch_create && offered("git_commit") && offered("git_switch")) {
+        value["writes"] = json!(WRITES_LEFT_TO_USER);
+    }
+    value
+}
+
+// Editors in a Git repository work in a linked worktree; these wrap its lifecycle for the editor store.
+pub(super) fn create_worktree(
+    runtime: &ToolRuntime,
+    directory: &Path,
+    tree_name: &str,
+) -> Result<Option<worktree::Created>, ToolError> {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    if std::fs::symlink_metadata(environment.workspace().join(".git")).is_err() {
+        return Ok(None);
+    }
+    let parent = super::fs::open_directory(directory)?;
+    let reserve = |bytes| super::fs::editor::require_reserve(&parent, bytes);
+    worktree::create(program, environment, &directory.join(tree_name), reserve)
+}
+
+pub(super) fn worktree_changes(
+    runtime: &ToolRuntime,
+    tree: &Path,
+    record: &Worktree,
+) -> Result<worktree::Changed, ToolError> {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return Err(ToolError::Configuration);
+    };
+    let git = worktree::worktree_git(program, environment, tree, record)?;
+    worktree::changed(&git, &record.base)
+}
+
+pub(super) fn remove_worktree(runtime: &ToolRuntime, tree: &Path, record: &Worktree) {
+    if let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) {
+        worktree::remove(program, environment, tree, record);
     }
 }
 
-async fn timeout_after_reap(
-    reap: impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>,
-) -> ToolError {
-    match tokio::time::timeout(Duration::from_secs(1), reap).await {
-        Ok(Ok(_)) => ToolError::Timeout(String::new()),
-        Ok(Err(_)) | Err(_) => ToolError::Operation,
-    }
+pub(super) fn relocate_worktree(
+    runtime: &ToolRuntime,
+    tree: &Path,
+    record: &Worktree,
+) -> Result<(), ToolError> {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return Err(ToolError::Configuration);
+    };
+    worktree::relocate(program, environment, tree, record)
 }
 
-pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
-    let git = site.config.git.as_ref().ok_or(ToolError::Configuration)?;
-    #[cfg(target_os = "linux")]
-    let scratch = Path::new("/scratch");
-    #[cfg(not(target_os = "linux"))]
-    let scratch = site.root;
-    let max_bytes = site.intent.limits.result_bytes as usize;
-    let output = if site.intent.call.mutates() {
-        #[cfg(target_os = "macos")]
-        {
-            write_stage(site, git).await
-        }
-        #[cfg(not(target_os = "macos"))]
-        write::execute(
-            site.workspace,
-            scratch,
-            git,
-            &site.config.git_identity.clone().unwrap_or_default(),
-            site.intent,
-            site.hidden,
-            site.remaining_runtime(),
-        )
+pub(super) async fn folder_hooks(workspace: &Path, editors: &Path) -> Option<Hooks> {
+    let environment = Environment::capture(workspace, editors)?;
+    let program = resolve(&environment)?;
+    hooks::detect(&Git::workspace(&program, &environment))
         .await
+        .ok()?
+}
+
+pub(super) async fn accepted_hooks(
+    runtime: &ToolRuntime,
+    accepted: Option<[u8; 32]>,
+) -> Option<Hooks> {
+    let accepted = accepted?;
+    let git = Git::workspace(
+        runtime.config.git.as_ref()?,
+        runtime.git_environment.as_deref()?,
+    );
+    let hooks = hooks::detect(&git).await.ok()??;
+    (hooks.digest == accepted).then_some(hooks)
+}
+
+// Binds Git intents to the cage and disclosure contract they ran under.
+pub(super) fn enforcement_digest() -> [u8; 32] {
+    let mut contract = b"arany-native-git-v1:user-configuration;cage-hooks-off-fsmonitor-off-pager-cat-editor-false-no-network;workspace-config-and-programs-refused".to_vec();
+    contract.extend_from_slice(DISCLOSURE_CONTRACT);
+    crate::validate::digest(&contract)
+}
+
+// The Workspace's `.git` directory, opened without following links.
+fn git_directory(workspace: &Path) -> Result<Dir, ToolError> {
+    use cap_fs_ext::DirExt;
+    super::fs::open_directory(workspace)?
+        .open_dir_nofollow(".git")
+        .map_err(|_| ToolError::Path)
+}
+
+async fn execute(
+    git: &Git<'_>,
+    call: &ToolCall,
+    hidden: &HiddenPaths,
+    max_bytes: usize,
+    deadline: tokio::time::Instant,
+) -> Result<String, ToolError> {
+    // A branch read keeps time to tear down and deliver the rows it already completed.
+    let deadline = if matches!(call, ToolCall::GitBranch { name: None, .. }) {
+        deadline - BRANCH_CLEANUP_RESERVE
     } else {
-        execute(GitReadRequest {
-            workspace: site.workspace,
-            scratch,
-            git,
-            call: &site.intent.call,
-            hidden: site.hidden,
-            max_bytes,
-            runtime: site.remaining_runtime(),
-        })
-        .await
+        deadline
     };
-    #[cfg(target_os = "linux")]
-    site.stop_descendants().await?;
-    output
-}
-
-pub(crate) const WRITE_FRAME_BYTES: usize = write::FRAME_BYTES;
-
-#[cfg(target_os = "macos")]
-async fn write_stage(site: &GuardContext<'_>, git: &Program) -> Result<String, ToolError> {
-    use super::guard::GitStage;
-    match site.git.stage {
-        Some(GitStage::Plan) => {
-            let identity = site.config.git_identity.clone().unwrap_or_default();
-            match write::plan_frame(
-                site.workspace,
-                site.root,
-                git,
-                &identity,
-                site.intent,
-                site.hidden,
-                site.remaining_runtime(),
-            )
-            .await?
-            {
-                Ok((frame, result)) => {
-                    *site.git_plan.lock().map_err(|_| ToolError::Operation)? = Some(frame);
-                    Ok(result.to_string())
-                }
-                Err(failure) => Ok(failure),
-            }
-        }
-        Some(GitStage::Publish) => {
-            let (result, frame) = site.git.input.as_ref().ok_or(ToolError::Configuration)?;
-            let result: serde_json::Value =
-                serde_json::from_slice(result).map_err(|_| ToolError::Configuration)?;
-            if !result.is_object() || result.get("publication").is_some() {
-                return Err(ToolError::Configuration);
-            }
-            write::publish_frame(site.workspace, frame, result, site.intent, site.hidden)
-        }
-        None => Err(ToolError::Configuration),
-    }
-}
-
-pub(super) struct GitReadRequest<'a> {
-    pub(super) workspace: &'a Path,
-    pub(super) scratch: &'a Path,
-    pub(super) git: &'a Program,
-    pub(super) call: &'a ToolCall,
-    pub(super) hidden: &'a HiddenPaths,
-    pub(super) max_bytes: usize,
-    pub(super) runtime: Duration,
-}
-
-pub(super) async fn execute(request: GitReadRequest<'_>) -> Result<String, ToolError> {
-    let GitReadRequest {
-        workspace,
-        scratch,
-        git,
-        call,
-        hidden,
-        max_bytes,
-        runtime,
-    } = request;
-    let branch_read = matches!(call, ToolCall::GitBranch { name: None, .. });
-    let runtime = runtime.min(MAX_GIT_RUNTIME);
-    let work_runtime = if branch_read {
-        runtime.saturating_sub(BRANCH_CLEANUP_RESERVE)
-    } else {
-        runtime
-    };
-    let deadline = tokio::time::Instant::now() + work_runtime;
-    verify_pin(git)?;
-    let view = scratch.join(VIEW);
-    let repository = match prepare_view(workspace, &view)? {
-        Prepared::Ready(repository) => repository,
-        Prepared::Unsupported(message) => return Ok(failure(message, &[], max_bytes, hidden)),
-    };
-    let env = environment(&view, workspace, scratch);
     PreparedGitRead {
-        workspace,
         git,
         call,
         hidden,
         max_bytes,
         deadline,
-        env,
     }
-    .run(&repository)
+    .run()
     .await
+}
+
+fn not_run(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    match error {
+        ToolError::ChangedInput => refused(intent, json!({"failed": GIT_CHANGED}).to_string()),
+        error => super::unstarted_observation(intent, error),
+    }
+}
+
+fn refused(intent: EffectIntent, output: String) -> ToolObservation {
+    observation(intent, ToolDisposition::Failed, output, None, None)
+}
+
+fn observation(
+    intent: EffectIntent,
+    disposition: ToolDisposition,
+    output: String,
+    receipt: Option<GitReceipt>,
+    limit_cause: Option<super::types::LimitCause>,
+) -> ToolObservation {
+    ToolObservation {
+        spill: None,
+        intent,
+        disposition,
+        output,
+        attestation: receipt.map(Attestation::Git),
+        cache_update: super::CacheUpdate::NotApplicable,
+        enforcement_cause: None,
+        limit_cause,
+        approval_cause: None,
+        guard_stage: None,
+    }
+}
+
+// A write whose Git process did not finish cleanly may have changed the repository.
+fn uncertain(intent: EffectIntent, workspace: &Path) -> ToolObservation {
+    let locks = stale_locks(workspace);
+    let mut output =
+        "Git write outcome unknown; inspect the repository before continuing. Do not retry automatically."
+            .to_owned();
+    if !locks.is_empty() {
+        output = format!("{}. {output}", ToolError::StaleGitLocks(locks.join(", ")));
+    }
+    observation(intent, ToolDisposition::Uncertain, output, None, None)
+}
+
+// A write runs the folder's hooks only while they match what the user accepted; otherwise it says so.
+async fn write_hooks(
+    runtime: &ToolRuntime,
+    git: &Git<'_>,
+) -> (Option<std::path::PathBuf>, Option<&'static str>) {
+    match hooks::detect(git).await {
+        Ok(Some(found)) if runtime.git_hooks.as_deref() == Some(&found) => {
+            (Some(found.directory), None)
+        }
+        Ok(Some(_)) | Err(_) => (None, Some(HOOKS_NOT_RUN)),
+        Ok(None) => (None, None),
+    }
+}
+
+fn with_hooks_note(
+    mut written: write::Written,
+    note: Option<&str>,
+    max_bytes: usize,
+) -> write::Written {
+    if let Some(note) = note
+        && let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(&written.output)
+    {
+        fields.insert("hooks_not_run".into(), json!(note));
+        let output = Value::Object(fields).to_string();
+        if output.len() <= max_bytes {
+            written.output = output;
+        }
+    }
+    written
+}
+
+// Typed Git runs natively in the Engine under the cage, with the user's configuration.
+pub(super) async fn run(
+    runtime: &ToolRuntime,
+    intent: EffectIntent,
+    mut cancellation: Cancellation,
+) -> ToolObservation {
+    let (Some(program), Some(environment)) = (
+        runtime.config.git.as_ref(),
+        runtime.git_environment.as_deref(),
+    ) else {
+        return super::unstarted_observation(intent, ToolError::Configuration);
+    };
+    let started = tokio::time::Instant::now();
+    let window = match runtime.begin_active_action(started).await {
+        Ok(window) => window,
+        Err(error) => return super::unstarted_observation(intent, error),
+    };
+    let deadline_after = |limit: Duration| {
+        window.map_or(started + limit, |window| {
+            (started + limit).min(window.payload_deadline)
+        })
+    };
+    let mut deadline = deadline_after(
+        Duration::from_millis(u64::from(intent.effective_timeout_ms())).min(MAX_GIT_RUNTIME),
+    );
+    if let Err(error) = runtime
+        .before_dispatch(window, intent.limits.runtime_ms, &cancellation)
+        .await
+    {
+        return super::unstarted_observation(intent, error);
+    }
+    let hidden = runtime.hidden_paths(&intent.call);
+    let max_bytes = intent.limits.result_bytes as usize;
+    let mut git = Git::workspace(program, environment);
+    if std::fs::symlink_metadata(&git.git_dir).is_err() {
+        return refused(intent, failure(NO_REPOSITORY, &[], max_bytes, &hidden));
+    }
+    let admitted = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(ToolError::Cancelled),
+        admitted = git.admit(deadline) => admitted,
+    };
+    match admitted {
+        Ok(None) => {}
+        Ok(Some(refusal)) => return refused(intent, failure(&refusal, &[], max_bytes, &hidden)),
+        Err(error) => return not_run(intent, error),
+    }
+    let mutates = intent.call.mutates();
+    let mut hooks_note = None;
+    if mutates {
+        (git.hooks, hooks_note) = write_hooks(runtime, &git).await;
+        // Accepted hooks may run a project's checks, so the write gets the command runtime ceiling.
+        if git.hooks.is_some() {
+            deadline = deadline_after(Duration::from_millis(u64::from(intent.limits.runtime_ms)));
+        }
+    }
+    let result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(ToolError::Cancelled),
+        result = execute_typed(&git, &intent.call, &hidden, max_bytes, deadline) => result,
+    };
+    let written = match result {
+        Ok(written) => with_hooks_note(written, hooks_note, max_bytes),
+        Err(error) => return failed_run(intent, error, environment.workspace()),
+    };
+    let receipt = (!mutates || written.refs.is_some()).then(|| GitReceipt {
+        contract_version: 1,
+        intent_digest: intent.digest(),
+        executable_sha256: program.sha256.clone(),
+        exit_code: written.exit_code,
+        refs: written.refs,
+    });
+    let (disposition, output, _, limit_cause) =
+        super::dispatch::outcome(&intent, Ok(written.output));
+    observation(intent, disposition, output, receipt, limit_cause)
+}
+
+async fn execute_typed(
+    git: &Git<'_>,
+    call: &ToolCall,
+    hidden: &HiddenPaths,
+    max_bytes: usize,
+    deadline: tokio::time::Instant,
+) -> Result<write::Written, ToolError> {
+    if call.mutates() {
+        write::execute(git, call, hidden, max_bytes, deadline).await
+    } else {
+        execute(git, call, hidden, max_bytes, deadline)
+            .await
+            .map(|output| write::Written {
+                output,
+                refs: None,
+                exit_code: git.exit_code(),
+            })
+    }
+}
+
+// A failed write's effect is unknown; a read that failed changed nothing.
+fn failed_run(intent: EffectIntent, error: ToolError, workspace: &Path) -> ToolObservation {
+    if intent.call.mutates() {
+        return uncertain(intent, workspace);
+    }
+    match error {
+        ToolError::Cancelled => super::cancelled_read(intent),
+        ToolError::ChangedInput => not_run(intent, ToolError::ChangedInput),
+        error => {
+            let (disposition, output, _, limit_cause) =
+                super::dispatch::outcome(&intent, Err(error));
+            observation(intent, disposition, output, None, limit_cause)
+        }
+    }
 }
 
 // Diagnostics cannot be matched against path rules, so a filtered read keeps only its message.
@@ -1797,12 +1551,10 @@ fn log_output(
 }
 
 struct BranchRead<'a> {
-    git: &'a Path,
-    env: &'a [(&'static str, OsString)],
-    workspace: &'a Path,
+    git: &'a Git<'a>,
     deadline: tokio::time::Instant,
     hidden: &'a HiddenPaths,
-    repository: &'a Repository,
+    history_complete: bool,
     budget: usize,
 }
 
@@ -1822,65 +1574,13 @@ enum UpstreamStatus {
     NotApplicable,
 }
 
-type PackedUpstreams = BTreeMap<String, UpstreamStatus>;
-
 impl BranchRead<'_> {
-    fn packed_upstreams(
-        &self,
-        config: Option<&UpstreamConfig>,
-        listed: &[&[u8]],
-    ) -> Result<PackedUpstreams, ToolError> {
-        let mut targets: PackedUpstreams = listed
-            .iter()
-            .filter_map(|record| {
-                let name = std::str::from_utf8(record.split(|byte| *byte == 0).next()?).ok()?;
-                let branch = name.strip_prefix("refs/heads/")?;
-                let target = config?.upstream(branch).ok()??;
-                Some((target, UpstreamStatus::Gone))
-            })
-            .collect();
-        if targets.is_empty() {
-            return Ok(targets);
-        }
-        if tokio::time::Instant::now() >= self.deadline {
-            return Err(ToolError::Timeout(String::new()));
-        }
-        let packed =
-            match read_optional(&self.repository.git_dir, "packed-refs", MAX_SNAPSHOT_BYTES) {
-                Ok(packed) => packed.unwrap_or_default(),
-                Err(_) => {
-                    targets
-                        .values_mut()
-                        .for_each(|status| *status = UpstreamStatus::Unsupported);
-                    return Ok(targets);
-                }
-            };
-        for line in packed.split(|byte| *byte == b'\n') {
-            if tokio::time::Instant::now() >= self.deadline {
-                return Err(ToolError::Timeout(String::new()));
-            }
-            if let Some((oid, name)) = std::str::from_utf8(line)
-                .ok()
-                .and_then(|line| line.split_once(' '))
-                && let Some(status) = targets.get_mut(name)
-                && *status == UpstreamStatus::Gone
-            {
-                *status = if object_id(oid.as_bytes()).is_ok() {
-                    UpstreamStatus::Present
-                } else {
-                    UpstreamStatus::Unsupported
-                };
-            }
-        }
-        Ok(targets)
-    }
-
     async fn capture(
         &self,
         argv: &[String],
         deadline: tokio::time::Instant,
     ) -> Result<Captured, ToolError> {
-        spawn_git(self.git, argv, self.env, self.workspace, deadline).await
+        self.git.run(argv, Io::default(), deadline).await
     }
 
     fn failed(&self, capture: &Captured) -> Option<Value> {
@@ -1920,7 +1620,13 @@ impl BranchRead<'_> {
                 .await
             {
                 Err(ToolError::Timeout(_)) => {
-                    return Ok(branch_result(self.repository, Vec::new(), None, true, true));
+                    return Ok(branch_result(
+                        self.history_complete,
+                        Vec::new(),
+                        None,
+                        true,
+                        true,
+                    ));
                 }
                 result => result?,
             };
@@ -1943,14 +1649,14 @@ impl BranchRead<'_> {
             .await?
         {
             BranchCompletion::Finished { truncated } => Ok(branch_result(
-                self.repository,
+                self.history_complete,
                 rows.rows,
                 comparison,
                 truncated,
                 false,
             )),
             BranchCompletion::TimedOut => Ok(branch_result(
-                self.repository,
+                self.history_complete,
                 rows.rows,
                 comparison,
                 true,
@@ -1970,27 +1676,13 @@ impl BranchRead<'_> {
         if tokio::time::Instant::now() >= self.deadline {
             return Ok(BranchCompletion::TimedOut);
         }
-        let upstreams = upstream_config(&self.repository.config);
         let listed = records(&list.stdout, b'\n', list.overflow)?;
         let mut truncated = list.overflow || listed.len() > max_count as usize;
-        let packed = match self.packed_upstreams(
-            upstreams.as_ref(),
-            &listed[..listed.len().min(max_count as usize)],
-        ) {
-            Err(ToolError::Timeout(_)) => return Ok(BranchCompletion::TimedOut),
-            result => result?,
-        };
         for record in listed.into_iter().take(max_count as usize) {
             if tokio::time::Instant::now() >= self.deadline {
                 return Ok(BranchCompletion::TimedOut);
             }
-            let mut row = branch_row(
-                record,
-                upstreams.as_ref(),
-                &self.repository.git_dir,
-                &packed,
-                comparison.is_some(),
-            )?;
+            let mut row = branch_row(record, comparison.is_some())?;
             truncated |= row["name_truncated"] == true || row["symbolic_target_truncated"] == true;
             let enrich = self.hidden.is_empty()
                 && row["symbolic_target"].is_null()
@@ -2071,7 +1763,7 @@ impl BranchRead<'_> {
             capture.overflow,
             &oid,
             self.hidden,
-            !self.repository.links.contains(&"shallow"),
+            self.history_complete,
         )?;
         row["subject_withheld"] = json!(subject.is_none());
         row["subject"] = json!(subject);
@@ -2110,25 +1802,19 @@ impl BranchRead<'_> {
 }
 
 fn branch_result(
-    repository: &Repository,
+    history_complete: bool,
     branches: Vec<Value>,
     comparison_base: Option<Value>,
     truncated: bool,
     timed_out: bool,
 ) -> Value {
     json!({"branches": branches, "comparison_base": comparison_base,
-        "history_complete": !repository.links.contains(&"shallow"), "truncated": truncated, "timed_out": timed_out})
+        "history_complete": history_complete, "truncated": truncated, "timed_out": timed_out})
 }
 
-fn branch_row(
-    raw: &[u8],
-    config: Option<&UpstreamConfig>,
-    git_dir: &Dir,
-    packed: &PackedUpstreams,
-    comparison: bool,
-) -> Result<Value, ToolError> {
+fn branch_row(raw: &[u8], comparison: bool) -> Result<Value, ToolError> {
     let fields: Vec<_> = raw.split(|byte| *byte == 0).collect();
-    let [name, oid, head, symbolic, kind] = fields.as_slice() else {
+    let [name, oid, head, symbolic, kind, upstream, track] = fields.as_slice() else {
         return Err(ToolError::Operation);
     };
     let name_exact = std::str::from_utf8(name).is_ok();
@@ -2141,10 +1827,20 @@ fn branch_row(
     let symbolic_exact = std::str::from_utf8(symbolic).is_ok();
     let symbolic_text = String::from_utf8_lossy(symbolic);
     let symbolic = (!symbolic.is_empty()).then_some(symbolic_text.as_ref());
-    let (upstream, status) = if local && !name_exact {
+    let (upstream, status) = if !local {
+        (None, UpstreamStatus::NotApplicable)
+    } else if !name_exact || std::str::from_utf8(upstream).is_err() {
         (None, UpstreamStatus::Unsupported)
+    } else if upstream.is_empty() {
+        (None, UpstreamStatus::Unavailable)
     } else {
-        upstream_status(config, git_dir, packed, name)
+        let target = String::from_utf8_lossy(upstream).into_owned();
+        let status = if *track == b"gone" {
+            UpstreamStatus::Gone
+        } else {
+            UpstreamStatus::Present
+        };
+        (Some(target), status)
     };
     let commit = *kind == b"commit";
     let mut row = json!({"name": bounded_ref_name(name), "name_truncated": !name_exact || name.len() > REF_BYTES,
@@ -2227,170 +1923,6 @@ fn tip_subject(
     Ok(visible.then(|| subject.to_owned()))
 }
 
-fn upstream_status(
-    config: Option<&UpstreamConfig>,
-    git_dir: &Dir,
-    packed: &PackedUpstreams,
-    name: &str,
-) -> (Option<String>, UpstreamStatus) {
-    let Some(branch) = name.strip_prefix("refs/heads/") else {
-        return (None, UpstreamStatus::NotApplicable);
-    };
-    match config.map(|config| config.upstream(branch)) {
-        Some(Ok(Some(target))) => match loose_ref(git_dir, &target) {
-            Ok(Some(_)) => (Some(target), UpstreamStatus::Present),
-            Ok(None) => match packed
-                .get(&target)
-                .copied()
-                .unwrap_or(UpstreamStatus::Unsupported)
-            {
-                status @ (UpstreamStatus::Present | UpstreamStatus::Gone) => (Some(target), status),
-                UpstreamStatus::Unavailable
-                | UpstreamStatus::Unsupported
-                | UpstreamStatus::NotApplicable => (None, UpstreamStatus::Unsupported),
-            },
-            Err(_) => (None, UpstreamStatus::Unsupported),
-        },
-        Some(Ok(None)) => (None, UpstreamStatus::Unavailable),
-        Some(Err(())) | None => (None, UpstreamStatus::Unsupported),
-    }
-}
-
-struct UpstreamConfig {
-    values: std::collections::BTreeMap<(String, String, String), Vec<String>>,
-}
-
-// Configuration is descriptive data only; Git always receives VIEW_CONFIG.
-fn upstream_config(bytes: &[u8]) -> Option<UpstreamConfig> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let mut values = std::collections::BTreeMap::<_, Vec<String>>::new();
-    let mut section = (String::new(), String::new());
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with(['#', ';']) {
-            continue;
-        }
-        if line.contains('\\') || line.matches('"').count() % 2 != 0 {
-            return None;
-        }
-        if line.starts_with('[') {
-            let header = line.strip_prefix('[')?.strip_suffix(']')?.trim();
-            let (kind, name) = header
-                .split_once(char::is_whitespace)
-                .unwrap_or((header, ""));
-            let kind = kind.to_ascii_lowercase();
-            if matches!(kind.split('.').next(), Some("include" | "includeif"))
-                || kind.starts_with("branch.")
-                || kind.starts_with("remote.")
-            {
-                return None;
-            }
-            let name = name.trim();
-            let name = if name.is_empty() {
-                ""
-            } else {
-                name.strip_prefix('"')?.strip_suffix('"')?
-            };
-            if name.contains(['\\', '"']) {
-                return None;
-            }
-            section = (kind, name.to_owned());
-            continue;
-        }
-        if !matches!(section.0.as_str(), "branch" | "remote") {
-            continue;
-        }
-        let (key, value) = line.split_once('=')?;
-        let key = key.trim().to_ascii_lowercase();
-        if !matches!(
-            (section.0.as_str(), key.as_str()),
-            ("branch", "remote" | "merge") | ("remote", "fetch")
-        ) {
-            continue;
-        }
-        let value = value.trim();
-        let value = if value.starts_with('"') {
-            value.strip_prefix('"')?.strip_suffix('"')?
-        } else {
-            value
-        };
-        if value.contains(['\\', '"']) {
-            return None;
-        }
-        values
-            .entry((section.0.clone(), section.1.clone(), key))
-            .or_default()
-            .push(value.to_owned());
-    }
-    Some(UpstreamConfig { values })
-}
-
-impl UpstreamConfig {
-    fn upstream(&self, branch: &str) -> Result<Option<String>, ()> {
-        let get = |section: &str, name: &str, key: &str| {
-            self.values.get(&(section.into(), name.into(), key.into()))
-        };
-        let remote = get("branch", branch, "remote");
-        let merge = get("branch", branch, "merge");
-        if remote.is_some_and(|values| values.len() != 1)
-            || merge.is_some_and(|values| values.len() != 1)
-        {
-            return Err(());
-        }
-        if remote.is_none() || merge.is_none() {
-            return Ok(None);
-        }
-        let ([remote], [merge]) = (remote.ok_or(())?.as_slice(), merge.ok_or(())?.as_slice())
-        else {
-            return Err(());
-        };
-        if !merge.starts_with("refs/heads/") || !valid_branch(merge) {
-            return Err(());
-        }
-        if remote == "." {
-            return Ok(Some(merge.clone()));
-        }
-        if !valid_branch(remote) {
-            return Err(());
-        }
-        let Some(mappings) = get("remote", remote, "fetch") else {
-            return Ok(None);
-        };
-        let [mapping] = mappings.as_slice() else {
-            return Err(());
-        };
-        let mapping = mapping.strip_prefix('+').unwrap_or(mapping);
-        let (source, target) = mapping.split_once(':').ok_or(())?;
-        if !source.starts_with("refs/heads/")
-            || !(target.starts_with("refs/heads/") || target.starts_with("refs/remotes/"))
-        {
-            return Err(());
-        }
-        let target = match (source.split_once('*'), target.split_once('*')) {
-            (None, None) if valid_branch(source) && valid_branch(target) && source == merge => {
-                target.to_owned()
-            }
-            (Some((prefix, suffix)), Some((before, after)))
-                if !suffix.contains('*')
-                    && !after.contains('*')
-                    && valid_branch(&source.replace('*', "branch"))
-                    && valid_branch(&target.replace('*', "branch")) =>
-            {
-                let middle = merge
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.strip_suffix(suffix))
-                    .ok_or(())?;
-                format!("{before}{middle}{after}")
-            }
-            _ => return Err(()),
-        };
-        if !valid_branch(&target) {
-            return Err(());
-        }
-        Ok(Some(target))
-    }
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -2402,12 +1934,29 @@ pub(super) mod tests {
         HiddenPaths::default()
     }
 
+    // The test process's own Git, resolved the way a Run resolves it.
+    pub(super) fn git_program() -> super::super::config::Program {
+        let root = tempfile::tempdir().unwrap();
+        resolve(&environment(root.path(), root.path(), Path::new("/"))).expect("git on PATH")
+    }
+
+    // A Run's Git environment for `workspace`, with `home` as the user's home directory.
+    pub(super) fn environment(workspace: &Path, editors: &Path, home: &Path) -> Environment {
+        Environment::from_variables(workspace, editors, |name| match name {
+            "HOME" => Some(home.into()),
+            // Isolated child fixtures clear the environment; the platform directories still hold Git.
+            "PATH" => Some(std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into())),
+            _ => None,
+        })
+        .unwrap()
+    }
+
     pub(super) fn host_git_output(
         repository: &Path,
         home: &Path,
         args: &[&str],
     ) -> std::process::Output {
-        std::process::Command::new(discover().expect("pinned git").executable)
+        std::process::Command::new(git_program().executable)
             // `git commit` otherwise detaches `maintenance run --auto`, which can write `.git` after the fixture returns.
             .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .args(args)
@@ -2543,6 +2092,15 @@ pub(super) mod tests {
         markers
     }
 
+    // Hostile markers the cage must prevent; the user's out-of-folder filter driver is allowed.
+    pub(super) fn caged_markers(markers: &Path) -> Vec<String> {
+        std::fs::read_dir(markers)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "clean")
+            .collect()
+    }
+
     pub(super) fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(root: &Path, path: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
@@ -2610,35 +2168,29 @@ pub(super) mod tests {
 
     fn run_filtered(
         workspace: &Path,
-        scratch: &Path,
+        editors: &Path,
         call: &ToolCall,
         hidden: &HiddenPaths,
     ) -> Value {
-        let git = discover().expect("pinned system git");
+        let program = git_program();
+        let home = workspace.parent().unwrap().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let environment = environment(workspace, editors, &home);
+        let git = Git::workspace(&program, &environment);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let output = runtime
-            .block_on(execute(GitReadRequest {
-                workspace,
-                scratch,
-                git: &git,
+            .block_on(execute(
+                &git,
                 call,
                 hidden,
-                max_bytes: 16 * 1024,
-                runtime: Duration::from_secs(30),
-            }))
+                16 * 1024,
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ))
             .expect("typed Git read");
         serde_json::from_str(&output).unwrap()
-    }
-
-    pub(super) struct RestoreMode(pub(super) PathBuf);
-
-    impl Drop for RestoreMode {
-        fn drop(&mut self) {
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
-        }
     }
 
     fn branches(scope: Option<&str>, base: Option<&str>, max_count: Option<u32>) -> ToolCall {
@@ -2834,8 +2386,8 @@ pub(super) mod tests {
             &scratch(temp.path(), 503),
             &branches(None, None, Some(1)),
         );
-        assert_eq!(hostile["branches"][0]["upstream_status"], "unsupported");
-        assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
+        assert_eq!(hostile["branches"][0]["upstream_status"], "present");
+        assert_eq!(caged_markers(&markers), Vec::<String>::new());
         let missing = run_call(
             &workspace,
             &scratch(temp.path(), 504),
@@ -2887,17 +2439,9 @@ pub(super) mod tests {
         assert_eq!(main["subject"], "second commit");
         assert_eq!(main["ahead"], 0);
         assert_eq!(main["counts_withheld"], false);
-        let repository = inspect(&workspace).unwrap().ok().unwrap();
         let name = format!("refs/heads/{}", "\u{00e9}".repeat(REF_BYTES));
-        let raw = format!("{name}\0{}\0 \0\0commit", main["oid"].as_str().unwrap());
-        let clipped = branch_row(
-            raw.as_bytes(),
-            None,
-            &repository.git_dir,
-            &PackedUpstreams::new(),
-            false,
-        )
-        .unwrap();
+        let raw = format!("{name}\0{}\0 \0\0commit\0\0", main["oid"].as_str().unwrap());
+        let clipped = branch_row(raw.as_bytes(), false).unwrap();
         assert_eq!(clipped["name_truncated"], true);
         let shown = clipped["name"].as_str().unwrap();
         assert!(shown.len() <= REF_BYTES && name.starts_with(shown));
@@ -2963,15 +2507,8 @@ pub(super) mod tests {
         assert_eq!(main["name_truncated"], false);
         assert_eq!(main["subject"], "second commit");
         let mut alias = format!("refs/remotes/review/alias\0{oid}\0 \0").into_bytes();
-        alias.extend_from_slice(b"refs/remotes/review/legacy-\xff\0commit");
-        let alias = branch_row(
-            &alias,
-            None,
-            &repository.git_dir,
-            &PackedUpstreams::new(),
-            false,
-        )
-        .unwrap();
+        alias.extend_from_slice(b"refs/remotes/review/legacy-\xff\0commit\0\0");
+        let alias = branch_row(&alias, false).unwrap();
         assert_eq!(alias["name_truncated"], false);
         assert_eq!(
             alias["symbolic_target"],
@@ -2984,7 +2521,7 @@ pub(super) mod tests {
     fn import_refs(workspace: &Path, home: &Path, import: &str) {
         let input = home.join("refs.import");
         std::fs::write(&input, import).unwrap();
-        let output = std::process::Command::new(discover().unwrap().executable)
+        let output = std::process::Command::new(git_program().executable)
             .args([
                 "-c",
                 "maintenance.auto=false",
@@ -3053,54 +2590,39 @@ pub(super) mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn timed_out_git_requires_confirmed_reaping_before_continuation() {
-        use std::os::unix::process::ExitStatusExt;
-        let reaped = async { Ok(std::process::ExitStatus::from_raw(9)) };
-        assert!(matches!(
-            timeout_after_reap(reaped).await,
-            ToolError::Timeout(_)
-        ));
-        let failed = async { Err(std::io::Error::other("reap failed")) };
-        assert!(matches!(
-            timeout_after_reap(failed).await,
-            ToolError::Operation
-        ));
-        let start = tokio::time::Instant::now();
-        let pending = std::future::pending();
-        assert!(matches!(
-            timeout_after_reap(pending).await,
-            ToolError::Operation
-        ));
-        assert_eq!(start.elapsed(), Duration::from_secs(1));
-    }
-
     #[tokio::test]
     async fn branch_deadline_returns_the_completed_prefix_without_dispatch() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
-        let git = discover().unwrap();
+        let program = git_program();
+        let environment = environment(
+            &workspace,
+            &scratch(temp.path(), 510),
+            &temp.path().join("home"),
+        );
+        let git = Git::workspace(&program, &environment);
         let hidden = none();
-        let first = execute(GitReadRequest {
-            workspace: &workspace,
-            scratch: &scratch(temp.path(), 510),
-            git: &git,
-            call: &branches(None, None, Some(1)),
-            hidden: &hidden,
-            max_bytes: 16 * 1024,
-            runtime: MAX_GIT_RUNTIME,
-        })
+        let deadline = tokio::time::Instant::now() + MAX_GIT_RUNTIME;
+        let first = execute(
+            &git,
+            &branches(None, None, Some(1)),
+            &hidden,
+            16 * 1024,
+            deadline,
+        )
         .await
         .unwrap();
         let first: Value = serde_json::from_str(&first).unwrap();
-        let repository = inspect(&workspace).unwrap().ok().unwrap();
+        let missing = super::super::config::Program {
+            executable: "/no-dispatch".into(),
+            ..program.clone()
+        };
+        let stopped = Git::workspace(&missing, &environment);
         let read = BranchRead {
-            git: Path::new("/no-dispatch"),
-            env: &[],
-            workspace: &workspace,
+            git: &stopped,
             deadline: tokio::time::Instant::now() - Duration::from_secs(1),
             hidden: &hidden,
-            repository: &repository,
+            history_complete: true,
             budget: 16 * 1024,
         };
         let mut rows = Rows::new(read.budget);
@@ -3110,172 +2632,23 @@ pub(super) mod tests {
             read.collect(&pending, 1, None, &mut rows).await.unwrap(),
             BranchCompletion::TimedOut
         ));
-        let result = branch_result(&repository, rows.rows, None, true, true);
+        let result = branch_result(true, rows.rows, None, true, true);
         assert_eq!(result["branches"], first["branches"]);
         assert_eq!(result["timed_out"], true);
         assert_eq!(result["truncated"], true);
-        let expired = execute(GitReadRequest {
-            workspace: &workspace,
-            scratch: &scratch(temp.path(), 511),
-            git: &git,
-            call: &branches(None, None, None),
-            hidden: &hidden,
-            max_bytes: 16 * 1024,
-            runtime: Duration::ZERO,
-        })
+        let expired = execute(
+            &git,
+            &branches(None, None, None),
+            &hidden,
+            16 * 1024,
+            tokio::time::Instant::now() + BRANCH_CLEANUP_RESERVE,
+        )
         .await
         .unwrap();
         let expired: Value = serde_json::from_str(&expired).unwrap();
         assert_eq!(expired["branches"], json!([]));
         assert_eq!(expired["timed_out"], true);
         assert_eq!(expired["truncated"], true);
-    }
-
-    #[test]
-    fn upstream_metadata_reports_only_supported_direct_associations() {
-        let direct = "[branch \"topic\"]\nremote = review\nmerge = refs/heads/topic\n";
-        for (label, extra, expected) in [
-            (
-                "literal",
-                "[remote \"review\"]\nfetch = +refs/heads/topic:refs/remotes/review/other\n",
-                Ok(Some("refs/remotes/review/other".to_owned())),
-            ),
-            (
-                "wildcard",
-                "[remote \"review\"]\nfetch = refs/heads/*:refs/remotes/review/*\n",
-                Ok(Some("refs/remotes/review/topic".to_owned())),
-            ),
-            ("missing", "", Ok(None)),
-            (
-                "continued section",
-                "[core]\nignored = \\\n[remote \"review\"]\nfetch = refs/heads/*:refs/remotes/review/*\n",
-                Err(()),
-            ),
-            (
-                "negative",
-                "[remote \"review\"]\nfetch = ^refs/heads/topic\n",
-                Err(()),
-            ),
-            (
-                "duplicate",
-                "[remote \"review\"]\nfetch = refs/heads/*:refs/remotes/review/*\nfetch = refs/heads/*:refs/remotes/review/*\n",
-                Err(()),
-            ),
-            (
-                "ambiguous",
-                "[branch \"topic\"]\nremote = origin\n",
-                Err(()),
-            ),
-            ("include", "[include]\npath = outside\n", Err(())),
-            (
-                "conditional include",
-                "[includeIf \"gitdir:somewhere\"]\npath = outside\n",
-                Err(()),
-            ),
-            (
-                "old include syntax",
-                "[includeif.gitdir:somewhere]\npath = outside\n",
-                Err(()),
-            ),
-            (
-                "escaped",
-                "[branch \"topic\"]\nmerge = \"refs/heads/other\\t\"\n",
-                Err(()),
-            ),
-            (
-                "continuation",
-                "[remote \"review\"]\nfetch = refs/heads/*:\\\nrefs/remotes/review/*\n",
-                Err(()),
-            ),
-            (
-                "multiple wildcards",
-                "[remote \"review\"]\nfetch = refs/heads/**:refs/remotes/review/**\n",
-                Err(()),
-            ),
-        ] {
-            let config = format!("{direct}{extra}");
-            let actual = upstream_config(config.as_bytes())
-                .ok_or(())
-                .and_then(|config| config.upstream("topic"));
-            assert_eq!(actual, expected, "{label}");
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = fixture(temp.path());
-        let home = temp.path().join("home");
-        let head = host_git_output(&workspace, &home, &["rev-parse", "HEAD"]);
-        let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
-        host_git(
-            &workspace,
-            &home,
-            &["update-ref", "refs/remotes/review/topic", &head],
-        );
-        host_git(&workspace, &home, &["pack-refs", "--all"]);
-        let config = upstream_config(format!("{direct}[remote \"review\"]\nfetch = refs/heads/*:refs/remotes/review/*\n[branch \"alias\"]\nremote = review\nmerge = refs/heads/topic\n").as_bytes()).unwrap();
-        let repository = inspect(&workspace).unwrap().ok().unwrap();
-        let hidden = none();
-        let read = BranchRead {
-            git: Path::new("/no-dispatch"),
-            env: &[],
-            workspace: &workspace,
-            deadline: tokio::time::Instant::now() + MAX_GIT_RUNTIME,
-            hidden: &hidden,
-            repository: &repository,
-            budget: 16 * 1024,
-        };
-        let listed: &[&[u8]] = &[b"refs/heads/topic\0", b"refs/heads/alias\0"];
-        let packed = read.packed_upstreams(Some(&config), listed).unwrap();
-        assert_eq!(packed.len(), 1);
-        std::fs::remove_file(workspace.join(".git/packed-refs")).unwrap();
-        for branch in ["refs/heads/topic", "refs/heads/alias"] {
-            assert_eq!(
-                upstream_status(Some(&config), &repository.git_dir, &packed, branch),
-                (
-                    Some("refs/remotes/review/topic".into()),
-                    UpstreamStatus::Present
-                )
-            );
-        }
-        std::fs::write(
-            workspace.join(".git/packed-refs"),
-            "invalid refs/remotes/review/topic\n",
-        )
-        .unwrap();
-        let malformed = read.packed_upstreams(Some(&config), listed).unwrap();
-        assert_eq!(
-            upstream_status(
-                Some(&config),
-                &repository.git_dir,
-                &malformed,
-                "refs/heads/topic"
-            ),
-            (None, UpstreamStatus::Unsupported)
-        );
-        let loose = workspace.join(".git/refs/remotes/review/topic");
-        std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
-        std::fs::write(&loose, format!("{head}\n")).unwrap();
-        assert_eq!(
-            upstream_status(
-                Some(&config),
-                &repository.git_dir,
-                &malformed,
-                "refs/heads/topic"
-            ),
-            (
-                Some("refs/remotes/review/topic".into()),
-                UpstreamStatus::Present
-            )
-        );
-        std::fs::remove_file(&loose).unwrap();
-        std::os::unix::fs::symlink(workspace.join("src/main.rs"), &loose).unwrap();
-        assert_eq!(
-            upstream_status(
-                Some(&config),
-                &repository.git_dir,
-                &packed,
-                "refs/heads/topic"
-            ),
-            (None, UpstreamStatus::Unsupported)
-        );
     }
 
     #[test]
@@ -3381,38 +2754,6 @@ pub(super) mod tests {
             &branches(None, None, Some(1)),
         );
         assert!(missing["failed"].is_string());
-    }
-
-    #[test]
-    fn discover_pins_the_root_owned_system_git() {
-        let git = discover().expect("pinned system git");
-        assert_eq!(git.name, "git");
-        assert!(git_root(Path::new(&git.executable)));
-        assert_eq!(
-            git.sha256,
-            hex_digest(&std::fs::read(&git.executable).unwrap())
-        );
-        assert!(!git.interpreter && git.inputs.is_empty());
-        verify_host_executable(&git).unwrap();
-        let mut wrong = git.clone();
-        wrong.sha256 = "0".repeat(64);
-        assert!(matches!(
-            verify_host_executable(&wrong),
-            Err(ToolError::ChangedInput)
-        ));
-    }
-
-    #[test]
-    fn executable_magic_matches_the_platform_format() {
-        let git = discover().expect("pinned system git");
-        assert!(executable_bytes(&git.executable).is_ok());
-        let temp = tempfile::tempdir().unwrap();
-        let script = temp.path().join("git");
-        std::fs::write(&script, b"#!/bin/sh\n").unwrap();
-        assert!(matches!(
-            executable_bytes(script.to_str().unwrap()),
-            Err(ToolError::ChangedInput)
-        ));
     }
 
     #[test]
@@ -3560,39 +2901,6 @@ pub(super) mod tests {
             invocations(&ToolCall::List { path: "src".into() }, false),
             Err(ToolError::Configuration)
         ));
-    }
-
-    #[test]
-    fn environment_is_a_closed_allowlist() {
-        let env = environment(
-            Path::new("/s/git-view"),
-            Path::new("/workspace"),
-            Path::new("/scratch"),
-        );
-        let keys: Vec<&str> = env.iter().map(|(key, _)| *key).collect();
-        assert_eq!(
-            keys,
-            [
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "HOME",
-                "PATH",
-                "GIT_CONFIG_NOSYSTEM",
-                "GIT_CONFIG_GLOBAL",
-                "GIT_ATTR_NOSYSTEM",
-                "GIT_OPTIONAL_LOCKS",
-                "GIT_NO_REPLACE_OBJECTS",
-                "GIT_NO_LAZY_FETCH",
-                "GIT_TERMINAL_PROMPT",
-                "LC_ALL",
-                "TZ",
-            ]
-        );
-        let value = |key: &str| env.iter().find(|(name, _)| *name == key).unwrap().1.clone();
-        assert_eq!(value("GIT_DIR"), OsString::from("/s/git-view"));
-        assert_eq!(value("GIT_CONFIG_GLOBAL"), OsString::from("/dev/null"));
-        assert_eq!(value("GIT_NO_REPLACE_OBJECTS"), OsString::from("1"));
-        assert_eq!(value("PATH"), OsString::from("/usr/bin:/bin"));
     }
 
     fn captured(stdout: &[u8], overflow: bool) -> Captured {
@@ -3750,7 +3058,6 @@ pub(super) mod tests {
         ));
 
         std::fs::remove_file(workspace.join(".gitignore")).unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink("missing", workspace.join(".gitignore")).unwrap();
         assert!(matches!(
             GitDisclosure::new(
@@ -4075,214 +3382,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn view_contains_only_fixed_configuration_and_data_links() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = fixture(temp.path());
-        arm_hostile(temp.path(), &workspace);
-        let view = temp.path().join("scratch").join(VIEW);
-        std::fs::create_dir_all(view.parent().unwrap()).unwrap();
-        assert!(matches!(
-            prepare_view(&workspace, &view),
-            Ok(Prepared::Ready(_))
-        ));
-
-        let mut names: Vec<String> = std::fs::read_dir(&view)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, ["HEAD", "config", "index", "objects", "refs"]);
-        assert_eq!(std::fs::read(view.join("config")).unwrap(), VIEW_CONFIG);
-        assert!(
-            std::fs::symlink_metadata(view.join("index"))
-                .unwrap()
-                .is_file()
-        );
-        assert_eq!(
-            std::fs::read(view.join("index")).unwrap(),
-            std::fs::read(workspace.join(".git/index")).unwrap()
-        );
-        let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
-        assert_eq!(
-            modified(&view.join("index")),
-            modified(&workspace.join(".git/index")),
-            "a fresh index mtime hides same-size edits from Git's racy-stat check"
-        );
-        assert_eq!(
-            std::fs::read_to_string(view.join("HEAD")).unwrap(),
-            "ref: refs/heads/main\n"
-        );
-        assert_eq!(
-            std::fs::read_link(view.join("objects")).unwrap(),
-            workspace.join(".git/objects")
-        );
-    }
-
-    #[test]
-    fn oversized_index_is_a_typed_limit_error() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("workspace");
-        let git = workspace.join(".git");
-        std::fs::create_dir_all(git.join("objects")).unwrap();
-        std::fs::create_dir(git.join("refs")).unwrap();
-        std::fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-        std::fs::File::create(git.join("index"))
-            .unwrap()
-            .set_len(MAX_SNAPSHOT_BYTES as u64 + 1)
-            .unwrap();
-        let view = temp.path().join(VIEW);
-        assert!(matches!(
-            prepare_view(&workspace, &view),
-            Err(ToolError::Limit)
-        ));
-        assert!(!view.exists());
-    }
-
-    #[test]
-    fn unsupported_git_metadata_is_not_an_enforcement_cause() {
-        use nix::{sys::stat::Mode, unistd::mkfifo};
-        for name in ["HEAD", "config"] {
-            for kind in ["regular", "directory", "hardlink", "fifo"] {
-                let temp = tempfile::tempdir().unwrap();
-                let workspace = temp.path().join("workspace");
-                let git = workspace.join(".git");
-                std::fs::create_dir_all(git.join("objects")).unwrap();
-                std::fs::create_dir(git.join("refs")).unwrap();
-                std::fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-                std::fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n")
-                    .unwrap();
-                let target = git.join(name);
-                match kind {
-                    "regular" => {}
-                    "directory" => {
-                        std::fs::remove_file(&target).unwrap();
-                        std::fs::create_dir(&target).unwrap();
-                    }
-                    "hardlink" => std::fs::hard_link(&target, temp.path().join("alias")).unwrap(),
-                    "fifo" => {
-                        std::fs::remove_file(&target).unwrap();
-                        mkfifo(&target, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
-                    }
-                    _ => unreachable!(),
-                }
-                let view = temp.path().join("view");
-                let prepared = prepare_view(&workspace, &view);
-                if kind == "regular" {
-                    assert!(matches!(prepared, Ok(Prepared::Ready(_))), "{name}/{kind}");
-                } else {
-                    assert!(
-                        matches!(prepared, Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT))),
-                        "{name}/{kind} must retain the unsupported-layout outcome"
-                    );
-                    assert!(!view.exists());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unsupported_repositories_fail_closed_without_running_git() {
-        let check = |name: &str, prepare: &dyn Fn(&Path, &Path), message: &str| {
-            let temp = tempfile::tempdir().unwrap();
-            let workspace = fixture(temp.path());
-            prepare(temp.path(), &workspace);
-            let value = run_call(
-                &workspace,
-                &scratch(temp.path(), 0),
-                &ToolCall::GitStatus { path: ".".into() },
-            );
-            assert_eq!(value, json!({"failed": message}), "{name}");
-        };
-        check(
-            "no .git",
-            &|_, workspace| std::fs::remove_dir_all(workspace.join(".git")).unwrap(),
-            NO_REPOSITORY,
-        );
-        check(
-            "gitfile",
-            &|_, workspace| {
-                std::fs::remove_dir_all(workspace.join(".git")).unwrap();
-                std::fs::write(workspace.join(".git"), "gitdir: /elsewhere\n").unwrap();
-            },
-            UNSUPPORTED_LAYOUT,
-        );
-        check(
-            "symlinked .git",
-            &|temp, workspace| {
-                let other = fixture(&temp.join("other"));
-                std::fs::remove_dir_all(workspace.join(".git")).unwrap();
-                std::os::unix::fs::symlink(other.join(".git"), workspace.join(".git")).unwrap();
-            },
-            UNSUPPORTED_LAYOUT,
-        );
-        check(
-            "extensions",
-            &|_, workspace| {
-                use std::io::Write;
-                let mut config = std::fs::OpenOptions::new()
-                    .append(true)
-                    .open(workspace.join(".git/config"))
-                    .unwrap();
-                config
-                    .write_all(b"[extensions]\n\tobjectFormat = sha256\n")
-                    .unwrap();
-            },
-            UNSUPPORTED_FORMAT,
-        );
-        check(
-            "sha256 HEAD",
-            &|_, workspace| {
-                std::fs::write(workspace.join(".git/HEAD"), format!("{}\n", "a".repeat(64)))
-                    .unwrap()
-            },
-            UNSUPPORTED_FORMAT,
-        );
-        check(
-            "symlinked objects",
-            &|_, workspace| {
-                std::fs::rename(
-                    workspace.join(".git/objects"),
-                    workspace.join(".git/objects-real"),
-                )
-                .unwrap();
-                std::os::unix::fs::symlink(
-                    workspace.join(".git/objects-real"),
-                    workspace.join(".git/objects"),
-                )
-                .unwrap();
-            },
-            UNSUPPORTED_LAYOUT,
-        );
-        check(
-            "missing refs",
-            &|_, workspace| std::fs::remove_dir_all(workspace.join(".git/refs")).unwrap(),
-            UNSUPPORTED_LAYOUT,
-        );
-        check(
-            "hard-linked config",
-            &|temp, workspace| {
-                std::fs::rename(workspace.join(".git/config"), temp.join("config-copy")).unwrap();
-                std::fs::hard_link(temp.join("config-copy"), workspace.join(".git/config"))
-                    .unwrap();
-            },
-            UNSUPPORTED_LAYOUT,
-        );
-
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = fixture(temp.path());
-        let home = temp.path().join("home");
-        host_git(&workspace, &home, &["update-index", "--split-index"]);
-        let markers = arm_hostile(temp.path(), &workspace);
-        let value = run_call(
-            &workspace,
-            &scratch(temp.path(), 1),
-            &ToolCall::GitStatus { path: ".".into() },
-        );
-        assert_eq!(value["failed"], "git exited with status 128");
-        assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
-    }
-
-    #[test]
     fn hostile_fixture_executes_under_plain_git() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
@@ -4309,18 +3408,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn hostile_repository_configuration_never_executes() {
+    fn cage_keeps_hostile_repository_programs_from_running() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
         let markers = arm_hostile(temp.path(), &workspace);
         let before = tree(&workspace.join(".git"));
-        // Unit runs are not sandboxed; the chmod stands in for the Guard's read-only bind.
-        std::fs::set_permissions(
-            workspace.join(".git"),
-            std::fs::Permissions::from_mode(0o555),
-        )
-        .unwrap();
-        let _restore = RestoreMode(workspace.join(".git"));
 
         let mut outputs = Vec::new();
         let status = run_call(
@@ -4427,7 +3519,8 @@ pub(super) mod tests {
                 assert!(!output.contains(canary), "{canary} leaked into Tool output");
             }
         }
-        assert_eq!(std::fs::read_dir(&markers).unwrap().count(), 0);
+        // Configuration outside the folder is the user's: its filter driver may run, nothing else.
+        assert_eq!(caged_markers(&markers), Vec::<String>::new());
         assert_unchanged(&workspace.join(".git"), &before);
     }
 
@@ -4444,23 +3537,18 @@ pub(super) mod tests {
             .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
             .unwrap();
         let before = tree(&workspace.join(".git"));
-        let view_scratch = scratch(temp.path(), 0);
         let status = run_call(
             &workspace,
-            &view_scratch,
+            &scratch(temp.path(), 0),
             &ToolCall::GitStatus { path: ".".into() },
         );
         assert!(status.get("failed").is_none(), "{status}");
-        assert_eq!(
-            std::fs::read(view_scratch.join(VIEW).join("index")).unwrap(),
-            std::fs::read(workspace.join(".git/index")).unwrap()
-        );
         assert_eq!(tree(&workspace.join(".git")), before);
-        assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
+        assert_eq!(caged_markers(&markers), Vec::<String>::new());
     }
 
     #[test]
-    fn stale_stat_diff_never_writes_repository_index() {
+    fn stale_stat_diff_changes_only_the_refreshed_index() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
         let markers = arm_hostile(temp.path(), &workspace);
@@ -4491,8 +3579,17 @@ pub(super) mod tests {
         );
         let patch = diff["patch"].as_str().unwrap();
         assert!(patch.contains("-bravo") && patch.contains("+delta"));
-        assert_eq!(tree(&workspace.join(".git")), before);
-        assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
+        // Like `git diff` in a terminal, the read may refresh index stat data, never other state.
+        let without_index = |tree: Vec<(PathBuf, Vec<u8>)>| {
+            tree.into_iter()
+                .filter(|(path, _)| path != Path::new("index"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            without_index(tree(&workspace.join(".git"))),
+            without_index(before)
+        );
+        assert_eq!(caged_markers(&markers), Vec::<String>::new());
     }
 
     #[test]
@@ -4530,15 +3627,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn extensions_are_detected_after_a_byte_order_mark() {
-        assert!(uses_extensions(
-            b"\xef\xbb\xbf[extensions]\n\tobjectFormat = sha256\n"
-        ));
-        assert!(uses_extensions(b"[Extensions]\n"));
-        assert!(!uses_extensions(b"[core]\n\tbare = false\n"));
-    }
-
-    #[test]
     fn numstat_rows_and_patch_hunks_drop_secret_paths() {
         let numstat = captured(
             b"1\t1\tsrc/ok.rs\x000\t3\t.env.local\x000\t1\tcfg/.ssh/id\x000\t2\t.ENV\x00",
@@ -4556,63 +3644,6 @@ pub(super) mod tests {
         let text = value["patch"].as_str().unwrap();
         assert!(text.contains("+ok"));
         assert!(!text.contains("SECRET_CANARY"));
-    }
-
-    #[test]
-    fn user_identity_reads_only_the_user_section_as_data() {
-        for (text, expected) in [
-            (
-                "[user]\n\tname = Ana Lima\n\temail = ana@example.com\n",
-                (Some("Ana Lima"), Some("ana@example.com")),
-            ),
-            (
-                "[User]\nName = \"Ana # Lima\"\nemail = ana@example.com ; work\n",
-                (Some("Ana # Lima"), Some("ana@example.com")),
-            ),
-            (
-                "[user \"x\"]\n\tname = sub\n[core]\n\tname = other\n",
-                (None, None),
-            ),
-            (
-                "[include]\n\tpath = elsewhere\n[user]\n\tname = \"esc\\\"aped\"\n",
-                (None, None),
-            ),
-        ] {
-            let (name, email) = user_section(text);
-            assert_eq!((name.as_deref(), email.as_deref()), expected, "{text}");
-        }
-        assert!(GitIdentity::default().valid());
-        for (name, email) in [
-            ("", "a@b"),
-            ("A <b>", "a@b"),
-            ("A", "a b@c"),
-            ("A\n", "a@b"),
-        ] {
-            assert!(
-                !GitIdentity {
-                    name: name.into(),
-                    email: email.into()
-                }
-                .valid()
-            );
-        }
-    }
-
-    #[test]
-    fn user_config_fifo_without_a_writer_is_refused_promptly() {
-        let dir = tempfile::tempdir().unwrap();
-        let fifo = dir.path().join("config");
-        nix::unistd::mkfifo(
-            &fifo,
-            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-        )
-        .unwrap();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || sender.send(read_user_config(&fifo)).ok());
-        let read = receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("FIFO open must not block");
-        assert!(read.is_none());
     }
 
     fn private_hidden() -> HiddenPaths {

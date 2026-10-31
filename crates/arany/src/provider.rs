@@ -11,14 +11,12 @@ mod custom;
 mod decode;
 pub(crate) mod diagnostics;
 mod effort;
-pub(crate) mod evidence;
 mod image;
 #[cfg(any(test, feature = "test-support"))]
 pub use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
 mod limits;
 mod native;
-mod native_check;
 pub use limits::{
     ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, LimitFailure, LimitSource,
     LimitUnavailable, MAX_API_LIMIT_ROWS, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES, PlanWindow,
@@ -26,6 +24,10 @@ pub use limits::{
 };
 mod openai;
 pub(crate) mod prompts;
+pub use prompts::{
+    EffectivePrompts, MAX_COMPACTION_PROMPT_OVERRIDE_BYTES, MAX_PROMPT_OVERRIDE_BYTES, PromptFile,
+    PromptOverrideError, PromptPin, PromptSource,
+};
 mod render;
 mod roster;
 pub use roster::{AdmittedRoster, NamedProviderRoutes, RosterSnapshot, valid_profile_name};
@@ -44,30 +46,25 @@ pub use catalog::{
     MAX_CATALOG_MODELS, ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
-pub(crate) use conversation::{MAX_HARNESS_FEEDBACK_BYTES, max_turn_bytes};
+pub(crate) use conversation::{MAX_HARNESS_FEEDBACK_BYTES, max_turn_bytes, valid_wire_id};
 pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
 };
+pub(crate) use custom::PROVIDER_PROFILES;
 pub(crate) use custom::resolve_admitted;
 pub use custom::{
-    CustomCheckStatus, CustomProfile, CustomProfileCheck, CustomProfileDraft, CustomProfileError,
-    CustomProtocol, CustomProvider, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
-    MAX_CUSTOM_PROFILE_EFFORTS_BYTES, MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
-    MAX_CUSTOM_PROFILE_MODEL_BYTES, MAX_CUSTOM_PROFILE_NAME_BYTES, MessagesAuth,
-    check_custom_profile, check_custom_profile_value_with_cancellation,
-    check_custom_profile_with_cancellation,
+    CustomProfile, CustomProfileDraft, CustomProfileError, CustomProtocol, CustomProvider,
+    MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES, MAX_CUSTOM_PROFILE_EFFORTS_BYTES,
+    MAX_CUSTOM_PROFILE_ENDPOINT_BYTES, MAX_CUSTOM_PROFILE_MODEL_BYTES,
+    MAX_CUSTOM_PROFILE_NAME_BYTES, MessagesAuth,
 };
-pub(crate) use custom::{MAX_ADDRESSES, PROVIDER_PROFILES};
 pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
 pub use image::{
     ImageAttachment, ImageOrigin, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES,
     ProviderImage,
 };
-pub use native_check::{
-    NativeCheckError, NativeCheckRequest, check_native_model, check_native_model_from_env,
-};
-pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
+pub use openai::{ChatGptProvider, OpenAiProvider};
 pub(crate) use render::instructions_text;
 #[cfg(feature = "test-support")]
 pub use render::semantic;
@@ -192,6 +189,9 @@ impl ProviderRecord {
     }
 }
 
+const IDLE_CONNECTIONS_PER_HOST: usize = 1;
+const IDLE_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
@@ -205,7 +205,8 @@ pub(crate) fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilde
         .retry(reqwest::retry::never())
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(timeout)
-        .pool_max_idle_per_host(0)
+        .pool_max_idle_per_host(IDLE_CONNECTIONS_PER_HOST)
+        .pool_idle_timeout(IDLE_CONNECTION_TIMEOUT)
 }
 
 async fn read_identity_body(
@@ -277,8 +278,8 @@ pub(crate) async fn rate_limit_failure(response: &mut reqwest::Response) -> Prov
     }
 }
 
-// Error codes a wait cannot clear: exhausted credit, quota, plan or spending and usage limits,
-// as Codex classifies them. Anthropic 429s are rate limits only.
+// Error codes a wait cannot clear: exhausted credit, quota, plan or spending and usage limits.
+// Anthropic 429s are rate limits only.
 const QUOTA_CODES: [&str; 7] = [
     "insufficient_quota",
     "credit_balance_exhausted",
@@ -332,8 +333,8 @@ fn max_stream_bytes(max_output_tokens: u32) -> usize {
     MAX_STREAM_ENVELOPE_BYTES_PER_EVENT * max_stream_events(max_output_tokens)
 }
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
-pub(crate) const PROBE_TOTAL_DEADLINE: Duration = Duration::from_secs(180);
-pub(crate) const PROBE_OUTPUT_CAP: u32 = 1024;
+#[cfg(test)]
+pub(crate) const SMALL_OUTPUT_CAP: u32 = 1024;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_RESPONSE_JSON_NODES: usize = MAX_RESPONSE_BYTES / 4;
 const MAX_RESPONSE_JSON_DEPTH: usize = 64;
@@ -391,8 +392,10 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
 }
 
 pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
-pub(crate) const MAX_WINDOW_REQUEST_BYTES: usize = 1280 * 1024;
 const WINDOW_REQUEST_HEADROOM_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_WINDOW_REQUEST_BYTES: usize =
+    crate::session::MAX_WINDOW_CONTENT_BYTES + WINDOW_REQUEST_HEADROOM_BYTES;
+pub const MAX_MODEL_ID_BYTES: usize = 128;
 pub const MIN_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
 pub const MAX_CONTEXT_WINDOW_TOKENS: u32 = 2_000_000;
 
@@ -407,7 +410,8 @@ pub fn admitted_context_window(tokens: u64) -> Option<u32> {
 pub(crate) fn request_ceiling(context_window_tokens: Option<u32>) -> usize {
     match context_window_tokens {
         None => MAX_PROVIDER_REQUEST_BYTES,
-        Some(_) => (crate::session::content_ceiling(context_window_tokens)
+        // Calibration may raise the content ceiling during a Run, up to its maximum ratio.
+        Some(window) => (crate::session::max_calibrated_content_ceiling(window)
             + WINDOW_REQUEST_HEADROOM_BYTES)
             .min(MAX_WINDOW_REQUEST_BYTES),
     }
@@ -632,7 +636,7 @@ impl ProviderIdentity {
             && self.profile.len() <= 128
             && ProviderKind::custom_name(&self.profile).is_none_or(valid_profile_name)
             && !self.model.is_empty()
-            && self.model.len() <= 128
+            && self.model.len() <= MAX_MODEL_ID_BYTES
             && (provider == Some(ProviderKind::Custom)) == self.custom_provenance().is_some()
             && valid_saved_api_account_id(&self.profile, self.saved_api_account_id())
             && chatgpt == self.chatgpt_provenance().is_some()
@@ -644,7 +648,8 @@ impl ProviderIdentity {
             && self
                 .custom_provenance()
                 .is_none_or(CustomProfileProvenance::valid)
-            && (1..=8).contains(&limits.concurrency)
+            && (1..=crate::session::CollaborationPolicy::MAX_ACTIVE_CHILDREN)
+                .contains(&limits.concurrency)
             && (1..=MAX_OUTPUT_TOKEN_CAP).contains(&limits.max_output_tokens)
     }
 }
@@ -734,6 +739,7 @@ impl ProviderRequest {
         }
         if !role_fits
             || !root && (input.outcome_correction || input.previous_run_failure.is_some())
+            || input.final_call && input.role != PromptRole::Primary
             || self.phase == AgentPhase::ChildWork
                 && (self.collaboration != CollaborationPolicy::Single
                     || input.goal_context_facts.is_some())
@@ -892,6 +898,8 @@ pub struct CompactionRequest {
     pub previous_summary: Option<String>,
     pub items: Vec<CompactionItem>,
     pub max_output_tokens: u32,
+    /// Supplies the compaction working style; its authority block stays compiled.
+    pub prompts: EffectivePrompts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1283,8 +1291,7 @@ impl ProviderError {
 #[serde(deny_unknown_fields)]
 pub struct CustomProfileProvenance {
     pub endpoint: String,
-    pub evidence_digest: [u8; 32],
-    pub capability_evidence_version: u32,
+    pub profile_digest: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1310,7 +1317,7 @@ impl OutputTokenBound {
 #[serde(deny_unknown_fields)]
 pub struct ChatGptProvenance {
     pub account_id: Uuid,
-    pub evidence_fingerprint: [u8; 32],
+    pub admission_fingerprint: [u8; 32],
     pub admission: ChatGptAdmission,
 }
 
@@ -1323,7 +1330,7 @@ pub enum ChatGptAdmission {
 impl ChatGptProvenance {
     pub(crate) fn valid(&self) -> bool {
         self.account_id.get_version() == Some(Version::SortRand)
-            && self.evidence_fingerprint != [0; 32]
+            && self.admission_fingerprint != [0; 32]
     }
 }
 
@@ -1332,7 +1339,6 @@ impl CustomProfileProvenance {
         !self.endpoint.is_empty()
             && self.endpoint.len() <= 512
             && !self.endpoint.chars().any(char::is_control)
-            && self.capability_evidence_version == 2
     }
 }
 
@@ -1352,14 +1358,9 @@ impl CustomProfileProvenance {
 pub trait Provider: Send + Sync {
     fn identity(&self) -> &ProviderIdentity;
 
-    /// The input window from this route's authenticated catalog evidence; `None` keeps the default bounds.
+    /// The input window from this route's authenticated catalog; `None` keeps the default bounds.
     fn context_window_tokens(&self) -> Option<u32> {
         None
-    }
-
-    /// Refreshes this route's window evidence for a new Run admission.
-    async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        self.context_window_tokens()
     }
 
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
@@ -1413,9 +1414,6 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
     }
     fn context_window_tokens(&self) -> Option<u32> {
         (**self).context_window_tokens()
-    }
-    async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        (**self).context_window_tokens_for_run().await
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         (**self).invoke(request).await
@@ -1478,8 +1476,7 @@ mod tests {
                 "custom:local",
                 Provenance::Custom(CustomProfileProvenance {
                     endpoint: "https://example.com/v1/responses".into(),
-                    evidence_digest: [7; 32],
-                    capability_evidence_version: 2,
+                    profile_digest: [7; 32],
                 }),
                 None,
             ),
@@ -1487,7 +1484,7 @@ mod tests {
                 "chatgpt",
                 Provenance::ChatGpt(ChatGptProvenance {
                     account_id: Uuid::now_v7(),
-                    evidence_fingerprint: [7; 32],
+                    admission_fingerprint: [7; 32],
                     admission: ChatGptAdmission::AccountConsent,
                 }),
                 Some(RetryCause::StreamCut),
@@ -1502,7 +1499,7 @@ mod tests {
     fn stream_bounds_follow_the_declared_output_cap() {
         for cap in [
             1,
-            PROBE_OUTPUT_CAP,
+            SMALL_OUTPUT_CAP,
             DEFAULT_OUTPUT_TOKEN_CAP,
             MAX_OUTPUT_TOKEN_CAP,
         ] {
@@ -1516,8 +1513,8 @@ mod tests {
             );
         }
         assert_eq!(max_stream_events(1), MIN_STREAM_EVENTS);
-        assert_eq!(max_stream_events(PROBE_OUTPUT_CAP), MIN_STREAM_EVENTS);
-        assert!(max_stream_bytes(PROBE_OUTPUT_CAP) < max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP));
+        assert_eq!(max_stream_events(SMALL_OUTPUT_CAP), MIN_STREAM_EVENTS);
+        assert!(max_stream_bytes(SMALL_OUTPUT_CAP) < max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP));
         assert!(
             max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP) < max_stream_bytes(MAX_OUTPUT_TOKEN_CAP)
         );

@@ -59,39 +59,25 @@ impl Http {
         self.inbox.push_back(frame);
         Ok(())
     }
-}
 
-impl Wire for Http {
-    async fn send(&mut self, message: Value) -> Result<(), ToolError> {
-        if message.get("method").is_some() && message.get("id").is_some() {
-            self.stream = None;
-            self.inbox.clear();
-        }
-        let is_call = message["method"] == "tools/call";
-        if is_call {
-            self.dispatched = true;
-            self.call_id = message["id"].clone();
-        }
+    fn post(&self, message: &Value) -> Result<reqwest::RequestBuilder, ToolError> {
         let mut request = self
             .client
             .post(self.url.clone())
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .header("MCP-Protocol-Version", VERSION)
-            .body(encode(&message)?);
+            .body(encode(message)?);
         if let Some(token) = &self.bearer {
             request = request.bearer_auth(token);
         }
         if let Some(id) = &self.session_id {
             request = request.header("Mcp-Session-Id", id);
         }
-        let mut response = request.send().await.map_err(|_| ToolError::Operation)?;
-        let status = response.status();
-        if matches!(status.as_u16(), 401 | 403) {
-            // A refusal of an auxiliary POST (a ping reply) says nothing about whether the call already ran.
-            self.unauthorized = is_call || !self.dispatched;
-            return Err(ToolError::Operation);
-        }
+        Ok(request)
+    }
+
+    fn adopt_session(&mut self, response: &reqwest::Response) -> Result<(), ToolError> {
         if self.session_id.is_none()
             && let Some(id) = response
                 .headers()
@@ -106,6 +92,44 @@ impl Wire for Http {
             }
             self.session_id = Some(id.to_owned());
         }
+        Ok(())
+    }
+}
+
+async fn read_body(response: &mut reqwest::Response) -> Result<Vec<u8>, ToolError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ToolError::Operation)? {
+        if body.len() + chunk.len() > MAX_MCP_RESPONSE_BYTES {
+            return Err(ToolError::Limit);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+impl Wire for Http {
+    async fn send(&mut self, message: Value) -> Result<(), ToolError> {
+        if message.get("method").is_some() && message.get("id").is_some() {
+            self.stream = None;
+            self.inbox.clear();
+        }
+        let is_call = message["method"] == "tools/call";
+        if is_call {
+            self.dispatched = true;
+            self.call_id = message["id"].clone();
+        }
+        let mut response = self
+            .post(&message)?
+            .send()
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        let status = response.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            // A refusal of an auxiliary POST (a ping reply) says nothing about whether the call already ran.
+            self.unauthorized = is_call || !self.dispatched;
+            return Err(ToolError::Operation);
+        }
+        self.adopt_session(&response)?;
         if status.as_u16() == 202 {
             return Ok(());
         }
@@ -127,13 +151,7 @@ impl Wire for Http {
             .unwrap_or_default();
         match kind.as_str() {
             "application/json" => {
-                let mut body = Vec::new();
-                while let Some(chunk) = response.chunk().await.map_err(|_| ToolError::Operation)? {
-                    if body.len() + chunk.len() > MAX_MCP_RESPONSE_BYTES {
-                        return Err(ToolError::Limit);
-                    }
-                    body.extend_from_slice(&chunk);
-                }
+                let body = read_body(&mut response).await?;
                 self.accept(parse_json(&body, FRAME_BYTES)?)
             }
             // Frames are serviced as they arrive: a server may wait for a `ping` reply before it answers.

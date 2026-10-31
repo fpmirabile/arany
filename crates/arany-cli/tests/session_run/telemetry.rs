@@ -1,4 +1,4 @@
-use super::loopback::{check_profile, read_request, send_response, wait_product, write_profile};
+use super::loopback::{read_request, send_response, wait_product, write_profile};
 use arany::{GoalStatus, RunStatus, SessionId, StateRoot, Store};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
@@ -220,7 +220,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     write_profile(&state, provider_port);
     let (first_team_export, team_export_gate) = mpsc::channel();
     let provider = thread::spawn(move || {
-        for index in 0..12 {
+        for index in 0..6 {
             let mut stream = crate::process::accept_with_deadline(
                 &provider_listener,
                 Duration::from_secs(10),
@@ -232,29 +232,21 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                     .windows(b"OMITTED_SECRET_CANARY".len())
                     .any(|part| part == b"OMITTED_SECRET_CANARY")
             );
-            let response_index = if index >= 8 { index - 8 } else { index };
-            let text = match response_index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!("synthetic summary SUMMARY_SECRET_CANARY"),
-                4 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child one","profile":null},{"objective":"child two","profile":null}]}})
-                }
-                _ => {
-                    serde_json::json!("RESULT_SECRET_CANARY")
-                }
+            // The single Run, the team Run (delegation, two children, synthesis), then the failed-export Run.
+            let text = if index == 1 {
+                serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child one","profile":null},{"objective":"child two","profile":null}]}})
+            } else {
+                serde_json::json!("RESULT_SECRET_CANARY")
             };
-            send_response(&mut stream, response_index, text);
-            if index == 4 {
+            // The failed-export Run receives the single Run's exact reply.
+            send_response(&mut stream, if index == 5 { 0 } else { index }, text);
+            if index == 1 {
                 team_export_gate
                     .recv_timeout(Duration::from_secs(10))
                     .expect("first team trace batch before remaining Provider replies");
             }
         }
     });
-    check_profile(&workspace, &state);
 
     let collector_listener = TcpListener::bind("127.0.0.1:0").expect("Collector listener");
     collector_listener
@@ -274,6 +266,9 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .env("OTEL_RESOURCE_ATTRIBUTES", "leak=RESOURCE_SECRET_CANARY")
         .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -309,7 +304,6 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         "OBJECTIVE_SECRET_CANARY",
         "GUIDANCE_SECRET_CANARY",
         "OMITTED_SECRET_CANARY",
-        "SUMMARY_SECRET_CANARY",
         "RESULT_SECRET_CANARY",
         "RESOURCE_SECRET_CANARY",
         "test-key",
@@ -488,6 +482,9 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     });
     let mut team = Command::new(env!("CARGO_BIN_EXE_arany"));
     team.env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["--otlp-endpoint", &format!("http://{team_address}"), "exec"])
@@ -581,7 +578,6 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
 
     let failed_state = temp.path().join("failed-state");
     write_profile(&failed_state, provider_port);
-    check_profile(&workspace, &failed_state);
 
     let refused_listener = TcpListener::bind("127.0.0.1:0").expect("failed Collector port");
     refused_listener
@@ -600,6 +596,9 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let mut unavailable = Command::new(env!("CARGO_BIN_EXE_arany"));
     unavailable
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .env("OTEL_RESOURCE_ATTRIBUTES", "leak=RESOURCE_SECRET_CANARY")
         .env("HTTP_PROXY", "http://127.0.0.1:1")
@@ -737,6 +736,9 @@ fn invalid_telemetry_configuration_exits_before_workspace_or_state_use() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .current_dir(&workspace)
             .args(["--otlp-endpoint", endpoint, "exec"])
             .arg("--state-dir")

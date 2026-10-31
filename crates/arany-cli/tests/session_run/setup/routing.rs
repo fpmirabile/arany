@@ -1,4 +1,4 @@
-use super::checks::{Presentation, acknowledge_result, assert_result_contains, inline_frame};
+use super::manager::{Presentation, acknowledge_result, assert_result_contains, inline_frame};
 use super::*;
 use arany::{AgentPhase, AgentRole, Event, ProviderSetupDisposition, ProviderSetupTargetKind};
 use serde_json::json;
@@ -8,7 +8,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-const ROUTE_CHECK_CALLS: usize = 3;
 const ROUTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MAX_WARNING_PAGES: usize = 128;
@@ -51,7 +50,7 @@ fn role_manager_saves_ordered_chains_reopens_inheritance_and_clears_in_every_pre
         let record: serde_json::Value = serde_json::from_slice(&saved).unwrap();
         assert_eq!(
             record,
-            json!({"version":2,"providers":{
+            json!({"providers":{
                 "primary":null,"child":[
                     {"provider":{"kind":"anthropic","custom_name":null},"model":"claude-sonnet-5","effort":"high","account_id":null},
                     {"provider":{"kind":"anthropic","custom_name":null},"model":"claude-opus-5-5","effort":"medium","account_id":null},
@@ -65,13 +64,13 @@ fn role_manager_saves_ordered_chains_reopens_inheritance_and_clears_in_every_pre
     }
 }
 
-fn open_roles(pty: &mut SetupPty, presentation: Presentation) {
+fn open_roles(pty: &mut Pty, presentation: Presentation) {
     let from = presentation.choose(pty, 3);
     presentation.menu(pty, from, "Role routing");
 }
 
 fn add_native(
-    pty: &mut SetupPty,
+    pty: &mut Pty,
     presentation: Presentation,
     append: usize,
     source: usize,
@@ -81,29 +80,19 @@ fn add_native(
     presentation.menu(pty, from, "Route source");
     let from = presentation.choose(pty, source);
     match presentation {
-        Presentation::ScreenReader => wait_for_after(
-            &mut pty.output,
-            &mut pty.input,
-            &mut pty.transcript,
-            &mut pty.answered,
-            from,
-            b"Input:\r\n",
-        ),
+        Presentation::ScreenReader => pty.wait_for_after(from, b"Input:\r\n"),
         Presentation::Inline => {
             inline_frame(pty, from, "Role model");
         }
     }
-    let from = pty.transcript.len();
-    pty.input
-        .write_all(format!("{model}\r").as_bytes())
-        .unwrap();
+    let from = pty.send(format!("{model}\r").as_bytes());
     presentation.menu(pty, from, "Role effort");
     let from = presentation.choose(pty, 1);
     presentation.menu(pty, from, "Edit role chain");
 }
 
 pub(super) fn confirm(
-    pty: &mut SetupPty,
+    pty: &mut Pty,
     presentation: Presentation,
     from: usize,
     title: &str,
@@ -111,16 +100,8 @@ pub(super) fn confirm(
 ) {
     match presentation {
         Presentation::ScreenReader => {
-            acknowledge_linear_pages(
-                &mut pty.output,
-                &mut pty.input,
-                &mut pty.transcript,
-                &mut pty.answered,
-                (from, b"empty Enter selects 1. Back\r\nInput:\r\n"),
-            );
-            pty.input
-                .write_all(if accept { b"2\r" } else { b"1\r" })
-                .unwrap();
+            pty.acknowledge_linear_pages((from, b"empty Enter selects 1. Back\r\nInput:\r\n"));
+            pty.send(if accept { b"2\r" } else { b"1\r" });
         }
         Presentation::Inline => {
             let mut cursor = from;
@@ -128,12 +109,10 @@ pub(super) fn confirm(
                 let screen = inline_frame(pty, cursor, title);
                 cursor = pty.transcript.len();
                 if screen.iter().any(|row| row.contains("Accept")) {
-                    pty.input
-                        .write_all(if accept { b"\t\r" } else { b"\r" })
-                        .unwrap();
+                    pty.send(if accept { b"\t\r" } else { b"\r" });
                     return;
                 }
-                pty.input.write_all(b"\r").unwrap();
+                pty.send(b"\r");
             }
             panic!("bounded routing confirmation pages exhausted");
         }
@@ -238,7 +217,7 @@ fn concurrent_role_edit_refuses_before_overwriting_the_other_editor() {
     let mut pty = start_setup_pty(&temp, &workspace, &state);
     open_roles(&mut pty, Presentation::ScreenReader);
     let from = Presentation::ScreenReader.choose(&mut pty, 6);
-    let bytes = br#"{"version":1,"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
+    let bytes = br#"{"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#;
     super::super::private_file(&state.join("provider-routing.json"), bytes);
     confirm(
         &mut pty,
@@ -248,15 +227,8 @@ fn concurrent_role_edit_refuses_before_overwriting_the_other_editor() {
         true,
     );
     let from = pty.transcript.len();
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Input:\r\n",
-    );
-    pty.input.write_all(b"/exit\r").unwrap();
+    pty.wait_for_after(from, b"Input:\r\n");
+    pty.send(b"/exit\r");
     let (result, transcript) = finish_setup_pty_with_transcript(pty);
     assert!(result.status.success());
     assert!(String::from_utf8_lossy(&transcript).contains("changed"));
@@ -312,17 +284,17 @@ fn saved_role_choices_feed_the_next_submission_without_rechecking_or_losing_defa
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
-    let (primary, child) = checked_role_peers(&workspace, &state);
+    let (primary, child) = role_peers(&state);
     let mut pty = start_setup_pty_mode(&temp, &workspace, &state, SetupPtyMode::Configured);
     save_distinct_child_route(&mut pty);
     assert_eq!(
         primary.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS,
+        0,
         "Save must not check or infer on primary"
     );
     assert_eq!(
         child.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS,
+        0,
         "Save must not check or infer on child"
     );
     assert_retained_setup_conversation(&state, &workspace, Some(0));
@@ -349,58 +321,20 @@ fn saved_role_choices_feed_the_next_submission_without_rechecking_or_losing_defa
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        primary.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS + primary_requests.len()
-    );
-    assert_eq!(
-        child.calls.load(Ordering::SeqCst),
-        ROUTE_CHECK_CALLS + child_requests.len()
-    );
+    assert_eq!(primary.calls.load(Ordering::SeqCst), primary_requests.len());
+    assert_eq!(child.calls.load(Ordering::SeqCst), child_requests.len());
     assert_routed_run(&state, &workspace);
 }
 
-fn submit_delegated_turn(pty: &mut SetupPty) {
-    let from = pty.transcript.len();
-    pty.input.write_all(b"/agents auto\r").unwrap();
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Next-Run collaboration: auto",
-    );
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Input:\r\n",
-    );
-    let from = pty.transcript.len();
-    pty.input.write_all(b"answer after setup\r").unwrap();
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"retained setup answer",
-    );
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Input:\r\n",
-    );
-    pty.input.write_all(b"/exit\r").unwrap();
+fn submit_delegated_turn(pty: &mut Pty) {
+    let from = pty.send_and_wait(b"/agents auto\r", b"Next-Run collaboration: auto");
+    pty.wait_for_after(from, b"Input:\r\n");
+    let from = pty.send_and_wait(b"answer after setup\r", b"retained setup answer");
+    pty.wait_for_after(from, b"Input:\r\n");
+    pty.send(b"/exit\r");
 }
 
-fn save_distinct_child_route(pty: &mut SetupPty) {
+fn save_distinct_child_route(pty: &mut Pty) {
     open_roles(pty, Presentation::ScreenReader);
     let from = Presentation::ScreenReader.choose(pty, 3);
     Presentation::ScreenReader.menu(pty, from, "Edit role chain");
@@ -425,14 +359,7 @@ fn save_distinct_child_route(pty: &mut SetupPty) {
     );
     let from = pty.transcript.len();
     let (from, _) = acknowledge_result(pty, Presentation::ScreenReader, from);
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Setup closed\r\nInput:\r\n",
-    );
+    pty.wait_for_after(from, b"Setup closed\r\nInput:\r\n");
 }
 
 struct RolePeer {
@@ -440,37 +367,14 @@ struct RolePeer {
     peer: thread::JoinHandle<Vec<serde_json::Value>>,
 }
 
-fn checked_role_peers(workspace: &Path, state: &Path) -> (RolePeer, RolePeer) {
+fn role_peers(state: &Path) -> (RolePeer, RolePeer) {
     let primary = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let child = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     write_role_profiles(state, &primary, &child);
-    let primary = serve_role(primary, AgentRole::Primary, "model-1");
-    let child = serve_role(child, AgentRole::Child, "model-2");
-    for (name, credential_env, key) in [
-        ("local", "ARANY_PROVIDER_LOCAL_KEY", "test-key"),
-        (
-            "distinct-child",
-            "ARANY_PROVIDER_FIRST_ROUTE_KEY",
-            FIRST_ROUTE_KEY_CANARY,
-        ),
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env(credential_env, key)
-            .current_dir(workspace)
-            .args(["provider", "check", name, "--state-dir"])
-            .arg(state)
-            .stdin(Stdio::null())
-            .bounded_output()
-            .unwrap();
-        assert!(output.status.success(), "synthetic role conformance");
-        assert_eq!(output.stderr, b"");
-        assert_eq!(
-            crate::check_output(&output.stdout, state, arany::CheckDisposition::Succeeded),
-            format!("Provider: {name}\nStatus: custom verified\n").as_bytes()
-        );
-    }
-    (primary, child)
+    (
+        serve_role(primary, AgentRole::Primary, "model-1"),
+        serve_role(child, AgentRole::Child, "model-2"),
+    )
 }
 
 fn write_role_profiles(state: &Path, primary: &TcpListener, child: &TcpListener) {
@@ -493,27 +397,16 @@ fn write_role_profiles(state: &Path, primary: &TcpListener, child: &TcpListener)
         |(name, model, port, credential_env)| arany::CustomProfileDraft {
             name: name.into(),
             protocol: arany::CustomProtocol::OpenaiResponses,
-            endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
+            url: format!("http://127.0.0.1:{port}/v1/responses"),
+            auth: None,
             model: model.into(),
             credential_env: credential_env.into(),
-            messages_auth: arany::MessagesAuth::ApiKey,
             efforts: Vec::new(),
         },
     )
     .collect::<Vec<_>>();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            arany::CustomProfile::write_profiles(
-                &StateRoot::admit(state).unwrap(),
-                None,
-                &profiles,
-            )
-            .await
-            .unwrap();
-        });
+    arany::CustomProfile::write_profiles(&StateRoot::admit(state).unwrap(), None, &profiles)
+        .unwrap();
 }
 
 fn serve_role(listener: TcpListener, role: AgentRole, model: &'static str) -> RolePeer {
@@ -521,23 +414,6 @@ fn serve_role(listener: TcpListener, role: AgentRole, model: &'static str) -> Ro
     let calls = Arc::new(AtomicUsize::new(0));
     let served = Arc::clone(&calls);
     let peer = thread::spawn(move || {
-        let checks = [
-            json!("ok"),
-            json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
-            json!("synthetic summary"),
-        ];
-        for (index, text) in checks.into_iter().enumerate() {
-            let (mut stream, wire) = role_request(&listener, role);
-            assert_eq!(wire["model"], model);
-            served.fetch_add(1, Ordering::SeqCst);
-            super::super::loopback::send_response_for_model(
-                &mut stream,
-                index,
-                model,
-                text,
-                wire["stream"] == true,
-            );
-        }
         let script = match role {
             AgentRole::Primary => vec![
                 (
@@ -558,7 +434,7 @@ fn serve_role(listener: TcpListener, role: AgentRole, model: &'static str) -> Ro
             served.fetch_add(1, Ordering::SeqCst);
             super::super::loopback::send_response_for_model(
                 &mut stream,
-                ROUTE_CHECK_CALLS + index,
+                index,
                 model,
                 text,
                 wire["stream"] == true,
@@ -638,33 +514,10 @@ fn invalid_role_model_refuses_without_opening_an_empty_effort_picker_or_publishi
     let from = Presentation::ScreenReader.choose(&mut pty, 2);
     Presentation::ScreenReader.menu(&mut pty, from, "Route source");
     let from = Presentation::ScreenReader.choose(&mut pty, 2);
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Input:\r\n",
-    );
-    let from = pty.transcript.len();
-    pty.input.write_all(b"invalid model\r").unwrap();
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"invalid Provider role model",
-    );
-    wait_for_after(
-        &mut pty.output,
-        &mut pty.input,
-        &mut pty.transcript,
-        &mut pty.answered,
-        from,
-        b"Input:\r\n",
-    );
-    pty.input.write_all(b"/exit\r").unwrap();
+    pty.wait_for_after(from, b"Input:\r\n");
+    let from = pty.send_and_wait(b"invalid model\r", b"invalid Provider role model");
+    pty.wait_for_after(from, b"Input:\r\n");
+    pty.send(b"/exit\r");
     assert!(finish_setup_pty(pty).status.success());
     assert!(!state.join("provider-routing.json").exists());
     assert_edits(&state, &workspace, &[]);

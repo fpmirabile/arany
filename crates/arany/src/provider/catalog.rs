@@ -15,6 +15,7 @@ const OPENAI_MODELS: &str = "https://api.openai.com/v1/models";
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
 pub const MAX_CATALOG_MODELS: usize = 4096;
 const MAX_PAGES: usize = 16;
+const ANTHROPIC_PAGE_MODELS: usize = 1000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelEntry {
@@ -102,22 +103,6 @@ pub async fn list_native_models_with_credentials(
     profile: &str,
     credentials: &NativeApiCredentials,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
-    list_selected_models(profile, credentials, None).await
-}
-
-pub(super) async fn list_native_models_checked(
-    profile: &str,
-    credentials: &NativeApiCredentials,
-    journal: &mut crate::CheckJournal,
-) -> Result<Vec<ModelEntry>, ProviderError> {
-    list_selected_models(profile, credentials, Some(journal)).await
-}
-
-async fn list_selected_models(
-    profile: &str,
-    credentials: &NativeApiCredentials,
-    journal: Option<&mut crate::CheckJournal>,
-) -> Result<Vec<ModelEntry>, ProviderError> {
     let kind = ProviderKind::parse(profile).ok_or(ProviderError::Rejected)?;
     let endpoint = match kind {
         ProviderKind::OpenAi => OPENAI_MODELS,
@@ -130,7 +115,7 @@ async fn list_selected_models(
         .build()
         .map_err(|_| ProviderError::Unavailable)?;
     let endpoint = Url::parse(endpoint).map_err(|_| ProviderError::Unavailable)?;
-    list_at(&client, kind, endpoint, credentials, journal).await
+    list_at(&client, kind, endpoint, credentials).await
 }
 
 async fn list_at(
@@ -138,7 +123,6 @@ async fn list_at(
     kind: ProviderKind,
     endpoint: Url,
     credentials: &NativeApiCredentials,
-    mut journal: Option<&mut crate::CheckJournal>,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
     let profile = kind.native_name().ok_or(ProviderError::Rejected)?;
     credentials.require_profile(profile)?;
@@ -149,97 +133,16 @@ async fn list_at(
     for _ in 0..MAX_PAGES {
         let mut url = endpoint.clone();
         if kind == ProviderKind::Anthropic {
-            url.query_pairs_mut().append_pair("limit", "1000");
+            url.query_pairs_mut()
+                .append_pair("limit", &ANTHROPIC_PAGE_MODELS.to_string());
             if let Some(after) = cursor.as_deref() {
                 url.query_pairs_mut().append_pair("after_id", after);
             }
         }
-        let request = client
-            .get(url.clone())
-            .header(header::ACCEPT, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity");
-        let request = match kind {
-            ProviderKind::OpenAi => request.bearer_auth(key),
-            ProviderKind::Anthropic => {
-                let mut key = HeaderValue::from_str(key).map_err(|_| ProviderError::Rejected)?;
-                key.set_sensitive(true);
-                request
-                    .header("x-api-key", key)
-                    .header("anthropic-version", "2023-06-01")
-            }
-            ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
-        };
-        let request = match credentials.anthropic_workspace_id() {
-            Some(id) => request.header("anthropic-workspace-id", id),
-            None => request,
-        };
-        let token = match journal.as_deref_mut() {
-            Some(journal) => Some(
-                journal
-                    .call_started(crate::CheckCallKind::Catalog)
-                    .await
-                    .map_err(|_| ProviderError::Unavailable)?,
-            ),
-            None => None,
-        };
+        let request = page_request(client, kind, &url, credentials)?;
         let result = async {
-            let mut response = request
-                .send()
-                .await
-                .map_err(|_| ProviderError::Unavailable)?;
-            if response.url() != &url {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            if !response.status().is_success() {
-                return Err(
-                    if response.status().is_server_error()
-                        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    {
-                        ProviderError::Unavailable
-                    } else {
-                        ProviderError::Rejected
-                    },
-                );
-            }
-            let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
-            let content_type = content_types
-                .next()
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next())
-                .map(str::trim);
-            if content_types.next().is_some()
-                || !content_type.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
-            {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
-            if bytes
-                .windows(key.len())
-                .any(|window| window == key.as_bytes())
-            {
-                return Err(ProviderError::InvalidOutcome);
-            }
-            let (rows, next) = if kind == ProviderKind::OpenAi {
-                let page: OpenAiPage =
-                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-                (page.data, None)
-            } else {
-                let page: AnthropicPage =
-                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-                let next = if page.has_more {
-                    let last = page.last_id.ok_or(ProviderError::InvalidOutcome)?;
-                    if !valid_model_id(&last)
-                        || cursor.as_deref() == Some(&last)
-                        || page.data.last().is_none_or(|row| row.id != last)
-                    {
-                        return Err(ProviderError::InvalidOutcome);
-                    }
-                    Some(last)
-                } else {
-                    None
-                };
-                (page.data, next)
-            };
+            let bytes = read_page(request, &url, key).await?;
+            let (rows, next) = page_rows(kind, &bytes, cursor.as_deref())?;
             if rows.len() > MAX_CATALOG_MODELS - entries.len() {
                 return Err(ProviderError::InvalidOutcome);
             }
@@ -259,21 +162,6 @@ async fn list_at(
             Ok::<_, ProviderError>(next)
         }
         .await;
-        if let (Some(journal), Some(token)) = (journal.as_deref_mut(), token) {
-            let disposition = match &result {
-                Ok(_) => crate::CheckDisposition::Succeeded,
-                Err(error) => super::native_check::disposition(error),
-            };
-            journal
-                .call_finished(
-                    token,
-                    disposition,
-                    None,
-                    result.as_ref().is_ok_and(Option::is_none),
-                )
-                .await
-                .map_err(|_| ProviderError::Unavailable)?;
-        }
         match result? {
             None => {
                 entries.sort_by(|left, right| left.id.cmp(&right.id));
@@ -285,8 +173,109 @@ async fn list_at(
     Err(ProviderError::InvalidOutcome)
 }
 
+fn page_request(
+    client: &Client,
+    kind: ProviderKind,
+    url: &Url,
+    credentials: &NativeApiCredentials,
+) -> Result<reqwest::RequestBuilder, ProviderError> {
+    let request = client
+        .get(url.clone())
+        .header(header::ACCEPT, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity");
+    let request = match kind {
+        ProviderKind::OpenAi => request.bearer_auth(credentials.api_key()),
+        ProviderKind::Anthropic => {
+            let mut key = HeaderValue::from_str(credentials.api_key())
+                .map_err(|_| ProviderError::Rejected)?;
+            key.set_sensitive(true);
+            request
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        }
+        ProviderKind::ChatGpt | ProviderKind::Custom => return Err(ProviderError::Rejected),
+    };
+    Ok(match credentials.anthropic_workspace_id() {
+        Some(id) => request.header("anthropic-workspace-id", id),
+        None => request,
+    })
+}
+
+async fn read_page(
+    request: reqwest::RequestBuilder,
+    url: &Url,
+    key: &str,
+) -> Result<Vec<u8>, ProviderError> {
+    let mut response = request
+        .send()
+        .await
+        .map_err(|_| ProviderError::Unavailable)?;
+    if response.url() != url {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    if !response.status().is_success() {
+        return Err(
+            if response.status().is_server_error()
+                || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                ProviderError::Unavailable
+            } else {
+                ProviderError::Rejected
+            },
+        );
+    }
+    let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
+    let content_type = content_types
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_types.next().is_some()
+        || !content_type.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
+    {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
+    if bytes
+        .windows(key.len())
+        .any(|window| window == key.as_bytes())
+    {
+        return Err(ProviderError::InvalidOutcome);
+    }
+    Ok(bytes)
+}
+
+fn page_rows(
+    kind: ProviderKind,
+    bytes: &[u8],
+    cursor: Option<&str>,
+) -> Result<(Vec<CatalogRow>, Option<String>), ProviderError> {
+    if kind == ProviderKind::OpenAi {
+        let page: OpenAiPage =
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+        return Ok((page.data, None));
+    }
+    let page: AnthropicPage =
+        serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+    let next = if page.has_more {
+        let last = page.last_id.ok_or(ProviderError::InvalidOutcome)?;
+        if !valid_model_id(&last)
+            || cursor == Some(&last)
+            || page.data.last().is_none_or(|row| row.id != last)
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Some(last)
+    } else {
+        None
+    };
+    Ok((page.data, next))
+}
+
 pub(super) fn valid_model_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
+    !id.is_empty()
+        && id.len() <= super::MAX_MODEL_ID_BYTES
+        && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[cfg(test)]
@@ -426,7 +415,7 @@ mod tests {
             NativeApiCredentials::new(profile, "fixture-key".into(), workspace.map(str::to_owned))
                 .unwrap();
         let kind = ProviderKind::parse(profile).unwrap();
-        let result = list_at(&client, kind, endpoint, &credentials, None).await;
+        let result = list_at(&client, kind, endpoint, &credentials).await;
         (result, server.await.expect("fixture server"))
     }
 

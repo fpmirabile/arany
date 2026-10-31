@@ -6,7 +6,7 @@ use crate::session::{AgentRunId, Event};
 use crate::tools::permissions::{
     CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookIgnoreReason,
     HookInvocation, HookOutcome, HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES,
-    PermissionConfig, feedback_lines, narrows, peer_name, post_tool_use_input, pre_tool_use_input,
+    PermissionConfig, feedback_lines, narrows, post_tool_use_input, pre_tool_use_input, rule_name,
 };
 use crate::tools::types::model_observation;
 use crate::tools::{
@@ -160,6 +160,60 @@ fn hook_plan(
 }
 
 impl HookFold {
+    // Returns true when this hook's result ends the PreToolUse fold.
+    fn add_pre_hook(&mut self, run: HookRun, hook: &PreHook<'_, '_>) -> bool {
+        let HookRun {
+            result,
+            stops,
+            exhausted,
+            ..
+        } = run;
+        self.count += 1;
+        if stops {
+            self.stop = HookStop::Uncertain;
+            self.restriction = Some(Decision::Deny);
+            return true;
+        }
+        if exhausted {
+            self.stop = HookStop::ActiveTime;
+            self.restriction = Some(Decision::Deny);
+            return true;
+        }
+        match result {
+            HookResult::Stopped { .. } => {
+                self.stop = HookStop::Requested;
+                self.restriction = Some(Decision::Deny);
+                return true;
+            }
+            HookResult::Restricted {
+                decision: Decision::Deny,
+                reason,
+            } => {
+                self.restriction = Some(Decision::Deny);
+                self.reason = reason;
+                return true;
+            }
+            HookResult::Narrowed { call } if call == hook.intent.call => {}
+            HookResult::Narrowed { call } => {
+                self.narrow_pre_hook(hook, call);
+                return true;
+            }
+            HookResult::Restricted {
+                decision: Decision::Ask,
+                ..
+            } => self.restriction = Some(Decision::Ask),
+            HookResult::Passed
+            | HookResult::Restricted {
+                decision: Decision::Allow,
+                ..
+            }
+            | HookResult::Blocked { .. }
+            | HookResult::Feedback { .. }
+            | HookResult::Ignored { .. } => {}
+        }
+        false
+    }
+
     pub(super) fn none() -> Self {
         Self {
             restriction: None,
@@ -222,7 +276,7 @@ impl HookFold {
             ),
             (HookStop::None, _) => (
                 NotDispatched::HookDenied(match &self.narrowed {
-                    Some(call) => HookDenial::Narrowed(peer_name(call).into_owned()),
+                    Some(call) => HookDenial::Narrowed(rule_name(call).into_owned()),
                     None => HookDenial::Denied(self.reason.clone().unwrap_or_default()),
                 }),
                 None,
@@ -252,6 +306,7 @@ fn configured_call(hook: &CommandHook) -> ToolCall {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         Some(args) => ToolCall::Command {
             program: hook.command().into(),
@@ -259,6 +314,7 @@ fn configured_call(hook: &CommandHook) -> ToolCall {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     }
 }
@@ -405,8 +461,10 @@ impl RunLoop<'_> {
         if !post.is_empty() {
             // The bare form is the smallest stdin a post hook can get, so it must fit the Guard task.
             let Ok(bare) = post_tool_use_input(
-                self.session_id,
-                config.mode(),
+                crate::tools::permissions::HookHeader {
+                    session_id: self.session_id,
+                    mode: config.mode(),
+                },
                 &intent.call,
                 intent.id,
                 serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
@@ -425,8 +483,14 @@ impl RunLoop<'_> {
         if plans.is_empty() {
             return Ok(HookFold::none());
         }
-        let Ok(input) = pre_tool_use_input(self.session_id, config.mode(), &intent.call, intent.id)
-        else {
+        let Ok(input) = pre_tool_use_input(
+            crate::tools::permissions::HookHeader {
+                session_id: self.session_id,
+                mode: config.mode(),
+            },
+            &intent.call,
+            intent.id,
+        ) else {
             return Ok(HookFold::deny("hook input exceeds its limit", 0));
         };
         let input_digest = crate::validate::digest(input.as_bytes());
@@ -486,54 +550,8 @@ impl RunLoop<'_> {
                     return Ok(fold);
                 }
             };
-            let HookRun {
-                result,
-                stops,
-                exhausted,
-                ..
-            } = run;
-            fold.count += 1;
-            if stops {
-                fold.stop = HookStop::Uncertain;
-                fold.restriction = Some(Decision::Deny);
+            if fold.add_pre_hook(run, &hook) {
                 return Ok(fold);
-            }
-            if exhausted {
-                fold.stop = HookStop::ActiveTime;
-                fold.restriction = Some(Decision::Deny);
-                return Ok(fold);
-            }
-            match result {
-                HookResult::Stopped { .. } => {
-                    fold.stop = HookStop::Requested;
-                    fold.restriction = Some(Decision::Deny);
-                    return Ok(fold);
-                }
-                HookResult::Restricted {
-                    decision: Decision::Deny,
-                    reason,
-                } => {
-                    fold.restriction = Some(Decision::Deny);
-                    fold.reason = reason;
-                    return Ok(fold);
-                }
-                HookResult::Narrowed { call } if call == hook.intent.call => {}
-                HookResult::Narrowed { call } => {
-                    fold.narrow_pre_hook(&hook, call);
-                    return Ok(fold);
-                }
-                HookResult::Restricted {
-                    decision: Decision::Ask,
-                    ..
-                } => fold.restriction = Some(Decision::Ask),
-                HookResult::Passed
-                | HookResult::Restricted {
-                    decision: Decision::Allow,
-                    ..
-                }
-                | HookResult::Blocked { .. }
-                | HookResult::Feedback { .. }
-                | HookResult::Ignored { .. } => {}
             }
         }
         Ok(fold)
@@ -615,8 +633,10 @@ impl RunLoop<'_> {
         let mut budget = MAX_HOOK_INPUT_BYTES;
         loop {
             let input = post_tool_use_input(
-                self.session_id,
-                config.mode(),
+                crate::tools::permissions::HookHeader {
+                    session_id: self.session_id,
+                    mode: config.mode(),
+                },
                 call,
                 observation.intent.id,
                 response.clone(),
@@ -825,12 +845,16 @@ impl RunLoop<'_> {
         let mut budget = MAX_HOOK_INPUT_BYTES;
         loop {
             let input = crate::tools::permissions::lifecycle_input(
-                self.session_id,
-                config.mode(),
-                hook.event,
-                continuations > 0,
-                hook.message,
-                hook.subject,
+                crate::tools::permissions::HookHeader {
+                    session_id: self.session_id,
+                    mode: config.mode(),
+                },
+                crate::tools::permissions::LifecycleSubject {
+                    event: hook.event,
+                    active: continuations > 0,
+                    message: hook.message,
+                    trigger: hook.subject,
+                },
                 budget,
             );
             let sized = runtime.clone().with_hook_stdin(&input);
@@ -962,15 +986,19 @@ impl RunLoop<'_> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let config = runtime.permissions().ok_or(EngineError::InvalidRequest)?;
         let input = crate::tools::permissions::lifecycle_input(
-            self.session_id,
-            config.mode(),
-            hook.event,
-            false,
-            "",
-            hook.subject,
+            crate::tools::permissions::HookHeader {
+                session_id: self.session_id,
+                mode: config.mode(),
+            },
+            crate::tools::permissions::LifecycleSubject {
+                event: hook.event,
+                active: false,
+                message: "",
+                trigger: hook.subject,
+            },
             MAX_HOOK_INPUT_BYTES,
         );
-        let intent = runtime.intent(self.run_id, hook.agent, call);
+        let intent = runtime.intent(self.run_id, hook.agent, call)?;
         self.journal
             .admit(
                 self.session_id,
@@ -1027,9 +1055,12 @@ impl RunLoop<'_> {
         plans: &[HookPlan],
     ) -> bool {
         plans.iter().all(|plan| {
-            let mut probe = runtime.intent(self.run_id, agent_run_id, plan.call.clone());
-            probe.limits.runtime_ms = u32::MAX;
-            runtime.hook_task_fits(&probe)
+            runtime
+                .intent(self.run_id, agent_run_id, plan.call.clone())
+                .is_ok_and(|mut probe| {
+                    probe.limits.runtime_ms = u32::MAX;
+                    runtime.hook_task_fits(&probe)
+                })
         })
     }
 
@@ -1144,22 +1175,13 @@ impl RunLoop<'_> {
             fixed_ms,
             ..
         } = timing;
-        // The Goal ledger refuses a start that does not fit, so a shortfall never runs the hook.
-        let active_ms = if let Some(deadline) = deadline {
-            duration_ms(deadline.saturating_duration_since(tokio::time::Instant::now()))
-                .saturating_sub(fixed_ms)
-        } else {
-            self.ledger()
-                .active_remaining_ms()
-                .map_or(u64::MAX, |remaining| remaining.saturating_sub(fixed_ms))
-                .max(u64::from(MIN_HOOK_RUNTIME_MS))
-        };
+        let active_ms = self.hook_active_ms(deadline, fixed_ms);
         if active_ms < u64::from(MIN_HOOK_RUNTIME_MS) {
             return Ok(HookStart::Exhausted);
         }
         let runtime_ms =
             u32::try_from(active_ms.min(u64::from(plan.timeout_ms))).unwrap_or(u32::MAX);
-        let hook_intent = self.hook_intent(runtime, &occurrence, runtime_ms);
+        let hook_intent = self.hook_intent(runtime, &occurrence, runtime_ms)?;
         let clock = match deadline {
             Some(deadline) => Admission::Reserved(HookClock::Deadline(deadline)),
             None => self.reserve_active_pause()?.map(HookClock::Pause),
@@ -1173,20 +1195,8 @@ impl RunLoop<'_> {
             hook: HookInvocation {
                 active_ceiling_ms: if boundary {
                     boundary_ceiling
-                } else if matches!(
-                    event,
-                    HookEvent::CommandRewrite
-                        | HookEvent::Stop
-                        | HookEvent::SubagentStop
-                        | HookEvent::PreCompact
-                ) {
-                    Some(self.lifecycle_ceiling(if deadline.is_some() {
-                        0
-                    } else {
-                        fixed_ms.saturating_add(u64::from(runtime_ms))
-                    })?)
                 } else {
-                    None
+                    self.idle_hook_ceiling(*event, deadline, fixed_ms, runtime_ms)?
                 },
                 event: *event,
                 group: plan.group,
@@ -1209,22 +1219,58 @@ impl RunLoop<'_> {
             .await
     }
 
+    // The Goal ledger refuses a start that does not fit, so a shortfall never runs the hook.
+    fn hook_active_ms(&self, deadline: Option<tokio::time::Instant>, fixed_ms: u64) -> u64 {
+        if let Some(deadline) = deadline {
+            duration_ms(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .saturating_sub(fixed_ms)
+        } else {
+            self.ledger()
+                .active_remaining_ms()
+                .map_or(u64::MAX, |remaining| remaining.saturating_sub(fixed_ms))
+                .max(u64::from(MIN_HOOK_RUNTIME_MS))
+        }
+    }
+
+    fn idle_hook_ceiling(
+        &self,
+        event: HookEvent,
+        deadline: Option<tokio::time::Instant>,
+        fixed_ms: u64,
+        runtime_ms: u32,
+    ) -> Result<Option<u64>, EngineError> {
+        if !matches!(
+            event,
+            HookEvent::CommandRewrite
+                | HookEvent::Stop
+                | HookEvent::SubagentStop
+                | HookEvent::PreCompact
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(self.lifecycle_ceiling(if deadline.is_some() {
+            0
+        } else {
+            fixed_ms.saturating_add(u64::from(runtime_ms))
+        })?))
+    }
+
     fn hook_intent(
         &self,
         runtime: &ToolRuntime,
         occurrence: &HookOccurrence<'_>,
         runtime_ms: u32,
-    ) -> EffectIntent {
+    ) -> Result<EffectIntent, crate::tools::ToolError> {
         let mut hook_intent =
-            runtime.intent(self.run_id, occurrence.agent, occurrence.plan.call.clone());
+            runtime.intent(self.run_id, occurrence.agent, occurrence.plan.call.clone())?;
         let limits = &mut hook_intent.limits;
         limits.result_bytes = HOOK_RESULT_BYTES;
         limits.runtime_ms = runtime_ms;
-        limits.cache_requested_bytes = 0;
+        limits.cache_requested_bytes = crate::tools::BuildCacheSize::DISABLED;
         limits.cache_bytes = 0;
         limits.cache_candidate_bytes = 0;
         limits.cache_transfer_ms = 0;
-        hook_intent
+        Ok(hook_intent)
     }
 
     async fn record_hook_finished(

@@ -8,7 +8,7 @@
         "name": "bash"
       }
     ],
-    "file_tools": "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication), delete (one regular file, expected sha256), move (source and missing destination, source expected sha256, preserves bytes and executable status)",
+    "file_tools": true,
     "git": "unavailable",
     "host_clock": {
       "timezone": "UTC",
@@ -38,7 +38,7 @@
   },
   "researcher": {
     "commands": [],
-    "file_tools": "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)",
+    "file_tools": true,
     "host_clock": {
       "timezone": "UTC",
       "unix_ms": 0

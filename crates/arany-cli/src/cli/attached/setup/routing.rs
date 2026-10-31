@@ -1,4 +1,3 @@
-use super::custom::custom_status_label;
 use super::prompts::read_setup_value;
 use super::{SetupError, SetupJournal, await_operation, await_setup_ack, choose, review_warning};
 use crate::accounts::{chatgpt, credentials};
@@ -52,7 +51,7 @@ pub(super) async fn manage(
         };
         match action {
             b'1' => {
-                let text = manifest(&state, &draft, primary.as_ref()).await?;
+                let text = manifest(&state, &draft, primary.as_ref())?;
                 await_setup_ack(terminal, "Resolved role routes", &text).await?;
             }
             b'2'..=b'5' => {
@@ -72,20 +71,7 @@ pub(super) async fn manage(
                 .await?;
             }
             b'6' => {
-                let bytes = draft
-                    .encode(primary.as_ref())
-                    .map_err(SetupError::recoverable)?;
-                let text = manifest(&state, &draft, primary.as_ref()).await?;
-                if review_warning(
-                    terminal,
-                    "Save role routing?",
-                    &text,
-                    "Save all four role chains?",
-                )
-                .await?
-                {
-                    publish(journal, &state, &draft, Some(&bytes)).await?;
-                    await_setup_ack(terminal, "Role routing", "Saved; next submission re-admits every route; no Provider check was started").await?;
+                if save(terminal, &state, journal, &draft, primary.as_ref()).await? {
                     return Ok(());
                 }
             }
@@ -97,6 +83,35 @@ pub(super) async fn manage(
             _ => return Ok(()),
         }
     }
+}
+
+async fn save(
+    terminal: &mut AttachedTerminal,
+    state: &StateRoot,
+    journal: &mut SetupJournal,
+    draft: &RoutingDraft,
+    primary: Option<&Route>,
+) -> Result<bool, SetupError> {
+    let bytes = draft.encode(primary).map_err(SetupError::recoverable)?;
+    let text = manifest(state, draft, primary)?;
+    if !review_warning(
+        terminal,
+        "Save role routing?",
+        &text,
+        "Save all four role chains?",
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    publish(journal, state, draft, Some(&bytes)).await?;
+    await_setup_ack(
+        terminal,
+        "Role routing",
+        "Saved; next submission re-admits every route; no Provider call was made",
+    )
+    .await?;
+    Ok(true)
 }
 
 pub(super) async fn clear(
@@ -426,9 +441,6 @@ async fn select_custom(
 ) -> Result<Option<Route>, SetupError> {
     let (_, profiles) =
         CustomProfile::load_all_with_snapshot(state).map_err(SetupError::recoverable)?;
-    let statuses = CustomProfile::check_statuses(state, &profiles)
-        .await
-        .map_err(SetupError::recoverable)?;
     let choices = profiles
         .iter()
         .enumerate()
@@ -436,10 +448,9 @@ async fn select_custom(
             (
                 u8::try_from(index + 1).unwrap_or(u8::MAX),
                 format!(
-                    "{} / {} · {}",
+                    "{} / {}",
                     escape_terminal(profile.name()),
-                    escape_terminal(profile.model()),
-                    custom_status_label(&statuses, profile.name())
+                    escape_terminal(profile.model())
                 ),
             )
         })
@@ -530,22 +541,19 @@ pub(super) fn tuple_label(route: &Route) -> String {
     )
 }
 
-async fn manifest(
+fn manifest(
     state: &StateRoot,
     draft: &RoutingDraft,
     primary: Option<&Route>,
 ) -> Result<String, SetupError> {
     let (_, profiles) =
         CustomProfile::load_all_with_snapshot(state).map_err(SetupError::recoverable)?;
-    let statuses = CustomProfile::check_statuses(state, &profiles)
-        .await
-        .map_err(SetupError::recoverable)?;
     let primary_chain = draft
         .providers
         .primary
         .clone()
         .unwrap_or_else(|| primary.cloned().into_iter().collect());
-    let mut text = "Private role routing; every candidate is re-admitted before Workspace disclosure. No check or inference on Save.\n".to_owned();
+    let mut text = "Private role routing; every candidate is re-admitted before Workspace disclosure. No inference on Save.\n".to_owned();
     for (role, label) in ROLES {
         let configured = draft.providers.get(role);
         text.push_str(&format!(
@@ -567,10 +575,9 @@ async fn manifest(
             if let Some(name) = ProviderKind::custom_name(&route.provider.profile()) {
                 if let Some(profile) = profiles.iter().find(|profile| profile.name() == name) {
                     text.push_str(&format!(
-                        "    {} · Credential: {} — not checked by listing · {}\n",
-                        escape_terminal(&profile.check_destination()),
-                        escape_terminal(profile.credential_env()),
-                        custom_status_label(&statuses, name)
+                        "    {} · Credential: {} — not checked by listing\n",
+                        escape_terminal(profile.endpoint()),
+                        escape_terminal(profile.credential_env())
                     ));
                 } else {
                     text.push_str("    Declaration unavailable\n");

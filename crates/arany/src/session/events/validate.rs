@@ -78,6 +78,14 @@ impl Event {
     }
 }
 
+pub(super) fn checked(valid: bool) -> Result<(), ReplayError> {
+    if valid {
+        Ok(())
+    } else {
+        Err(ReplayError::InvalidPayload)
+    }
+}
+
 pub(super) fn bounded(value: &str, max: usize) -> Result<(), ReplayError> {
     if value.is_empty() || value.len() > max {
         return Err(ReplayError::InvalidPayload);
