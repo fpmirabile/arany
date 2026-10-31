@@ -1042,7 +1042,7 @@ fn alt_key(code: KeyCode) -> Option<TerminalInput> {
     match code {
         KeyCode::Left => Some(TerminalInput::AgentPrevious),
         KeyCode::Right => Some(TerminalInput::AgentNext),
-        // Option+Left/Right arrive as `ESC b`/`ESC f` without enhanced key reporting, as in Codex.
+        // Option+Left/Right arrive as `ESC b`/`ESC f` without enhanced key reporting.
         #[cfg(target_os = "macos")]
         KeyCode::Char('b') => Some(TerminalInput::AgentPrevious),
         #[cfg(target_os = "macos")]

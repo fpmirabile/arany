@@ -115,7 +115,7 @@ fn classic_dialogs_fill_their_content_sized_viewport() {
             ("rewind review", 12),
         ] {
             let mut terminal = Terminal::new(TestBackend::new(80, screen_height)).unwrap();
-            // As in Codex, the viewport is min(screen, the dialog's content height).
+            // The viewport is min(screen, the dialog's content height).
             let rows = height.min(screen_height);
             let full = Rect::new(0, screen_height - rows, 80, rows);
             let area = crate::terminal::dialog_area(full, height, true);

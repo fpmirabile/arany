@@ -172,7 +172,7 @@ other vendors' keys and other clients' OAuth identities never supply its
 credentials, and Arany always identifies itself as `arany/<version>`. A profile
 file this version cannot read is archived at startup; recreate the profiles.
 
-Arany runs no conformance pre-check: like Claude Code, Codex CLI and OpenCode, it
+Arany runs no conformance pre-check: it
 sends no request you did not ask for, and every Run validates each real response
 ([custom routes](./specs/provider.md#custom-destinations-and-routing)).
 If AI Tool review is needed, select a native review route in

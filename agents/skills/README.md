@@ -2,7 +2,7 @@
 
 Maintain Arany's development skill sources here: `rust-clean-code` for Rust, `terminal-ui-design` for terminal interaction, and `clean-architecture-review` for architecture reviews. Each skill is repo-agnostic and covers only its vertical; repository rules live in [AGENTS.md](../../AGENTS.md) and `agents/*.md`, which name the skill and when to load it. Apply each only when its task fits. [Arany's implementation priorities](../../AGENTS.md#product-and-implementation-priorities) inline Ponytail's essentials for every implementation and load these skills by name for new modules, cross-module refactors and code reviews.
 
-`agents/skills/` contains editable, checked-in sources. `.agents/skills/` contains generated, gitignored installations discovered by Codex and other compatible agents; agent-specific directories can link to them. These are different directories, not alternative spellings. [`skills-lock.json`](../../skills-lock.json) is the single manifest, with portable local source paths. These skills guide development agents; they do not enable runtime Skills or Tool permissions in Arany.
+`agents/skills/` contains editable, checked-in sources. `.agents/skills/` contains generated, gitignored installations discovered by compatible agents; agent-specific directories can link to them. These are different directories, not alternative spellings. [`skills-lock.json`](../../skills-lock.json) is the single manifest, with portable local source paths. These skills guide development agents; they do not enable runtime Skills or Tool permissions in Arany.
 
 ## Select and load
 

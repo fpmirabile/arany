@@ -744,7 +744,7 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     assert!(load(None).is_ok(), "the root alone fits");
     std::fs::write(workspace.join("crates/cli/AGENTS.md"), "cli").unwrap();
 
-    // An override wins in its directory, as in Codex.
+    // An override wins in its directory.
     std::fs::write(
         workspace.join("crates/AGENTS.override.md"),
         "crates override",

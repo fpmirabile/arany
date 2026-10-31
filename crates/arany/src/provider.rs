@@ -278,8 +278,8 @@ pub(crate) async fn rate_limit_failure(response: &mut reqwest::Response) -> Prov
     }
 }
 
-// Error codes a wait cannot clear: exhausted credit, quota, plan or spending and usage limits,
-// as Codex classifies them. Anthropic 429s are rate limits only.
+// Error codes a wait cannot clear: exhausted credit, quota, plan or spending and usage limits.
+// Anthropic 429s are rate limits only.
 const QUOTA_CODES: [&str; 7] = [
     "insufficient_quota",
     "credit_balance_exhausted",

@@ -349,7 +349,7 @@ impl Permission {
                 PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
             )
             && let Some(mode) = mode.filter(|mode| {
-                // A user-owned typed allow is prompt-free in every mode, as Claude Code's allow rules;
+                // A user-owned typed allow is prompt-free in every mode;
                 // auto never reviews what any user allow rule covers.
                 mode.asks(call)
                     && !(self.decision == Decision::Allow
@@ -684,7 +684,7 @@ fn rule_permission(grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) ->
         permission.basis = PermissionSource::PinnedGrant;
         permission.approval = None;
     }
-    // Claude Code's WebFetch asks per domain: only a listed host or an explicit allow rule skips the prompt.
+    // WebFetch asks per domain: only a listed host or an explicit allow rule skips the prompt.
     if matches!(call, ToolCall::WebFetch { .. })
         && permission.decision == Decision::Allow
         && permission.basis != PermissionSource::Rule

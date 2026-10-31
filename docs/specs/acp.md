@@ -4,7 +4,7 @@
 
 This contract owns `arany acp`, an ACP v1 subprocess on stdio: core turns, guarded Tools, one-use permissions, rich prompts, stored Session load and resume, closure and discovery, live approval modes, budget stop reasons and committed Goal plans. [Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown; [Session](./session.md), [Goals](./goals.md), [execution](./execution.md) and [Tools](./tools.md) own Engine policy. ACP only translates the serve vocabulary; it adds no execution runtime or library protocol dependency. Native editor support needs user evidence in [NEXT_STEPS](../../NEXT_STEPS.md).
 
-The subprocess and authentication shapes follow Goose; local execution instead of editor filesystem or terminal delegation follows codex-acp. Unlike peers' Provider deltas, Arany sends only the final committed answer, because chunks cannot be retracted after a failed Provider validation. The hand-written wire subset is checked against the [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
+Arany executes locally instead of delegating to the editor's filesystem or terminal. It sends only the final committed answer, never Provider deltas, because chunks cannot be retracted after a failed Provider validation. The hand-written wire subset is checked against the [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
 
 Audio and model selection are unavailable. Goal pause/resume slash commands and `available_commands_update` are omitted; a slash-prefixed prompt is ordinary user text, never a Goal control. Unadvertised requests fail method-not-found; unsupported prompt blocks fail invalid-params.
 
@@ -70,8 +70,8 @@ starting over. Close never resumes or retries an uncertain effect.
 
 ### Approval modes
 
-Following [ACP v1 config options](https://agentclientprotocol.com/protocol/v1/session-config-options)
-and Claude Code ACP's mode selector, new/load/resume return both `modes`
+Following [ACP v1 config options](https://agentclientprotocol.com/protocol/v1/session-config-options),
+new/load/resume return both `modes`
 (`currentModeId`, `availableModes`) and one `configOptions` entry with `id:"mode"`,
 `category:"mode"`, `type:"select"`, `currentValue` and flat `options`.
 Both surfaces offer exactly `default`, `acceptEdits` and `auto`, with the same
@@ -92,7 +92,7 @@ Neither setter widens a settings Ask or Deny under the [Tools mode composition](
 A mode changes approval handling only, never the CLI-admitted Tool grant:
 `auto` cannot enable Tools without `--tools`, expand paths or commands,
 change Provider selection or budgets, or enable human-only approvals.
-Unlike Claude Code ACP's plan and bypass modes, `plan` and `dontAsk` stay
+`plan` and `dontAsk` stay
 private-settings-only and bypass is always refused, to preserve the admitted authority.
 Mode/config IDs are case-sensitive closed values; unknown and
 oversized strings fail invalid-params within the line bound. Select

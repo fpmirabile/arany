@@ -22,7 +22,7 @@ pub struct HostPrefixRule {
 // offers only the exact command, never a derived prefix.
 const UNDERIVED_LAUNCHERS: [&str; 2] = ["osascript", "python"];
 
-// Without a model proposal, the approval offers the first two argv tokens as Claude Code's "Always allow".
+// Without a model proposal, the approval offers the first two argv tokens as the remembered prefix.
 pub(crate) fn fill_host_prefix(call: &mut ToolCall) {
     let ToolCall::CommandUnguarded {
         program,

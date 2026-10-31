@@ -210,9 +210,9 @@ pub(super) fn draw_history_above(
     area
 }
 
-// Every Classic surface takes min(screen, its content height), as Codex's inline viewport
-// does. A shrink keeps the viewport top while history stays visible above it, so the
-// composer remains under the latest history; otherwise the viewport returns to the bottom.
+// Every Classic surface takes min(screen, its content height). A shrink keeps the viewport top
+// while history stays visible above it, so the composer remains under the latest history;
+// otherwise the viewport returns to the bottom.
 pub(super) fn classic_keeps_top(area: Rect, history_adjacent: bool) -> bool {
     history_adjacent && area.y > 0
 }
@@ -501,7 +501,7 @@ mod insert_rows_tests {
                     .unwrap();
                 let area = terminal.get_frame().area();
                 let context = format!("{height} rows, {needed} needed, dialog {dialog}");
-                // As in Codex, every surface takes min(screen, its content height).
+                // Every surface takes min(screen, its content height).
                 assert_eq!(area.height, needed.min(height), "{context}");
                 if area.height < before.height {
                     if adjacent_before && before.y > 0 {

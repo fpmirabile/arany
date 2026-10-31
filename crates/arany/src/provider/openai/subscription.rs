@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::time::{Instant, timeout, timeout_at};
 
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
-// Codex's `stream_idle_timeout_ms` default; each received event restarts it.
+// Each received event restarts the idle timeout.
 const STREAM_IDLE: Duration = Duration::from_secs(300);
 const CALL_CEILING: Duration = Duration::from_secs(600);
 // The route sends no cap, so the Engine's summary byte bound decides compaction acceptance.

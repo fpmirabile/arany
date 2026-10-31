@@ -226,7 +226,7 @@ fn trust_dialog_takes_its_content_height_and_pages_beyond_the_screen() {
     for (lines, profile_start, pages) in
         [(&fitting, None, false), (&long, Some(profile_start), true)]
     {
-        // As in Codex, the Classic viewport is min(screen, the dialog's content height).
+        // The Classic viewport is min(screen, the dialog's content height).
         let content = permission_height(lines, 80, false, profile_start, profile_count);
         let height = content.min(24);
         assert_eq!(content > 24, pages, "content of {} rows", content);

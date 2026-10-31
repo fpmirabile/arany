@@ -882,7 +882,7 @@ impl WireResponse {
                 _ => {}
             }
         }
-        // Without a final message the last commentary is the answer, as in Codex.
+        // Without a final message the last commentary is the answer.
         let answer = text
             .map(|(text, _)| text)
             .or(commentary)

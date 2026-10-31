@@ -15,9 +15,7 @@ authority and approval scopes. [Terminal](./terminal.md) owns `exec` and
 `show` output. Protocol serialization adds no authority or Engine policy.
 
 The in-process transport uses bounded channels without newline framing and
-runs the same Server connection loop as stdio and ACP. As in
-[Codex's embedded app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server/src/in_process.rs),
-the attached terminal supplies its admission configuration at connection
+runs the same Server connection loop as stdio and ACP. The attached terminal supplies its admission configuration at connection
 startup: the exact saved-account selection, reviewed Workspace grant, full Run
 request (including Skill, launch directory, images and Goal continuation) and
 live approval mode. These typed inputs are internal to the binary; JSON-RPC,
@@ -62,7 +60,7 @@ Messages are UTF-8 JSON objects, one per newline-terminated line. Batches,
 non-objects, malformed JSON, non-integer numeric IDs and ambiguous envelopes
 are rejected. Encoded strings escape embedded newlines and control bytes.
 Outbound envelopes always include `"jsonrpc":"2.0"`; inbound envelopes accept
-its absence, matching Codex app-server clients, but reject any other value,
+its absence but reject any other value,
 including null. Request IDs are strings or signed 64-bit integers; only error
 responses can carry a null ID. Server request IDs reserve a separate integer
 namespace starting at 1.
@@ -133,7 +131,7 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string],hostCommandSessionApproval?:bool,provisionalDisplay?:bool}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
 | `thread/start` | `{cwd,provider,model,effort?,title?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread}` | Selects the Provider and configured role chains as `exec` does. `Engine::create_session` commits `SessionStarted` before the result and subsequent `thread/started`. A thread is a durable Session, including when no turn follows. |
 | `thread/resume` | `{threadId,cwd,provider,model,effort?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and execution configuration with the same settings and defaults as start, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
-| `thread/unsubscribe` | `{threadId}` → `{status:"unsubscribed"\|"notLoaded"}` | Codex app-server shape. Removes the connection's loaded thread and raw subscription; durable Session history remains. An active submission has its approval withdrawn and cancellation signalled, and its committed completion precedes the response and slot release. The thread stays loaded until then so `events/subscribe` reconciliation of the completed turn still works; ACP close ordering is defined by [session/close](./acp.md#behavior). A second close while cancellation is pending returns `busy`. An unloaded ID returns `notLoaded` without inspecting State. |
+| `thread/unsubscribe` | `{threadId}` → `{status:"unsubscribed"\|"notLoaded"}` | Removes the connection's loaded thread and raw subscription; durable Session history remains. An active submission has its approval withdrawn and cancellation signalled, and its committed completion precedes the response and slot release. The thread stays loaded until then so `events/subscribe` reconciliation of the completed turn still works; ACP close ordering is defined by [session/close](./acp.md#behavior). A second close while cancellation is pending returns `busy`. An unloaded ID returns `notLoaded` without inspecting State. |
 | `thread/list` | `{cwd?,cursor?,limit?}` → `{data:[{id,title,cwd,createdAt,updatedAt}],nextCursor}` | Read-only Session metadata for one admitted Workspace, including unloaded/closed Sessions. Absolute cwd defaults to the process launch directory. Newest committed activity first. Each page defaults to 50 entries, with limits 1–100; `nextCursor:null` ends the list. Invalid, oversized, noncanonical, stale-anchor or foreign-Workspace cursors fail `-32602 invalidParams`. No Provider selection, Run or Tool execution, and no loaded slot is consumed. |
 | `thread/settings/update` | `{threadId,permissionMode}` → `{permissionMode}` | Requires a loaded thread (`threadNotLoaded` otherwise). Replaces its live approval mode and updates the matching active submission's `ToolApprovals`, like terminal Shift+Tab. A pending immutable approval keeps its intent and decision channel; only subsequent approval decisions use the new mode. Other loaded threads are unaffected. No Provider selection, Tool grant, settings snapshot, Goal budget or child authority changes. |
 | `thread/fork` | `{threadId,cwd,title?}` → `{thread}` | Requires a loaded source and capacity for another thread. Calls `Engine::fork_session`: the Workspace identity must match, the source must be unlocked and end at a committed terminal Run boundary. Inherits the source's pinned execution configuration. The result precedes `thread/started` with `forkedFromId`; empty prefixes, an interrupted objective before `RunStarted` and an open Run fail `forkNotAtRunBoundary`, a busy source fails `sessionBusy`. A reply that cannot fit a line (client-sized request ID) fails `contextTooLarge` before any fork is persisted. |
@@ -145,14 +143,10 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `goal/pause` | `{threadId,goalId}` → `{}` | Sets the sticky pause on the active Run's steering handle; the Engine stops at its next boundary as for the terminal's `/goal pause`, so the turn ends `interrupted` and the Goal stays resumable. Repeating it is idempotent, and it is accepted for the whole submission, including between autonomous Runs. No active turn on the thread is `turnNotActive`; a `goalId` other than the active turn's Goal is `-32000 goalUnavailable`. An in-flight Provider call is never aborted: its answer still commits and the turn can complete. |
 | `goal/resume` | `{threadId,goalId,input?:[{type:"text",text}]}` → `{turn}` | Starts a submission like `turn/start` (same `busy`, `threadNotLoaded`, admission, approval and steering behavior) with `GoalRequest::resume(goalId, true)`, exactly as the terminal's `/goal resume` does. Only the thread's most recent resumable Interrupted Goal (paused or interrupted) resumes; any other Goal is `-32000 goalUnavailable` before a Run. Absent input runs the pinned objective. Text is a superset of the terminal (as in `exec --resume-goal ID PROMPT`): when the Goal has no accepted Run yet, text different from the pinned objective is `goalUnavailable`; otherwise it becomes the resumed Run's user message while the Goal objective stays pinned. No images. Budget, phase and resource settings stay pinned. An exhausted Interrupted Goal closes Failed and returns `-32000 goalBudgetExhausted` with no Run, `GoalResumed` or `turn/started`. |
 
-Lifecycle method names, unsubscribe status and list pagination envelopes follow
-[Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/thread.rs),
-with three divergences. One connection owns all loaded threads, so `notSubscribed`
-cannot occur, and Arany releases a thread right after durable completion instead
-of on a peer grace timer. Discovery lists one Workspace instead of the peer's
-global listing, so no other Workspace or State path is disclosed. List timestamps
-are UTC ISO 8601 strings (or `Unknown` when Store cannot represent one) instead of
-epoch seconds, reusing the Session metadata owner without replaying full histories.
+One connection owns all loaded threads, and Arany releases a thread right after
+durable completion. Discovery lists one Workspace, so no other Workspace or State
+path is disclosed. List timestamps are UTC ISO 8601 strings (or `Unknown` when
+Store cannot represent one), reusing the Session metadata owner without replaying full histories.
 Rows return no stored defaults, include paths, Provider configuration, State paths
 or journal content. Titles are untrusted plain text; clients render every metadata
 field inertly.
@@ -170,7 +164,7 @@ unknown parameters.
 Providers are `openai`, `anthropic`, `chatgpt` or `custom:NAME`; credentials come
 from the existing selection path. Collaboration defaults to `single`, like `exec`,
 and accepts `single`, `auto` (three children unless set) and `team` with the
-Engine's existing limits. Permission modes use Claude Code spellings `default`, `acceptEdits`
+Engine's existing limits. Permission modes are `default`, `acceptEdits`
 and `auto`; `plan`, `dontAsk` and bypass spellings are rejected on this wire surface. Tools default
 to disabled; enabled Tools use the same private configured grant as `exec`.
 Absolute `includePaths` must lie under `cwd` and are translated to
@@ -192,7 +186,7 @@ receipt refusal leaves the connection open.
 
 ## Rewind
 
-`thread_rewind_v2` advertises two idle, loaded-thread methods. Their vocabulary follows Codex app-server's thread/turn shape and Claude Agent SDK's explicit file-rewind embedding precedent. They call the same Engine as the [terminal](./terminal.md#rewind); [Tools](./tools.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
+`thread_rewind_v2` advertises two idle, loaded-thread methods. They call the same Engine as the [terminal](./terminal.md#rewind); [Tools](./tools.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
 
 | Method | Params | Result |
 |---|---|---|
@@ -232,9 +226,7 @@ honored.
 | `events/committed` | After a thread's final subscription page, `{threadId,event:EventLine}` for each later tapped Event in commit order. Events at or before the page head are suppressed. |
 | `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. Raw subscriptions receive one notice per subscribed thread with its last delivered sequence and are then disabled until `events/subscribe` is called again, so a later notice never reports a cursor beyond the first gap. The turn projection also emits `events/resync` for its active thread with its own `lastSequence`, so a subscriber can see two notices; `missed` counts the process-wide tap loss and may include other threads. Recover by paging `events/subscribe` from `lastSequence`, or reconstruct items with `thread/resume`. Live delivery is best effort: a lost append acknowledgment or a fork committed inside Store can leave a gap without Resync; paging supplies completeness. |
 
-`turn/display` follows the provisional streaming pattern of
-[Codex app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server),
-behind an explicit opt-in so existing clients are unaffected. `update` is either
+`turn/display` streams provisional text behind an explicit opt-in so existing clients are unaffected. `update` is either
 `{type:"preview",preview:{agentRunId,callIndex,answer,commentary,commentaryLimited,tentative}|null}`
 or `{type:"waiting",intentId:UUID|null}`. Preview fields copy the bounded Engine
 hint exactly; null withdraws a preview or capacity wait. Clients render these
@@ -247,8 +239,7 @@ Events, which survive strict replay regardless of notification delivery.
 Incomplete text stays qualified and never becomes an accepted Message, Provider
 history or compaction input. Unpublished transport-buffer tails follow the
 [Provider cancellation rule](./provider.md#streaming-and-provisional-text).
-Like [Codex's rollout policy](https://github.com/openai/codex/blob/rust-v0.114.0/codex-rs/core/src/rollout/policy.rs),
-streaming deltas are not persisted; Arany additionally keeps bounded intermediate
+Streaming deltas are not persisted; Arany keeps bounded intermediate
 checkpoints for crash and cancellation recovery. Latest preview and wait values
 coalesce independently. Delivery is attempted once without waiting; a full queue
 or an update above the line bound drops that update. Notification opt-out
@@ -311,7 +302,7 @@ Tool item status maps `succeeded` to `completed`, `denied` to `declined`,
 A Tool with `cache_update:uncertain` is also uncertain even if its disposition
 is succeeded. Unfinished historical intents are uncertain with no invented
 observation or disposition. Output is the bounded journaled observation.
-The `uncertain` status diverges from Codex to report an unknown effect outcome.
+The `uncertain` status reports an unknown effect outcome.
 
 A recoverable primary denial or known Tool failure, including explicit approval
 decline or unavailable approval, completes its item with the mapped Tool status
@@ -360,8 +351,7 @@ may reuse it; explicit thread/Goal resume, reconnect, restart and fork cannot.
 Clients without this capability receive once/decline/cancel only. A session reply
 without an offered session scope, including for ordinary Tools, is unavailable
 approval. Stdio and ACP never offer remembered prefixes; unsolicited scope
-replies reject without saving or dispatching. This follows Codex's
-[`acceptForSession` vocabulary](https://github.com/openai/codex/blob/61f34c35af77777db4d77d0ea2aeb8547a6b4523/codex-rs/app-server-protocol/schema/typescript/v2/CommandExecutionApprovalDecision.ts);
+replies reject without saving or dispatching.
 Arany journals a separate bounded scope grant rather than renewing the old intent.
 
 An in-process attached-terminal caller selects its full human approval channel

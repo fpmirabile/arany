@@ -131,7 +131,7 @@ pub(crate) static ALL: [OperationFacts; 29] = [
         10,
         "Apply a unique literal replacement to the real Workspace file, guarded by its SHA-256 from your latest Read or edit. To append, replace a unique file ending with that ending plus new text.",
     ),
-    // Inside the sandbox nothing asks; deny and ask rules, hooks and plan still narrow, as in Codex's on-request.
+    // Inside the sandbox nothing asks; deny and ask rules, hooks and plan still narrow.
     OperationFacts {
         spawns_process: true,
         goal_success: true,

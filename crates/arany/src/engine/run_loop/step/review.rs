@@ -164,7 +164,7 @@ impl RunLoop<'_> {
 }
 
 // Only the user's own prompts and the action: never model text, Tool output, repository content,
-// child reports, hook output or plans, as Claude Code's classifier never sees tool results.
+// child reports, hook output or plans.
 fn user_prompts(view: &SessionView) -> Vec<String> {
     bounded_prompts(
         &view

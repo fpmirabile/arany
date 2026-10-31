@@ -208,8 +208,8 @@ pub(super) fn bottom_area(area: Rect, height: u16) -> Rect {
     )
 }
 
-// Classic selector lists show at most this many rows and scroll inside, like Codex's
-// MAX_POPUP_ROWS; ten matches the page size of the linear pickers.
+// Classic selector lists show at most this many rows and scroll inside; ten matches the page
+// size of the linear pickers.
 pub const SELECTOR_ROWS: usize = 10;
 
 // From this width dialogs keep side gutters and full labels and hints; narrower ones shorten.
