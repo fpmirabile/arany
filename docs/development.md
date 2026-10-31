@@ -103,14 +103,15 @@ The workflow stays enabled, with three required check names: `Clippy`,
 `Linux Tests` and `macOS Tests`. Test jobs are separate so skipping does not leave
 an unexpanded matrix name in place of a required check. A job-level skip satisfies
 GitHub's required-check policy; skipping the whole workflow with path filters can
-leave checks pending. Manual dispatch always runs the standard lanes; its inputs
-enable the additional native lanes and history measurement. Optional Linux ARM64
-runs the same release suite. When changing this policy,
+leave checks pending. Manual dispatch always runs the standard lanes and can
+enable the history measurement. The [native Linux workflow](../.github/workflows/ci-native.yml)
+offers manual ARM64 and advanced Guard/tmux checks without adding skipped checks
+to pull requests. Optional Linux ARM64 runs the same release suite. When changing this policy,
 audit Rust includes and file reads before widening the allowlist, then run:
 
 ```sh
 python3 scripts/test-ci-changes.py
-actionlint .github/workflows/ci.yml .github/workflows/ci-focused.yml
+actionlint .github/workflows/ci.yml .github/workflows/ci-focused.yml .github/workflows/ci-native.yml
 ```
 
 Linux terminal tests need Bubblewrap and util-linux `script`, with user and

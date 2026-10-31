@@ -6,7 +6,7 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 Use the standard checks in [the development guide](../../docs/development.md#verification), which owns CI profile selection, changed-path detection and skipped-job behavior.
 
-Manual dispatch offers three inputs. `linux_arm64` runs the `Linux ARM64 Tests` job. `linux_native_advanced` runs the `Native Linux Guard and tmux` job, where each ignored `--exact` invocation must report one completed test. `history_benchmark` runs the `Measure native long-history behavior` step, and its numbers describe that runner only. The [focused workflow](../../.github/workflows/ci-focused.yml) runs one manually chosen `ci.yml` lane; [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline) governs its use. To reproduce the default suite:
+The [native Linux workflow](../../.github/workflows/ci-native.yml) runs only by manual dispatch: `linux_arm64` runs `Linux ARM64 Tests`; `linux_native_advanced` runs `Native Linux Guard and tmux`, where each ignored `--exact` invocation must report one completed test. Dispatch `ci.yml` with `history_benchmark` for the `Measure native long-history behavior` step; its numbers describe that runner only. The [focused workflow](../../.github/workflows/ci-focused.yml) runs one manually chosen `ci.yml` lane; [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline) governs its use. To reproduce the default suite:
 
 ```sh
 RUSTFLAGS='--cfg arany_ci' cargo test --workspace --release --features arany-cli/test-support --locked --offline
