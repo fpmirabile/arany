@@ -108,6 +108,7 @@ pub(super) fn chatgpt_edit_is_uncertain(error: &chatgpt::AuthorizationError) -> 
         chatgpt::AuthorizationError::SignOutStorageUncertain
             | chatgpt::AuthorizationError::RefreshCleanupUncertain
             | chatgpt::AuthorizationError::RenewalStorageUncertain
+            | chatgpt::AuthorizationError::RefreshOutcomeUnknown
             | chatgpt::AuthorizationError::CredentialStore(
                 CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
             )
@@ -146,6 +147,20 @@ mod tests {
         assert!(matches!(
             chatgpt_keyring_available(Err(CredentialError::Locked)),
             Err(SetupError::Recoverable(_))
+        ));
+    }
+
+    #[test]
+    fn chatgpt_unknown_refresh_outcome_is_uncertain() {
+        let error = chatgpt::AuthorizationError::RefreshOutcomeUnknown;
+        assert!(chatgpt_edit_is_uncertain(&error));
+        assert!(matches!(
+            SetupError::chatgpt_authorization(error),
+            SetupError::Uncertain(_)
+        ));
+        assert!(matches!(
+            SetupError::chatgpt_removal(chatgpt::AuthorizationError::RefreshOutcomeUnknown),
+            SetupError::Presentation(message) if message.contains("uncertain")
         ));
     }
 }

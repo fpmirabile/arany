@@ -55,6 +55,7 @@ fn subscription_replay_provider(account_id: Uuid, fingerprint: [u8; 32]) -> Arc<
         "model-a".into(),
         Effort::High,
         "synthetic-subscription-token".into(),
+        "synthetic-engine-account".into(),
         ChatGptProvenance {
             account_id,
             admission_fingerprint: fingerprint,

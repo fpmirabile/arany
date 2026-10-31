@@ -2558,6 +2558,7 @@ mod call_bound_tests {
             "model-a".into(),
             Effort::High,
             "synthetic-subscription-token".into(),
+            "synthetic-engine-account".into(),
             ChatGptProvenance {
                 account_id: uuid::Uuid::now_v7(),
                 admission_fingerprint: [7; 32],

@@ -33,6 +33,27 @@ fn root() -> (tempfile::TempDir, PathBuf, StateRoot) {
 }
 
 #[test]
+fn backend_admission_rejects_other_clients_before_keyring_access() {
+    let (_temp, workspace, state) = root();
+    let mut credentials = fixture("remote-account");
+    credentials.client_id = "oaiapp_other".into();
+    let consent = receipt(&credentials, AccountStorage::Keyring);
+    let id = save_keyring_at_with(
+        &state,
+        &workspace,
+        credentials,
+        consent,
+        None,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(
+        admit_backend_account_at(&state, &workspace, id),
+        Err(AuthorizationError::InvalidClient)
+    ));
+}
+
+#[test]
 fn public_client_accounts_keep_separate_slots_and_logout_deletes_only_the_selected_slot() {
     for disconnected in [false, true] {
         let (_temp, workspace, state) = root();
@@ -58,10 +79,7 @@ fn public_client_accounts_keep_separate_slots_and_logout_deletes_only_the_select
             ids.push(id);
         }
         assert_ne!(ids[0], ids[1]);
-        assert!(matches!(
-            refuse_backend_route_at(&state, &workspace, ids[1]),
-            Err(AuthorizationError::BackendRouteNotAdmitted)
-        ));
+        assert!(admit_backend_account_at(&state, &workspace, ids[1]).is_ok());
         let mut index = AccountIndex::read(&state).unwrap();
         index.accounts[1].disconnected = disconnected;
         index.write(&state).unwrap();

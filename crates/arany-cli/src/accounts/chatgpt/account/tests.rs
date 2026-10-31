@@ -1524,6 +1524,7 @@ fn private_file_renewal_is_selected_serialized_and_atomic() {
             .matches(&renewed.credentials, renewed.storage)
     );
     assert_eq!(renewed.credentials.access_token, "new-access");
+    assert_eq!(renewed.credentials.id_token, "synthetic-id");
     let reopened = StateRoot::open_existing(state.path()).unwrap();
     let reauthorize = || {
         let mut restored = credentials("oaiapp_second", "subject-two");
@@ -1596,7 +1597,23 @@ fn private_file_renewal_is_selected_serialized_and_atomic() {
     );
     reauthorize();
 
-    for drift in ["reused_tokens", "id_hint"] {
+    assert!(matches!(
+        refresh_selected_with(&reopened, &workspace, second_id, 1_800_003_500, |_| {
+            Err(AuthorizationError::RefreshOutcomeUnknown)
+        }),
+        Err(AuthorizationError::RefreshOutcomeUnknown)
+    ));
+    let after = StateRoot::open_existing(state.path()).unwrap();
+    assert!(AccountIndex::read(&after).unwrap().accounts[1].renewal_pending);
+    assert!(matches!(
+        refresh_selected_with(&after, &workspace, second_id, 1_800_003_500, |_| {
+            panic!("unknown renewal must never repeat its exchange")
+        }),
+        Err(AuthorizationError::RenewalStorageUncertain)
+    ));
+    reauthorize();
+
+    for drift in ["reused_tokens", "id_hint", "account_id"] {
         assert!(
             matches!(
                 refresh_selected_with(&reopened, &workspace, second_id, 1_800_003_500, |_| {
@@ -1605,8 +1622,10 @@ fn private_file_renewal_is_selected_serialized_and_atomic() {
                     if drift == "reused_tokens" {
                         next.access_token = "new-access".into();
                         next.refresh_token = "new-refresh".into();
-                    } else {
+                    } else if drift == "id_hint" {
                         next.id_token = "different-id-hint".into();
+                    } else {
+                        next.chatgpt_account_id = Some("another-account".into());
                     }
                     Ok(next)
                 }),

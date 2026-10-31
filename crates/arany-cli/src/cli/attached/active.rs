@@ -162,19 +162,12 @@ pub(super) fn preflight_idle_run(
         return Err("Use /setup to choose an account".into());
     };
     let Some(model) = view.defaults.model.as_deref() else {
-        return Err(
-            match view
-                .defaults
-                .account_id
-                .filter(|_| ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt))
-            {
-                Some(id) => match chatgpt::selected_reauthorization_target(id) {
-                    Ok(_) => chatgpt::AuthorizationError::BackendRouteNotAdmitted.to_string(),
-                    Err(error) => error.to_string(),
-                },
-                None => "Choose a model with /model before submitting".into(),
-            },
-        );
+        if let Some(id) = view.defaults.account_id
+            && ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt)
+        {
+            chatgpt::selected_reauthorization_target(id).map_err(|error| error.to_string())?;
+        }
+        return Err("Choose a model with /model before submitting".into());
     };
     if let Some(name) = &admission.roster {
         let selected =

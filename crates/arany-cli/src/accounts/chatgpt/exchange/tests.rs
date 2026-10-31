@@ -1,104 +1,13 @@
-use super::*;
-use aws_lc_rs::{
-    rand::SystemRandom,
-    rsa::KeySize,
-    signature::{KeyPair as _, RSA_PKCS1_SHA256, RsaKeyPair},
+use super::test_support::{
+    LONG_TOKEN_LIFETIME_SECONDS, Reply, claims, issuer, jwks, random_value, signed_token,
+    signed_token_with_header,
 };
+use super::*;
+use aws_lc_rs::{rsa::KeySize, signature::RsaKeyPair};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
 
 const NOW: u64 = 1_800_000_000;
-
-fn random_value() -> String {
-    let mut random = [0u8; 32];
-    getrandom::fill(&mut random).expect("test random value");
-    URL_SAFE_NO_PAD.encode(random)
-}
-
-fn key_parts(pair: &RsaKeyPair) -> (Vec<u8>, Vec<u8>) {
-    fn value<'a>(cursor: &mut &'a [u8], tag: u8) -> &'a [u8] {
-        assert_eq!(cursor[0], tag);
-        let length_byte = cursor[1];
-        let (offset, length) = if length_byte & 0x80 == 0 {
-            (2, usize::from(length_byte))
-        } else {
-            let length_bytes = usize::from(length_byte & 0x7f);
-            assert!((1..=2).contains(&length_bytes));
-            let mut length = 0usize;
-            for byte in &cursor[2..2 + length_bytes] {
-                length = (length << 8) | usize::from(*byte);
-            }
-            (2 + length_bytes, length)
-        };
-        assert!(cursor.len() >= offset + length);
-        let result = &cursor[offset..offset + length];
-        *cursor = &cursor[offset + length..];
-        result
-    }
-
-    let mut der = pair.public_key().as_ref();
-    let mut sequence = value(&mut der, 0x30);
-    assert!(der.is_empty());
-    let modulus = value(&mut sequence, 0x02)
-        .strip_prefix(&[0])
-        .unwrap_or_else(|| unreachable!("generated RSA modulus needs a sign byte"))
-        .to_vec();
-    let exponent = value(&mut sequence, 0x02).to_vec();
-    assert!(sequence.is_empty());
-    (modulus, exponent)
-}
-
-fn claims(now: u64, nonce: &str) -> Value {
-    json!({
-        "iss": "https://auth.openai.com",
-        "aud": super::super::CLIENT_ID,
-        "iat": now,
-        "exp": now + 3600,
-        "nonce": nonce,
-        "sub": "synthetic-subject",
-        "https://api.openai.com/auth": {"chatgpt_account_id": "account-one"}
-    })
-}
-
-fn signed_token_with_header(pair: &RsaKeyPair, claims: &Value, header: &Value) -> String {
-    let header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(header).expect("header"));
-    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims"));
-    let signed = format!("{header}.{payload}");
-    let mut signature = vec![0u8; pair.public_modulus_len()];
-    pair.sign(
-        &RSA_PKCS1_SHA256,
-        &SystemRandom::new(),
-        signed.as_bytes(),
-        &mut signature,
-    )
-    .expect("sign test identity");
-    format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature))
-}
-
-fn signed_token(pair: &RsaKeyPair, claims: &Value) -> String {
-    signed_token_with_header(
-        pair,
-        claims,
-        &json!({"alg": "RS256", "kid": "test-key", "typ": "JWT"}),
-    )
-}
-
-fn jwks(pair: &RsaKeyPair) -> Vec<u8> {
-    let (modulus, exponent) = key_parts(pair);
-    serde_json::to_vec(&json!({"keys": [{
-        "kty": "RSA",
-        "kid": "test-key",
-        "use": "sig",
-        "alg": "RS256",
-        "n": URL_SAFE_NO_PAD.encode(modulus),
-        "e": URL_SAFE_NO_PAD.encode(exponent)
-    }]}))
-    .expect("test JWKS")
-}
 
 #[test]
 fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
@@ -117,7 +26,7 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
         json!(null),
         json!({}),
         json!({"chatgpt_account_id": ""}),
-        json!({"chatgpt_account_id": "x".repeat(super::super::MAX_ACCOUNT_ID_BYTES + 1)}),
+        json!({"chatgpt_account_id": "x".repeat(arany::ChatGptProvider::MAX_ACCOUNT_ID_BYTES + 1)}),
         json!({"chatgpt_account_id": "account-\u{e9}"}),
         json!({"chatgpt_account_id": "account\n"}),
         json!({"chatgpt_account_id": 42}),
@@ -367,97 +276,6 @@ fn signed_identity_requires_exact_issuer_client_nonce_and_time() {
     );
 }
 
-struct Reply {
-    status: &'static str,
-    content_type: &'static str,
-    encoding: Option<&'static str>,
-    body: Vec<u8>,
-    chunked: bool,
-}
-
-async fn issuer(replies: Vec<Reply>) -> (Endpoints, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test issuer bind");
-    let origin = format!(
-        "http://{}",
-        listener.local_addr().expect("test issuer addr")
-    );
-    let endpoints = Endpoints {
-        token: Url::parse(&format!("{origin}/oauth/token")).expect("test token URL"),
-        jwks: Url::parse(&format!("{origin}/.well-known/jwks.json")).expect("test JWKS URL"),
-        https_only: false,
-    };
-    let task = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for reply in replies {
-            let (mut stream, _) = listener.accept().await.expect("accept test request");
-            let mut bytes = Vec::new();
-            let mut header_end = None;
-            while header_end.is_none() {
-                let mut buffer = [0u8; 1024];
-                let size = stream.read(&mut buffer).await.expect("read test request");
-                assert!(size > 0 && bytes.len() + size <= 32 * 1024);
-                bytes.extend_from_slice(&buffer[..size]);
-                header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n");
-            }
-            let body_start = header_end.expect("headers") + 4;
-            let headers = String::from_utf8(bytes[..body_start].to_vec()).expect("ASCII headers");
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            assert!(content_length <= MAX_REFRESH_FORM_BYTES);
-            while bytes.len() < body_start + content_length {
-                let mut buffer = [0u8; 1024];
-                let size = stream.read(&mut buffer).await.expect("read test body");
-                assert!(size > 0 && bytes.len() + size <= 32 * 1024);
-                bytes.extend_from_slice(&buffer[..size]);
-            }
-            requests.push(bytes);
-            let encoding = reply
-                .encoding
-                .map(|value| format!("Content-Encoding: {value}\r\n"))
-                .unwrap_or_default();
-            let framing = if reply.chunked {
-                "Transfer-Encoding: chunked\r\n".to_owned()
-            } else {
-                format!("Content-Length: {}\r\n", reply.body.len())
-            };
-            let location = if reply.status.starts_with("302") {
-                "Location: /redirected\r\n"
-            } else {
-                ""
-            };
-            let head = format!(
-                "HTTP/1.1 {}\r\nContent-Type: {}\r\n{}{}{}Connection: close\r\n\r\n",
-                reply.status, reply.content_type, encoding, framing, location
-            );
-            stream
-                .write_all(head.as_bytes())
-                .await
-                .expect("reply headers");
-            if reply.chunked {
-                stream
-                    .write_all(format!("{:X}\r\n", reply.body.len()).as_bytes())
-                    .await
-                    .expect("chunk header");
-            }
-            // Header-level rejection may close the socket before the fixture finishes writing.
-            let _ = stream.write_all(&reply.body).await;
-            if reply.chunked {
-                let _ = stream.write_all(b"\r\n0\r\n\r\n").await;
-            }
-        }
-        requests
-    });
-    (endpoints, task)
-}
-
 fn exchange(nonce: &str) -> CodeExchange {
     CodeExchange {
         code: "synthetic-code".into(),
@@ -477,7 +295,7 @@ fn token_reply(id_token: &str, scope: &str) -> Vec<u8> {
         "refresh_token": "synthetic-refresh",
         "id_token": id_token,
         "token_type": "Bearer",
-        "expires_in": 3600,
+        "expires_in": LONG_TOKEN_LIFETIME_SECONDS,
         "scope": scope
     }))
     .expect("test token reply")
@@ -522,7 +340,7 @@ async fn redemption_sends_exact_grant_and_returns_only_verified_credentials() {
     assert_eq!(verified.id_token, id_token);
     assert_eq!(verified.access_token, "synthetic-access");
     assert_eq!(verified.refresh_token, "synthetic-refresh");
-    assert!(verified.access_expires_at_unix > now);
+    assert!(verified.access_expires_at_unix >= now + LONG_TOKEN_LIFETIME_SECONDS);
     let requests = tokio::time::timeout(Duration::from_secs(5), task)
         .await
         .expect("issuer deadline")
@@ -712,7 +530,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: br#"{"detail":"invalid_grant"}"#.to_vec(),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeHttp { status: 400 },
         ),
         (
             "server failure mentioning a spent code",
@@ -734,7 +552,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: br#"{"error":"invalid_grant"}"#.to_vec(),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeHttp { status: 400 },
         ),
         (
             "wrong token type",
@@ -745,7 +563,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: serde_json::to_vec(&wrong_type).expect("wrong type reply"),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "enabled permission without refresh token",
@@ -756,7 +574,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: serde_json::to_vec(&missing_refresh).unwrap(),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "oversized scope",
@@ -767,7 +585,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: token_reply(&id_token, &"x".repeat(super::super::MAX_SCOPE_BYTES + 1)),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "wrong content type",
@@ -778,7 +596,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: token_reply(&id_token, "openid profile email offline_access"),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "redirect",
@@ -789,7 +607,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: Vec::new(),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeHttp { status: 302 },
         ),
         (
             "encoded",
@@ -800,7 +618,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: token_reply(&id_token, "openid profile email offline_access"),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "declared overflow",
@@ -811,7 +629,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: vec![b' '; MAX_TOKEN_RESPONSE_BYTES + 1],
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "chunked overflow",
@@ -822,7 +640,7 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: vec![b' '; MAX_TOKEN_RESPONSE_BYTES + 1],
                 chunked: true,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
         (
             "malformed token JSON",
@@ -833,12 +651,16 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: b"{".to_vec(),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            AuthorizationError::ExchangeReplyInvalid,
         ),
     ];
-    let missing_fields = ["expires_in", "id_token"].map(|field| {
+    let missing_fields = ["expires_in", "id_token", "null expires_in"].map(|field| {
         let mut reply: Value = serde_json::from_slice(&token_reply(&id_token, "openid")).unwrap();
-        reply.as_object_mut().unwrap().remove(field);
+        if field == "null expires_in" {
+            reply["expires_in"] = Value::Null;
+        } else {
+            reply.as_object_mut().unwrap().remove(field);
+        }
         (
             field,
             Reply {
@@ -848,12 +670,41 @@ async fn redemption_rejects_invalid_identity_and_failed_responses() {
                 body: serde_json::to_vec(&reply).unwrap(),
                 chunked: false,
             },
-            AuthorizationError::ExchangeFailed,
+            if field == "id_token" {
+                AuthorizationError::ExchangeReplyInvalid
+            } else {
+                AuthorizationError::ExchangeLifetimeMissing
+            },
         )
     });
-    for (name, token_reply, expected) in scenarios.into_iter().chain(missing_fields) {
+    let invalid_lifetimes = [0, u64::MAX].map(|seconds| {
+        let mut reply: Value = serde_json::from_slice(&token_reply(&id_token, "openid")).unwrap();
+        reply["expires_in"] = json!(seconds);
+        (
+            "invalid token lifetime",
+            Reply {
+                status: "200 OK",
+                content_type: "application/json",
+                encoding: None,
+                body: serde_json::to_vec(&reply).unwrap(),
+                chunked: false,
+            },
+            AuthorizationError::ExchangeLifetimeInvalid,
+        )
+    });
+    for (name, token_reply, expected) in scenarios
+        .into_iter()
+        .chain(missing_fields)
+        .chain(invalid_lifetimes)
+    {
         let (endpoints, task) = issuer(vec![token_reply]).await;
         let result = redeem_at(exchange(&nonce), endpoints).await;
+        if name == "expires_in" {
+            assert!(
+                matches!(&result, Err(error) if error.to_string().contains("expires_in")),
+                "missing token lifetime must be distinguishable from an HTTP rejection"
+            );
+        }
         assert!(matches!(result, Err(error) if error == expected), "{name}");
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
@@ -953,337 +804,20 @@ async fn redemption_rejects_untrusted_jwks_transport_before_identity_use() {
     }
 }
 
-fn saved_credentials() -> VerifiedCredentials {
-    VerifiedCredentials {
-        client_id: super::super::CLIENT_ID.into(),
-        host_id: uuid::Uuid::now_v7(),
-        subject: "synthetic-subject".into(),
-        chatgpt_account_id: None,
-        id_token: "synthetic-signed-id-hint".into(),
-        access_token: "synthetic-old-access".into(),
-        refresh_token: "synthetic-old-refresh".into(),
-        access_expires_at_unix: 1,
-    }
-}
-
-fn refresh_reply(access_token: &str, refresh_token: &str, scope: &str) -> Vec<u8> {
-    serde_json::to_vec(&json!({
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "Bearer",
-        "expires_in": 3600,
-        "scope": scope
-    }))
-    .expect("test refresh reply")
-}
-
-#[tokio::test]
-async fn refresh_rotates_only_the_selected_registration_with_exact_form() {
-    let original = saved_credentials();
-    let scope = "openid profile email offline_access";
-    let (endpoints, task) = issuer(vec![Reply {
-        status: "200 OK",
-        content_type: "application/json",
-        encoding: None,
-        body: refresh_reply("synthetic-new-access", "synthetic-new-refresh", scope),
-        chunked: false,
-    }])
-    .await;
-    let replacement = refresh_at(&original, endpoints)
-        .await
-        .expect("rotated credentials");
-    assert_eq!(replacement.client_id, original.client_id);
-    assert_eq!(replacement.host_id, original.host_id);
-    assert_eq!(replacement.subject, original.subject);
-    assert_eq!(replacement.id_token, original.id_token);
-    assert_eq!(replacement.access_token, "synthetic-new-access");
-    assert_eq!(replacement.refresh_token, "synthetic-new-refresh");
-    assert_ne!(
-        replacement.access_expires_at_unix,
-        original.access_expires_at_unix
-    );
-    assert_eq!(original.access_token, "synthetic-old-access");
-    assert_eq!(original.refresh_token, "synthetic-old-refresh");
-    let requests = tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .expect("issuer deadline")
-        .expect("issuer task");
-    assert_eq!(requests.len(), 1);
-    let request = String::from_utf8(requests[0].clone()).expect("form request");
-    assert!(request.starts_with("POST /oauth/token HTTP/1.1\r\n"));
-    let form = request.split("\r\n\r\n").nth(1).expect("form body");
-    let fields = url::form_urlencoded::parse(form.as_bytes())
-        .into_owned()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        fields,
-        [
-            ("grant_type".into(), "refresh_token".into()),
-            ("client_id".into(), super::super::CLIENT_ID.into()),
-            ("refresh_token".into(), "synthetic-old-refresh".into()),
-        ]
-    );
-    assert!(!request.contains("synthetic-old-access"));
-    assert!(!request.contains("synthetic-signed-id-hint"));
-}
-
 #[test]
 fn absolute_access_expiry_is_checked_from_request_start() {
     assert_eq!(access_expiry_at(1_000, 3_600), Ok(4_600));
-    for lifetime in [0, 7_201] {
-        assert_eq!(
-            access_expiry_at(1_000, lifetime),
-            Err(AuthorizationError::ExchangeFailed)
-        );
-    }
+    assert_eq!(
+        access_expiry_at(1_000, LONG_TOKEN_LIFETIME_SECONDS),
+        Ok(1_000 + LONG_TOKEN_LIFETIME_SECONDS)
+    );
+    assert_eq!(access_expiry_at(1_000, u64::MAX - 1_000), Ok(u64::MAX));
+    assert_eq!(
+        access_expiry_at(1_000, 0),
+        Err(AuthorizationError::ExchangeFailed)
+    );
     assert_eq!(
         access_expiry_at(u64::MAX - 3_599, 3_600),
         Err(AuthorizationError::ExchangeFailed)
-    );
-}
-
-#[tokio::test]
-async fn refresh_rejects_invalid_rotation_without_changing_prior_credentials() {
-    let original = saved_credentials();
-    let scope = "openid profile email offline_access";
-    let mut wrong_type: Value = serde_json::from_slice(&refresh_reply(
-        "synthetic-new-access",
-        "synthetic-new-refresh",
-        scope,
-    ))
-    .expect("test reply");
-    wrong_type["token_type"] = json!("Basic");
-    for (name, reply, expected) in [
-        (
-            "invalid expiry",
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: None,
-                body: {
-                    let mut reply: Value = serde_json::from_slice(&refresh_reply(
-                        "synthetic-new-access",
-                        "synthetic-new-refresh",
-                        "openid",
-                    ))
-                    .unwrap();
-                    reply["expires_in"] = 0.into();
-                    serde_json::to_vec(&reply).unwrap()
-                },
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "wrong token type",
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: None,
-                body: serde_json::to_vec(&wrong_type).expect("wrong type"),
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "old refresh token reused",
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: None,
-                body: refresh_reply("synthetic-new-access", "synthetic-old-refresh", scope),
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "unusable refresh token",
-            Reply {
-                status: "400 Bad Request",
-                content_type: "application/json",
-                encoding: None,
-                body: br#"{"error":"invalid_grant"}"#.to_vec(),
-                chunked: false,
-            },
-            AuthorizationError::RefreshTokenUnusable,
-        ),
-        (
-            "invalid client",
-            Reply {
-                status: "401 Unauthorized",
-                content_type: "application/json",
-                encoding: None,
-                body: br#"{"error":{"code":"invalid_client"}}"#.to_vec(),
-                chunked: false,
-            },
-            AuthorizationError::InvalidClient,
-        ),
-        (
-            "temporary server failure cannot invalidate tokens",
-            Reply {
-                status: "503 Service Unavailable",
-                content_type: "application/json",
-                encoding: None,
-                body: br#"{"error":"invalid_grant"}"#.to_vec(),
-                chunked: false,
-            },
-            AuthorizationError::Unavailable,
-        ),
-        (
-            "rate limit cannot invalidate tokens",
-            Reply {
-                status: "429 Too Many Requests",
-                content_type: "application/json",
-                encoding: None,
-                body: br#"{"error":"invalid_grant"}"#.to_vec(),
-                chunked: false,
-            },
-            AuthorizationError::Unavailable,
-        ),
-        (
-            "unrecognized error preserves tokens",
-            Reply {
-                status: "400 Bad Request",
-                content_type: "application/json",
-                encoding: None,
-                body: br#"{"error":"unknown"}"#.to_vec(),
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "malformed error preserves tokens",
-            Reply {
-                status: "400 Bad Request",
-                content_type: "application/json",
-                encoding: None,
-                body: br#"{"detail":"invalid_grant"}"#.to_vec(),
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "redirect",
-            Reply {
-                status: "302 Found",
-                content_type: "application/json",
-                encoding: None,
-                body: Vec::new(),
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "encoded",
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: Some("gzip"),
-                body: refresh_reply("synthetic-new-access", "synthetic-new-refresh", scope),
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "declared overflow",
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: None,
-                body: vec![b' '; MAX_TOKEN_RESPONSE_BYTES + 1],
-                chunked: false,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-        (
-            "chunked overflow",
-            Reply {
-                status: "200 OK",
-                content_type: "application/json",
-                encoding: None,
-                body: vec![b' '; MAX_TOKEN_RESPONSE_BYTES + 1],
-                chunked: true,
-            },
-            AuthorizationError::ExchangeFailed,
-        ),
-    ] {
-        let (endpoints, task) = issuer(vec![reply]).await;
-        let result = refresh_at(&original, endpoints).await;
-        assert!(matches!(result, Err(error) if error == expected), "{name}");
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("issuer deadline")
-            .expect("issuer task");
-        assert_eq!(original.access_token, "synthetic-old-access", "{name}");
-        assert_eq!(original.refresh_token, "synthetic-old-refresh", "{name}");
-    }
-
-    for code in [
-        "invalid_refresh_token",
-        "token_expired",
-        "refresh_token_expired",
-        "refresh_token_invalidated",
-        "refresh_token_reused",
-    ] {
-        let (endpoints, task) = issuer(vec![Reply {
-            status: "400 Bad Request",
-            content_type: "application/json",
-            encoding: None,
-            body: serde_json::to_vec(&json!({"error": code})).expect("error reply"),
-            chunked: false,
-        }])
-        .await;
-        assert!(matches!(
-            refresh_at(&original, endpoints).await,
-            Err(AuthorizationError::RefreshTokenUnusable)
-        ));
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("issuer deadline")
-            .expect("issuer task");
-    }
-
-    let mut invalid = saved_credentials();
-    invalid.client_id = "dynamic_agent_client".into();
-    assert!(matches!(
-        refresh_at(&invalid, Endpoints::production()).await,
-        Err(AuthorizationError::InvalidIdentity)
-    ));
-}
-
-#[tokio::test]
-async fn refresh_form_accepts_the_longest_admitted_escaped_token() {
-    let mut original = saved_credentials();
-    original.refresh_token = "%".repeat(crate::accounts::chatgpt::MAX_REFRESH_TOKEN_BYTES);
-    let (endpoints, task) = issuer(vec![Reply {
-        status: "200 OK",
-        content_type: "application/json",
-        encoding: None,
-        body: refresh_reply(
-            "synthetic-new-access",
-            "synthetic-new-refresh",
-            "openid profile email offline_access",
-        ),
-        chunked: false,
-    }])
-    .await;
-    let replacement = refresh_at(&original, endpoints)
-        .await
-        .expect("long admitted refresh token");
-    assert_eq!(replacement.refresh_token, "synthetic-new-refresh");
-    let requests = tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .expect("issuer deadline")
-        .expect("issuer task");
-    let request = String::from_utf8(requests[0].clone()).expect("form request");
-    let form = request.split("\r\n\r\n").nth(1).expect("form body");
-    assert!(form.len() <= MAX_REFRESH_FORM_BYTES);
-    let fields = url::form_urlencoded::parse(form.as_bytes())
-        .into_owned()
-        .collect::<Vec<_>>();
-    assert_eq!(fields[2].0, "refresh_token");
-    assert_eq!(
-        fields[2].1.len(),
-        crate::accounts::chatgpt::MAX_REFRESH_TOKEN_BYTES
     );
 }
