@@ -47,8 +47,9 @@ corpora are included independently of `debug_assertions`. Library unit tests
 exercise diagnostic privacy and bounds directly while the release product keeps
 logging disabled.
 
-Each native test job also runs production-only release Clippy without fixture
-features, rejecting `unwrap()` while allowing `expect()` for proven invariants:
+Dedicated Linux and macOS Clippy jobs check the fixture-enabled suite and
+production-only release targets without fixture features, rejecting `unwrap()`
+in production while allowing `expect()` for proven invariants:
 
 ```sh
 cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings -D clippy::unwrap_used
@@ -61,7 +62,7 @@ state or native credential access, with a fixture-enabled positive control.
 The same step runs the offline Rust build gate on each OS and the APFS alias gate
 on macOS; every selected parent must complete exactly one test.
 
-Only the Linux test job also compiles all release targets with all features,
+The Linux Clippy job also compiles all release targets with all features,
 replacing CI's `RUSTFLAGS` to cover alternatives without `arany_ci` and deny warnings:
 
 ```sh
@@ -100,7 +101,8 @@ to `main` compare the complete pushed range with the event's `before` commit,
 including code changes followed by documentation commits.
 
 The workflow stays enabled, with three required check names: `Clippy`,
-`Linux Tests` and `macOS Tests`. Test jobs are separate so skipping does not leave
+`Linux Tests` and `macOS Tests`. `Clippy` requires both native lint jobs to pass;
+test jobs run independently of lint. Test jobs are separate so skipping does not leave
 an unexpanded matrix name in place of a required check. A job-level skip satisfies
 GitHub's required-check policy; skipping the whole workflow with path filters can
 leave checks pending. Manual dispatch always runs the standard lanes and can

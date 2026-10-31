@@ -110,11 +110,19 @@ jobs:
         run: python3 scripts/ci-changes.py
 
   format-and-clippy:
-    name: Clippy
+    name: ${{ matrix.os }} Clippy
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-24.04
+          - os: macOS
+            runner: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,15 +130,38 @@ jobs:
       - name: Install repository Rust toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo fmt --all --check
+      - if: runner.os == 'Linux'
+        run: cargo fmt --all --check
       - run: cargo fetch --locked
       - name: Check library dependency boundary
+        if: runner.os == 'Linux'
         run: |
           cargo tree -p arany -e normal --target all --locked --offline > "$RUNNER_TEMP/arany-library-tree.txt"
           if grep -E 'ratatui|crossterm|keyring' "$RUNNER_TEMP/arany-library-tree.txt"; then
             exit 1
           fi
-      - run: cargo clippy --workspace --all-targets --release --features arany-cli/test-support --locked --offline -- -D warnings
+      - name: Check production release targets
+        run: cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings -D clippy::unwrap_used
+      - name: Check release targets with test fixtures
+        run: cargo clippy --workspace --all-targets --release --features arany-cli/test-support --locked --offline -- -D warnings
+      - name: Check release targets with all features
+        if: runner.os == 'Linux'
+        env:
+          # Clear arany_ci only here to compile the ordinary release test alternatives.
+          RUSTFLAGS: '-D warnings'
+        run: cargo check --workspace --all-targets --all-features --release --locked --offline
+
+  clippy:
+    name: Clippy
+    needs: [changes, format-and-clippy]
+    if: ${{ always() && !cancelled() && needs.changes.outputs.code-changed != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require both native lint jobs to pass
+        env:
+          LINT_RESULT: ${{ needs.format-and-clippy.result }}
+        run: test "$LINT_RESULT" = success
 
   linux-tests:
     name: Linux Tests

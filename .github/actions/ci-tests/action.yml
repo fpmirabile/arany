@@ -28,20 +28,6 @@ runs:
     - name: Fetch locked Rust dependencies
       shell: bash
       run: cargo fetch --locked
-    - name: Check production release targets
-      shell: bash
-      run: cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings -D clippy::unwrap_used
-    - name: Check release targets with all features
-      if: runner.os == 'Linux'
-      shell: bash
-      env:
-        # Clear arany_ci only here to compile the ordinary release test alternatives.
-        RUSTFLAGS: '-D warnings'
-      run: cargo check --workspace --all-targets --all-features --release --locked --offline
-    - name: Clippy on macOS
-      if: runner.os == 'macOS'
-      shell: bash
-      run: cargo clippy --workspace --all-targets --release --features arany-cli/test-support --locked --offline -- -D warnings
     - name: Pin ordinary production release
       shell: bash
       run: |
