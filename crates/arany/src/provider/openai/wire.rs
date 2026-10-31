@@ -419,11 +419,15 @@ fn run_body_inner(
                 PromptRole::Editor | PromptRole::ReadOnly | PromptRole::ToolReview => false,
             });
         }
-        body["include"] = json!(["reasoning.encrypted_content"]);
+        body["include"] = encrypted_reasoning();
     } else {
         body["text"] = json!({"format": {"type": "json_schema", "name": "arany_outcome", "strict": true, "schema": conversation.outcome}});
     }
     Ok(body)
+}
+
+pub(super) fn encrypted_reasoning() -> Value {
+    json!(["reasoning.encrypted_content"])
 }
 
 fn input_items(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {

@@ -286,6 +286,7 @@ fn is_event_type(name: &str) -> bool {
 
 pub(super) struct ResponsesPreview<'a> {
     secret: &'a str,
+    account_id: Option<&'a str>,
     model: &'a str,
     publisher: ResponsePreview,
     done: std::collections::BTreeMap<usize, Value>,
@@ -303,9 +304,15 @@ struct LiveAnswer {
 }
 
 impl<'a> ResponsesPreview<'a> {
-    pub(super) fn new(secret: &'a str, model: &'a str, publisher: ResponsePreview) -> Self {
+    pub(super) fn new(
+        secret: &'a str,
+        account_id: Option<&'a str>,
+        model: &'a str,
+        publisher: ResponsePreview,
+    ) -> Self {
         Self {
             secret,
+            account_id,
             model,
             publisher,
             done: Default::default(),
@@ -390,7 +397,11 @@ impl<'a> ResponsesPreview<'a> {
             && !live.failed
         {
             let fragment = value["delta"].as_str().unwrap_or_default();
-            match live.decoder.feed(fragment, self.secret) {
+            let visible = live
+                .decoder
+                .feed(fragment, self.secret)
+                .and_then(|text| visible_prefix(text, self.account_id.unwrap_or_default()));
+            match visible {
                 Ok(visible) if visible.len() > live.visible.len() => {
                     live.visible = visible.to_owned();
                     let streamed = PreviewText {
@@ -465,7 +476,10 @@ impl<'a> ResponsesPreview<'a> {
                 }
                 text.push_str(part["text"].as_str().ok_or(ProviderError::InvalidStream)?);
             }
-            if !self.secret.is_empty() && text.contains(self.secret) {
+            if [self.secret, self.account_id.unwrap_or_default()]
+                .iter()
+                .any(|secret| !secret.is_empty() && text.contains(secret))
+            {
                 return Err(ProviderError::InvalidOutcome);
             }
             if has_call || item["phase"] == "commentary" && Some(index) != commentary_answer {

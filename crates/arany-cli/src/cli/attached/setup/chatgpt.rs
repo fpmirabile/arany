@@ -704,10 +704,15 @@ async fn configure_chatgpt(
     let (selected_id, rows) = match catalog {
         Ok(catalog) => catalog,
         Err(error) => {
+            let recovery = if chatgpt_edit_is_uncertain(&error) {
+                "Use /setup to reconnect before continuing"
+            } else {
+                "Use /provider chatgpt then /model to retry"
+            };
             return Ok((
                 defaults,
                 Some(format!(
-                    "Model catalog failed; {}. Use /provider chatgpt then /model to retry: {error}",
+                    "Model catalog failed; {}. {recovery}: {error}",
                     account.status()
                 )),
                 Vec::new(),

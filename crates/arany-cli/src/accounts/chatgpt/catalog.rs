@@ -1,13 +1,13 @@
 use super::{AuthorizationError, VerifiedCredentials, consent::ConsentReceipt};
 use crate::accounts::credentials::AccountStorage;
-use arany::MAX_CATALOG_MODELS;
+use arany::{ChatGptProvider, MAX_CATALOG_MODELS};
 #[cfg(test)]
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url, header};
 use serde::{Deserialize, Deserializer};
 use std::{collections::HashSet, time::Duration};
 
-const MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
+const MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(20);
 
@@ -48,7 +48,10 @@ pub(crate) async fn list_models(
         return Err(AuthorizationError::ConsentRequired);
     }
     let client = super::exchange::client(true)?;
-    let endpoint = Url::parse(MODELS_ENDPOINT).expect("compiled ChatGPT models endpoint");
+    let mut endpoint = Url::parse(MODELS_ENDPOINT).expect("compiled ChatGPT models endpoint");
+    endpoint
+        .query_pairs_mut()
+        .append_pair("client_version", ChatGptProvider::CATALOG_CLIENT_VERSION);
     tokio::time::timeout(DEADLINE, list_at(&client, endpoint, credentials))
         .await
         .map_err(|_| AuthorizationError::Unavailable)?
@@ -59,10 +62,23 @@ async fn list_at(
     endpoint: Url,
     credentials: &VerifiedCredentials,
 ) -> Result<Vec<ChatGptModel>, AuthorizationError> {
+    if credentials.client_id != super::CLIENT_ID {
+        return Err(AuthorizationError::InvalidClient);
+    }
+    let account_id = credentials
+        .chatgpt_account_id
+        .as_deref()
+        .filter(|id| ChatGptProvider::valid_account_id(id))
+        .ok_or(AuthorizationError::InvalidIdentity)?;
     let response = client
         .get(endpoint.clone())
         .header(header::ACCEPT, "application/json")
         .header(header::ACCEPT_ENCODING, "identity")
+        .header(ChatGptProvider::ACCOUNT_ID_HEADER, account_id)
+        .header(
+            ChatGptProvider::ORIGINATOR_HEADER,
+            ChatGptProvider::ORIGINATOR,
+        )
         .bearer_auth(&credentials.access_token)
         .send()
         .await
@@ -81,14 +97,14 @@ async fn list_at(
         || AuthorizationError::InvalidCatalog,
     )
     .await?;
-    if !credentials.access_token.is_empty()
-        && body
-            .windows(credentials.access_token.len())
-            .any(|window| window == credentials.access_token.as_bytes())
-    {
+    let secrets = [credentials.access_token.as_str(), account_id];
+    if secrets.iter().any(|secret| {
+        body.windows(secret.len())
+            .any(|part| part == secret.as_bytes())
+    }) {
         return Err(AuthorizationError::InvalidCatalog);
     }
-    parse_catalog(&body, &credentials.access_token)
+    parse_catalog(&body, &secrets)
 }
 
 fn catalog_http_error(status: reqwest::StatusCode) -> AuthorizationError {
@@ -104,18 +120,20 @@ fn catalog_http_error(status: reqwest::StatusCode) -> AuthorizationError {
     }
 }
 
-fn parse_catalog(body: &[u8], access_token: &str) -> Result<Vec<ChatGptModel>, AuthorizationError> {
+fn parse_catalog(body: &[u8], secrets: &[&str]) -> Result<Vec<ChatGptModel>, AuthorizationError> {
     let reply: CatalogReply =
         serde_json::from_slice(body).map_err(|_| AuthorizationError::InvalidCatalog)?;
     let mut seen = HashSet::new();
     let mut visible = Vec::new();
     for row in reply.models {
         if !valid_slug(&row.slug)
-            || row.slug.contains(access_token)
-            || row
-                .display_name
-                .as_deref()
-                .is_some_and(|name| name.contains(access_token))
+            || secrets.iter().any(|secret| {
+                row.slug.contains(secret)
+                    || row
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|name| name.contains(secret))
+            })
             || !seen.insert(row.slug.clone())
         {
             return Err(AuthorizationError::InvalidCatalog);
@@ -171,10 +189,10 @@ mod tests {
 
     fn account() -> (VerifiedCredentials, ConsentReceipt) {
         let credentials = VerifiedCredentials {
-            client_id: "oaiapp_synthetic".into(),
+            client_id: super::super::CLIENT_ID.into(),
             host_id: Uuid::now_v7(),
             subject: "synthetic-subject".into(),
-            chatgpt_account_id: None,
+            chatgpt_account_id: Some("synthetic-catalog-account".into()),
             id_token: "synthetic-id".into(),
             access_token: "synthetic-catalog-token".into(),
             refresh_token: "synthetic-refresh".into(),
@@ -194,8 +212,9 @@ mod tests {
         assert!(receipt.matches(&account, AccountStorage::Keyring));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let endpoint = Url::parse(&format!(
-            "http://{}/v1/models",
-            listener.local_addr().unwrap()
+            "http://{}/backend-api/codex/models?client_version={}",
+            listener.local_addr().unwrap(),
+            ChatGptProvider::CATALOG_CLIENT_VERSION
         ))
         .unwrap();
         let server = tokio::spawn(async move {
@@ -234,7 +253,12 @@ mod tests {
             ["Model Z", "Model A"]
         );
         let request = server.await.expect("server");
-        assert!(request.starts_with("GET /v1/models HTTP/1.1\r\n"));
+        assert!(request.starts_with(&format!(
+            "GET /backend-api/codex/models?client_version={} HTTP/1.1\r\n",
+            ChatGptProvider::CATALOG_CLIENT_VERSION
+        )));
+        assert!(request.contains("chatgpt-account-id: synthetic-catalog-account\r\n"));
+        assert!(request.contains("originator: arany\r\n"));
         assert!(request.contains("authorization: Bearer synthetic-catalog-token\r\n"));
         assert!(!request.contains("Workspace"));
     }
@@ -243,7 +267,7 @@ mod tests {
         let (account, _) = account();
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let endpoint = Url::parse(&format!(
-            "http://{}/v1/models",
+            "http://{}/backend-api/codex/models",
             listener.local_addr().unwrap()
         ))
         .unwrap();
@@ -357,28 +381,32 @@ mod tests {
     #[test]
     fn catalog_parser_rejects_duplicate_oversize_and_reflected_secret() {
         let token = "synthetic-catalog-token";
+        let secrets = [token, "synthetic-catalog-account"];
         for body in [
             r#"{"models":[{"slug":"same","display_name":"A","visibility":"list"},{"slug":"same","display_name":"B","visibility":"list"}]}"#,
             r#"{"models":[{"slug":"bad id","display_name":"A","visibility":"list"}]}"#,
             r#"{"models":[{"slug":"model","display_name":"synthetic-catalog-token","visibility":"list"}]}"#,
+            r#"{"models":[{"slug":"model","display_name":"synthetic-catalog-account","visibility":"list"}]}"#,
             r#"{"models":[{"slug":"model","display_name":"bad\nname","visibility":"list"}]}"#,
             r#"{"models":[{"slug":"model","display_name":"bad\u202ename","visibility":"list"}]}"#,
             r#"{"models":[{"slug":"model","display_name":"bad\u2028name","visibility":"list"}]}"#,
             r#"{"models":[{"slug":"model","visibility":"list"}]}"#,
         ] {
             assert!(matches!(
-                parse_catalog(body.as_bytes(), token),
+                parse_catalog(body.as_bytes(), &secrets),
                 Err(AuthorizationError::InvalidCatalog)
             ));
         }
-        let escaped_token = token.replace('-', "\\u002d");
-        let reflected = format!(
-            r#"{{"models":[{{"slug":"model","display_name":"{escaped_token}","visibility":"list"}}]}}"#
-        );
-        assert!(matches!(
-            parse_catalog(reflected.as_bytes(), token),
-            Err(AuthorizationError::InvalidCatalog)
-        ));
+        for secret in secrets {
+            let escaped_token = secret.replace('-', "\\u002d");
+            let reflected = format!(
+                r#"{{"models":[{{"slug":"model","display_name":"{escaped_token}","visibility":"list"}}]}}"#
+            );
+            assert!(matches!(
+                parse_catalog(reflected.as_bytes(), &secrets),
+                Err(AuthorizationError::InvalidCatalog)
+            ));
+        }
         let mut rows = String::from("{\"models\":[");
         for index in 0..=MAX_CATALOG_MODELS {
             if index != 0 {
@@ -390,7 +418,7 @@ mod tests {
         }
         rows.push_str("]}");
         assert!(matches!(
-            parse_catalog(rows.as_bytes(), token),
+            parse_catalog(rows.as_bytes(), &secrets),
             Err(AuthorizationError::InvalidCatalog)
         ));
     }
@@ -402,7 +430,7 @@ mod tests {
                 r#"{{"models":[{{"slug":"gpt-6-luna","display_name":"Luna","visibility":"list"{metadata}}}]}}"#
             );
             let models =
-                parse_catalog(body.as_bytes(), "synthetic-catalog-token").expect("catalog");
+                parse_catalog(body.as_bytes(), &["synthetic-catalog-token"]).expect("catalog");
             assert_eq!(
                 models[0].context_window_tokens,
                 (!metadata.is_empty()).then_some(272_000)
@@ -425,7 +453,7 @@ mod tests {
             {"slug":"fraction","display_name":"R","visibility":"list","context_window":272000.5}
         ]}"#;
         assert_eq!(
-            parse_catalog(body.as_bytes(), token)
+            parse_catalog(body.as_bytes(), &[token])
                 .expect("catalog")
                 .into_iter()
                 .map(|model| (model.slug, model.context_window_tokens))
@@ -449,7 +477,7 @@ mod tests {
             r#"{"models":[{"slug":"m","display_name":"A","visibility":"list","context_window":272000},{"slug":"m","display_name":"B","visibility":"list","context_window":272000}]}"#,
         ] {
             assert!(matches!(
-                parse_catalog(body.as_bytes(), token),
+                parse_catalog(body.as_bytes(), &[token]),
                 Err(AuthorizationError::InvalidCatalog)
             ));
         }

@@ -106,6 +106,7 @@ pub(crate) fn selected_reauthorization_target(
 struct AdmittedAccount {
     id: Uuid,
     access_token: String,
+    backend_account_id: String,
     admission_fingerprint: [u8; 32],
 }
 
@@ -121,6 +122,11 @@ async fn admitted_account_for_run(
     Ok(AdmittedAccount {
         id: admitted.selected.id,
         access_token: admitted.selected.credentials.access_token,
+        backend_account_id: admitted
+            .selected
+            .credentials
+            .chatgpt_account_id
+            .ok_or(AuthorizationError::InvalidIdentity)?,
         admission_fingerprint: admitted.fingerprint,
     })
 }
@@ -137,6 +143,7 @@ pub(crate) async fn provider_for_run(
         model,
         effort,
         admitted.access_token,
+        admitted.backend_account_id,
         ChatGptProvenance {
             account_id: admitted.id,
             admission_fingerprint: admitted.admission_fingerprint,
@@ -149,7 +156,6 @@ pub(crate) async fn provider_for_run(
 const AUTHORIZE_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CALLBACK_PORTS: [u16; 2] = [1455, 1457];
-const MAX_ACCOUNT_ID_BYTES: usize = 128;
 const SCOPE: &str = "openid profile email offline_access";
 const CALLBACK_PATH: &str = "/auth/callback";
 const MAX_CALLBACK_BYTES: usize = 4096;
@@ -158,7 +164,7 @@ const MAX_CLIENT_ID_BYTES: usize = 128;
 const MAX_SCOPE_BYTES: usize = 512;
 const MAX_SUBJECT_BYTES: usize = 512;
 const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
-const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_ACCESS_TOKEN_BYTES: usize = ChatGptProvider::MAX_ACCESS_TOKEN_BYTES;
 const MAX_REFRESH_TOKEN_BYTES: usize = 8 * 1024;
 
 fn publication_error(error: arany::StoreError) -> AuthorizationError {
@@ -194,14 +200,26 @@ pub(crate) enum AuthorizationError {
     SignOutStorageUncertain,
     #[error("ChatGPT callback ports are busy; close the other sign-in and retry")]
     CallbackBusy,
-    #[error("ChatGPT backend route not admitted; update Arany before continuing")]
-    BackendRouteNotAdmitted,
     #[error("invalid authorization callback")]
     InvalidCallback,
     #[error("authorization was denied")]
     Denied,
     #[error("authorization code exchange failed")]
     ExchangeFailed,
+    #[error("authorization code exchange failed: HTTP {status}; restart sign-in")]
+    ExchangeHttp { status: u16 },
+    #[error(
+        "authorization code exchange failed: invalid token response format or fields; restart sign-in"
+    )]
+    ExchangeReplyInvalid,
+    #[error(
+        "authorization code exchange failed: token response expires_in is missing or null; restart sign-in"
+    )]
+    ExchangeLifetimeMissing,
+    #[error(
+        "authorization code exchange failed: expires_in must be positive and produce a representable expiry; restart sign-in"
+    )]
+    ExchangeLifetimeInvalid,
     #[error("authorization code is unusable; restart sign-in")]
     GrantUnusable,
     #[error("ChatGPT authorization must be renewed")]
@@ -214,7 +232,11 @@ pub(crate) enum AuthorizationError {
         "ChatGPT token renewal may have succeeded but could not be saved; sign in again before continuing"
     )]
     RenewalStorageUncertain,
-    #[error("ChatGPT client registration was rejected")]
+    #[error(
+        "ChatGPT token renewal outcome is unknown; the account is blocked; reconnect with /setup before continuing"
+    )]
+    RefreshOutcomeUnknown,
+    #[error("ChatGPT client was rejected; update Arany, then reconnect with /setup")]
     InvalidClient,
     #[error("invalid authorization identity")]
     InvalidIdentity,
@@ -302,7 +324,7 @@ impl VerifiedCredentials {
             && self
                 .chatgpt_account_id
                 .as_deref()
-                .is_none_or(valid_account_id)
+                .is_none_or(ChatGptProvider::valid_account_id)
             && bounded_graphic(&self.id_token, MAX_ID_TOKEN_BYTES)
             && bounded_graphic(&self.access_token, MAX_ACCESS_TOKEN_BYTES)
             && bounded_graphic(&self.refresh_token, MAX_REFRESH_TOKEN_BYTES)
@@ -336,7 +358,7 @@ impl AuthorizationAttempt {
         callback_port: u16,
     ) -> Result<Self, AuthorizationError> {
         if !valid_client_id(&account.client_id)
-            || !valid_account_id(&account.chatgpt_account_id)
+            || !ChatGptProvider::valid_account_id(&account.chatgpt_account_id)
             || !bounded_graphic(&account.subject, MAX_SUBJECT_BYTES)
             || account.id.get_version() != Some(Version::SortRand)
         {
@@ -378,7 +400,10 @@ impl AuthorizationAttempt {
             .append_pair("client_id", CLIENT_ID)
             .append_pair("id_token_add_organizations", "true")
             .append_pair("codex_cli_simplified_flow", "true")
-            .append_pair("originator", "arany")
+            .append_pair(
+                ChatGptProvider::ORIGINATOR_HEADER,
+                ChatGptProvider::ORIGINATOR,
+            )
             .append_pair("response_type", "code")
             .append_pair("redirect_uri", &self.redirect_uri)
             .append_pair("scope", SCOPE)
@@ -475,10 +500,6 @@ fn pkce_challenge(verifier: &str) -> String {
 
 fn bounded_graphic(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max && value.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
-fn valid_account_id(value: &str) -> bool {
-    bounded_graphic(value, MAX_ACCOUNT_ID_BYTES)
 }
 
 fn valid_client_id(value: &str) -> bool {

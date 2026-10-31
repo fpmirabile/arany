@@ -79,7 +79,7 @@ fn fixture(dir: &Path) {
             "-subj",
             "/CN=api.openai.com",
             "-addext",
-            "subjectAltName=DNS:api.openai.com,DNS:auth.openai.com,DNS:api.anthropic.com",
+            "subjectAltName=DNS:api.openai.com,DNS:auth.openai.com,DNS:api.anthropic.com,DNS:chatgpt.com",
             "-addext",
             "basicConstraints=critical,CA:FALSE",
             "-addext",

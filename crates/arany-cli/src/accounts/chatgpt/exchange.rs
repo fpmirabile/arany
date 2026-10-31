@@ -3,7 +3,11 @@ use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod renewal;
 mod revoke;
+
+#[cfg(test)]
+mod test_support;
 
 pub(super) async fn revoke_remote(
     credentials: &VerifiedCredentials,
@@ -14,7 +18,6 @@ pub(super) async fn revoke_remote(
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const JWKS_ENDPOINT: &str = "https://auth.openai.com/.well-known/jwks.json";
 const MAX_FORM_BYTES: usize = 4096;
-const MAX_REFRESH_FORM_BYTES: usize = 25 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 32 * 1024;
 const MAX_JWKS_BYTES: usize = 64 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -41,42 +44,13 @@ struct TokenReply {
     refresh_token: Option<String>,
     id_token: String,
     token_type: Option<String>,
-    expires_in: u64,
+    expires_in: Option<u64>,
     scope: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct CodeErrorReply {
     error: String,
-}
-
-#[derive(Deserialize)]
-struct RefreshReply {
-    access_token: String,
-    refresh_token: String,
-    token_type: Option<String>,
-    expires_in: u64,
-    scope: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RefreshErrorReply {
-    error: RefreshErrorCode,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RefreshErrorCode {
-    Plain(String),
-    Nested { code: String },
-}
-
-impl RefreshErrorCode {
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Plain(code) | Self::Nested { code } => code,
-        }
-    }
 }
 
 pub(super) async fn redeem(
@@ -120,12 +94,14 @@ async fn redeem_at(
         StatusCode::OK,
         MAX_TOKEN_RESPONSE_BYTES,
         false,
-        || AuthorizationError::ExchangeFailed,
+        || AuthorizationError::ExchangeReplyInvalid,
     )
     .await?;
-    let token: TokenReply =
-        serde_json::from_slice(&token_bytes).map_err(|_| AuthorizationError::ExchangeFailed)?;
-    validate_reply(&token)?;
+    let token: TokenReply = serde_json::from_slice(&token_bytes)
+        .map_err(|_| AuthorizationError::ExchangeReplyInvalid)?;
+    let expires_in = validate_reply(&token)?;
+    let access_expires_at_unix = access_expiry_at(requested_at_unix, expires_in)
+        .map_err(|_| AuthorizationError::ExchangeLifetimeInvalid)?;
 
     let jwks_response = client
         .get(endpoints.jwks)
@@ -157,7 +133,7 @@ async fn redeem_at(
         refresh_token: token
             .refresh_token
             .ok_or(AuthorizationError::ExchangeFailed)?,
-        access_expires_at_unix: access_expiry_at(requested_at_unix, token.expires_in)?,
+        access_expires_at_unix,
     })
 }
 
@@ -206,10 +182,14 @@ async fn classify_code_error(response: Response) -> AuthorizationError {
         return AuthorizationError::Unavailable;
     }
     if !status.is_client_error() {
-        return AuthorizationError::ExchangeFailed;
+        return AuthorizationError::ExchangeHttp {
+            status: status.as_u16(),
+        };
     }
     let bytes = match read_json(response, status, MAX_TOKEN_RESPONSE_BYTES, false, || {
-        AuthorizationError::ExchangeFailed
+        AuthorizationError::ExchangeHttp {
+            status: status.as_u16(),
+        }
     })
     .await
     {
@@ -218,7 +198,9 @@ async fn classify_code_error(response: Response) -> AuthorizationError {
     };
     match serde_json::from_slice::<CodeErrorReply>(&bytes) {
         Ok(reply) if reply.error == "invalid_grant" => AuthorizationError::GrantUnusable,
-        _ => AuthorizationError::ExchangeFailed,
+        _ => AuthorizationError::ExchangeHttp {
+            status: status.as_u16(),
+        },
     }
 }
 
@@ -243,141 +225,34 @@ pub(super) fn client(https_only: bool) -> Result<Client, AuthorizationError> {
 pub(super) async fn refresh_uncommitted(
     credentials: &VerifiedCredentials,
 ) -> Result<VerifiedCredentials, AuthorizationError> {
-    if credentials.client_id == super::CLIENT_ID {
-        return Err(AuthorizationError::BackendRouteNotAdmitted);
-    }
-    tokio::time::timeout(DEADLINE, refresh_at(credentials, Endpoints::production()))
-        .await
-        .map_err(|_| AuthorizationError::Unavailable)?
+    renewal::refresh(credentials).await
 }
 
-async fn refresh_at(
-    credentials: &VerifiedCredentials,
-    endpoints: Endpoints,
-) -> Result<VerifiedCredentials, AuthorizationError> {
-    if !super::valid_client_id(&credentials.client_id)
-        || credentials.host_id.is_nil()
-        || !super::bounded_graphic(&credentials.subject, super::MAX_SUBJECT_BYTES)
-        || !bounded_token(&credentials.id_token, super::MAX_ID_TOKEN_BYTES)
-        || !bounded_token(&credentials.access_token, super::MAX_ACCESS_TOKEN_BYTES)
-        || !bounded_token(&credentials.refresh_token, super::MAX_REFRESH_TOKEN_BYTES)
-    {
-        return Err(AuthorizationError::InvalidIdentity);
-    }
-    let body = form_body(
-        &[
-            ("grant_type", "refresh_token"),
-            ("client_id", credentials.client_id.as_str()),
-            ("refresh_token", credentials.refresh_token.as_str()),
-        ],
-        MAX_REFRESH_FORM_BYTES,
-    )?;
-    let client = client(endpoints.https_only)?;
-    let requested_at_unix = unix_now()?;
-    let response = client
-        .post(endpoints.token.clone())
-        .header(header::ACCEPT, "application/json")
-        .header(header::ACCEPT_ENCODING, "identity")
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| AuthorizationError::Unavailable)?;
-    if response.url() != &endpoints.token {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
-    if response.status() != StatusCode::OK {
-        return Err(classify_refresh_error(response).await);
-    }
-    let bytes = read_json(
-        response,
-        StatusCode::OK,
-        MAX_TOKEN_RESPONSE_BYTES,
-        false,
-        || AuthorizationError::ExchangeFailed,
-    )
-    .await?;
-    let replacement: RefreshReply =
-        serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::ExchangeFailed)?;
-    validate_token_fields(
-        &replacement.access_token,
-        Some(&replacement.refresh_token),
-        replacement.token_type.as_deref(),
-        replacement.expires_in,
-        replacement.scope.as_deref(),
-    )?;
-    if replacement.access_token == credentials.access_token
-        || replacement.refresh_token == credentials.refresh_token
-    {
-        return Err(AuthorizationError::ExchangeFailed);
-    }
-    Ok(VerifiedCredentials {
-        client_id: credentials.client_id.clone(),
-        host_id: credentials.host_id,
-        subject: credentials.subject.clone(),
-        chatgpt_account_id: credentials.chatgpt_account_id.clone(),
-        id_token: credentials.id_token.clone(),
-        access_token: replacement.access_token,
-        refresh_token: replacement.refresh_token,
-        access_expires_at_unix: access_expiry_at(requested_at_unix, replacement.expires_in)?,
-    })
-}
-
-async fn classify_refresh_error(response: Response) -> AuthorizationError {
-    let status = response.status();
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        return AuthorizationError::Unavailable;
-    }
-    if !status.is_client_error() {
-        return AuthorizationError::ExchangeFailed;
-    }
-    let bytes = match read_json(response, status, MAX_TOKEN_RESPONSE_BYTES, false, || {
-        AuthorizationError::ExchangeFailed
-    })
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(error) => return error,
-    };
-    let Ok(reply) = serde_json::from_slice::<RefreshErrorReply>(&bytes) else {
-        return AuthorizationError::ExchangeFailed;
-    };
-    match reply.error.as_str() {
-        "invalid_grant"
-        | "invalid_refresh_token"
-        | "token_expired"
-        | "refresh_token_expired"
-        | "refresh_token_invalidated"
-        | "refresh_token_reused" => AuthorizationError::RefreshTokenUnusable,
-        "invalid_client" => AuthorizationError::InvalidClient,
-        _ => AuthorizationError::ExchangeFailed,
-    }
-}
-
-fn validate_reply(token: &TokenReply) -> Result<(), AuthorizationError> {
+fn validate_reply(token: &TokenReply) -> Result<u64, AuthorizationError> {
+    let expires_in = token
+        .expires_in
+        .ok_or(AuthorizationError::ExchangeLifetimeMissing)?;
     validate_token_fields(
         &token.access_token,
         token.refresh_token.as_deref(),
         token.token_type.as_deref(),
-        token.expires_in,
         token.scope.as_deref(),
-    )?;
+    )
+    .map_err(|_| AuthorizationError::ExchangeReplyInvalid)?;
     if !bounded_token(&token.id_token, super::MAX_ID_TOKEN_BYTES) {
-        return Err(AuthorizationError::ExchangeFailed);
+        return Err(AuthorizationError::ExchangeReplyInvalid);
     }
-    Ok(())
+    Ok(expires_in)
 }
 
 fn validate_token_fields(
     access_token: &str,
     refresh_token: Option<&str>,
     token_type: Option<&str>,
-    expires_in: u64,
     scope: Option<&str>,
 ) -> Result<(), AuthorizationError> {
     let scope = scope.unwrap_or("");
     if token_type.is_some_and(|kind| kind != "Bearer")
-        || !(1..=7200).contains(&expires_in)
         || !bounded_token(access_token, super::MAX_ACCESS_TOKEN_BYTES)
         || refresh_token.is_none_or(|token| !bounded_token(token, super::MAX_REFRESH_TOKEN_BYTES))
         || scope.len() > super::MAX_SCOPE_BYTES
@@ -402,7 +277,7 @@ fn unix_now() -> Result<u64, AuthorizationError> {
 }
 
 fn access_expiry_at(requested_at_unix: u64, expires_in: u64) -> Result<u64, AuthorizationError> {
-    if !(1..=7200).contains(&expires_in) {
+    if expires_in == 0 {
         return Err(AuthorizationError::ExchangeFailed);
     }
     requested_at_unix
@@ -415,8 +290,9 @@ pub(super) async fn read_json(
     expected_status: StatusCode,
     max: usize,
     jwks: bool,
-    invalid: fn() -> AuthorizationError,
+    invalid: impl Fn() -> AuthorizationError,
 ) -> Result<Vec<u8>, AuthorizationError> {
+    let max_content_length = u64::try_from(max).map_err(|_| invalid())?;
     if response.status() != expected_status
         || response
             .headers()
@@ -425,7 +301,7 @@ pub(super) async fn read_json(
             .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
         || response
             .content_length()
-            .is_some_and(|length| length > max as u64)
+            .is_some_and(|length| length > max_content_length)
     {
         return Err(invalid());
     }

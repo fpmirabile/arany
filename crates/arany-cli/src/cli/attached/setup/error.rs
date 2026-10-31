@@ -108,6 +108,7 @@ pub(super) fn chatgpt_edit_is_uncertain(error: &chatgpt::AuthorizationError) -> 
         chatgpt::AuthorizationError::SignOutStorageUncertain
             | chatgpt::AuthorizationError::RefreshCleanupUncertain
             | chatgpt::AuthorizationError::RenewalStorageUncertain
+            | chatgpt::AuthorizationError::RefreshOutcomeUnknown
             | chatgpt::AuthorizationError::CredentialStore(
                 CredentialError::WriteOutcomeUnknown | CredentialError::DeleteOutcomeUnknown
             )

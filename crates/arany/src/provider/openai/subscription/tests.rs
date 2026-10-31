@@ -22,6 +22,7 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
         "model-a".into(),
         Effort::High,
         TOKEN.into(),
+        TEST_ACCOUNT_ID.into(),
         provenance.clone(),
     )
     .expect("admitted synthetic account");
@@ -39,6 +40,22 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
         crate::provider::MAX_OUTPUT_TOKEN_CAP
     );
     assert_eq!(provider.identity().chatgpt_provenance(), Some(&provenance));
+    for account_id in [
+        String::new(),
+        "unsafe\naccount".into(),
+        "x".repeat(ChatGptProvider::MAX_ACCOUNT_ID_BYTES + 1),
+    ] {
+        assert!(
+            ChatGptProvider::from_checked_account(
+                "model-a".into(),
+                Effort::High,
+                TOKEN.into(),
+                account_id,
+                provenance.clone(),
+            )
+            .is_err()
+        );
+    }
     assert_eq!(
         provider.identity().limits.deadline,
         std::time::Duration::from_secs(600)
@@ -52,6 +69,7 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
             "model-a".into(),
             Effort::High,
             TOKEN.into(),
+            TEST_ACCOUNT_ID.into(),
             ChatGptProvenance {
                 admission_fingerprint: [0; 32],
                 ..provenance
@@ -68,6 +86,7 @@ async fn requests_above_the_declared_cap_are_rejected_before_dispatch() {
         "model-a".into(),
         Effort::High,
         TOKEN.into(),
+        TEST_ACCOUNT_ID.into(),
         ChatGptProvenance {
             account_id: uuid::Uuid::now_v7(),
             admission_fingerprint: [7; 32],
@@ -93,6 +112,8 @@ async fn requests_above_the_declared_cap_are_rejected_before_dispatch() {
                     client: &client(),
                     endpoint,
                     access_token: TOKEN,
+                    account_id: TEST_ACCOUNT_ID,
+                    session_id: request.session_id,
                     effort: Effort::High,
                     max_output_tokens: limits.max_output_tokens,
                 },
@@ -172,7 +193,7 @@ fn multiedit_subscription_stream_preserves_defaults_and_advertises_only_admitted
             "data: {}\n\n",
             json!({"type":"response.completed","response":response})
         );
-        let completed = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+        let completed = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
             .feed(stream.as_bytes())
             .unwrap()
             .unwrap();
@@ -421,7 +442,8 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 if populated {
                     terminal["response"]["output"] = json!([reasoning["item"], done["item"]]);
                 }
-                let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+                let mut decoder =
+                    StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
                 let prefix = format!("data: {created}\n\ndata: {reasoning}\n\ndata: {done}\n\n");
                 assert!(
                     decoder.feed(prefix.as_bytes()).unwrap().is_none(),
@@ -485,7 +507,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         ));
         for (label, stream) in rejected {
             assert!(
-                StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+                StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
                     .feed(stream.as_bytes())
                     .is_err(),
                 "{label}"
@@ -494,7 +516,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         for kind in ["response.failed", "response.incomplete", "error"] {
             let stream = format!("{prefix}data: {}\n\n", json!({"type":kind}));
             assert!(
-                StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+                StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
                     .feed(stream.as_bytes())
                     .is_err(),
                 "{kind} after done"
@@ -507,7 +529,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             let mut changed = done.clone();
             *changed.pointer_mut(pointer).unwrap() = value;
             let stream = format!("data: {created}\n\ndata: {changed}\n\ndata: {terminal}\n\n");
-            let body = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+            let body = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
                 .feed(stream.as_bytes())
                 .unwrap()
                 .unwrap();
@@ -530,7 +552,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             let mut changed = terminal.clone();
             *changed.pointer_mut(pointer).unwrap() = value;
             let stream = format!("{prefix}data: {changed}\n\n");
-            let body = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+            let body = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
                 .feed(stream.as_bytes())
                 .unwrap()
                 .unwrap();
@@ -545,7 +567,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         }
         let reflected = prefix.replace("\"done\"", &format!("\"{TOKEN}\""));
         assert!(
-            StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+            StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
                 .feed(reflected.as_bytes())
                 .is_err()
         );
@@ -553,12 +575,12 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             "data: {created}\n\ndata: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"id\":\"one\",\"id\":\"two\",\"type\":\"message\",\"status\":\"completed\"}}}}\n\n"
         );
         assert!(
-            StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+            StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
                 .feed(duplicate_item.as_bytes())
                 .is_err()
         );
     }
-    let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     let stream = completed(Some(12));
     let split = stream.len() / 3;
     assert!(decoder.feed(&stream[..split]).unwrap().is_none());
@@ -589,7 +611,8 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 .filter(|line| !line.starts_with("event:"))
                 .collect::<String>()
         };
-        let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+        let mut decoder =
+            StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
         let mut terminal = None;
         for byte in stream.as_bytes().chunks(1) {
             if let Some(completed) = decoder.feed(byte).expect(name) {
@@ -618,7 +641,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         ("duplicate event field", b"event: response.completed\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n".as_slice()),
         ("reflected token", b"event: response.created\ndata: {\"type\":\"response.created\",\"echo\":\"\\u0073ynthetic-subscription-token\"}\n\n".as_slice()),
     ] {
-        let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+        let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
         assert!(decoder.feed(bytes).is_err(), "{label}");
         let stage = match label {
             "failed" | "error" => Stage::RemoteFailure,
@@ -630,7 +653,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         };
         assert_eq!(decoder.stage(), stage, "{label}");
     }
-    let mut failed = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut failed = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     let failure = failed
         .feed(b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"subscription_sharing_usage_unavailable\"}}}\n\n")
         .expect_err("remote stream failure");
@@ -639,7 +662,8 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         "Provider stream failed: subscription_sharing_usage_unavailable"
     );
     assert_eq!(failure.failure_class(), ProviderFailureClass::Unavailable);
-    let mut event_error = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut event_error =
+        StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     let failure = event_error
         .feed(b"event: error\ndata: {\"type\":\"error\",\"code\":\"subscription_sharing_usage_limit_exceeded\"}\n\n")
         .expect_err("structured error event");
@@ -663,23 +687,23 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             .into_bytes(),
         ),
     ] {
-        let failure = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+        let failure = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
             .feed(&stream)
             .expect_err(label);
         assert!(matches!(failure, ProviderError::Rejected), "{label}");
     }
-    let reflected = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+    let reflected = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
         .feed(b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"\\u0073ynthetic-subscription-token\"}}}\n\n")
         .expect_err("reflected token in code");
     assert!(matches!(reflected, ProviderError::InvalidOutcome));
     assert!(!reflected.to_string().contains(TOKEN));
     assert!(
-        StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+        StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
             .feed(&vec![b'x'; MAX_RESPONSE_BYTES + 1])
             .is_err()
     );
     assert!(
-        StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP)
+        StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP)
             .feed(b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
             .unwrap()
             .is_none()
@@ -700,7 +724,7 @@ fn created_event_echoing_a_large_tool_catalog_is_admitted_within_the_byte_bound(
         json!({"type":"response.created","response":{"id":"resp_synthetic","tools":tools}});
     let bytes = format!("event: response.created\ndata: {created}\n\n").into_bytes();
     assert!(bytes.len() < 1024 * 1024);
-    let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     decoder
         .feed(&bytes)
         .expect("echoed catalog within the byte bound");
@@ -709,7 +733,7 @@ fn created_event_echoing_a_large_tool_catalog_is_admitted_within_the_byte_bound(
         "event: response.created\ndata: {{\"type\":\"response.created\",\"x\":[{}]}}\n\n",
         vec!["0"; 300_000].join(",")
     );
-    let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     assert!(decoder.feed(flood.as_bytes()).is_err());
     assert_eq!(decoder.stage(), Stage::EventJson);
 }
@@ -754,7 +778,8 @@ fn created_echo_of_the_largest_catalog_request_stays_within_half_the_stream_json
             count < crate::provider::MAX_RESPONSE_JSON_NODES / 2,
             "{label} {count} nodes"
         );
-        let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+        let mut decoder =
+            StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
         decoder
             .feed(format!("event: response.created\ndata: {data}\n\n").as_bytes())
             .unwrap_or_else(|error| panic!("{label}: {error}"));
@@ -764,7 +789,7 @@ fn created_echo_of_the_largest_catalog_request_stays_within_half_the_stream_json
 async fn serve(reply: Vec<u8>) -> (Url, tokio::task::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let endpoint = Url::parse(&format!(
-        "http://{}/v1/responses",
+        "http://{}/backend-api/codex/responses",
         listener.local_addr().unwrap()
     ))
     .expect("test endpoint");
@@ -861,7 +886,8 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         .chain(stream.clone())
         .collect();
         let (endpoint, server) = serve(reply).await;
-        let response = invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
+        let request = request();
+        let response = invoke_at(&client(), endpoint, TOKEN, &request, Effort::Medium)
             .await
             .expect(label);
         assert_eq!(response.usage.output_tokens, Some(12), "{label}");
@@ -869,9 +895,16 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
             matches!(response.outcome, ProviderOutcome::Answer(ref value) if value.text == "done")
         );
         let wire_request = server.await.expect("server");
-        assert!(wire_request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+        assert!(wire_request.starts_with("POST /backend-api/codex/responses HTTP/1.1\r\n"));
         assert!(wire_request.contains("authorization: Bearer synthetic-subscription-token\r\n"));
         assert!(wire_request.contains("accept: text/event-stream\r\n"));
+        assert!(wire_request.contains("originator: arany\r\n"));
+        assert!(wire_request.contains("openai-beta: responses=experimental\r\n"));
+        assert!(wire_request.contains(&format!("chatgpt-account-id: {TEST_ACCOUNT_ID}\r\n")));
+        assert!(wire_request.contains(&format!("session-id: {}\r\n", request.session_id)));
+        assert!(wire_request.contains(&format!("x-client-request-id: {}\r\n", request.session_id)));
+        assert!(!wire_request.contains("conversation_id"));
+
         let document: Value =
             serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(document["store"], false);
@@ -1045,6 +1078,8 @@ async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_c
                         client: &client(),
                         endpoint,
                         access_token: TOKEN,
+                        account_id: TEST_ACCOUNT_ID,
+                        session_id: request.session_id,
                         effort: Effort::Medium,
                         max_output_tokens: crate::provider::MAX_OUTPUT_TOKEN_CAP,
                     },
@@ -1117,7 +1152,8 @@ async fn only_received_events_restart_the_stream_idle_window() {
         ("bytes without an event", &trickled[..], secs(300), false),
     ] {
         let started = Instant::now();
-        let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+        let mut decoder =
+            StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
         let mut source = ScriptedChunks(script.iter().cloned().collect());
         let result = read_events(&mut decoder, &mut source).await;
         assert_eq!(started.elapsed(), elapsed, "{label}");
@@ -1479,8 +1515,13 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
     events.push(json!({"type":"response.output_item.done","output_index":1,"item":final_item}));
     events.push(json!({"type":"response.completed","response":{"id":"resp_preview","model":"model-a","status":"completed","output":[commentary, final_item],"usage":{"input_tokens":8,"output_tokens":12}}}));
     let (publisher, observed) = ResponsePreview::new();
-    let mut decoder =
-        StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher), DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::with_preview(
+        TOKEN,
+        Some(TEST_ACCOUNT_ID),
+        "model-a",
+        Some(publisher),
+        DEFAULT_OUTPUT_TOKEN_CAP,
+    );
     let mut last = String::new();
     let mut accepted = None;
     for event in &events {
@@ -1502,6 +1543,7 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
         let (publisher, observed) = ResponsePreview::new();
         let mut decoder = StreamDecoder::with_preview(
             TOKEN,
+            Some(TEST_ACCOUNT_ID),
             "model-a",
             Some(publisher),
             DEFAULT_OUTPUT_TOKEN_CAP,
@@ -1516,6 +1558,35 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
 }
 
 #[test]
+fn backend_account_reflection_never_reaches_preview_or_accepted_output() {
+    let (publisher, observed) = ResponsePreview::new();
+    let mut decoder = StreamDecoder::with_preview(
+        TOKEN,
+        Some(TEST_ACCOUNT_ID),
+        "model-a",
+        Some(publisher),
+        DEFAULT_OUTPUT_TOKEN_CAP,
+    );
+    let initial = json!({"type":"response.output_item.added","output_index":0,"item":{
+        "id":"msg_account","type":"message","role":"assistant","phase":"final_answer","status":"in_progress","content":[]
+    }});
+    decoder
+        .feed(format!("data: {initial}\n\n").as_bytes())
+        .unwrap();
+    let (prefix, suffix) = TEST_ACCOUNT_ID.split_at(TEST_ACCOUNT_ID.len() / 2);
+    for fragment in [prefix, suffix] {
+        let event = json!({"type":"response.output_text.delta","item_id":"msg_account","output_index":0,"content_index":0,"delta":fragment});
+        decoder
+            .feed(format!("data: {event}\n\n").as_bytes())
+            .unwrap();
+        assert!(observed.borrow().answer.is_empty());
+    }
+    let rejected = decoder.feed(&completed_with_text(Some(12), TEST_ACCOUNT_ID));
+    assert!(matches!(rejected, Err(ProviderError::InvalidOutcome)));
+    assert!(observed.borrow().answer.is_empty());
+}
+
+#[test]
 fn subscription_accept_rejects_cached_tokens_above_input() {
     let usage = Usage {
         input_tokens: Some(12),
@@ -1523,7 +1594,16 @@ fn subscription_accept_rejects_cached_tokens_above_input() {
         cache_read_input_tokens: Some(13),
         cache_creation_input_tokens: None,
     };
-    assert!(accept_result(false, usage, 0, 4096, StreamCounts::default()).is_err());
+    assert!(
+        accept_result(
+            (&[TOKEN], |_| false),
+            usage,
+            0,
+            4096,
+            StreamCounts::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1766,6 +1846,7 @@ fn answer_text_streams_before_completion_and_is_withdrawn_when_a_call_follows() 
         let (publisher, observed) = ResponsePreview::new();
         let mut decoder = StreamDecoder::with_preview(
             TOKEN,
+            Some(TEST_ACCOUNT_ID),
             "model-a",
             Some(publisher),
             DEFAULT_OUTPUT_TOKEN_CAP,
@@ -1806,8 +1887,13 @@ fn oversized_streamed_answer_leaves_refusal_to_the_engine_instead_of_failing_the
         json!({"type":"response.completed","response":{"id":"resp_1","model":"model-a","status":"completed","output":[message],"usage":{"input_tokens":8,"output_tokens":12}}}),
     ];
     let (publisher, observed) = ResponsePreview::new();
-    let mut decoder =
-        StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher), DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::with_preview(
+        TOKEN,
+        Some(TEST_ACCOUNT_ID),
+        "model-a",
+        Some(publisher),
+        DEFAULT_OUTPUT_TOKEN_CAP,
+    );
     for event in &events {
         decoder
             .feed(format!("data: {event}\n\n").as_bytes())
@@ -1831,6 +1917,7 @@ fn streamed_answer_is_tentative_unless_the_item_is_final_answer() {
         let (publisher, observed) = ResponsePreview::new();
         let mut decoder = StreamDecoder::with_preview(
             TOKEN,
+            Some(TEST_ACCOUNT_ID),
             "model-a",
             Some(publisher),
             DEFAULT_OUTPUT_TOKEN_CAP,
@@ -2029,15 +2116,18 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
         let reply = format!("HTTP/1.1 {status} Synthetic\r\nx-codex-primary-used-percent: 42\r\nx-codex-primary-window-minutes: 10080\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).into_bytes().into_iter().chain(body).collect();
         let (endpoint, server) = serve(reply).await;
         let slot = RateLimitSlot::default();
+        let request = request();
         let result = invoke_at_observed(
             RunCall {
                 client: &client(),
                 endpoint,
                 access_token: TOKEN,
+                account_id: TEST_ACCOUNT_ID,
+                session_id: request.session_id,
                 effort: Effort::Low,
                 max_output_tokens: CallLimits::default().max_output_tokens,
             },
-            &request(),
+            &request,
             crate::provider::MAX_PROVIDER_REQUEST_BYTES,
             (None, slot.clone()),
         )
@@ -2054,15 +2144,18 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
         let reply = format!("HTTP/1.1 {status} Synthetic\r\nx-request-id: {TOKEN}\r\nx-codex-primary-used-percent: 42\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes();
         let (endpoint, server) = serve(reply).await;
         let slot = RateLimitSlot::default();
+        let request = request();
         let result = invoke_at_observed(
             RunCall {
                 client: &client(),
                 endpoint,
                 access_token: TOKEN,
+                account_id: TEST_ACCOUNT_ID,
+                session_id: request.session_id,
                 effort: Effort::Low,
                 max_output_tokens: CallLimits::default().max_output_tokens,
             },
-            &request(),
+            &request,
             crate::provider::MAX_PROVIDER_REQUEST_BYTES,
             (None, slot.clone()),
         )
@@ -2072,7 +2165,7 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
         server.await.unwrap();
     }
     let slot = RateLimitSlot::default();
-    let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     decoder.set_limits(slot.clone());
     let event = json!({"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":23,"window_minutes":10080,"reset_at":2000}},"plan_type":"DO_NOT_KEEP_PLAN","account_id":"DO_NOT_KEEP_ACCOUNT"});
     assert!(
@@ -2121,8 +2214,13 @@ fn token_sized_write_deltas_cover_the_content_ceiling_at_the_real_cap() {
                 "output_tokens":arguments.len().div_ceil(4)}}}),
     ]);
     let (publisher, observed) = ResponsePreview::new();
-    let mut decoder =
-        StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher), request.max_output_tokens);
+    let mut decoder = StreamDecoder::with_preview(
+        TOKEN,
+        Some(TEST_ACCOUNT_ID),
+        "model-a",
+        Some(publisher),
+        request.max_output_tokens,
+    );
     let mut completed = None;
     for event in events {
         let frame = format!(
@@ -2144,7 +2242,7 @@ fn token_sized_write_deltas_cover_the_content_ceiling_at_the_real_cap() {
 #[test]
 fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
     for cap in [SMALL_OUTPUT_CAP, crate::provider::MAX_OUTPUT_TOKEN_CAP] {
-        let mut decoder = StreamDecoder::new(TOKEN, cap);
+        let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), cap);
         let frame = b"data: {\"type\":\"response.queued\"}\n\n";
         for _ in 0..crate::provider::max_stream_events(cap) {
             assert!(decoder.feed(frame).unwrap().is_none());
@@ -2156,7 +2254,7 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
             Some(crate::ProviderFailureReason::StreamProtocol)
         );
         assert!(error.retry_cause().is_none());
-        let mut decoder = StreamDecoder::new(TOKEN, cap);
+        let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), cap);
         let comment = format!(":{}\n", " ".repeat(MAX_RESPONSE_BYTES - 2));
         let bound = crate::provider::max_stream_bytes(cap);
         for _ in 0..bound / comment.len() {
@@ -2183,7 +2281,7 @@ fn multi_call_replay_keeps_all_paired_outputs_and_drops_server_ids() {
     let mut request = crate::provider::test_support::primary_request("model-a");
     let step = crate::provider::test_support::four_read_step("openai");
     let items = step.turn.items("openai").unwrap();
-    let mut decoder = StreamDecoder::new(TOKEN, DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::new(TOKEN, Some(TEST_ACCOUNT_ID), DEFAULT_OUTPUT_TOKEN_CAP);
     let created = json!({"type":"response.created","response":{"id":"resp_batch"}});
     assert!(
         decoder
@@ -2319,8 +2417,13 @@ fn commentary_without_a_call_or_final_message_previews_as_the_answer() {
         json!({"type":"response.completed","response":{"id":"resp_1","model":"model-a","status":"completed","output":[commentary],"usage":{"input_tokens":8,"output_tokens":4}}}),
     ];
     let (publisher, observed) = ResponsePreview::new();
-    let mut decoder =
-        StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher), DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut decoder = StreamDecoder::with_preview(
+        TOKEN,
+        Some(TEST_ACCOUNT_ID),
+        "model-a",
+        Some(publisher),
+        DEFAULT_OUTPUT_TOKEN_CAP,
+    );
     let mut accepted = None;
     for event in &events {
         accepted = decoder
