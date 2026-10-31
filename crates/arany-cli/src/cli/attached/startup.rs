@@ -240,7 +240,7 @@ impl Startup {
                 catalog,
             })) => {
                 self.admission.defaults = defaults;
-                self.setup_notice = Some(notice);
+                append_notice(&mut self.setup_notice, &notice);
                 self.setup_catalog = Some(catalog);
             }
             Ok(Some(setup::SetupSelection::ChatGpt {
@@ -249,12 +249,14 @@ impl Startup {
                 catalog,
             })) => {
                 self.admission.defaults = defaults;
-                self.setup_notice = notice;
+                if let Some(notice) = notice {
+                    append_notice(&mut self.setup_notice, &notice);
+                }
                 self.setup_catalog = Some(catalog);
             }
             Ok(Some(setup::SetupSelection::Custom { defaults, notice })) => {
                 self.admission.defaults = defaults;
-                self.setup_notice = Some(notice);
+                append_notice(&mut self.setup_notice, &notice);
                 self.setup_catalog = Some(Vec::new());
             }
             Ok(None) => return Ok(ControlFlow::Break(())),
@@ -345,7 +347,10 @@ impl Startup {
                 }
             }
             Err(error) => {
-                self.setup_notice = Some(format!("Error: {error}; choose /model to select again"))
+                append_notice(
+                    &mut self.setup_notice,
+                    &format!("Error: {error}; choose /model to select again"),
+                );
             }
         }
     }
@@ -481,7 +486,10 @@ impl Startup {
             {
                 Ok(catalog) => self.setup_catalog = Some(catalog),
                 Err(error) => {
-                    self.setup_notice = Some(format!("Error: {error}; cached models unavailable"))
+                    append_notice(
+                        &mut self.setup_notice,
+                        &format!("Error: {error}; cached models unavailable"),
+                    );
                 }
             }
         }
@@ -499,9 +507,10 @@ impl Startup {
             )
             .await
         {
-            self.setup_notice = Some(format!(
-                "Error: {error}; selection kept for this conversation only"
-            ));
+            append_notice(
+                &mut self.setup_notice,
+                &format!("Error: {error}; selection kept for this conversation only"),
+            );
         }
     }
 

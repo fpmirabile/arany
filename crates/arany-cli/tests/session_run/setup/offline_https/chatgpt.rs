@@ -16,10 +16,12 @@ use std::{
 };
 
 const STAGE: &str = "ARANY_TEST_OFFLINE_CHATGPT_STAGE";
-const ACCOUNT_ONLY_TEST: &str = "setup::offline_https::chatgpt::release_private_file_chatgpt_sign_in_keeps_account_without_check";
-const ROUTE_REFUSAL_TEST: &str =
-    "setup::offline_https::chatgpt::release_private_file_chatgpt_refuses_unadmitted_routes";
+const SIGN_IN_TEST: &str = "setup::offline_https::chatgpt::release_private_file_chatgpt_sign_in_selects_a_backend_model_without_probe";
+const RENEWAL_TEST: &str =
+    "setup::offline_https::chatgpt::release_private_file_chatgpt_renews_before_a_backend_turn";
 const ACCESS: &str = "synthetic-chatgpt-access-token";
+const RENEWED_ACCESS: &str = "synthetic-renewed-chatgpt-access-token";
+const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const REFRESH: &str = "synthetic-chatgpt-refresh-token";
 const CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ACCOUNT: &str = "synthetic-remote-account";
@@ -103,7 +105,7 @@ pub(super) fn read_request(output: &mut impl Read) -> Vec<u8> {
         let count = output.read(&mut chunk).expect("issuer request read");
         assert!(count > 0, "issuer peer closed before request");
         bytes.extend_from_slice(&chunk[..count]);
-        assert!(bytes.len() <= 32 * 1024, "issuer request cap");
+        assert!(bytes.len() <= MAX_REQUEST_BYTES, "HTTP request cap");
         if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
             break end + 4;
         }
@@ -118,12 +120,15 @@ pub(super) fn read_request(output: &mut impl Read) -> Vec<u8> {
         })
         .map_or(Ok(0), |value| value.trim().parse())
         .expect("issuer request content length");
-    assert!(length <= 32 * 1024 - header_end, "issuer body cap");
-    while bytes.len() < header_end + length {
+    let request_end = header_end
+        .checked_add(length)
+        .filter(|end| *end <= MAX_REQUEST_BYTES)
+        .expect("issuer body cap");
+    while bytes.len() < request_end {
         let count = output.read(&mut chunk).expect("issuer request body");
         assert!(count > 0, "issuer peer closed during body");
         bytes.extend_from_slice(&chunk[..count]);
-        assert!(bytes.len() <= 32 * 1024, "issuer request cap");
+        assert!(bytes.len() <= MAX_REQUEST_BYTES, "HTTP request cap");
     }
     bytes
 }
@@ -141,25 +146,98 @@ pub(super) fn send_json(input: &mut impl Write, body: &[u8]) {
     input.write_all(body).expect("issuer response body");
 }
 
-fn issuer(reply: Receiver<(Vec<u8>, Vec<u8>, String)>, revoke: bool, exchanges: usize) -> Server {
-    assert!((1..=2).contains(&exchanges));
-    let mut child = Command::new("/usr/bin/openssl")
+struct IssuerReply {
+    token: Vec<u8>,
+    jwks: Vec<u8>,
+    redirect_uri: String,
+    nonce: String,
+}
+
+const MAX_PEER_CONNECTIONS: usize = 10;
+const PEER_IO_SECONDS: u64 = 20;
+const PEER_ACCEPT_SECONDS: u64 = 60;
+const HTTPS_PEER: &str = r#"
+import socket, ssl, sys
+address, port = sys.argv[1].rsplit(':', 1)
+limit, connections, deadline, accept_deadline = map(int, sys.argv[2:])
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain('/fixture/server.pem', '/fixture/server.key')
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind((address, int(port)))
+listener.listen()
+listener.settimeout(accept_deadline)
+sys.stdout.buffer.write(b'READY\n')
+sys.stdout.buffer.flush()
+def message(stream):
+    head = bytearray()
+    while not head.endswith(b'\r\n\r\n'):
+        byte = stream.read(1)
+        if not byte:
+            return None
+        head.extend(byte)
+        assert len(head) <= limit
+    length = 0
+    for line in head.split(b'\r\n')[1:]:
+        name, separator, value = line.partition(b':')
+        if separator and name.lower() == b'content-length':
+            length = int(value.strip())
+    assert 0 <= length <= limit - len(head)
+    body = stream.read(length)
+    assert len(body) == length
+    return bytes(head) + body
+for _ in range(connections):
+    socket_peer, _ = listener.accept()
+    socket_peer.settimeout(deadline)
+    try:
+        with context.wrap_socket(socket_peer, server_side=True) as peer:
+            with peer.makefile('rb') as source:
+                request = message(source)
+                if request is None:
+                    continue
+                sys.stdout.buffer.write(request)
+                sys.stdout.buffer.flush()
+                response = message(sys.stdin.buffer)
+                if response is None:
+                    break
+                peer.sendall(response)
+    except (ConnectionError, ssl.SSLEOFError):
+        socket_peer.close()
+"#;
+
+fn tls_server(address: &str) -> Child {
+    let mut child = Command::new("/usr/bin/python3")
         .args([
-            "s_server",
-            "-quiet",
-            "-accept",
-            "127.0.0.2:443",
-            "-cert",
-            "/fixture/server.pem",
-            "-key",
-            "/fixture/server.key",
+            "-I",
+            "-c",
+            HTTPS_PEER,
+            address,
+            &MAX_REQUEST_BYTES.to_string(),
+            &MAX_PEER_CONNECTIONS.to_string(),
+            &PEER_IO_SECONDS.to_string(),
+            &PEER_ACCEPT_SECONDS.to_string(),
         ])
+        .env_clear()
         .current_dir("/fixture")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
-        .expect("isolated synthetic issuer");
+        .expect("isolated HTTPS peer");
+    let mut ready = [0; b"READY\n".len()];
+    child
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .expect("HTTPS peer ready");
+    assert_eq!(&ready, b"READY\n");
+    child
+}
+
+fn issuer(reply: Receiver<IssuerReply>, revoke: bool, exchanges: usize, renew: bool) -> Server {
+    assert!((1..=2).contains(&exchanges));
+    let mut child = tls_server("127.0.0.2:443");
     let mut input = child.stdin.take().expect("issuer response pipe");
     let mut output = child.stdout.take().expect("issuer request pipe");
     let responder = thread::spawn(move || {
@@ -192,7 +270,12 @@ fn issuer(reply: Receiver<(Vec<u8>, Vec<u8>, String)>, revoke: bool, exchanges: 
                     .iter()
                     .any(|(name, value)| name == "code_verifier" && !value.is_empty())
             );
-            let (token, jwks, redirect_uri) = reply
+            let IssuerReply {
+                token,
+                jwks,
+                redirect_uri,
+                nonce,
+            } = reply
                 .recv_timeout(Duration::from_secs(10))
                 .expect("signed identity fixture");
             assert!(
@@ -204,16 +287,19 @@ fn issuer(reply: Receiver<(Vec<u8>, Vec<u8>, String)>, revoke: bool, exchanges: 
             let second = read_request(&mut output);
             assert!(second.starts_with(b"GET /.well-known/jwks.json HTTP/1.1\r\n"));
             send_json(&mut input, &jwks);
+            if renew {
+                checked_turn::renew_once(&mut input, &mut output, &nonce);
+            }
         }
         if revoke {
             let discovery = read_request(&mut output);
             assert!(discovery.starts_with(b"GET /.well-known/openid-configuration HTTP/1.1\r\n"));
             send_json(
                 &mut input,
-                br#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/oauth/revoke"}"#,
+                br#"{"issuer":"https://auth.openai.com","revocation_endpoint":"https://auth.openai.com/api/accounts/oauth/revoke"}"#,
             );
             let revoke = read_request(&mut output);
-            assert!(revoke.starts_with(b"POST /oauth/revoke HTTP/1.1\r\n"));
+            assert!(revoke.starts_with(b"POST /api/accounts/oauth/revoke HTTP/1.1\r\n"));
             let end = revoke
                 .windows(4)
                 .position(|part| part == b"\r\n\r\n")
@@ -235,73 +321,10 @@ fn issuer(reply: Receiver<(Vec<u8>, Vec<u8>, String)>, revoke: bool, exchanges: 
                 .expect("revocation confirmation");
         }
     });
-    let server = Server {
+    Server {
         child,
         responder: Some(responder),
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect("127.0.0.2:443").is_err() {
-        assert!(Instant::now() < deadline, "synthetic issuer did not start");
-        thread::sleep(Duration::from_millis(20));
     }
-    server
-}
-
-fn catalog_server(started: Arc<AtomicBool>) -> Server {
-    let mut child = Command::new("/usr/bin/openssl")
-        .args([
-            "s_server",
-            "-quiet",
-            "-accept",
-            "127.0.0.1:443",
-            "-cert",
-            "/fixture/server.pem",
-            "-key",
-            "/fixture/server.key",
-        ])
-        .current_dir("/fixture")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("isolated ChatGPT catalog peer");
-    let mut input = child.stdin.take().expect("catalog response pipe");
-    let mut output = child.stdout.take().expect("catalog request pipe");
-    let responder = thread::spawn(move || {
-        let mut first = [0];
-        if output.read(&mut first).unwrap() == 0 {
-            return;
-        }
-        let request = read_request(&mut std::io::Cursor::new(first).chain(output));
-        started.store(true, Ordering::SeqCst);
-        assert!(request.starts_with(b"GET /v1/models HTTP/1.1\r\n"));
-        let headers = std::str::from_utf8(&request).expect("catalog headers");
-        assert!(
-            headers.lines().any(|line| line
-                .trim_end_matches('\r')
-                .eq_ignore_ascii_case(&format!("authorization: Bearer {ACCESS}"))),
-            "selected ChatGPT access token was not sent to its compiled catalog"
-        );
-        let body = serde_json::to_vec(&serde_json::json!({"models":[{
-            "slug":"gpt-6.1-sol", "display_name":"GPT-6.1 Sol", "visibility":"list",
-            "context_window": 272_000
-        }]}))
-        .expect("catalog body");
-        send_json(&mut input, &body);
-    });
-    let server = Server {
-        child,
-        responder: Some(responder),
-    };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect("127.0.0.1:443").is_err() {
-        assert!(
-            Instant::now() < deadline,
-            "ChatGPT catalog peer did not start"
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-    server
 }
 
 fn wait_browser_url(pty: &mut Pty, previous: Option<&url::Url>) -> url::Url {
@@ -487,9 +510,12 @@ fn isolated_stage(near_expiry: bool) {
         }
     }
     let (sender, receiver) = mpsc::sync_channel(1);
-    let mut auth = issuer(receiver, true, 1);
+    let mut auth = issuer(receiver, true, 1, near_expiry);
     let catalog_started = Arc::new(AtomicBool::new(false));
-    let _api = catalog_server(Arc::clone(&catalog_started));
+    let mut backend = checked_turn::backend_server(
+        Arc::clone(&catalog_started),
+        if near_expiry { RENEWED_ACCESS } else { ACCESS },
+    );
     let mut pty = Pty::new(
         crate::product::PtyLaunch::new(crate::product::Isolation::Caller, SHELL)
             .env("SHELL", "/usr/bin/sh")
@@ -535,15 +561,17 @@ fn isolated_stage(near_expiry: bool) {
         "expires_in": if near_expiry { 1 } else { 3600 }
     }))
     .unwrap();
-    sender.send((token, jwks, redirect)).unwrap();
+    sender
+        .send(IssuerReply {
+            token,
+            jwks,
+            redirect_uri: redirect,
+            nonce,
+        })
+        .unwrap();
     let configured_at = pty.transcript.len();
     callback(&authorization);
-    wait_for_stage(
-        &mut pty,
-        configured_at,
-        b"ChatGPT backend route not admitted; update Arany before continuing",
-        Some(&signed),
-    );
+    wait_for_stage(&mut pty, configured_at, b"gpt-6.1-sol", Some(&signed));
     wait_for_stage(&mut pty, configured_at, b"Input:\r\n", Some(&signed));
     let quit_at = pty.send(b"/exit\r");
     wait_for_stage(&mut pty, quit_at, b"TTY_AFTER:", Some(&signed));
@@ -560,7 +588,8 @@ fn isolated_stage(near_expiry: bool) {
     assert!(view.runs.is_empty());
     assert!(view.pending_provider_setup_edit.is_none());
     assert!(!view.provider_setup_uncertain);
-    assert!(view.defaults.model.is_none() && view.defaults.effort.is_none());
+    assert_eq!(view.defaults.model.as_deref(), Some("gpt-6.1-sol"));
+    assert_eq!(view.defaults.effort, Some(arany::Effort::Low));
     let account_id = view.defaults.account_id.unwrap();
     let root = StateRoot::open_existing(Path::new("/root/.local/state/arany")).unwrap();
     let record = root
@@ -569,12 +598,12 @@ fn isolated_stage(near_expiry: bool) {
         .unwrap()
         .unwrap();
     let index: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    assert_eq!(index["schema"], 5);
     assert_eq!(index["selected"], account_id.to_string());
-    assert_eq!(index["accounts"][0]["chatgpt_account_id"], ACCOUNT);
+    assert!(index["accounts"][0]["chatgpt_account_id"].as_str() == Some(ACCOUNT));
     assert_eq!(index["accounts"][0]["client_id"], CLIENT);
+    assert_eq!(index["accounts"][0]["renewal_pending"], false);
     let journal = std::fs::read("/root/state-chatgpt/events.sqlite3").unwrap();
-    for secret in [ACCESS, REFRESH, signed.as_str(), ACCOUNT] {
+    for secret in [ACCESS, RENEWED_ACCESS, REFRESH, signed.as_str(), ACCOUNT] {
         for bytes in [&pty.transcript, &journal] {
             assert!(
                 !bytes
@@ -583,8 +612,9 @@ fn isolated_stage(near_expiry: bool) {
             );
         }
     }
-    checked_turn::assert_route_refusals(&root, &record);
-    assert!(!catalog_started.load(Ordering::SeqCst));
+    checked_turn::assert_backend_turn(&root, &record);
+    assert!(catalog_started.load(Ordering::SeqCst));
+    backend.responder.take().unwrap().join().unwrap();
     let logout = Command::new("/arany")
         .args(["provider", "logout", "chatgpt"])
         .env_clear()
@@ -606,25 +636,25 @@ fn isolated_stage(near_expiry: bool) {
 }
 
 #[test]
-#[ignore = "native Linux networkless ChatGPT OAuth fixture; requires OpenSSL, ip, unshare, bwrap, and script"]
-fn release_private_file_chatgpt_sign_in_keeps_account_without_check() {
+#[ignore = "native Linux networkless ChatGPT OAuth fixture; requires OpenSSL, Python, ip, unshare, bwrap, and script"]
+fn release_private_file_chatgpt_sign_in_selects_a_backend_model_without_probe() {
     if std::env::var_os(STAGE).is_some() {
         isolated_stage(false);
         return;
     }
     for stage in ["archived_records", "account_only"] {
-        run_isolated(ACCOUNT_ONLY_TEST, stage);
+        run_isolated(SIGN_IN_TEST, stage);
     }
 }
 
 #[test]
-#[ignore = "native Linux networkless ChatGPT route refusals; requires OpenSSL, ip, unshare, bwrap, and script"]
-fn release_private_file_chatgpt_refuses_unadmitted_routes() {
+#[ignore = "native Linux networkless ChatGPT renewal and backend turn; requires OpenSSL, Python, ip, unshare, bwrap, and script"]
+fn release_private_file_chatgpt_renews_before_a_backend_turn() {
     if std::env::var_os(STAGE).is_some() {
         isolated_stage(true);
         return;
     }
-    run_isolated(ROUTE_REFUSAL_TEST, "near_expiry");
+    run_isolated(RENEWAL_TEST, "near_expiry");
 }
 
 fn run_isolated(test_name: &str, stage: &str) {
@@ -648,7 +678,7 @@ fn run_isolated(test_name: &str, stage: &str) {
     let hosts = temp.path().join("hosts");
     std::fs::write(
         &hosts,
-        b"127.0.0.1 api.openai.com\n127.0.0.2 auth.openai.com\n",
+        b"127.0.0.1 api.openai.com chatgpt.com\n127.0.0.2 auth.openai.com\n",
     )
     .expect("private hosts");
     let nsswitch = temp.path().join("nsswitch.conf");
@@ -659,7 +689,7 @@ fn run_isolated(test_name: &str, stage: &str) {
         .args([
             "-k",
             "2s",
-            "60s",
+            &format!("{PEER_ACCEPT_SECONDS}s"),
             "/usr/bin/unshare",
             "--map-auto",
             "--map-user",

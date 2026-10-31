@@ -1,4 +1,4 @@
-use super::AuthorizationError;
+use super::{AuthorizationError, VerifiedCredentials};
 use aws_lc_rs::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer};
@@ -66,12 +66,13 @@ struct Claims {
     iss: String,
     #[serde(deserialize_with = "single_audience")]
     aud: String,
-    #[serde(default, deserialize_with = "present_authorized_party")]
+    #[serde(default, deserialize_with = "present_string")]
     azp: Option<String>,
     exp: u64,
     iat: u64,
     nbf: Option<u64>,
-    nonce: String,
+    #[serde(default, deserialize_with = "present_string")]
+    nonce: Option<String>,
     sub: String,
     #[serde(rename = "https://api.openai.com/auth")]
     account: Option<AccountClaim>,
@@ -112,6 +113,53 @@ pub(super) fn verify(
     nonce: &str,
     now_seconds: u64,
 ) -> Result<VerifiedIdentity, AuthorizationError> {
+    verify_bound(
+        id_token,
+        jwks,
+        client_id,
+        NonceBinding::Authorization(nonce),
+        now_seconds,
+    )
+}
+
+pub(super) fn verify_renewed(
+    id_token: &str,
+    jwks: &[u8],
+    credentials: &VerifiedCredentials,
+    now_seconds: u64,
+) -> Result<VerifiedIdentity, AuthorizationError> {
+    let identity = verify_bound(
+        id_token,
+        jwks,
+        &credentials.client_id,
+        NonceBinding::Renewal(&credentials.id_token),
+        now_seconds,
+    )?;
+    if identity.subject != credentials.subject {
+        return Err(AuthorizationError::IdentityRejected(
+            IdentityFailure::SelectedSubject,
+        ));
+    }
+    if Some(identity.account_id.as_str()) != credentials.chatgpt_account_id.as_deref() {
+        return Err(AuthorizationError::IdentityRejected(
+            IdentityFailure::AccountClaim,
+        ));
+    }
+    Ok(identity)
+}
+
+enum NonceBinding<'a> {
+    Authorization(&'a str),
+    Renewal(&'a str),
+}
+
+fn verify_bound(
+    id_token: &str,
+    jwks: &[u8],
+    client_id: &str,
+    binding: NonceBinding<'_>,
+    now_seconds: u64,
+) -> Result<VerifiedIdentity, AuthorizationError> {
     let (header_segment, payload_segment, signature_segment) = split_token(id_token)?;
     let header = checked_header(header_segment)?;
     let signed_length = header_segment.len() + 1 + payload_segment.len();
@@ -121,7 +169,7 @@ pub(super) fn verify(
         jwks,
         &header.kid,
     )?;
-    checked_claims(payload_segment, client_id, nonce, now_seconds)
+    checked_claims(payload_segment, client_id, binding, now_seconds)
 }
 
 fn split_token(id_token: &str) -> Result<(&str, &str, &str), AuthorizationError> {
@@ -216,7 +264,7 @@ fn check_signature(
 fn checked_claims(
     payload_segment: &str,
     client_id: &str,
-    nonce: &str,
+    binding: NonceBinding<'_>,
     now_seconds: u64,
 ) -> Result<VerifiedIdentity, AuthorizationError> {
     let claims_error = || AuthorizationError::IdentityRejected(IdentityFailure::ClaimsFormat);
@@ -242,7 +290,7 @@ fn checked_claims(
             IdentityFailure::AuthorizedParty,
         ));
     }
-    if claims.nonce != nonce {
+    if !nonce_matches(claims.nonce.as_deref(), binding)? {
         return Err(AuthorizationError::IdentityRejected(IdentityFailure::Nonce));
     }
     if claims.sub.is_empty()
@@ -267,7 +315,7 @@ fn checked_claims(
     let account_id = claims
         .account
         .and_then(|account| account.chatgpt_account_id)
-        .filter(|id| super::valid_account_id(id))
+        .filter(|id| arany::ChatGptProvider::valid_account_id(id))
         .ok_or(AuthorizationError::IdentityRejected(
             IdentityFailure::AccountClaim,
         ))?;
@@ -275,6 +323,25 @@ fn checked_claims(
         subject: claims.sub,
         account_id,
     })
+}
+
+fn nonce_matches(
+    nonce: Option<&str>,
+    binding: NonceBinding<'_>,
+) -> Result<bool, AuthorizationError> {
+    match binding {
+        NonceBinding::Authorization(expected) => Ok(nonce == Some(expected)),
+        NonceBinding::Renewal(previous) => {
+            let Some(nonce) = nonce else {
+                return Ok(true);
+            };
+            let (_, payload, _) = split_token(previous)?;
+            let bytes = decode_segment(payload, MAX_CLAIMS_BYTES)?;
+            let claims: Claims = serde_json::from_slice(&bytes)
+                .map_err(|_| AuthorizationError::IdentityRejected(IdentityFailure::ClaimsFormat))?;
+            Ok(claims.nonce.as_deref() == Some(nonce))
+        }
+    }
 }
 
 fn decode_segment(value: &str, max_bytes: usize) -> Result<Vec<u8>, AuthorizationError> {
@@ -305,7 +372,7 @@ where
     })
 }
 
-fn present_authorized_party<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+pub(super) fn present_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {

@@ -27,7 +27,7 @@ pub(super) async fn read_completed_response(
             rejection.error
         },
     )?;
-    let mut decoder = StreamDecoder::with_preview(key, model, preview, max_output_tokens);
+    let mut decoder = StreamDecoder::with_preview(key, None, model, preview, max_output_tokens);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -43,6 +43,7 @@ pub(super) async fn read_completed_response(
 pub(super) struct StreamDecoder<'a> {
     limits: RateLimitSlot,
     token: &'a str,
+    account_id: Option<&'a str>,
     framer: SseFramer,
     preview: Option<ResponsesPreview<'a>>,
     stage: Stage,
@@ -70,9 +71,10 @@ struct DoneEvent {
 }
 
 impl<'a> StreamDecoder<'a> {
-    pub(super) fn new(token: &'a str, max_output_tokens: u32) -> Self {
+    pub(super) fn new(token: &'a str, account_id: Option<&'a str>, max_output_tokens: u32) -> Self {
         Self {
             token,
+            account_id,
             framer: SseFramer::new(max_output_tokens),
             limits: RateLimitSlot::default(),
             preview: None,
@@ -86,12 +88,14 @@ impl<'a> StreamDecoder<'a> {
 
     pub(super) fn with_preview(
         token: &'a str,
+        account_id: Option<&'a str>,
         model: &'a str,
         preview: Option<ResponsePreview>,
         max_output_tokens: u32,
     ) -> Self {
-        let mut decoder = Self::new(token, max_output_tokens);
-        decoder.preview = preview.map(|preview| ResponsesPreview::new(token, model, preview));
+        let mut decoder = Self::new(token, account_id, max_output_tokens);
+        decoder.preview =
+            preview.map(|preview| ResponsesPreview::new(token, account_id, model, preview));
         decoder
     }
 
@@ -120,6 +124,13 @@ impl<'a> StreamDecoder<'a> {
 
     fn finish_event(&mut self, event: SseEvent) -> Result<Option<Vec<u8>>, ProviderError> {
         let SseEvent { value, data } = event;
+        if self
+            .account_id
+            .is_some_and(|id| crate::provider::streaming::reflects_secret(&value, id))
+        {
+            self.stage = Stage::CredentialReflection;
+            return Err(ProviderError::InvalidOutcome);
+        }
         let kind = value
             .get("type")
             .and_then(Value::as_str)

@@ -1,6 +1,6 @@
 use super::limits;
 use super::responses::StreamDecoder;
-use super::{OPENAI_ENDPOINT, wire};
+use super::wire;
 use crate::provider::conversation::Conversation;
 use crate::provider::diagnostics::subscription_failure;
 use crate::provider::diagnostics::{StreamCounts, SubscriptionFailureStage as Stage};
@@ -19,7 +19,9 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::time::{Instant, timeout, timeout_at};
 
-const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_ACCESS_TOKEN_BYTES: usize = ChatGptProvider::MAX_ACCESS_TOKEN_BYTES;
+#[cfg(test)]
+const TEST_ACCOUNT_ID: &str = "synthetic-backend-account";
 // Each received event restarts the idle timeout.
 const STREAM_IDLE: Duration = Duration::from_secs(300);
 const CALL_CEILING: Duration = Duration::from_secs(600);
@@ -32,16 +34,26 @@ pub struct ChatGptProvider {
     identity: ProviderIdentity,
     effort: Effort,
     access_token: String,
+    account_id: String,
     context_window_tokens: Option<u32>,
 }
 
 impl ChatGptProvider {
+    pub const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+    pub const MAX_ACCOUNT_ID_BYTES: usize = 128;
+    pub const ACCOUNT_ID_HEADER: &'static str = "chatgpt-account-id";
+    pub const ORIGINATOR_HEADER: &'static str = "originator";
+    pub const ORIGINATOR: &'static str = "arany";
+    // Codex catalog compatibility pin, independent of Arany's release version.
+    pub const CATALOG_CLIENT_VERSION: &'static str = "0.155.0";
+    pub const RESPONSES_ENDPOINT: &'static str = "https://chatgpt.com/backend-api/codex/responses";
     /// The caller must revalidate the selected account and current consent before Workspace input.
     /// A model probe is not required for account-consent admission.
     pub fn from_checked_account(
         model: String,
         effort: Effort,
         access_token: String,
+        account_id: String,
         provenance: ChatGptProvenance,
     ) -> Result<Self, ProviderError> {
         if !valid_model_id(&model)
@@ -49,6 +61,7 @@ impl ChatGptProvider {
             || access_token.is_empty()
             || access_token.len() > MAX_ACCESS_TOKEN_BYTES
             || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
+            || !Self::valid_account_id(&account_id)
         {
             return Err(ProviderError::Rejected);
         }
@@ -65,8 +78,15 @@ impl ChatGptProvider {
             identity,
             effort,
             access_token,
+            account_id,
             context_window_tokens: None,
         })
+    }
+
+    pub fn valid_account_id(account_id: &str) -> bool {
+        !account_id.is_empty()
+            && account_id.len() <= Self::MAX_ACCOUNT_ID_BYTES
+            && account_id.bytes().all(|byte| byte.is_ascii_graphic())
     }
 
     /// Pins the window the account's checked catalog reported; out-of-range values stay absent.
@@ -115,8 +135,10 @@ impl Provider for ChatGptProvider {
         invoke_at_observed(
             RunCall {
                 client: &self.client,
-                endpoint: Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint"),
+                endpoint: Url::parse(Self::RESPONSES_ENDPOINT).expect("compiled Codex endpoint"),
                 access_token: &self.access_token,
+                account_id: &self.account_id,
+                session_id: request.session_id,
                 effort: self.effort,
                 max_output_tokens: self.identity.limits.max_output_tokens,
             },
@@ -138,8 +160,10 @@ impl Provider for ChatGptProvider {
         compact_at_observed(
             RunCall {
                 client: &self.client,
-                endpoint: Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint"),
+                endpoint: Url::parse(Self::RESPONSES_ENDPOINT).expect("compiled Codex endpoint"),
                 access_token: &self.access_token,
+                account_id: &self.account_id,
+                session_id: request.session_id,
                 effort: self.effort,
                 max_output_tokens: request.max_output_tokens,
             },
@@ -169,6 +193,8 @@ struct RunCall<'a> {
     client: &'a Client,
     endpoint: Url,
     access_token: &'a str,
+    account_id: &'a str,
+    session_id: crate::session::SessionId,
     effort: Effort,
     max_output_tokens: u32,
 }
@@ -186,6 +212,8 @@ async fn invoke_at(
             client,
             endpoint,
             access_token,
+            account_id: TEST_ACCOUNT_ID,
+            session_id: request.session_id,
             effort,
             max_output_tokens: crate::provider::SMALL_OUTPUT_CAP,
         },
@@ -203,6 +231,7 @@ async fn invoke_at_observed(
     observations: (Option<ResponsePreview>, RateLimitSlot),
 ) -> Result<ProviderResponse, ProviderError> {
     let access_token = call.access_token;
+    let account_id = call.account_id;
     if !(1..=call.max_output_tokens).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
@@ -242,7 +271,9 @@ async fn invoke_at_observed(
         response_failure(error, counts)
     })?;
     accept_result(
-        result.reflects_secret(access_token),
+        (&[access_token, account_id], |secret| {
+            result.reflects_secret(secret)
+        }),
         result.usage,
         reasoning_tokens,
         request.max_output_tokens,
@@ -264,6 +295,8 @@ async fn compact_at(
             client,
             endpoint,
             access_token,
+            account_id: TEST_ACCOUNT_ID,
+            session_id: request.session_id,
             effort,
             max_output_tokens: request.max_output_tokens,
         },
@@ -283,6 +316,7 @@ async fn compact_at_observed(
     }
     let body = subscription_compaction_body(request, call.effort)?;
     let access_token = call.access_token;
+    let account_id = call.account_id;
     let CompletedStream {
         body: completed,
         counts,
@@ -291,7 +325,9 @@ async fn compact_at_observed(
     let result = wire::decode_streamed_compaction(&completed, &request.model)
         .map_err(|error| response_failure(error, counts))?;
     accept_result(
-        result.reflects_secret(access_token),
+        (&[access_token, account_id], |secret| {
+            result.reflects_secret(secret)
+        }),
         result.usage,
         reasoning_tokens,
         COMPACTION_VISIBLE_CAP,
@@ -302,13 +338,14 @@ async fn compact_at_observed(
 
 // The cap bounds visible output; the reported total also counts reasoning and is kept for charging.
 fn accept_result(
-    reflects_secret: bool,
+    protected: (&[&str], impl Fn(&str) -> bool),
     usage: Usage,
     reasoning_tokens: u32,
     max_output_tokens: u32,
     counts: StreamCounts,
 ) -> Result<(), ProviderError> {
-    if reflects_secret {
+    let (secrets, reflects_secret) = protected;
+    if secrets.iter().any(|secret| reflects_secret(secret)) {
         return Err(failure(
             Stage::CredentialReflection,
             ProviderError::InvalidOutcome,
@@ -363,11 +400,16 @@ async fn completed_at_with_preview(
     let mut decoder = match preview {
         Some((preview, model)) => StreamDecoder::with_preview(
             call.access_token,
+            Some(call.account_id),
             model,
             Some(preview),
             call.max_output_tokens,
         ),
-        None => StreamDecoder::new(call.access_token, call.max_output_tokens),
+        None => StreamDecoder::new(
+            call.access_token,
+            Some(call.account_id),
+            call.max_output_tokens,
+        ),
     };
     decoder.set_limits(limits);
     let body = read_events(&mut decoder, &mut response).await?;
@@ -387,9 +429,11 @@ async fn send_stream_request(
     if access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
         || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
+        || !ChatGptProvider::valid_account_id(call.account_id)
     {
         return Err(ProviderError::Rejected);
     }
+    let session_id = call.session_id.to_string();
     let send = call
         .client
         .post(call.endpoint.clone())
@@ -397,6 +441,14 @@ async fn send_stream_request(
         .header(header::ACCEPT, "text/event-stream")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT_ENCODING, "identity")
+        .header(ChatGptProvider::ACCOUNT_ID_HEADER, call.account_id)
+        .header(
+            ChatGptProvider::ORIGINATOR_HEADER,
+            ChatGptProvider::ORIGINATOR,
+        )
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("session-id", session_id.as_str())
+        .header("x-client-request-id", session_id)
         .body(body)
         .send();
     match timeout(STREAM_IDLE, send).await {
@@ -459,9 +511,13 @@ async fn admit_stream_headers(
             counts,
         ));
     }
-    if response.content_length().is_some_and(|length| {
-        length > crate::provider::max_stream_bytes(call.max_output_tokens) as u64
-    }) {
+    let max_stream_length =
+        u64::try_from(crate::provider::max_stream_bytes(call.max_output_tokens))
+            .map_err(|_| failure(Stage::StreamLimit, ProviderError::InvalidStream, counts))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_stream_length)
+    {
         crate::provider::diagnostics::stream_limit(0, 0);
         return Err(failure(
             Stage::ContentLength,
@@ -589,6 +645,13 @@ fn subscription_compaction_body(
 
 fn streaming_body(mut body: Value, max_request_bytes: usize) -> Result<Vec<u8>, ProviderError> {
     let object = body.as_object_mut().ok_or(ProviderError::Rejected)?;
+    if object
+        .get("instructions")
+        .and_then(Value::as_str)
+        .is_none_or(|text| text.trim().is_empty())
+    {
+        return Err(ProviderError::Rejected);
+    }
     let input = object.remove("input").ok_or(ProviderError::Rejected)?;
     object.remove("max_output_tokens");
     object.remove("truncation");
@@ -599,6 +662,7 @@ fn streaming_body(mut body: Value, max_request_bytes: usize) -> Result<Vec<u8>, 
     };
     object.insert("input".into(), input);
     object.insert("stream".into(), Value::Bool(true));
+    object.insert("include".into(), wire::encrypted_reasoning());
     wire::encode_request_within(&body, max_request_bytes)
 }
 

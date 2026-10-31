@@ -194,7 +194,7 @@ impl AccountEntry {
             && !self.subject.is_empty()
             && self.subject.len() <= 512
             && self.subject.bytes().all(|byte| byte.is_ascii_graphic())
-            && super::bounded_graphic(&self.chatgpt_account_id, super::MAX_ACCOUNT_ID_BYTES)
+            && arany::ChatGptProvider::valid_account_id(&self.chatgpt_account_id)
             && self.slot_valid()
             && !(self.signout_pending && self.renewal_pending)
             && match (&self.storage, &self.token) {
@@ -368,17 +368,25 @@ fn account_fingerprint(
     }
     let mut message = Vec::with_capacity(256);
     for field in [
-        "https://api.openai.com/v1/responses;store=false;stream=true",
+        arany::ChatGptProvider::RESPONSES_ENDPOINT,
+        "codex-backend-v1;store=false;stream=true",
         &selected.credentials.client_id,
         &selected.credentials.subject,
+        selected
+            .credentials
+            .chatgpt_account_id
+            .as_deref()
+            .ok_or(AuthorizationError::InvalidIdentity)?,
         model,
         effort.as_str(),
     ] {
-        message.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        let length = u64::try_from(field.len()).map_err(|_| AuthorizationError::InvalidIdentity)?;
+        message.extend_from_slice(&length.to_be_bytes());
         message.extend_from_slice(field.as_bytes());
     }
     let consent = selected.consent.fingerprint_bytes()?;
-    message.extend_from_slice(&(consent.len() as u64).to_be_bytes());
+    let length = u64::try_from(consent.len()).map_err(|_| AuthorizationError::InvalidIdentity)?;
+    message.extend_from_slice(&length.to_be_bytes());
     message.extend_from_slice(&consent);
     message.extend_from_slice(selected.id.as_bytes());
     message.extend_from_slice(selected.credentials.host_id.as_bytes());
@@ -843,11 +851,11 @@ pub(super) async fn selected_for_use(
             .selected
             .ok_or(AuthorizationError::NoSelectedAccount)?,
     };
-    refuse_backend_route_at(&state, &workspace, id)?;
+    admit_backend_account_at(&state, &workspace, id)?;
     refresh_selected_at(state, workspace, id).await
 }
 
-fn refuse_backend_route_at(
+fn admit_backend_account_at(
     state: &StateRoot,
     workspace: &Path,
     expected_id: Uuid,
@@ -858,8 +866,12 @@ fn refuse_backend_route_at(
             if index.selected != Some(expected_id) {
                 return Err(AuthorizationError::SelectedAccountChanged);
             }
-            index.accounts[index.account_position(expected_id)?].ensure_usable()?;
-            Err(AuthorizationError::BackendRouteNotAdmitted)
+            let entry = &index.accounts[index.account_position(expected_id)?];
+            entry.ensure_usable()?;
+            if entry.client_id != super::CLIENT_ID {
+                return Err(AuthorizationError::InvalidClient);
+            }
+            Ok(())
         })
         .map_err(|_| AuthorizationError::Unavailable)?
 }
@@ -1390,7 +1402,7 @@ fn check_replacement(
         || replacement.host_id != current.host_id
         || replacement.id_token != current.id_token
         || replacement.access_token == current.access_token
-        || replacement.refresh_token == current.refresh_token
+        || replacement.chatgpt_account_id != current.chatgpt_account_id
         || replacement.access_expires_at_unix <= now
     {
         return Err(AuthorizationError::InvalidIdentity);
