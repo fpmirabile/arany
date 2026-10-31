@@ -173,14 +173,11 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
             command.env(name, value);
         }
     }
-    #[cfg(all(target_os = "macos", any(debug_assertions, feature = "test-support")))]
+    #[cfg(all(target_os = "macos", feature = "test-support"))]
     if let Some(root) = std::env::var_os(macos::TEST_KEYCHAIN_ROOT_ENV) {
         command.env(macos::TEST_KEYCHAIN_ROOT_ENV, root);
     }
-    #[cfg(all(
-        target_os = "macos",
-        not(any(debug_assertions, feature = "test-support"))
-    ))]
+    #[cfg(all(target_os = "macos", not(feature = "test-support")))]
     if std::env::var_os(macos::TEST_KEYCHAIN_ROOT_ENV).is_some() {
         return Err(CredentialError::Unavailable);
     }
@@ -316,7 +313,7 @@ fn helper_reply(
                 .iter()
                 .find(|category| category.as_bytes() == output)
                 .ok_or(CredentialError::Unavailable)?;
-            if cfg!(debug_assertions) {
+            if cfg!(any(debug_assertions, test)) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "credential store refused access: {category}"
@@ -696,7 +693,6 @@ mod tests {
             crate::test_process::assert_single_test_completed(&output.stdout, &test);
             let expected = LOCKED_CATEGORIES
                 .iter()
-                .filter(|_| cfg!(debug_assertions))
                 .map(|category| {
                     format!("credential store refused access: {category}\n")
                         .repeat(OPERATIONS.len())

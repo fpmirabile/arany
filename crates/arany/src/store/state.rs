@@ -305,7 +305,7 @@ impl StateRoot {
     }
 
     pub fn account_path() -> Result<PathBuf, StoreError> {
-        #[cfg(not(any(debug_assertions, test, feature = "test-support")))]
+        #[cfg(not(any(test, feature = "test-support")))]
         if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
             return Err(StoreError::InvalidStateDirectory);
         }
@@ -341,11 +341,11 @@ impl StateRoot {
     }
 
     fn fixture_account_override() -> Option<PathBuf> {
-        #[cfg(any(debug_assertions, test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support"))]
         {
             std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").map(PathBuf::from)
         }
-        #[cfg(not(any(debug_assertions, test, feature = "test-support")))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             None
         }

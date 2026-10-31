@@ -876,9 +876,11 @@ async fn post_case(hook: Value) -> PostCase {
 
 #[test]
 fn heavy_guard_journeys_fit_a_one_and_a_half_mebibyte_stack() {
+    // This optimized-build regression budget excludes the larger development-build frames.
+    const RELEASE_STACK_BYTES: usize = 1536 * 1024;
     std::thread::Builder::new()
         .name("guard-stack-canary".into())
-        .stack_size(1536 * 1024)
+        .stack_size(RELEASE_STACK_BYTES)
         .spawn(|| {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
