@@ -1,18 +1,12 @@
 #[test]
 #[cfg_attr(
     not(arany_ci),
-    ignore = "native macOS researcher journey; release requires CI's disposable account"
+    ignore = "native macOS researcher journey; requires isolated account fixtures"
 )]
 fn researcher_tools_survive_closed_replay_without_widening_authority() {
-    #[cfg(debug_assertions)]
     crate::tools::native_journey("tools_researcher::journey::native_researcher_journey_helper");
-    #[cfg(all(not(debug_assertions), arany_ci))]
-    journey::release_researcher_journey();
-    #[cfg(all(not(debug_assertions), not(arany_ci)))]
-    panic!("release researcher journey requires CI's disposable account");
 }
 
-#[cfg(any(debug_assertions, arany_ci))]
 mod journey {
     use crate::engine_support::run_with;
     use crate::{hash, private_file};
@@ -96,54 +90,12 @@ done
         }
     }
 
-    #[cfg(all(not(debug_assertions), arany_ci))]
-    pub(super) fn release_researcher_journey() {
-        use crate::process::BoundedOutput;
-
-        const HELPER: &str = "tools_researcher::journey::native_researcher_journey_helper";
-        const LABEL: &str = "native researcher journey";
-        let _gate = crate::process::NATIVE_GATE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let temp = tempfile::tempdir().unwrap();
-        for directory in ["home", "environment-state", "environment-data"] {
-            std::fs::create_dir(temp.path().join(directory)).unwrap();
-        }
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args(["--exact", HELPER, "--ignored", "--nocapture"])
-            .env_clear()
-            .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
-            .env("HOME", temp.path().join("home"))
-            // Runs resolve Git from PATH; the Command Line Tools Git is the only one on it here.
-            .env("PATH", "/Library/Developer/CommandLineTools/usr/bin")
-            .env("XDG_STATE_HOME", temp.path().join("environment-state"))
-            .env("XDG_DATA_HOME", temp.path().join("environment-data"))
-            .current_dir(temp.path());
-        crate::process::isolate_host_authentication(&mut command, &temp.path().join("home"));
-        let output = command
-            .bounded_output_for(Duration::from_secs(360), 32 * 1024)
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{LABEL}: {:?}; stdout={:?}; stderr={:?}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        crate::process::assert_single_test_completed(&output.stdout, LABEL);
-        assert!(output.stderr.is_empty());
-    }
-
     #[tokio::test]
     #[ignore = "isolated helper owned by native researcher journey"]
     async fn native_researcher_journey_helper() {
         let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
         let root = Path::new(&root);
-        #[cfg(debug_assertions)]
         assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
-        #[cfg(not(debug_assertions))]
-        assert!(std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none());
         let workspace = root.join("workspace");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         private_file(&workspace.join("src/facts.txt"), FACTS.as_bytes());

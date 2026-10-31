@@ -1,10 +1,8 @@
 use super::*;
 
-#[cfg(debug_assertions)]
 const PRIVATE_FILE_PROMPT: &[u8] =
     b"Choose: NOT encrypted; same-user apps read key; type a choice name: 1. Cancel or 2. Use private file; empty Enter selects 1. Cancel\r\nInput:\r\n";
 
-#[cfg(debug_assertions)]
 const PROVIDER_PROMPT: &[u8] =
     b"Choose: Only the selected Provider receives requests; type a choice name: 1. OpenAI or 2. Anthropic; empty Enter selects 1. OpenAI\r\nInput:\r\n";
 
@@ -15,7 +13,6 @@ fn choose_native_account_setup(pty: &mut Pty, from: usize) {
     pty.send(b"Add or replace native API account\r");
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn bare_start_reuses_private_file_account_without_setup_or_run() {
     let (temp, workspace, state) = workspace_root();
@@ -63,7 +60,7 @@ fn bare_start_reuses_private_file_account_without_setup_or_run() {
     });
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "native Linux Bubblewrap release-account setup gate"]
 fn release_setup_uses_private_passwd_home_without_test_override() {
@@ -124,7 +121,7 @@ fn release_setup_uses_private_passwd_home_without_test_override() {
     assert_tty_restored(&text);
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "native Linux Bubblewrap release-account cross-StateRoot gate"]
 fn release_saved_file_account_is_shared_across_session_roots() {
@@ -146,7 +143,7 @@ fn release_saved_file_account_is_shared_across_session_roots() {
     }
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "native Linux cross-user product gate; requires subordinate IDs, unshare, bwrap, and setpriv"]
 fn release_saved_account_is_private_across_os_users() {
@@ -390,7 +387,7 @@ fn release_saved_account_is_private_across_os_users() {
     crate::process::assert_single_test_completed(&output.stdout, "saved account");
 }
 
-#[cfg(all(target_os = "linux", debug_assertions))]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "native Linux network-isolated saved-account replacement gate"]
 fn replaced_file_account_cannot_run_an_older_session() {
@@ -469,7 +466,6 @@ fn replaced_file_account_cannot_run_an_older_session() {
     });
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
     for explicit_workspace in [false, true] {
@@ -575,7 +571,6 @@ fn narrow_no_color_setup_hides_key_and_restores_terminal_on_cancel() {
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
     let (temp, workspace, state) = workspace_root();
@@ -683,7 +678,6 @@ fn cancelled_screen_reader_setup_hides_key_and_creates_no_session() {
     assert_eq!(before, transcript_field(&text, "TTY_AFTER:"));
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn setup_signals_after_hidden_key_segment_restore_echo_and_preserve_defaults() {
     for (signal, signal_name, attached) in [
@@ -859,17 +853,11 @@ fn credential_helper_rejects_invalid_record_before_os_store_access() {
 #[test]
 fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
     let temp = tempfile::tempdir().expect("private test root");
-    #[cfg(debug_assertions)]
     let account_root = crate::product::fixture_account(temp.path());
-    #[cfg(not(debug_assertions))]
-    let private_home = temp.path().join("home");
-    #[cfg(not(debug_assertions))]
-    let account_root = private_home.join(".local/state/arany");
     drop(StateRoot::admit(&account_root).expect("private account root"));
     let run = || {
         let mut command = Command::new("/usr/bin/timeout");
         command.args(["--signal=TERM", "--kill-after=1s", "2s"]);
-        #[cfg(debug_assertions)]
         command
             .arg(env!("CARGO_BIN_EXE_arany"))
             .args(["provider", "models", "openai", "--saved-account"])
@@ -880,64 +868,6 @@ fn saved_account_fifo_is_rejected_without_blocking_or_keyring_access() {
             .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
             .env("DBUS_SESSION_BUS_ADDRESS", "unixexec:path=/usr/bin/false")
             .current_dir(temp.path());
-        #[cfg(not(debug_assertions))]
-        {
-            let passwd_home = release_passwd_home();
-            command
-                .args([
-                    "/usr/bin/bwrap",
-                    "--unshare-user",
-                    "--unshare-net",
-                    "--unshare-pid",
-                    "--die-with-parent",
-                    "--tmpfs",
-                    "/",
-                    "--ro-bind",
-                    "/usr",
-                    "/usr",
-                    "--symlink",
-                    "usr/lib",
-                    "/lib",
-                    "--ro-bind-try",
-                    "/lib64",
-                    "/lib64",
-                    "--ro-bind",
-                    "/etc/passwd",
-                    "/etc/passwd",
-                ])
-                .arg("--bind")
-                .arg(&private_home)
-                .arg(&passwd_home)
-                .arg("--ro-bind")
-                .arg(env!("CARGO_BIN_EXE_arany"))
-                .arg("/arany")
-                .args(["--proc", "/proc", "--dev-bind", "/dev", "/dev"])
-                .arg("--chdir")
-                .arg(&passwd_home)
-                .arg("--clearenv")
-                .arg("--setenv")
-                .arg("HOME")
-                .arg(&passwd_home)
-                .arg("--setenv")
-                .arg("XDG_STATE_HOME")
-                .arg(passwd_home.join(".local/state"))
-                .args([
-                    "--setenv",
-                    "DBUS_SESSION_BUS_ADDRESS",
-                    "unixexec:path=/usr/bin/false",
-                    "--setenv",
-                    "PATH",
-                    "/usr/bin",
-                    "--",
-                    "/arany",
-                    "provider",
-                    "models",
-                    "openai",
-                    "--saved-account",
-                ])
-                .env_clear()
-                .current_dir(temp.path());
-        }
         command.bounded_output().expect("saved-account read")
     };
     let without_leaf = run();

@@ -1,4 +1,3 @@
-#[cfg(debug_assertions)]
 fn reviewed_setup_text(transcript: &str, title: &str) -> String {
     let mut current = "";
     let mut text = String::new();
@@ -23,7 +22,6 @@ use crate::terminal::{AttachedTerminal, Composer};
 
 #[cfg(target_os = "macos")]
 use crate::cli::serve::embedded::{self, RunAttemptError, RunFailure};
-#[cfg(debug_assertions)]
 use arany::RecordKind;
 #[cfg(target_os = "macos")]
 use arany::{
@@ -52,7 +50,6 @@ impl Drop for OwnedChild {
     }
 }
 
-#[cfg(debug_assertions)]
 #[tokio::test]
 async fn saved_access_is_authorized_before_chat_without_exposing_secrets() {
     enum StartupInput {
@@ -1102,14 +1099,8 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
         false,
     )
     .await;
-    #[cfg(debug_assertions)]
     assert!(
         matches!(&choice, Ok(super::permissions::PermissionChoice::Selected(access)) if access.is_trusted())
-    );
-    #[cfg(not(debug_assertions))]
-    assert!(
-        matches!(&choice, Ok(super::permissions::PermissionChoice::Exit)),
-        "optimized account override must end at recovery before host access"
     );
     let permissions = match &choice {
         Ok(super::permissions::PermissionChoice::Selected(access)) => Some(access),
@@ -1228,7 +1219,6 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
         )
         .await
         .expect_err("explicit Tool admission must reject before inference");
-        #[cfg(debug_assertions)]
         assert!(
             matches!(
                 error,
@@ -1237,16 +1227,6 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
                 )))
             ),
             "the admitted private account fixture must reach stale executable-pin rejection"
-        );
-        #[cfg(not(debug_assertions))]
-        assert!(
-            matches!(
-                error,
-                RunAttemptError::Failed(RunFailure::Engine(arany::EngineError::Store(
-                    arany::StoreError::InvalidStateDirectory
-                )))
-            ),
-            "the optimized account override must reject from the Workspace lease before Tool discovery or Provider use"
         );
         assert_eq!(
             observed.lock().unwrap().len(),
@@ -1351,13 +1331,10 @@ async fn native_chat_preserves_turns_with_guarded_tools_and_rejects_invalid_admi
         ),
         Err(_) => None,
     };
-    #[cfg(debug_assertions)]
     assert!(matches!(
         choice,
         Some(Ok(super::permissions::PermissionChoice::Exit))
     ));
-    #[cfg(not(debug_assertions))]
-    assert!(choice.is_none(), "release rejects the test account root");
     assert_eq!(
         super::permissions::cycle(&mut composer),
         if permissions.is_some() {

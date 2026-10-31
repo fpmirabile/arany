@@ -10,8 +10,18 @@ use crate::test_process;
 
 /// Enables bounded local diagnostics in debug builds after ordinary state admission.
 pub fn enable_development_diagnostics(root: &StateRoot) {
-    if cfg!(debug_assertions)
-        && let Ok(root) = root.try_clone()
+    if cfg!(debug_assertions) {
+        enable(root);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn enable_test_diagnostics(root: &StateRoot) {
+    enable(root);
+}
+
+fn enable(root: &StateRoot) {
+    if let Ok(root) = root.try_clone()
         && ROOT.set(Mutex::new(root)).is_ok()
     {
         let mut record = BoundedRecord(String::new());
@@ -21,7 +31,7 @@ pub fn enable_development_diagnostics(root: &StateRoot) {
 }
 
 pub(crate) fn enabled() -> bool {
-    cfg!(debug_assertions) && ROOT.get().is_some()
+    cfg!(any(debug_assertions, test)) && ROOT.get().is_some()
 }
 
 /// Closed stages accepted by the local debug log; no error text is stored.
@@ -47,7 +57,7 @@ pub fn record_development_failure(stage: DevelopmentFailure) {
 pub(crate) fn event_failure(event: &crate::session::Event) {
     use crate::session::{CompactionStatus, Event, ProviderCallDisposition, RunDisposition};
     use crate::tools::ToolDisposition;
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return;
     }
     let mut record = BoundedRecord(String::new());
@@ -99,7 +109,7 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
 }
 
 pub(crate) fn tap_resync(missed: u64) {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return;
     }
     let mut record = BoundedRecord(String::new());
@@ -109,7 +119,7 @@ pub(crate) fn tap_resync(missed: u64) {
 
 pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
     use crate::engine::EngineError;
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return;
     }
     let cause = match error {
@@ -175,7 +185,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
 }
 
 pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return;
     }
     let mut record = BoundedRecord(String::new());
@@ -196,7 +206,7 @@ pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) 
 }
 
 pub(crate) fn record_local(record: BoundedRecord) {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return;
     }
     let Some(root) = ROOT.get() else { return };
@@ -210,7 +220,7 @@ pub(crate) fn record_local(record: BoundedRecord) {
     expect(dead_code, reason = "only the macOS controller records stage timings")
 )]
 pub(crate) fn guard_timing(call: &'static str, stages: &[(&'static str, u128)]) {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return;
     }
     let mut record = BoundedRecord(String::new());
@@ -333,6 +343,7 @@ mod tests {
             );
         } else {
             assert!(!path.exists());
+            enable_test_diagnostics(&root);
         }
         let mut failure = BoundedRecord(String::new());
         writeln!(
@@ -400,10 +411,8 @@ mod tests {
         let timing = std::fs::read_to_string(&path)
             .unwrap()
             .split_off(before_timing);
-        if cfg!(debug_assertions) {
-            assert!(timing.contains("guard timing call=command connect_ms=3 ready_ms=41\n"));
-            assert!(!timing.contains("call stack"));
-        }
+        assert!(timing.contains("guard timing call=command connect_ms=3 ready_ms=41\n"));
+        assert!(!timing.contains("call stack"));
         record_development_failure(DevelopmentFailure::ProviderAdmission);
         engine_failure(&crate::engine::EngineError::Store(
             crate::store::StoreError::Io(std::io::Error::other(CANARY)),
@@ -487,9 +496,8 @@ mod tests {
             "tool operation=edit disposition=Uncertain receipt=false stops_run=true",
             "run disposition=Failed cause=Some(ProposalRefused)",
         ] {
-            assert_eq!(
+            assert!(
                 failure_log.contains(detail),
-                cfg!(debug_assertions),
                 "closed diagnostic stage missing"
             );
         }

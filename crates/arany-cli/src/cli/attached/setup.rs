@@ -16,7 +16,7 @@ use prompts::{await_setup_ack, choose};
 use crate::accounts::chatgpt;
 use crate::accounts::credentials;
 use crate::terminal::AttachedTerminal;
-#[cfg(all(test, unix, debug_assertions))]
+#[cfg(test)]
 use arany::{CollaborationPolicy, RecordKind};
 use arany::{
     Event, HistoryRecovery, ModelEntry, ProviderKind, ProviderSetupDisposition,
@@ -30,7 +30,7 @@ const AUTHORIZE_TITLE: &str = "Authorize saved access";
 const AUTHORIZE_PROMPT: &str =
     "Approve this Arany credential in your OS password store; Esc or Ctrl+C exits";
 
-#[cfg(all(test, unix, debug_assertions))]
+#[cfg(test)]
 #[path = "../../../tests/session_run/setup/removal.rs"]
 mod removal;
 

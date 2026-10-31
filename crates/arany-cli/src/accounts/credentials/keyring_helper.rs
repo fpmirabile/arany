@@ -173,11 +173,14 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
             command.env(name, value);
         }
     }
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(all(target_os = "macos", any(debug_assertions, feature = "test-support")))]
     if let Some(root) = std::env::var_os(macos::TEST_KEYCHAIN_ROOT_ENV) {
         command.env(macos::TEST_KEYCHAIN_ROOT_ENV, root);
     }
-    #[cfg(all(target_os = "macos", not(debug_assertions)))]
+    #[cfg(all(
+        target_os = "macos",
+        not(any(debug_assertions, feature = "test-support"))
+    ))]
     if std::env::var_os(macos::TEST_KEYCHAIN_ROOT_ENV).is_some() {
         return Err(CredentialError::Unavailable);
     }

@@ -1,31 +1,21 @@
 name: Run CI tests
-description: Run the full release suite or debug unit and Session coverage on a native runner.
-inputs:
-  profile:
-    description: debug or release
-    required: true
+description: Run the unified release suite and native gates on a native runner.
 runs:
   using: composite
   steps:
-    - name: Configure test profile
+    - name: Configure release fixtures
       shell: bash
-      env:
-        CI_PROFILE: ${{ inputs.profile }}
       run: |
-        case "$CI_PROFILE" in
-          debug|release) ;;
-          *) echo 'Unsupported test profile' >&2; exit 1 ;;
-        esac
         if [ "$RUNNER_OS" = macOS ]; then
           echo 'TMPDIR=/private/tmp' >> "$GITHUB_ENV"
-          echo "ARANY_TEST_EXE=$GITHUB_WORKSPACE/target/$CI_PROFILE/arany" >> "$GITHUB_ENV"
         fi
+        echo "ARANY_TEST_EXE=$GITHUB_WORKSPACE/target/release/arany" >> "$GITHUB_ENV"
     - name: Install repository Rust toolchain
       shell: bash
       run: rustup show
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
-        shared-key: native-tests-${{ inputs.profile }}
+        shared-key: native-tests-release-fixtures
     - name: Prepare isolated Linux terminal fixtures
       if: runner.os == 'Linux'
       shell: bash
@@ -39,34 +29,29 @@ runs:
       shell: bash
       run: cargo fetch --locked
     - name: Check production release targets
-      if: inputs.profile == 'debug'
       shell: bash
-      run: cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings
-    - name: Check ordinary release targets with all features
-      if: runner.os == 'Linux' && inputs.profile == 'debug'
+      run: cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings -D clippy::unwrap_used
+    - name: Check release targets with all features
+      if: runner.os == 'Linux'
       shell: bash
       env:
         # Clear arany_ci only here to compile the ordinary release test alternatives.
         RUSTFLAGS: '-D warnings'
       run: cargo check --workspace --all-targets --all-features --release --locked --offline
-    - name: Reject product unwraps
-      if: inputs.profile == 'debug'
-      shell: bash
-      run: cargo clippy --workspace --lib --bins --locked --offline -- -D warnings -D clippy::unwrap_used
     - name: Clippy on macOS
-      if: runner.os == 'macOS' && inputs.profile == 'debug'
+      if: runner.os == 'macOS'
       shell: bash
-      run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-    - name: Run debug unit and Session tests
-      if: inputs.profile == 'debug'
+      run: cargo clippy --workspace --all-targets --release --features arany-cli/test-support --locked --offline -- -D warnings
+    - name: Pin ordinary production release
       shell: bash
-      run: cargo test --workspace --lib --bins --test session_run --locked --offline
+      run: |
+        cargo build --release --locked --offline -p arany-cli --bin arany
+        cp target/release/arany "$RUNNER_TEMP/arany-production-release"
+        echo "ARANY_PRODUCTION_EXE=$RUNNER_TEMP/arany-production-release" >> "$GITHUB_ENV"
     - name: Run full release suite
-      if: inputs.profile == 'release'
       shell: bash
-      run: cargo test --workspace --release --locked --offline
-    - name: Run explicit offline Rust build gate
-      if: inputs.profile == 'debug'
+      run: cargo test --workspace --release --features arany-cli/test-support --locked --offline --no-fail-fast
+    - name: Run explicit native release gates
       shell: bash
       run: |
           set -euo pipefail
@@ -78,7 +63,8 @@ runs:
           ARANY_TEST_RUST_SYSROOT="$(rustc --print sysroot)"
           ARANY_TEST_RUST_SYSROOT="$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ARANY_TEST_RUST_SYSROOT")"
           export ARANY_TEST_RUST_SYSROOT
-          cargo test --locked --offline -p arany-cli --test session_run "$gate" -- --exact --ignored --nocapture 2>&1 | python3 -c '
+          run_gate() {
+          cargo test --release --features arany-cli/test-support --locked --offline -p arany-cli --test "$1" "$2" -- --exact --ignored --nocapture 2>&1 | python3 -c '
           import re
           import sys
 
@@ -95,25 +81,9 @@ runs:
           if len(re.findall(summary, captured)) != 1:
               raise SystemExit("native gate must complete exactly one passing test")
           '
-    - name: Run explicit macOS APFS rewind alias gate
-      if: runner.os == 'macOS' && inputs.profile == 'release'
-      shell: bash
-      run: |
-          set -euo pipefail
-          cargo test --locked --offline --release -p arany-cli --test guard_runs rewind::guarded_rewind_refuses_case_insensitive_apfs_alias_without_publication -- --exact --ignored --nocapture 2>&1 | python3 -c '
-          import re
-          import sys
-
-          limit = 1024 * 1024
-          captured = bytearray()
-          for chunk in iter(lambda: sys.stdin.buffer.read(65536), b""):
-              remaining = limit + 1 - len(captured)
-              if remaining > 0:
-                  captured.extend(chunk[:remaining])
-          sys.stdout.buffer.write(captured[:limit])
-          if len(captured) > limit:
-              raise SystemExit("native gate output exceeded 1 MiB")
-          summary = rb"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out"
-          if len(re.findall(summary, captured)) != 1:
-              raise SystemExit("native gate must complete exactly one passing test")
-          '
+          }
+          run_gate production_release ordinary_release_refuses_the_account_fixture_before_reading_state
+          run_gate session_run "$gate"
+          if [ "$RUNNER_OS" = macOS ]; then
+            run_gate guard_runs rewind::guarded_rewind_refuses_case_insensitive_apfs_alias_without_publication
+          fi

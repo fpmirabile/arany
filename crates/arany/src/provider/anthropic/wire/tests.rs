@@ -1717,16 +1717,11 @@ fn decoded_messages_report_closed_failure_stages() {
         (&invalid_typed_tool, "path_bytes: Some(11)"),
     ] {
         let shape = decode_run_failure_tool_shape(bytes, &scope);
-        if cfg!(debug_assertions) {
-            assert!(format!("{:?}", shape.unwrap()).contains(expected));
-        } else {
-            assert!(shape.is_none());
-        }
+        assert!(format!("{:?}", shape.unwrap()).contains(expected));
     }
 }
 
 #[test]
-#[cfg(debug_assertions)]
 fn completed_stream_rejection_logs_decoder_record_with_received_counters() {
     if crate::test_process::isolate_test() {
         return;
@@ -1735,7 +1730,7 @@ fn completed_stream_rejection_logs_decoder_record_with_received_counters() {
     let temp = tempfile::tempdir().expect("diagnostic state");
     let root =
         crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
-    crate::diagnostics::enable_development_diagnostics(&root);
+    crate::diagnostics::enable_test_diagnostics(&root);
 
     let request = primary_request(MODEL);
     let conversation = render::conversation(&request).unwrap();
@@ -1769,7 +1764,6 @@ fn completed_stream_rejection_logs_decoder_record_with_received_counters() {
     assert!(log.contains("operation: \"write\""));
 }
 
-#[cfg(debug_assertions)]
 fn malformed_completed_write_stream() -> (Vec<u8>, crate::provider::diagnostics::StreamCounts, usize)
 {
     let mut start = message_start();

@@ -1222,7 +1222,6 @@ async fn compaction_stream_requires_complete_bounded_summary() {
 }
 
 #[tokio::test]
-#[cfg(debug_assertions)]
 #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn completed_response_header_rejections_log_the_validation_stage() {
     if crate::test_process::isolate_test() {
@@ -1231,7 +1230,7 @@ async fn completed_response_header_rejections_log_the_validation_stage() {
     let temp = tempfile::tempdir().expect("diagnostic state");
     let root =
         crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
-    crate::diagnostics::enable_development_diagnostics(&root);
+    crate::diagnostics::enable_test_diagnostics(&root);
     let path = root.path().join("development.log");
     for (headers, stage) in [
         (

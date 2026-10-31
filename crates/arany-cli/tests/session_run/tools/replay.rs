@@ -1,10 +1,8 @@
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use crate::engine_support::run_with;
 use arany::WorkspaceIdentity;
 use arany::{
     AgentPhase, CollaborationPolicy, RunStatus, SessionView, StateRoot, ToolCall, ToolDisposition,
 };
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use arany::{EngineConfig, RunControls, ToolGrant};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
@@ -1379,7 +1377,6 @@ async fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() 
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) async fn native_command_changeset_corpus(
     root: &std::path::Path,
     config: &serde_json::Value,
@@ -2333,7 +2330,6 @@ fn exec_tool_configuration_rejects_before_workspace_content_or_provider_egress()
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn assert_refused_integration_continues(
     case: &str,
     run: &arany::RunView,

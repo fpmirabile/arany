@@ -14,7 +14,7 @@ on:
         default: false
         type: boolean
       linux_arm64:
-        description: Run native Linux ARM64 debug and release tests
+        description: Run native Linux ARM64 release tests
         required: false
         default: false
         type: boolean
@@ -140,10 +140,10 @@ jobs:
           if grep -E 'ratatui|crossterm|keyring' "$RUNNER_TEMP/arany-library-tree.txt"; then
             exit 1
           fi
-      - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - run: cargo clippy --workspace --all-targets --release --features arany-cli/test-support --locked --offline -- -D warnings
 
-  linux-debug:
-    name: Linux Tests (debug)
+  linux-tests:
+    name: Linux Tests
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
     runs-on: ubuntu-24.04
@@ -153,28 +153,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/ci-tests
-        with:
-          profile: debug
-
-  linux-release:
-    name: Linux Tests (release)
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/ci-tests
-        with:
-          profile: release
       - name: Measure native long-history behavior
         if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.history_benchmark }}
         shell: bash
         run: |
           sudo apt-get install --yes tmux
-          cargo test --locked --offline --release -p arany-cli --test session_run active_terminal::tmux::history_latency::active_keyboard_stays_visible_with_near_cap_history -- --exact --ignored --nocapture | tee "$RUNNER_TEMP/arany-history-measurement.log"
+          cargo test --locked --offline --release --features arany-cli/test-support -p arany-cli --test session_run active_terminal::tmux::history_latency::active_keyboard_stays_visible_with_near_cap_history -- --exact --ignored --nocapture | tee "$RUNNER_TEMP/arany-history-measurement.log"
           python3 - <<'PY'
           import os
           import pathlib
@@ -186,14 +170,10 @@ jobs:
           PY
 
   linux-arm64-tests:
-    name: Linux ARM64 Tests (${{ matrix.profile }})
+    name: Linux ARM64 Tests
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_arm64 }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [debug, release]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,7 +182,7 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: linux-arm64-${{ matrix.profile }}
+          key: linux-arm64-release
       - name: Verify native Linux ARM64 host and Rust target
         run: |
           set -euo pipefail
@@ -217,8 +197,8 @@ jobs:
           bwrap --unshare-user --unshare-net --ro-bind / / -- true
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
-      - name: Run workspace tests (${{ matrix.profile }})
-        run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+      - name: Run workspace tests (release)
+        run: cargo test --workspace --release --features arany-cli/test-support --locked --offline --no-fail-fast
 
   linux-native-advanced:
     name: Native Linux Guard and tmux (${{ matrix.arch }})
@@ -270,7 +250,7 @@ jobs:
 
           run_exact_parent() {
             local parent="$1"
-            if ! cargo test --release --locked --offline -p arany-cli --test session_run "$parent" -- --ignored --exact 2>&1 | python3 -c '
+            if ! cargo test --release --features arany-cli/test-support --locked --offline -p arany-cli --test session_run "$parent" -- --ignored --exact 2>&1 | python3 -c '
           import sys
 
           limit = int(sys.argv[2])
@@ -304,8 +284,8 @@ jobs:
           run_exact_parent active_terminal::tmux::fullscreen_steering_note_and_pause_in_tmux || result=1
           exit "$result"
 
-  macos-debug:
-    name: macOS Tests (debug)
+  macos-tests:
+    name: macOS Tests
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
     runs-on: macos-15
@@ -315,19 +295,3 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/ci-tests
-        with:
-          profile: debug
-
-  macos-release:
-    name: macOS Tests (release)
-    needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/ci-tests
-        with:
-          profile: release

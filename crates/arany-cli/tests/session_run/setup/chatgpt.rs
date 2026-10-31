@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(debug_assertions)]
 #[test]
 fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failure() {
     for (choice, disconnected, other_saved) in [
@@ -143,7 +142,6 @@ fn setup_reuse_and_reconnect_choices_preserve_selected_chatgpt_account_on_failur
     }
 }
 
-#[cfg(debug_assertions)]
 fn assert_failed_chatgpt_selection(state: &Path, workspace: &Path, target_id: Uuid) {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -203,7 +201,6 @@ fn assert_failed_chatgpt_selection(state: &Path, workspace: &Path, target_id: Uu
         });
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     let (temp, workspace, state) = workspace_root();
@@ -285,7 +282,6 @@ fn saved_chatgpt_picker_lists_account_ids_and_cancels_cleanly() {
     assert_eq!(updated["selected"], selected.to_string());
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_state() {
     for accept_file in [false, true] {
@@ -368,7 +364,7 @@ fn screen_reader_chatgpt_consent_defaults_to_back_before_browser_or_account_stat
     }
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "native Linux Bubblewrap ChatGPT account-only cross-StateRoot gate"]
 fn release_selected_chatgpt_account_starts_without_keyring_or_run() {
@@ -390,7 +386,6 @@ fn release_selected_chatgpt_account_starts_without_keyring_or_run() {
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal() {
     let (temp, workspace, state) = workspace_root();
@@ -452,7 +447,6 @@ fn narrow_no_color_chatgpt_warning_pages_before_acceptance_and_restores_terminal
     assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn unsafe_dbus_address_cannot_launch_a_credential_command() {
     let (temp, workspace, state) = workspace_root();

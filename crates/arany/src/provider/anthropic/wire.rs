@@ -1096,7 +1096,7 @@ fn diagnostic_tool_arguments(
     operation: &str,
     raw_input: &serde_json::value::RawValue,
 ) -> Option<crate::provider::diagnostics::ToolArgumentShape> {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(debug_assertions, test)) {
         return None;
     }
     let operation = crate::tools::catalog::by_name(operation)?.name;

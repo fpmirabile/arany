@@ -2,6 +2,7 @@ use super::*;
 use arany::{
     CommandEnvironment, EnvironmentCaptureEvent, EnvironmentCapturePhase, EnvironmentCaptureStage,
 };
+use std::os::unix::fs::MetadataExt;
 
 #[tokio::test]
 async fn login_capture_decline_is_journaled_and_each_capture_needs_a_fresh_human() {
@@ -26,6 +27,32 @@ async fn login_capture_decline_is_journaled_and_each_capture_needs_a_fresh_human
     CommandEnvironment::load(&root).unwrap();
     let file = fixture.state.join("command-environment.json");
     let before = std::fs::read(&file).unwrap();
+    if login_shell.metadata().unwrap().nlink() != 1 {
+        let result = fixture
+            .engine
+            .capture_command_environment(
+                session,
+                &fixture.workspace,
+                |_| -> std::future::Ready<arany::ApprovalReply> {
+                    panic!("an unadmitted shell must never request execution approval")
+                },
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(arany::EngineError::Tool(arany::ToolError::Path))
+        ));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        fixture.engine.close().await.unwrap();
+        let (events, view) = arany::test_support::goals::replayed(&fixture.state, session).await;
+        assert!(view.environment_capture.is_none());
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::HostEnvironmentCapture { .. }))
+        );
+        return;
+    }
     let mut asks = 0;
     for _ in 0..2 {
         let stage = fixture

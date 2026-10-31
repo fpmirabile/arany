@@ -1427,7 +1427,6 @@ mod tests {
         );
     }
 
-    #[cfg(debug_assertions)]
     #[test]
     fn rejected_save_keeps_the_trust_record_and_reports_the_error() {
         use super::{PermissionChoice, choose};

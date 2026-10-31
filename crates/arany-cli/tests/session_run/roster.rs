@@ -7,7 +7,7 @@ use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 const TERMINAL_REQUIRED: &[u8] =
     b"error: attached mode requires terminal stdin and stderr; use arany exec for pipes\n";
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(target_os = "macos")]
 fn drain_attached_output(
     reader: &mut impl std::io::Read,
     destination: &mut Vec<u8>,
@@ -208,7 +208,6 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     assert!(!fresh.exists(), "refusal creates no State");
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
     let temp = tempdir();
@@ -291,7 +290,7 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
     }
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(target_os = "macos")]
 fn attached_leg_macos(
     temp: &Path,
     workspace: &Path,
@@ -518,7 +517,7 @@ fn attached_pty_refusal(
     );
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(target_os = "macos")]
 fn attached_pty_refusal(
     temp: &Path,
     workspace: &Path,
@@ -686,7 +685,6 @@ fn attached_pty_refusal(
 }
 
 #[test]
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn attached_profile_admission_waits_for_folder_consent() {
     let temp = tempdir();
     let workspace = temp.path().join("project");
@@ -706,7 +704,6 @@ fn attached_profile_admission_waits_for_folder_consent() {
     );
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 mod journey {
     use super::*;
     use arany::{GoalId, GoalStatus, RunStatus, SessionView, StateRoot, Store};
@@ -975,15 +972,10 @@ mod journey {
         } else {
             exec_leg(&workspace, &state, &held_rx, &served)
         };
-        #[cfg(all(target_os = "macos", debug_assertions))]
+        #[cfg(target_os = "macos")]
         let (session_id, goal_id) = if attached {
             super::attached_leg_macos(temp.path(), &workspace, &state, &held_rx, &served)
         } else {
-            exec_leg(&workspace, &state, &held_rx, &served)
-        };
-        #[cfg(not(any(target_os = "linux", all(target_os = "macos", debug_assertions))))]
-        let (session_id, goal_id) = {
-            assert!(!attached);
             exec_leg(&workspace, &state, &held_rx, &served)
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1120,7 +1112,6 @@ mod journey {
         cancel_then_resume(false);
     }
 
-    #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
     #[test]
     fn attached_cancellation_resumes_through_exec_only_with_the_same_preset() {
         cancel_then_resume(true);

@@ -195,7 +195,6 @@ fn fifo_include_rejects_without_waiting_for_a_writer() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(debug_assertions)]
     command.env(
         "ARANY_TEST_ACCOUNT_ROOT",
         arany::test_support::isolate_account_root(),
