@@ -571,6 +571,29 @@ async fn manager(
     }
 }
 
+async fn accept_supervisor(
+    stream: tokio::net::UnixStream,
+    launched: &Identity,
+) -> Result<(tokio::net::UnixStream, Identity), ToolError> {
+    let stream = stream.into_std().map_err(|_| ToolError::Operation)?;
+    let pid = peer(&stream)?;
+    let child = identity(pid)?;
+    if child.pid != launched.pid
+        || child.unique_id != launched.unique_id
+        || child.coalition != launched.coalition
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let stream = tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
+    let mut stream = BufReader::new(stream);
+    let received: Identity = serde_json::from_slice(&read_line_capped(&mut stream, 512).await?)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    if received != child {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok((stream.into_inner(), child))
+}
+
 impl Unit {
     #[cfg(test)]
     async fn new(fixture: &Path) -> Result<Self, ToolError> {
@@ -763,27 +786,12 @@ impl Unit {
         scope.apply_limits(limits);
         self.scope = Some(scope);
         let (stream, _) = listener.accept().await.map_err(|_| ToolError::Operation)?;
-        let stream = stream.into_std().map_err(|_| ToolError::Operation)?;
-        let pid = peer(&stream)?;
-        let child = identity(pid)?;
-        if child.pid != launched.pid
-            || child.unique_id != launched.unique_id
-            || child.coalition != launched.coalition
-        {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let stream = tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
-        let mut stream = BufReader::new(stream);
-        let received: Identity = serde_json::from_slice(&read_line_capped(&mut stream, 512).await?)
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if received != child {
-            return Err(ToolError::ProtectionUnavailable);
-        }
+        let (stream, child) = accept_supervisor(stream, &launched).await?;
         let record = recovery(&self._directory)?;
         if record.boot != ffi::boot_session()? || record.supervisor != Some(child) {
             return Err(ToolError::ProtectionUnavailable);
         }
-        Ok(stream.into_inner())
+        Ok(stream)
     }
 
     fn worker_output(&self) -> Vec<u8> {
@@ -921,7 +929,6 @@ pub(super) async fn execute(
     run_unit(runtime, intent, cancellation, dispatched, admitted).await
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) async fn run_unit(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -936,259 +943,35 @@ pub(super) async fn run_unit(
     let proxy = proxy_for(runtime, intent)?;
     let (preparation_deadline, go_deadline, completion_deadline) =
         action_deadlines(active_window, intent, tokio::time::Instant::now());
-    let mut cache = clone_cache(
+    let cache = clone_cache(
         super::super::cache_directory::session(runtime, intent, preparation_deadline).await?,
         &unit,
         intent,
     )?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    let go_cancellation = cancellation.clone();
     let timings = StageTimer::new();
+    let control = UnitControl {
+        runtime,
+        intent,
+        active_window,
+        preparation_deadline,
+        go_deadline,
+        completion_deadline,
+        go_cancellation: cancellation.clone(),
+        dispatched,
+        timings: &timings,
+        cached: cache.is_some(),
+    };
     let eviction = runtime
         .cache_state
         .clone()
         .map(|state| tokio::spawn(evict_near_reserve(state, unit.root.clone())));
-    let execution = async {
-        let capture = FixtureSpan::begin(FixtureStage::Connect);
-        let mut stream = BufReader::new(
-            tokio::time::timeout(CONNECT_DEADLINE, unit.connect(runtime))
-                .await
-                .map_err(|_| ToolError::GuardRejected(GuardStage::ConnectionDeadline))??,
-        );
-        capture.complete();
-        timings.mark("connect");
-        let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
-        let primary_command = primary_command(intent);
-        let payload_phase = AtomicBool::new(false);
-        let selecting = AtomicBool::new(false);
-        let watcher = Mutex::new(Scope::new(
-            unit.scope
-                .as_ref()
-                .ok_or(ToolError::ProtectionUnavailable)?
-                .coalition,
-        )?);
-        let phases = async {
-            let mut task = Task::new(runtime, intent, cache_transfer)?;
-            task.proxy_port = proxy.as_ref().map(crate::tools::network::Proxy::port);
-            let task = super::super::encode_task(&task)?;
-            let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
-                stream
-                    .get_mut()
-                    .write_all(&task)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                read_line_capped(&mut stream, 2048).await
-            })
-            .await
-            .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
-            if bytes == b"WORKER_READY\n" {
-                let input = runtime
-                    .handover
-                    .as_deref()
-                    .ok_or(ToolError::Configuration)?;
-                tokio::time::timeout_at(
-                    go_deadline,
-                    crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
-                )
-                .await
-                .map_err(|_| ToolError::Limit)??;
-                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-            }
-            if primary_command && bytes != b"SELECT_READY\n" {
-                return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
-                    .map_or(ToolError::Configuration, ToolError::GuardBootstrap));
-            }
-            let command_deadline = if bytes == b"SELECT_READY\n" {
-                // The command runtime starts at selection, after storage and cache preparation.
-                let command_deadline = super::super::selection_phase::command_deadline(intent)
-                    .ok_or(ToolError::Configuration)?;
-                selecting.store(true, Ordering::Release);
-                stream
-                    .get_mut()
-                    .write_all(b"SELECT\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                stream
-                    .get_mut()
-                    .write_all(&super::super::selection_phase::encode_deadline(
-                        command_deadline,
-                    )?)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                let deadline = command_deadline.min(go_deadline);
-                let mut selection_cancel = go_cancellation.clone();
-                super::super::selection_phase::wait(
-                    deadline,
-                    &mut selection_cancel,
-                    super::super::selection_phase::receive(&mut stream, deadline),
-                )
-                .await?;
-                selecting.store(false, Ordering::Release);
-                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                    .await
-                    .map_err(|_| ToolError::Limit)??;
-                Some(command_deadline)
-            } else {
-                None
-            };
-            if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
-                return Err(ToolError::GuardBootstrap(failure));
-            }
-            let ready = super::super::parse_ready(&bytes, intent)?;
-            if identity(ready.pid)?.coalition
-                != unit
-                    .scope
-                    .as_ref()
-                    .ok_or(ToolError::ProtectionUnavailable)?
-                    .coalition
-            {
-                return Err(ToolError::ProtectionUnavailable);
-            }
-            unit.scope
-                .as_mut()
-                .ok_or(ToolError::ProtectionUnavailable)?
-                .check_resources()
-                .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
-            capture.complete();
-            timings.mark("ready");
-            let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
-            super::super::selection_phase::before_dispatch(
-                runtime,
-                intent,
-                active_window,
-                command_deadline,
-                &go_cancellation,
-            )
-            .await?;
-            payload_phase.store(true, Ordering::Release);
-            dispatched.store(true, Ordering::Release);
-            let observation = async {
-                stream
-                    .get_mut()
-                    .write_all(b"GO\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                crate::fault::guard_dispatched(intent);
-                crate::fault::guard_dispatch_gate(intent).await;
-                if primary_command {
-                    use tokio::io::AsyncBufReadExt;
-                    if stream
-                        .fill_buf()
-                        .await
-                        .map_err(|_| ToolError::Operation)?
-                        .first()
-                        == Some(&b'C')
-                    {
-                        let marker = read_line_capped(&mut stream, 64).await?;
-                        if marker != b"CAPTURE_READY\n" {
-                            return Err(ToolError::Operation);
-                        }
-                        watcher
-                            .lock()
-                            .map_err(|_| ToolError::ProtectionUnavailable)?
-                            .begin_capture(&intent.limits)?;
-                        selecting.store(true, Ordering::Release);
-                        payload_phase.store(false, Ordering::Release);
-                        let (deadline, report_deadline) =
-                            super::super::selection_phase::capture_deadlines(completion_deadline)?;
-                        stream
-                            .get_mut()
-                            .write_all(b"CAPTURE\n")
-                            .await
-                            .map_err(|_| ToolError::Operation)?;
-                        stream
-                            .get_mut()
-                            .write_all(&super::super::selection_phase::encode_deadline(deadline)?)
-                            .await
-                            .map_err(|_| ToolError::Operation)?;
-                        let done = tokio::time::timeout_at(
-                            report_deadline,
-                            read_line_capped(&mut stream, 64),
-                        )
-                        .await
-                        .map_err(|_| ToolError::Timeout(String::new()))??;
-                        if done != b"CAPTURE_DONE\n" {
-                            return Err(ToolError::Operation);
-                        }
-                        selecting.store(false, Ordering::Release);
-                        payload_phase.store(true, Ordering::Release);
-                    }
-                }
-                let capture_result = async {
-                    if cache.is_some() {
-                        let observation =
-                            super::super::read_observation_line(&mut stream, intent).await?;
-                        let candidate = super::super::CacheCandidate::Received;
-                        let cache_status = tokio::time::timeout_at(
-                            completion_deadline,
-                            read_line_capped(&mut stream, 32),
-                        )
-                        .await
-                        .map_err(|_| ToolError::Limit)??;
-                        match cache_status.as_slice() {
-                            b"CACHE_DONE\n" => {}
-                            b"CACHE_FAILED\n" => {
-                                let failure = tokio::time::timeout_at(
-                                    completion_deadline,
-                                    read_line_capped(&mut stream, 256),
-                                )
-                                .await
-                                .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
-                                .ok()
-                                .and_then(|bytes| {
-                                    serde_json::from_slice::<BootstrapFailure>(&bytes).ok()
-                                });
-                                return Err(failure.map_or(
-                                    ToolError::GuardRejected(GuardStage::StorageCleanup),
-                                    ToolError::GuardBootstrap,
-                                ));
-                            }
-                            _ => return Err(ToolError::Operation),
-                        }
-                        Ok((observation, candidate))
-                    } else {
-                        super::super::read_worker_report(&mut stream, intent)
-                            .await
-                            .map(|observation| {
-                                (observation, super::super::CacheCandidate::Received)
-                            })
-                    }
-                };
-                capture_result.await
-            };
-            let observation = observation.await;
-            capture.complete();
-            timings.mark("report");
-            observation
-        };
-        tokio::pin!(phases);
-        let mut samples = tokio::time::interval(super::SUPERVISION_INTERVAL);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut phases => break result,
-                _ = samples.tick() => {
-                    if !payload_phase.load(Ordering::Acquire) {
-                        let checked = watcher
-                            .lock()
-                            .map_err(|_| ToolError::ProtectionUnavailable)
-                            .and_then(|mut watcher| {
-                                let limits = if selecting.load(Ordering::Acquire) {
-                                    selection_limits(&intent.limits)
-                                } else {
-                                    intent.limits.clone()
-                                };
-                                watcher.apply_limits(limits);
-                                watcher.check_resources()
-                            });
-                        if let Err(error) = checked { break Err(error); }
-                    }
-                }
-            }
-        }
-    };
+    let execution = control_unit(
+        &control,
+        &mut unit,
+        cache_transfer,
+        proxy.as_ref().map(crate::tools::network::Proxy::port),
+    );
     let result = if let Some(window) = active_window {
         tokio::select! {
             biased;
@@ -1205,13 +988,333 @@ pub(super) async fn run_unit(
     if let Some(eviction) = eviction {
         eviction.abort();
     }
-    let stopped = tokio::time::timeout_at(completion_deadline, unit.stop())
+    finish_unit(&control, &mut unit, proxy, cache, result).await
+}
+
+struct UnitControl<'a> {
+    runtime: &'a ToolRuntime,
+    intent: &'a EffectIntent,
+    active_window: Option<crate::tools::ActiveToolWindow>,
+    preparation_deadline: tokio::time::Instant,
+    go_deadline: tokio::time::Instant,
+    completion_deadline: tokio::time::Instant,
+    go_cancellation: Cancellation,
+    dispatched: &'a AtomicBool,
+    timings: &'a StageTimer,
+    cached: bool,
+}
+
+// Tell the resource sampler which limits the worker's current phase allows.
+#[derive(Default)]
+struct PhaseFlags {
+    payload: AtomicBool,
+    selecting: AtomicBool,
+}
+
+type UnitStream = BufReader<tokio::net::UnixStream>;
+type UnitReport = (ToolObservation, super::super::CacheCandidate);
+
+async fn control_unit(
+    control: &UnitControl<'_>,
+    unit: &mut Unit,
+    cache_transfer: Option<super::super::BuildCacheTransfer>,
+    proxy_port: Option<u16>,
+) -> Result<UnitReport, ToolError> {
+    let capture = FixtureSpan::begin(FixtureStage::Connect);
+    let mut stream = BufReader::new(
+        tokio::time::timeout(CONNECT_DEADLINE, unit.connect(control.runtime))
+            .await
+            .map_err(|_| ToolError::GuardRejected(GuardStage::ConnectionDeadline))??,
+    );
+    capture.complete();
+    control.timings.mark("connect");
+    let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
+    let flags = PhaseFlags::default();
+    let watcher = Mutex::new(Scope::new(
+        unit.scope
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .coalition,
+    )?);
+    let phases = async {
+        let mut task = Task::new(control.runtime, control.intent, cache_transfer)?;
+        task.proxy_port = proxy_port;
+        let task = super::super::encode_task(&task)?;
+        let command_deadline = ready_worker(control, &mut stream, unit, &flags, &task).await?;
+        capture.complete();
+        control.timings.mark("ready");
+        let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
+        super::super::selection_phase::before_dispatch(
+            control.runtime,
+            control.intent,
+            control.active_window,
+            command_deadline,
+            &control.go_cancellation,
+        )
+        .await?;
+        flags.payload.store(true, Ordering::Release);
+        control.dispatched.store(true, Ordering::Release);
+        let observation = observe_worker(control, &mut stream, &watcher, &flags).await;
+        capture.complete();
+        control.timings.mark("report");
+        observation
+    };
+    sample_phases(phases, &watcher, &flags, control.intent).await
+}
+
+async fn ready_worker(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    unit: &mut Unit,
+    flags: &PhaseFlags,
+    task: &[u8],
+) -> Result<Option<tokio::time::Instant>, ToolError> {
+    let (runtime, intent, go_deadline) = (control.runtime, control.intent, control.go_deadline);
+    let mut bytes = tokio::time::timeout_at(control.preparation_deadline, async {
+        stream
+            .get_mut()
+            .write_all(task)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        read_line_capped(&mut *stream, 2048).await
+    })
+    .await
+    .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
+    if bytes == b"WORKER_READY\n" {
+        let input = runtime
+            .handover
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        tokio::time::timeout_at(
+            go_deadline,
+            crate::tools::guard::transfer::send_frame(stream.get_mut(), input),
+        )
+        .await
+        .map_err(|_| ToolError::Limit)??;
+        bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut *stream, 2048))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    }
+    if primary_command(intent) && bytes != b"SELECT_READY\n" {
+        return Err(serde_json::from_slice::<BootstrapFailure>(&bytes)
+            .map_or(ToolError::Configuration, ToolError::GuardBootstrap));
+    }
+    let command_deadline = if bytes == b"SELECT_READY\n" {
+        let (command_deadline, next) = select_command(control, stream, flags).await?;
+        bytes = next;
+        Some(command_deadline)
+    } else {
+        None
+    };
+    if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
+        return Err(ToolError::GuardBootstrap(failure));
+    }
+    let ready = super::super::parse_ready(&bytes, intent)?;
+    if identity(ready.pid)?.coalition
+        != unit
+            .scope
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .coalition
+    {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    unit.scope
+        .as_mut()
+        .ok_or(ToolError::ProtectionUnavailable)?
+        .check_resources()
+        .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
+    Ok(command_deadline)
+}
+
+async fn select_command(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    flags: &PhaseFlags,
+) -> Result<(tokio::time::Instant, Vec<u8>), ToolError> {
+    // The command runtime starts at selection, after storage and cache preparation.
+    let command_deadline = super::super::selection_phase::command_deadline(control.intent)
+        .ok_or(ToolError::Configuration)?;
+    flags.selecting.store(true, Ordering::Release);
+    stream
+        .get_mut()
+        .write_all(b"SELECT\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    stream
+        .get_mut()
+        .write_all(&super::super::selection_phase::encode_deadline(
+            command_deadline,
+        )?)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let deadline = command_deadline.min(control.go_deadline);
+    let mut selection_cancel = control.go_cancellation.clone();
+    super::super::selection_phase::wait(
+        deadline,
+        &mut selection_cancel,
+        super::super::selection_phase::receive(&mut *stream, deadline),
+    )
+    .await?;
+    flags.selecting.store(false, Ordering::Release);
+    let bytes = tokio::time::timeout_at(control.go_deadline, read_line_capped(stream, 2048))
+        .await
+        .map_err(|_| ToolError::Limit)??;
+    Ok((command_deadline, bytes))
+}
+
+async fn observe_worker(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    watcher: &Mutex<Scope>,
+    flags: &PhaseFlags,
+) -> Result<UnitReport, ToolError> {
+    let intent = control.intent;
+    stream
+        .get_mut()
+        .write_all(b"GO\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    crate::fault::guard_dispatched(intent);
+    crate::fault::guard_dispatch_gate(intent).await;
+    if primary_command(intent) {
+        use tokio::io::AsyncBufReadExt;
+        if stream
+            .fill_buf()
+            .await
+            .map_err(|_| ToolError::Operation)?
+            .first()
+            == Some(&b'C')
+        {
+            capture_selection(control, stream, watcher, flags).await?;
+        }
+    }
+    read_report(stream, intent, control.cached, control.completion_deadline).await
+}
+
+async fn capture_selection(
+    control: &UnitControl<'_>,
+    stream: &mut UnitStream,
+    watcher: &Mutex<Scope>,
+    flags: &PhaseFlags,
+) -> Result<(), ToolError> {
+    let marker = read_line_capped(&mut *stream, 64).await?;
+    if marker != b"CAPTURE_READY\n" {
+        return Err(ToolError::Operation);
+    }
+    watcher
+        .lock()
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .begin_capture(&control.intent.limits)?;
+    flags.selecting.store(true, Ordering::Release);
+    flags.payload.store(false, Ordering::Release);
+    let (deadline, report_deadline) =
+        super::super::selection_phase::capture_deadlines(control.completion_deadline)?;
+    stream
+        .get_mut()
+        .write_all(b"CAPTURE\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    stream
+        .get_mut()
+        .write_all(&super::super::selection_phase::encode_deadline(deadline)?)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let done = tokio::time::timeout_at(report_deadline, read_line_capped(stream, 64))
+        .await
+        .map_err(|_| ToolError::Timeout(String::new()))??;
+    if done != b"CAPTURE_DONE\n" {
+        return Err(ToolError::Operation);
+    }
+    flags.selecting.store(false, Ordering::Release);
+    flags.payload.store(true, Ordering::Release);
+    Ok(())
+}
+
+async fn read_report(
+    stream: &mut UnitStream,
+    intent: &EffectIntent,
+    cached: bool,
+    completion_deadline: tokio::time::Instant,
+) -> Result<UnitReport, ToolError> {
+    if !cached {
+        return super::super::read_worker_report(stream, intent)
+            .await
+            .map(|observation| (observation, super::super::CacheCandidate::Received));
+    }
+    let observation = super::super::read_observation_line(&mut *stream, intent).await?;
+    let candidate = super::super::CacheCandidate::Received;
+    let cache_status =
+        tokio::time::timeout_at(completion_deadline, read_line_capped(&mut *stream, 32))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    match cache_status.as_slice() {
+        b"CACHE_DONE\n" => {}
+        b"CACHE_FAILED\n" => {
+            let failure =
+                tokio::time::timeout_at(completion_deadline, read_line_capped(stream, 256))
+                    .await
+                    .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<BootstrapFailure>(&bytes).ok());
+            return Err(failure.map_or(
+                ToolError::GuardRejected(GuardStage::StorageCleanup),
+                ToolError::GuardBootstrap,
+            ));
+        }
+        _ => return Err(ToolError::Operation),
+    }
+    Ok((observation, candidate))
+}
+
+async fn sample_phases(
+    phases: impl Future<Output = Result<UnitReport, ToolError>>,
+    watcher: &Mutex<Scope>,
+    flags: &PhaseFlags,
+    intent: &EffectIntent,
+) -> Result<UnitReport, ToolError> {
+    tokio::pin!(phases);
+    let mut samples = tokio::time::interval(super::SUPERVISION_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut phases => break result,
+            _ = samples.tick() => {
+                if !flags.payload.load(Ordering::Acquire) {
+                    let checked = watcher
+                        .lock()
+                        .map_err(|_| ToolError::ProtectionUnavailable)
+                        .and_then(|mut watcher| {
+                            let limits = if flags.selecting.load(Ordering::Acquire) {
+                                selection_limits(&intent.limits)
+                            } else {
+                                intent.limits.clone()
+                            };
+                            watcher.apply_limits(limits);
+                            watcher.check_resources()
+                        });
+                    if let Err(error) = checked { break Err(error); }
+                }
+            }
+        }
+    }
+}
+
+async fn finish_unit(
+    control: &UnitControl<'_>,
+    unit: &mut Unit,
+    proxy: Option<crate::tools::network::Proxy>,
+    mut cache: Option<super::super::BuildCacheSession>,
+    result: Result<UnitReport, ToolError>,
+) -> Result<ToolObservation, ToolError> {
+    let intent = control.intent;
+    let stopped = tokio::time::timeout_at(control.completion_deadline, unit.stop())
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
         .and_then(|stopped| {
             stopped.map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))
         });
-    timings.mark("teardown");
+    control.timings.mark("teardown");
     let refusals = crate::tools::network::Proxy::settle(proxy, stopped).await?;
     super::super::cache_directory::finished(cache.as_ref())?;
     // The coalition is empty, so the view is quiescent until the root is removed.
@@ -1230,7 +1333,7 @@ pub(super) async fn run_unit(
                 &mut observation,
                 candidate,
                 cache.take(),
-                completion_deadline,
+                control.completion_deadline,
             )
             .await;
             Ok(observation)
@@ -1238,8 +1341,8 @@ pub(super) async fn run_unit(
         Err(error) => Err(error),
     };
     super::retire_cache_alias(&unit.root, intent.workspace_device, intent.workspace_inode);
-    timings.mark("cache");
-    crate::diagnostics::guard_timing(intent.call.label(), &timings.stages());
+    control.timings.mark("cache");
+    crate::diagnostics::guard_timing(intent.call.label(), &control.timings.stages());
     result
 }
 
@@ -1357,7 +1460,247 @@ fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolEr
     Ok((root, stream))
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
+fn claim_supervisor(root: &PrivateDirectory, stream: &mut UnixStream) -> Result<Scope, ToolError> {
+    let parent = peer(stream)?;
+    let own = identity(std::process::id())?;
+    if identity(parent)?.coalition == own.coalition {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let scope = Scope::new(own.coalition)?;
+    let mut record = recovery(root)?;
+    if record.boot != ffi::boot_session()? || record.supervisor.is_some() {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    record.supervisor = Some(own);
+    write_record(&root.dir, RECOVERY_RECORD, &record)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ToolError::Operation)?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ToolError::Operation)?;
+    serde_json::to_writer(&mut *stream, &own).map_err(|_| ToolError::Operation)?;
+    stream.write_all(b"\n").map_err(|_| ToolError::Operation)?;
+    Ok(scope)
+}
+
+fn receive_task(stream: &mut UnixStream) -> Result<Task, ToolError> {
+    let task = {
+        let mut reader = std::io::BufReader::new(stream);
+        super::super::read_task(&mut reader)?
+    };
+    if task.command_deadline.is_some() {
+        return Err(ToolError::Configuration);
+    }
+    if let Some(cache) = &task.cache {
+        cache.validate(&task.intent, &task.config)?;
+    }
+    Ok(task)
+}
+
+fn receive_worker_input(
+    stream: &mut UnixStream,
+    task: &Task,
+) -> Result<Option<Vec<u8>>, ToolError> {
+    if task.handover.is_none() {
+        return Ok(None);
+    }
+    stream
+        .write_all(b"WORKER_READY\n")
+        .map_err(|_| ToolError::Operation)?;
+    let bytes = crate::tools::guard::transfer::read_frame(
+        stream,
+        crate::session::worker::WORKER_DATA_BYTES,
+    )?;
+    crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
+    Ok(Some(bytes))
+}
+
+async fn await_selection(
+    input: &mut tokio::net::unix::OwnedReadHalf,
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    limits: &crate::tools::types::ToolLimits,
+) -> Result<([u8; 8], std::time::Instant), ToolError> {
+    output
+        .write_all(b"SELECT_READY\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let mut select = [0; 7];
+    input
+        .read_exact(&mut select)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    if select != *b"SELECT\n" {
+        return Err(ToolError::Configuration);
+    }
+    let mut frame = [0; 8];
+    input
+        .read_exact(&mut frame)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    let deadline = super::super::selection_phase::decode_command_deadline(frame, limits)?;
+    Ok((frame, deadline))
+}
+
+// Any other byte, or the controller closing the stream, cancels the worker.
+async fn read_go(
+    listener: GoListener,
+    go: tokio::sync::oneshot::Sender<()>,
+    watched: Cancellation,
+) {
+    let GoListener {
+        mut input,
+        capture_go,
+    } = listener;
+    let mut bytes = [0; 3];
+    if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
+        let _ = go.send(());
+        let mut capture = [0; 8];
+        if input.read_exact(&mut capture).await.is_ok() {
+            if capture == *b"CAPTURE\n" {
+                let mut frame = [0; 8];
+                if input.read_exact(&mut frame).await.is_ok()
+                    && let Ok(deadline) = super::super::selection_phase::decode_deadline(frame)
+                {
+                    let _ = capture_go.send(deadline);
+                }
+            }
+            let _ = input.read(&mut [0; 1]).await;
+        }
+    }
+    watched.cancel();
+}
+
+type CommandBefore = (
+    crate::tools::fs::command::CommandBaseline,
+    crate::tools::fs::CommandSelection,
+);
+
+fn command_baseline(root: &Path) -> Result<CommandBefore, ToolError> {
+    crate::private_fs::clone_at(
+        &crate::tools::fs::open_directory(&root.join("workspace"))?,
+        &crate::tools::fs::open_directory(root)?,
+        "base",
+    )
+    .map_err(|_| ToolError::Operation)?;
+    Ok((
+        crate::tools::fs::command_baseline(&root.join("base"), &root.join("workspace"))?,
+        crate::tools::fs::CommandSelection::read(root)?,
+    ))
+}
+
+fn capture_changeset(
+    observation: &ToolObservation,
+    (before, selection): &CommandBefore,
+    workspace: &Path,
+    capture_deadline: Option<std::time::Instant>,
+) -> Result<
+    (
+        crate::tools::CommandChangeset,
+        crate::tools::types::CommandSelectionSummary,
+    ),
+    ToolError,
+> {
+    if observation.disposition == ToolDisposition::Limit {
+        Ok((crate::tools::CommandChangeset::default(), selection.summary))
+    } else {
+        crate::tools::fs::selected_command_changeset(
+            workspace,
+            before,
+            selection,
+            capture_deadline.ok_or(ToolError::Operation)?,
+        )
+    }
+}
+
+fn record_capture(observation: &mut ToolObservation, captured: Result<String, ToolError>) {
+    match captured {
+        Ok(output) => {
+            observation.output = output;
+            if !observation.valid() {
+                observation.disposition = ToolDisposition::Limit;
+                observation.limit_cause = Some(crate::tools::LimitCause::Resource);
+                observation.enforcement_cause = None;
+                observation.spill = None;
+                observation.output = "Command changeset exceeded its reserved capacity".into();
+            }
+        }
+        Err(error) => {
+            let (disposition, _, cause, limit_cause) =
+                crate::tools::dispatch::outcome(&observation.intent, Err(error));
+            observation.disposition = disposition;
+            observation.enforcement_cause = cause;
+            observation.limit_cause = limit_cause;
+            observation.spill = None;
+            observation.output = "Command changeset could not be captured".into();
+        }
+    }
+}
+
+fn teardown_stage<T>(
+    cleanup: &Result<(), ToolError>,
+    storage_cleanup: &Result<(), ToolError>,
+    result: &Result<T, ToolError>,
+) -> Option<super::super::BootstrapStage> {
+    if cleanup.is_err() {
+        Some(super::super::BootstrapStage::ProcessStop)
+    } else if storage_cleanup.is_err() {
+        Some(super::super::BootstrapStage::StorageCleanup)
+    } else {
+        match result {
+            Err(ToolError::GuardRejected(GuardStage::LauncherReap)) => {
+                Some(super::super::BootstrapStage::LauncherReap)
+            }
+            Err(ToolError::GuardRejected(GuardStage::OutputEof)) => {
+                Some(super::super::BootstrapStage::StderrDrain)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn cache_status(result: &Result<ToolObservation, ToolError>) -> Result<Vec<u8>, ToolError> {
+    Ok(match result {
+        Ok(_) => b"CACHE_DONE\n".to_vec(),
+        Err(error) => {
+            let failure = match error {
+                ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
+                _ => serde_json::to_vec(&BootstrapFailure::at(
+                    super::super::BootstrapStage::StorageCleanup,
+                )),
+            }
+            .map_err(|_| ToolError::Operation)?;
+            [&b"CACHE_FAILED\n"[..], failure.as_slice(), &b"\n"[..]].concat()
+        }
+    })
+}
+
+fn report_bytes(
+    result: &Result<ToolObservation, ToolError>,
+    stage: &super::super::BootstrapStage,
+) -> Result<Vec<u8>, ToolError> {
+    match result {
+        Ok(observation) => crate::tools::spill::encode_report(observation),
+        Err(ToolError::GuardBootstrap(failure)) => {
+            serde_json::to_vec(failure).map_err(|_| ToolError::Operation)
+        }
+        Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone()))
+            .map_err(|_| ToolError::Operation),
+    }
+    .map_err(|_| ToolError::Operation)
+}
+
+fn report_failure(stream: &mut UnixStream, error: &ToolError, stage: super::super::BootstrapStage) {
+    let failure = match error {
+        ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
+        _ => serde_json::to_vec(&BootstrapFailure::at(stage)),
+    };
+    if let Ok(mut bytes) = failure {
+        bytes.push(b'\n');
+        let _ = stream.write_all(&bytes);
+    }
+}
+
 pub(super) fn helper_main() -> std::process::ExitCode {
     super::super::bound_worker_output();
     let mut diagnostic = None;
@@ -1369,61 +1712,31 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         let (root, mut stream) = connect_control(path)?;
         diagnostic = Some(stream.try_clone().map_err(|_| ToolError::Operation)?);
         stage = super::super::BootstrapStage::Capabilities;
-        let parent = peer(&stream)?;
-        let own = identity(std::process::id())?;
-        if identity(parent)?.coalition == own.coalition {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        let mut scope = Scope::new(own.coalition)?;
-        let mut record = recovery(&root)?;
-        if record.boot != ffi::boot_session()? || record.supervisor.is_some() {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        record.supervisor = Some(own);
-        write_record(&root.dir, RECOVERY_RECORD, &record)?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|_| ToolError::Operation)?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .map_err(|_| ToolError::Operation)?;
-        serde_json::to_writer(&mut stream, &own).map_err(|_| ToolError::Operation)?;
-        stream.write_all(b"\n").map_err(|_| ToolError::Operation)?;
+        let mut scope = claim_supervisor(&root, &mut stream)?;
         stage = super::super::BootstrapStage::Admission;
-        let task = {
-            let mut reader = std::io::BufReader::new(&mut stream);
-            super::super::read_task(&mut reader)?
-        };
-        if task.command_deadline.is_some() {
-            return Err(ToolError::Configuration);
-        }
-        if let Some(cache) = &task.cache {
-            cache.validate(&task.intent, &task.config)?;
-        }
+        let task = receive_task(&mut stream)?;
         stage = super::super::BootstrapStage::Capabilities;
         if task.guard_executable
             != std::env::current_exe().map_err(|_| ToolError::ProtectionUnavailable)?
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let worker_input = if task.handover.is_some() {
-            stream
-                .write_all(b"WORKER_READY\n")
-                .map_err(|_| ToolError::Operation)?;
-            let bytes = crate::tools::guard::transfer::read_frame(
-                &mut stream,
-                crate::session::worker::WORKER_DATA_BYTES,
-            )?;
-            crate::tools::guard::transfer::decode_handover(&task.intent, &bytes, &task.config)?;
-            Some(bytes)
-        } else {
-            None
-        };
+        let worker_input = receive_worker_input(&mut stream, &task)?;
         let proxy_port = task.proxy_port;
         let editor_tree = task.editor_tree.clone();
         let policy_grants = task.policy_grants.clone();
         let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
+        let mut supervised = Supervised {
+            runtime,
+            intent,
+            cached: cache.is_some(),
+            root: path.parent().ok_or(ToolError::Path)?,
+            scope,
+            proxy_port,
+            editor_tree,
+            policy_grants,
+        };
         stream
             .set_read_timeout(None)
             .map_err(|_| ToolError::Operation)?;
@@ -1438,382 +1751,357 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             .build()
             .map_err(|_| ToolError::Operation)?;
         diagnostic = None;
-        reactor.block_on(async {
-            let stream =
-                tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
-            let (mut input, mut output) = stream.into_split();
-            let cancellation = Cancellation::new();
-            let mut reader = None;
-            let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
-            let mut command_before = None;
-            let (capture_go, mut receive_capture) = tokio::sync::oneshot::channel();
-            let result = async {
-                stage = super::super::BootstrapStage::Workspace;
-                let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if intent.call.is_process() {
-                    Some(prepare_command_storage(
-                        path.parent().ok_or(ToolError::Path)?,
-                        &runtime,
-                        &intent.limits,
-                        primary_command(&intent) || intent.target.editor(),
-                        cache.is_some(),
-                    )?)
-                } else {
-                    None
-                };
-                if storage.is_some() {
-                    scope.watch_disk(path.parent().ok_or(ToolError::Path)?)?;
-                }
-                let command_deadline = if primary_command(&intent) {
-                    output
-                        .write_all(b"SELECT_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let mut select = [0; 7];
-                    input
-                        .read_exact(&mut select)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    if select != *b"SELECT\n" {
-                        return Err(ToolError::Configuration);
-                    }
-                    let mut frame = [0; 8];
-                    input
-                        .read_exact(&mut frame)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let deadline = super::super::selection_phase::decode_command_deadline(
-                        frame,
-                        &intent.limits,
-                    )?;
-                    let source = crate::tools::fs::open_directory(&runtime.workspace)?;
-                    let resources =
-                        crate::tools::fs::open_directory(path.parent().ok_or(ToolError::Path)?)?;
-                    let target = storage
-                        .as_ref()
-                        .and_then(|volumes| volumes.first())
-                        .ok_or(ToolError::Operation)?;
-                    let selected = crate::tools::fs::prepare_command(
-                        &source,
-                        target,
-                        &resources,
-                        &runtime.config,
-                        deadline,
-                    );
-                    let message = super::super::selection_phase::response(&selected);
-                    output
-                        .write_all(message)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    selected?;
-                    Some(frame)
-                } else {
-                    None
-                };
-                let (go, receive_go) = tokio::sync::oneshot::channel();
-                let watched = cancellation.clone();
-                reader = Some(tokio::spawn(async move {
-                    let mut bytes = [0; 3];
-                    if input.read_exact(&mut bytes).await.is_ok() && bytes == *b"GO\n" {
-                        let _ = go.send(());
-                        let mut capture = [0; 8];
-                        if input.read_exact(&mut capture).await.is_ok() {
-                            if capture == *b"CAPTURE\n" {
-                                let mut frame = [0; 8];
-                                if input.read_exact(&mut frame).await.is_ok()
-                                    && let Ok(deadline) =
-                                        super::super::selection_phase::decode_deadline(frame)
-                                {
-                                    let _ = capture_go.send(deadline);
-                                }
-                            }
-                            let _ = input.read(&mut [0; 1]).await;
-                        }
-                    }
-                    watched.cancel();
-                }));
-                if primary_command(&intent) {
-                    let root = path.parent().ok_or(ToolError::Path)?;
-                    crate::private_fs::clone_at(
-                        &crate::tools::fs::open_directory(&root.join("workspace"))?,
-                        &crate::tools::fs::open_directory(root)?,
-                        "base",
-                    )
-                    .map_err(|_| ToolError::Operation)?;
-                    command_before = Some((
-                        crate::tools::fs::command_baseline(
-                            &root.join("base"),
-                            &root.join("workspace"),
-                        )?,
-                        crate::tools::fs::CommandSelection::read(root)?,
-                    ));
-                }
-                capture.complete();
-                stage = super::super::BootstrapStage::Capabilities;
-                super::execute_worker(
-                    &runtime,
-                    &intent,
-                    cancellation,
-                    &mut scope,
-                    &mut output,
-                    receive_go,
-                    (
-                        path.parent().ok_or(ToolError::Path)?,
-                        command_deadline,
-                        proxy_port,
-                        editor_tree.as_deref(),
-                        policy_grants,
-                    ),
-                )
-                .await
-            }
-            .await;
-            let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
-            let teardown = scope
-                .teardown
-                .unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
-            let cleanup = scope.stop_until(Some(std::process::id()), teardown).await;
-            capture.finish(cleanup.is_ok());
-            let capture_started = cleanup.is_ok() && command_before.is_some() && result.is_ok();
-            let mut capture_deadline = None;
-            let capture_handshake = async {
-                if capture_started {
-                    output
-                        .write_all(b"CAPTURE_READY\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    capture_deadline = Some(
-                        tokio::time::timeout(
-                            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
-                            &mut receive_capture,
-                        )
-                        .await
-                        .map_err(|_| ToolError::Timeout(String::new()))?
-                        .map_err(|_| ToolError::Operation)?,
-                    );
-                    scope.begin_capture(&intent.limits)?;
-                }
-                Ok(())
-            }
-            .await;
-            let result = result.map(|mut worker| {
-                if let Err(error) = capture_handshake {
-                    let (disposition, output, cause, limit_cause) =
-                        crate::tools::dispatch::outcome(&intent, Err(error));
-                    worker.observation.disposition = disposition;
-                    worker.observation.output = output;
-                    worker.observation.spill = None;
-                    worker.observation.enforcement_cause = cause;
-                    worker.observation.limit_cause = limit_cause;
-                    command_before = None;
-                }
-                worker
-            });
-            let mut result = result.and_then(
-                |super::WorkerOutput {
-                     mut observation,
-                     windows,
-                     ..
-                 }| {
-                    observation.cache_update = if cache.is_some() {
-                        crate::tools::CacheUpdate::NotAttempted
-                    } else {
-                        crate::tools::CacheUpdate::NotApplicable
-                    };
-                    if cleanup.is_ok()
-                        && let Some((before, selection)) = &command_before
-                        && let Ok(command) =
-                            serde_json::from_str::<CommandResult>(&observation.output)
-                    {
-                        let captured = if observation.disposition == ToolDisposition::Limit {
-                            Ok((crate::tools::CommandChangeset::default(), selection.summary))
-                        } else {
-                            crate::tools::fs::selected_command_changeset(
-                                &path.parent().ok_or(ToolError::Path)?.join("workspace"),
-                                before,
-                                selection,
-                                capture_deadline.ok_or(ToolError::Operation)?,
-                            )
-                        }
-                        .and_then(|(changeset, summary)| {
-                            let windows = windows.ok_or(ToolError::Operation)?;
-                            crate::tools::process::fit_selected_command(
-                                command.exit_code,
-                                &windows.stdout,
-                                &windows.stderr,
-                                changeset,
-                                intent.limits.result_bytes as usize,
-                                if runtime.hook_stdin.is_some() {
-                                    crate::tools::process::Truncation::Refuse
-                                } else {
-                                    crate::tools::process::Truncation::Allow
-                                },
-                                summary,
-                            )
-                        });
-                        match captured {
-                            Ok(output) => {
-                                observation.output = output;
-                                if !observation.valid() {
-                                    observation.disposition = ToolDisposition::Limit;
-                                    observation.limit_cause =
-                                        Some(crate::tools::LimitCause::Resource);
-                                    observation.enforcement_cause = None;
-                                    observation.spill = None;
-                                    observation.output =
-                                        "Command changeset exceeded its reserved capacity".into();
-                                }
-                            }
-                            Err(error) => {
-                                let (disposition, _, cause, limit_cause) =
-                                    crate::tools::dispatch::outcome(
-                                        &observation.intent,
-                                        Err(error),
-                                    );
-                                observation.disposition = disposition;
-                                observation.enforcement_cause = cause;
-                                observation.limit_cause = limit_cause;
-                                observation.spill = None;
-                                observation.output =
-                                    "Command changeset could not be captured".into();
-                            }
-                        }
-                    }
-                    Ok(observation)
-                },
-            );
-            if capture_started && output.write_all(b"CAPTURE_DONE\n").await.is_err() {
-                result = Err(ToolError::Operation);
-            }
-            let mut response_sent = false;
-            let mut cache_transfer_failed = false;
-            if let (Some(_), Ok(observation)) = (&cache, &result) {
-                let transfer = async {
-                    let bytes = crate::tools::spill::encode_report(observation)?;
-                    output
-                        .write_all(&bytes)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    output
-                        .write_all(b"\n")
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    response_sent = true;
-                    Ok::<(), ToolError>(())
-                }
-                .await;
-                cache_transfer_failed = transfer.is_err();
-            }
-            drop(storage);
-            let mut storage_check = None;
-            let storage_cleanup = if cleanup.is_ok() {
-                let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
-                let result = cleanup_storage(path.parent().ok_or(ToolError::Path)?);
-                capture.finish(result.is_ok());
-                result.map_err(|failed| {
-                    storage_check = Some(failed.check);
-                    failed.error
-                })
-            } else {
-                Err(ToolError::ProtectionUnavailable)
-            };
-            if cache_transfer_failed {
-                if let Some(reader) = reader {
-                    reader.abort();
-                    let _ = reader.await;
-                }
-                output.shutdown().await.map_err(|_| ToolError::Operation)?;
-                return Err(ToolError::Operation);
-            }
-            let teardown_stage = if cleanup.is_err() {
-                Some(super::super::BootstrapStage::ProcessStop)
-            } else if storage_cleanup.is_err() {
-                Some(super::super::BootstrapStage::StorageCleanup)
-            } else {
-                match &result {
-                    Err(ToolError::GuardRejected(GuardStage::LauncherReap)) => {
-                        Some(super::super::BootstrapStage::LauncherReap)
-                    }
-                    Err(ToolError::GuardRejected(GuardStage::OutputEof)) => {
-                        Some(super::super::BootstrapStage::StderrDrain)
-                    }
-                    _ => None,
-                }
-            };
-            let result = match (cleanup.and(storage_cleanup).and(result), teardown_stage) {
-                (Err(_), Some(stage)) => {
-                    let check = storage_check
-                        .filter(|_| matches!(stage, super::super::BootstrapStage::StorageCleanup));
-                    Err(ToolError::GuardBootstrap(BootstrapFailure {
-                        stage,
-                        check,
-                        detail: None,
-                        namespace_remedy: None,
-                    }))
-                }
-                (result, _) => result,
-            };
-            if response_sent {
-                let bytes = match &result {
-                    Ok(_) => b"CACHE_DONE\n".to_vec(),
-                    Err(error) => {
-                        let failure = match error {
-                            ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-                            _ => serde_json::to_vec(&BootstrapFailure::at(
-                                super::super::BootstrapStage::StorageCleanup,
-                            )),
-                        }
-                        .map_err(|_| ToolError::Operation)?;
-                        [&b"CACHE_FAILED\n"[..], failure.as_slice(), &b"\n"[..]].concat()
-                    }
-                };
-                output
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-            } else {
-                let bytes = match &result {
-                    Ok(observation) => crate::tools::spill::encode_report(observation),
-                    Err(ToolError::GuardBootstrap(failure)) => {
-                        serde_json::to_vec(failure).map_err(|_| ToolError::Operation)
-                    }
-                    Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone()))
-                        .map_err(|_| ToolError::Operation),
-                }
-                .map_err(|_| ToolError::Operation)?;
-                output
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                output
-                    .write_all(b"\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-            }
-            if let Some(reader) = reader {
-                reader.abort();
-                let _ = reader.await;
-            }
-            output.shutdown().await.map_err(|_| ToolError::Operation)?;
-            result.map(|_| ())
-        })
+        reactor.block_on(supervise(&mut supervised, stream, &mut stage))
     })();
     if let Err(error) = &result
         && let Some(stream) = &mut diagnostic
     {
-        let failure = match error {
-            ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-            _ => serde_json::to_vec(&BootstrapFailure::at(stage)),
-        };
-        if let Ok(mut bytes) = failure {
-            bytes.push(b'\n');
-            let _ = stream.write_all(&bytes);
-        }
+        report_failure(stream, error, stage);
     }
     if result.is_ok() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE
+    }
+}
+
+struct Supervised<'a> {
+    runtime: ToolRuntime,
+    intent: EffectIntent,
+    cached: bool,
+    root: &'a Path,
+    scope: Scope,
+    proxy_port: Option<u16>,
+    editor_tree: Option<PathBuf>,
+    policy_grants: Option<Vec<crate::tools::toolchains::RuntimeGrant>>,
+}
+
+// What the launch left behind, kept even when it failed part way.
+#[derive(Default)]
+struct Launched {
+    reader: Option<tokio::task::JoinHandle<()>>,
+    storage: Option<Vec<cap_std::fs::Dir>>,
+    command_before: Option<CommandBefore>,
+}
+
+struct GoListener {
+    input: tokio::net::unix::OwnedReadHalf,
+    capture_go: tokio::sync::oneshot::Sender<std::time::Instant>,
+}
+
+async fn supervise(
+    supervised: &mut Supervised<'_>,
+    stream: UnixStream,
+    stage: &mut super::super::BootstrapStage,
+) -> Result<(), ToolError> {
+    let stream = tokio::net::UnixStream::from_std(stream).map_err(|_| ToolError::Operation)?;
+    let (input, mut output) = stream.into_split();
+    let mut launched = Launched::default();
+    let (capture_go, mut receive_capture) = tokio::sync::oneshot::channel();
+    let result = launch_worker(
+        supervised,
+        &mut launched,
+        stage,
+        &mut output,
+        GoListener { input, capture_go },
+    )
+    .await;
+    let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
+    let teardown = supervised
+        .scope
+        .teardown
+        .unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
+    let cleanup = supervised
+        .scope
+        .stop_until(Some(std::process::id()), teardown)
+        .await;
+    capture.finish(cleanup.is_ok());
+    let capture_started = cleanup.is_ok() && launched.command_before.is_some() && result.is_ok();
+    let (capture_handshake, capture_deadline) = if capture_started {
+        begin_capture(supervised, &mut output, &mut receive_capture).await
+    } else {
+        (Ok(()), None)
+    };
+    let mut result = result
+        .map(|worker| {
+            interrupted_capture(worker, capture_handshake, &supervised.intent, &mut launched)
+        })
+        .and_then(|worker| {
+            captured_observation(
+                supervised,
+                worker,
+                cleanup.as_ref().ok().and(launched.command_before.as_ref()),
+                capture_deadline,
+            )
+        });
+    if capture_started && output.write_all(b"CAPTURE_DONE\n").await.is_err() {
+        result = Err(ToolError::Operation);
+    }
+    let (response_sent, cache_transfer_failed) = match (supervised.cached, &result) {
+        (true, Ok(observation)) => {
+            let sent = send_report(&mut output, observation).await.is_ok();
+            (sent, !sent)
+        }
+        _ => (false, false),
+    };
+    drop(launched.storage);
+    let (storage_cleanup, storage_check) = detach_storage(supervised.root, &cleanup);
+    if cache_transfer_failed {
+        stop_reader(launched.reader).await;
+        output.shutdown().await.map_err(|_| ToolError::Operation)?;
+        return Err(ToolError::Operation);
+    }
+    let result = bootstrap_result(cleanup, storage_cleanup, result, storage_check);
+    if response_sent {
+        output
+            .write_all(&cache_status(&result)?)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+    } else {
+        send_report_line(&mut output, &report_bytes(&result, stage)?).await?;
+    }
+    stop_reader(launched.reader).await;
+    output.shutdown().await.map_err(|_| ToolError::Operation)?;
+    result.map(|_| ())
+}
+
+async fn launch_worker(
+    supervised: &mut Supervised<'_>,
+    launched: &mut Launched,
+    stage: &mut super::super::BootstrapStage,
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    mut listener: GoListener,
+) -> Result<super::WorkerOutput, ToolError> {
+    let (runtime, intent, root) = (&supervised.runtime, &supervised.intent, supervised.root);
+    *stage = super::super::BootstrapStage::Workspace;
+    let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
+    launched.storage = if intent.call.is_process() {
+        Some(prepare_command_storage(
+            root,
+            runtime,
+            &intent.limits,
+            primary_command(intent) || intent.target.editor(),
+            supervised.cached,
+        )?)
+    } else {
+        None
+    };
+    if launched.storage.is_some() {
+        supervised.scope.watch_disk(root)?;
+    }
+    let command_deadline = if primary_command(intent) {
+        let (frame, deadline) =
+            await_selection(&mut listener.input, output, &intent.limits).await?;
+        let source = crate::tools::fs::open_directory(&runtime.workspace)?;
+        let resources = crate::tools::fs::open_directory(root)?;
+        let target = launched
+            .storage
+            .as_ref()
+            .and_then(|volumes| volumes.first())
+            .ok_or(ToolError::Operation)?;
+        let selected = crate::tools::fs::prepare_command(
+            &source,
+            target,
+            &resources,
+            &runtime.config,
+            deadline,
+        );
+        let message = super::super::selection_phase::response(&selected);
+        output
+            .write_all(message)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        selected?;
+        Some(frame)
+    } else {
+        None
+    };
+    let cancellation = Cancellation::new();
+    let (go, receive_go) = tokio::sync::oneshot::channel();
+    let watched = cancellation.clone();
+    launched.reader = Some(tokio::spawn(read_go(listener, go, watched)));
+    if primary_command(intent) {
+        launched.command_before = Some(command_baseline(root)?);
+    }
+    capture.complete();
+    *stage = super::super::BootstrapStage::Capabilities;
+    super::execute_worker(
+        runtime,
+        intent,
+        cancellation,
+        super::WorkerLink {
+            scope: &mut supervised.scope,
+            control: output,
+            receive_go,
+        },
+        (
+            root,
+            command_deadline,
+            supervised.proxy_port,
+            supervised.editor_tree.as_deref(),
+            supervised.policy_grants.take(),
+        ),
+    )
+    .await
+}
+
+async fn begin_capture(
+    supervised: &mut Supervised<'_>,
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    receive_capture: &mut tokio::sync::oneshot::Receiver<std::time::Instant>,
+) -> (Result<(), ToolError>, Option<std::time::Instant>) {
+    let mut capture_deadline = None;
+    let handshake = async {
+        output
+            .write_all(b"CAPTURE_READY\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        capture_deadline = Some(
+            tokio::time::timeout(
+                Duration::from_millis(u64::from(supervised.intent.limits.runtime_ms)),
+                receive_capture,
+            )
+            .await
+            .map_err(|_| ToolError::Timeout(String::new()))?
+            .map_err(|_| ToolError::Operation)?,
+        );
+        supervised.scope.begin_capture(&supervised.intent.limits)
+    }
+    .await;
+    (handshake, capture_deadline)
+}
+
+fn interrupted_capture(
+    mut worker: super::WorkerOutput,
+    handshake: Result<(), ToolError>,
+    intent: &EffectIntent,
+    launched: &mut Launched,
+) -> super::WorkerOutput {
+    if let Err(error) = handshake {
+        let (disposition, output, cause, limit_cause) =
+            crate::tools::dispatch::outcome(intent, Err(error));
+        worker.observation.disposition = disposition;
+        worker.observation.output = output;
+        worker.observation.spill = None;
+        worker.observation.enforcement_cause = cause;
+        worker.observation.limit_cause = limit_cause;
+        launched.command_before = None;
+    }
+    worker
+}
+
+fn captured_observation(
+    supervised: &Supervised<'_>,
+    super::WorkerOutput {
+        mut observation,
+        windows,
+        ..
+    }: super::WorkerOutput,
+    command_before: Option<&CommandBefore>,
+    capture_deadline: Option<std::time::Instant>,
+) -> Result<ToolObservation, ToolError> {
+    let (runtime, intent) = (&supervised.runtime, &supervised.intent);
+    observation.cache_update = if supervised.cached {
+        crate::tools::CacheUpdate::NotAttempted
+    } else {
+        crate::tools::CacheUpdate::NotApplicable
+    };
+    if let Some(baseline) = command_before
+        && let Ok(command) = serde_json::from_str::<CommandResult>(&observation.output)
+    {
+        let captured = capture_changeset(
+            &observation,
+            baseline,
+            &supervised.root.join("workspace"),
+            capture_deadline,
+        )
+        .and_then(|(changeset, summary)| {
+            let windows = windows.ok_or(ToolError::Operation)?;
+            crate::tools::process::fit_selected_command(
+                crate::tools::process::CommandRun {
+                    exit_code: command.exit_code,
+                    stdout: &windows.stdout,
+                    stderr: &windows.stderr,
+                },
+                changeset,
+                intent.limits.result_bytes as usize,
+                if runtime.hook_stdin.is_some() {
+                    crate::tools::process::Truncation::Refuse
+                } else {
+                    crate::tools::process::Truncation::Allow
+                },
+                summary,
+            )
+        });
+        record_capture(&mut observation, captured);
+    }
+    Ok(observation)
+}
+
+async fn send_report(
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    observation: &ToolObservation,
+) -> Result<(), ToolError> {
+    let bytes = crate::tools::spill::encode_report(observation)?;
+    send_report_line(output, &bytes).await
+}
+
+async fn send_report_line(
+    output: &mut tokio::net::unix::OwnedWriteHalf,
+    bytes: &[u8],
+) -> Result<(), ToolError> {
+    output
+        .write_all(bytes)
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    output
+        .write_all(b"\n")
+        .await
+        .map_err(|_| ToolError::Operation)
+}
+
+fn detach_storage(
+    root: &Path,
+    cleanup: &Result<(), ToolError>,
+) -> (Result<(), ToolError>, Option<super::super::GuardCheck>) {
+    if cleanup.is_err() {
+        return (Err(ToolError::ProtectionUnavailable), None);
+    }
+    let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
+    let result = cleanup_storage(root);
+    capture.finish(result.is_ok());
+    match result {
+        Ok(()) => (Ok(()), None),
+        Err(failed) => (Err(failed.error), Some(failed.check)),
+    }
+}
+
+async fn stop_reader(reader: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(reader) = reader {
+        reader.abort();
+        let _ = reader.await;
+    }
+}
+
+fn bootstrap_result(
+    cleanup: Result<(), ToolError>,
+    storage_cleanup: Result<(), ToolError>,
+    result: Result<ToolObservation, ToolError>,
+    storage_check: Option<super::super::GuardCheck>,
+) -> Result<ToolObservation, ToolError> {
+    let teardown_stage = teardown_stage(&cleanup, &storage_cleanup, &result);
+    match (cleanup.and(storage_cleanup).and(result), teardown_stage) {
+        (Err(_), Some(stage)) => {
+            let check = storage_check
+                .filter(|_| matches!(stage, super::super::BootstrapStage::StorageCleanup));
+            Err(ToolError::GuardBootstrap(BootstrapFailure {
+                stage,
+                check,
+                detail: None,
+                namespace_remedy: None,
+            }))
+        }
+        (result, _) => result,
     }
 }
 
@@ -3714,9 +4002,11 @@ int main(int argc, char **argv) {
                     &["shimmed".into(), outside_pid.to_string()],
                     ".",
                     root,
-                    &runtime.config.runtime_grants,
-                    false,
-                    &crate::tools::ToolLimits::default(),
+                    super::super::super::PayloadEnvironment {
+                        runtime_grants: &runtime.config.runtime_grants,
+                        cache_enabled: false,
+                        limits: &crate::tools::ToolLimits::default(),
+                    },
                 )
                 .unwrap();
                 let (probe_status, probe_stdout, probe_stderr) = reactor
@@ -3746,9 +4036,11 @@ int main(int argc, char **argv) {
                     &[],
                     ".",
                     root,
-                    &runtime.config.runtime_grants,
-                    false,
-                    &crate::tools::ToolLimits::default(),
+                    super::super::super::PayloadEnvironment {
+                        runtime_grants: &runtime.config.runtime_grants,
+                        cache_enabled: false,
+                        limits: &crate::tools::ToolLimits::default(),
+                    },
                 )
                 .unwrap();
                 let (rust_status, rust_stdout, rust_stderr) = reactor
@@ -3873,9 +4165,11 @@ int main(int argc, char **argv) {
                         &args,
                         ".",
                         root,
-                        &runtime.config.runtime_grants,
-                        false,
-                        &crate::tools::ToolLimits::default(),
+                        super::super::super::PayloadEnvironment {
+                            runtime_grants: &runtime.config.runtime_grants,
+                            cache_enabled: false,
+                            limits: &crate::tools::ToolLimits::default(),
+                        },
                     )
                     .unwrap();
                     let (status, stdout, stderr) = reactor
@@ -3927,9 +4221,11 @@ printf 'native command success'
                     ],
                     ".",
                     root,
-                    &runtime.config.runtime_grants,
-                    false,
-                    &crate::tools::ToolLimits::default(),
+                    super::super::super::PayloadEnvironment {
+                        runtime_grants: &runtime.config.runtime_grants,
+                        cache_enabled: false,
+                        limits: &crate::tools::ToolLimits::default(),
+                    },
                 )
                 .unwrap();
                 let (status, stdout, stderr) = reactor
@@ -3956,8 +4252,7 @@ printf 'native command success'
                         },
                         &runtime.config,
                         root,
-                        crate::tools::ToolLimits::default().cache_bytes > 0,
-                        crate::tools::ToolLimits::default().result_bytes as usize,
+                        &crate::tools::ToolLimits::default(),
                         &Default::default(),
                     ))
                     .unwrap();
@@ -3974,8 +4269,7 @@ printf 'native command success'
                         &call,
                         &runtime.config,
                         root,
-                        crate::tools::ToolLimits::default().cache_bytes > 0,
-                        crate::tools::ToolLimits::default().result_bytes as usize,
+                        &crate::tools::ToolLimits::default(),
                         &Default::default(),
                     ))
                     .unwrap();

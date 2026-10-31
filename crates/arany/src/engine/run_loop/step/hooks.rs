@@ -6,7 +6,7 @@ use crate::session::{AgentRunId, Event};
 use crate::tools::permissions::{
     CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookIgnoreReason,
     HookInvocation, HookOutcome, HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES,
-    PermissionConfig, feedback_lines, narrows, peer_name, post_tool_use_input, pre_tool_use_input,
+    PermissionConfig, feedback_lines, narrows, post_tool_use_input, pre_tool_use_input, rule_name,
 };
 use crate::tools::types::model_observation;
 use crate::tools::{
@@ -276,7 +276,7 @@ impl HookFold {
             ),
             (HookStop::None, _) => (
                 NotDispatched::HookDenied(match &self.narrowed {
-                    Some(call) => HookDenial::Narrowed(peer_name(call).into_owned()),
+                    Some(call) => HookDenial::Narrowed(rule_name(call).into_owned()),
                     None => HookDenial::Denied(self.reason.clone().unwrap_or_default()),
                 }),
                 None,
@@ -461,8 +461,10 @@ impl RunLoop<'_> {
         if !post.is_empty() {
             // The bare form is the smallest stdin a post hook can get, so it must fit the Guard task.
             let Ok(bare) = post_tool_use_input(
-                self.session_id,
-                config.mode(),
+                crate::tools::permissions::HookHeader {
+                    session_id: self.session_id,
+                    mode: config.mode(),
+                },
                 &intent.call,
                 intent.id,
                 serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
@@ -481,8 +483,14 @@ impl RunLoop<'_> {
         if plans.is_empty() {
             return Ok(HookFold::none());
         }
-        let Ok(input) = pre_tool_use_input(self.session_id, config.mode(), &intent.call, intent.id)
-        else {
+        let Ok(input) = pre_tool_use_input(
+            crate::tools::permissions::HookHeader {
+                session_id: self.session_id,
+                mode: config.mode(),
+            },
+            &intent.call,
+            intent.id,
+        ) else {
             return Ok(HookFold::deny("hook input exceeds its limit", 0));
         };
         let input_digest = crate::validate::digest(input.as_bytes());
@@ -625,8 +633,10 @@ impl RunLoop<'_> {
         let mut budget = MAX_HOOK_INPUT_BYTES;
         loop {
             let input = post_tool_use_input(
-                self.session_id,
-                config.mode(),
+                crate::tools::permissions::HookHeader {
+                    session_id: self.session_id,
+                    mode: config.mode(),
+                },
                 call,
                 observation.intent.id,
                 response.clone(),
@@ -835,12 +845,16 @@ impl RunLoop<'_> {
         let mut budget = MAX_HOOK_INPUT_BYTES;
         loop {
             let input = crate::tools::permissions::lifecycle_input(
-                self.session_id,
-                config.mode(),
-                hook.event,
-                continuations > 0,
-                hook.message,
-                hook.subject,
+                crate::tools::permissions::HookHeader {
+                    session_id: self.session_id,
+                    mode: config.mode(),
+                },
+                crate::tools::permissions::LifecycleSubject {
+                    event: hook.event,
+                    active: continuations > 0,
+                    message: hook.message,
+                    trigger: hook.subject,
+                },
                 budget,
             );
             let sized = runtime.clone().with_hook_stdin(&input);
@@ -972,12 +986,16 @@ impl RunLoop<'_> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let config = runtime.permissions().ok_or(EngineError::InvalidRequest)?;
         let input = crate::tools::permissions::lifecycle_input(
-            self.session_id,
-            config.mode(),
-            hook.event,
-            false,
-            "",
-            hook.subject,
+            crate::tools::permissions::HookHeader {
+                session_id: self.session_id,
+                mode: config.mode(),
+            },
+            crate::tools::permissions::LifecycleSubject {
+                event: hook.event,
+                active: false,
+                message: "",
+                trigger: hook.subject,
+            },
             MAX_HOOK_INPUT_BYTES,
         );
         let intent = runtime.intent(self.run_id, hook.agent, call)?;

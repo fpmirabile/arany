@@ -499,9 +499,11 @@ fn merge(
     let stderr = crate::tools::output::Window::from_recorded(&result.stderr, result.stderr_total)
         .ok_or(CaptureFailure::Rejected)?;
     crate::tools::process::fit_selected_command(
-        result.exit_code,
-        &stdout,
-        &stderr,
+        crate::tools::process::CommandRun {
+            exit_code: result.exit_code,
+            stdout: &stdout,
+            stderr: &stderr,
+        },
         changeset,
         observation.intent.limits.command_result_budget(),
         truncation,

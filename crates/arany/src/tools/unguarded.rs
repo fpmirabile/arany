@@ -778,9 +778,11 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
         }
         Ended::Timeout(stdout, stderr, budget) => {
             let output = super::process::fit_command(
-                None,
-                &stdout,
-                &stderr,
+                crate::tools::process::CommandRun {
+                    exit_code: None,
+                    stdout: &stdout,
+                    stderr: &stderr,
+                },
                 CommandChangeset::default(),
                 budget,
                 super::process::Truncation::Allow,
@@ -803,9 +805,11 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
         ),
         Ended::Done(status, stdout, stderr, budget) => {
             let output = super::process::fit_command(
-                status.code(),
-                &stdout,
-                &stderr,
+                crate::tools::process::CommandRun {
+                    exit_code: status.code(),
+                    stdout: &stdout,
+                    stderr: &stderr,
+                },
                 CommandChangeset::default(),
                 budget,
                 super::process::Truncation::Allow,

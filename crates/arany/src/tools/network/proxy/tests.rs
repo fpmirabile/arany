@@ -369,9 +369,11 @@ fn refusal_rows_fit_a_result_filled_to_its_command_budget() {
         .unwrap();
     let stderr = crate::tools::output::Window::new(limits.result_bytes as usize);
     let output = crate::tools::process::fit_selected_command(
-        Some(0),
-        &stdout,
-        &stderr,
+        crate::tools::process::CommandRun {
+            exit_code: Some(0),
+            stdout: &stdout,
+            stderr: &stderr,
+        },
         Default::default(),
         budget,
         crate::tools::process::Truncation::Allow,

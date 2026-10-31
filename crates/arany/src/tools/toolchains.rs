@@ -556,36 +556,7 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
         }
     }
 
-    for (manager, root, nested) in [
-        (RuntimeManager::Nvm, home.join(".nvm/versions/node"), false),
-        (
-            RuntimeManager::Fnm,
-            home.join(".local/share/fnm/node-versions"),
-            true,
-        ),
-        (
-            RuntimeManager::Volta,
-            home.join(".volta/tools/image/node"),
-            false,
-        ),
-        (
-            RuntimeManager::Asdf,
-            home.join(".asdf/installs/nodejs"),
-            false,
-        ),
-    ] {
-        for version in directory_names(&root)? {
-            let version_path = root.join(&version);
-            let path = if nested {
-                version_path.join("installation")
-            } else {
-                version_path
-            };
-            if has_toolchain(&path, RuntimeKind::Node) {
-                push(&mut candidates, RuntimeKind::Node, manager, version, path)?;
-            }
-        }
-    }
+    discover_node(home, &mut candidates)?;
 
     for version in directory_names(&home.join(".pyenv/versions"))? {
         let path = home.join(".pyenv/versions").join(&version);
@@ -619,6 +590,40 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
         profile_order((&left.grant, &left.token), (&right.grant, &right.token))
     });
     Ok(candidates)
+}
+
+fn discover_node(home: &Path, candidates: &mut Vec<Candidate>) -> Result<(), ToolError> {
+    for (manager, root, nested) in [
+        (RuntimeManager::Nvm, home.join(".nvm/versions/node"), false),
+        (
+            RuntimeManager::Fnm,
+            home.join(".local/share/fnm/node-versions"),
+            true,
+        ),
+        (
+            RuntimeManager::Volta,
+            home.join(".volta/tools/image/node"),
+            false,
+        ),
+        (
+            RuntimeManager::Asdf,
+            home.join(".asdf/installs/nodejs"),
+            false,
+        ),
+    ] {
+        for version in directory_names(&root)? {
+            let version_path = root.join(&version);
+            let path = if nested {
+                version_path.join("installation")
+            } else {
+                version_path
+            };
+            if has_toolchain(&path, RuntimeKind::Node) {
+                push(candidates, RuntimeKind::Node, manager, version, path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // Every PATH directory is granted per Run, so consent offers only manager shims and their roots.

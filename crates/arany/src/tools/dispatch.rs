@@ -32,8 +32,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                     call,
                     site.config,
                     site.root,
-                    site.intent.limits.cache_bytes > 0,
-                    site.intent.limits.result_bytes as usize,
+                    &site.intent.limits,
                     &site.captured,
                 )
                 .await

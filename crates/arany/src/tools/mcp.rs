@@ -329,10 +329,10 @@ pub(super) async fn execute(
     call: &ToolCall,
     config: &Config,
     root: &Path,
-    cache_enabled: bool,
-    result_bytes: usize,
+    limits: &super::types::ToolLimits,
     captured: &std::sync::Mutex<Option<Vec<u8>>>,
 ) -> Result<String, ToolError> {
+    let (cache_enabled, result_bytes) = (limits.cache_bytes > 0, limits.result_bytes as usize);
     let name = match call {
         ToolCall::McpList { server } | ToolCall::McpCall { server, .. } => server,
         _ => return Err(ToolError::Operation),
@@ -348,9 +348,11 @@ pub(super) async fn execute(
         &server.args,
         "",
         root,
-        &config.runtime_grants,
-        cache_enabled,
-        &super::types::ToolLimits::default(),
+        super::guard::PayloadEnvironment {
+            runtime_grants: &config.runtime_grants,
+            cache_enabled,
+            limits: &super::types::ToolLimits::default(),
+        },
     )?;
     command.envs(&config.locale);
     command.stdin(Stdio::piped());

@@ -1597,34 +1597,14 @@ pub(super) fn helper_main() -> ExitCode {
             stage = BootstrapStage::Workspace;
             prepare_command_baseline(&task, workspace, &mut stdin)?
         };
-        stage = BootstrapStage::Handshake;
-        send_ready(&task)?;
-        let mut go = [0; 3];
-        stdin
-            .read_exact(&mut go)
-            .map_err(|_| ToolError::Operation)?;
-        let runtime_started = task.runtime_started()?;
-        // Admitted preparation and GO have their own deadlines.
-        if go != *b"GO\n" {
-            return Err(ToolError::Configuration);
-        }
-        verify_intent_runtime_grants(&task.intent, &task.config)?;
-        attest_task_mounts(
+        let runtime_started = await_go(
             &task,
+            &mut stdin,
+            handover.is_some(),
             &mut stage,
             #[cfg(target_os = "linux")]
             overlay.as_ref(),
         )?;
-        if handover.is_some() {
-            let mut trailing = [0; 1];
-            if stdin
-                .read(&mut trailing)
-                .map_err(|_| ToolError::Operation)?
-                != 0
-            {
-                return Err(ToolError::Configuration);
-            }
-        }
         drop(stdin);
         stage = BootstrapStage::Payload;
         #[cfg(not(target_os = "macos"))]
@@ -1654,11 +1634,47 @@ pub(super) fn helper_main() -> ExitCode {
         };
         let result = runtime.block_on(site.dispatch());
         stage = BootstrapStage::Receipt;
-        let mut stdout = std::io::stdout().lock();
-        send_result(task, result, &mut stdout)?;
-        Ok(())
+        send_result(task, result, &mut std::io::stdout().lock())
     })();
     bootstrap_exit(stage, result)
+}
+
+fn await_go(
+    task: &Task,
+    stdin: &mut std::io::BufReader<impl Read>,
+    handover: bool,
+    stage: &mut BootstrapStage,
+    #[cfg(target_os = "linux")] overlay: Option<&linux::overlay::Attestation>,
+) -> Result<Option<std::time::Instant>, ToolError> {
+    *stage = BootstrapStage::Handshake;
+    send_ready(task)?;
+    let mut go = [0; 3];
+    stdin
+        .read_exact(&mut go)
+        .map_err(|_| ToolError::Operation)?;
+    let runtime_started = task.runtime_started()?;
+    // Admitted preparation and GO have their own deadlines.
+    if go != *b"GO\n" {
+        return Err(ToolError::Configuration);
+    }
+    verify_intent_runtime_grants(&task.intent, &task.config)?;
+    attest_task_mounts(
+        task,
+        stage,
+        #[cfg(target_os = "linux")]
+        overlay,
+    )?;
+    if handover {
+        let mut trailing = [0; 1];
+        if stdin
+            .read(&mut trailing)
+            .map_err(|_| ToolError::Operation)?
+            != 0
+        {
+            return Err(ToolError::Configuration);
+        }
+    }
+    Ok(runtime_started)
 }
 
 fn bootstrap_exit(stage: BootstrapStage, result: Result<(), ToolError>) -> ExitCode {
@@ -1765,10 +1781,13 @@ pub(super) fn payload<'a>(
     args: &[String],
     cwd: &str,
     root: &Path,
-    runtime_grants: &[RuntimeGrant],
-    cache_enabled: bool,
-    limits: &ToolLimits,
+    environment: PayloadEnvironment<'_>,
 ) -> Result<Command, ToolError> {
+    let PayloadEnvironment {
+        runtime_grants,
+        cache_enabled,
+        limits,
+    } = environment;
     let source = source.into();
     let program = source.definition();
     let resources = if cfg!(target_os = "macos") {
@@ -1778,11 +1797,10 @@ pub(super) fn payload<'a>(
     };
     let workspace = root.join("workspace");
     let scratch = root.join("scratch");
-    let cache = root.join("cache");
     #[cfg(target_os = "macos")]
     let view = macos::cache_view(root);
     #[cfg(not(target_os = "macos"))]
-    let view = cache.clone();
+    let view = root.join("cache");
     let cache_base = if cache_enabled { &view } else { &scratch };
     let executable = source.executable(&resources)?;
     let bytes = super::fs::read_regular(
@@ -1795,23 +1813,7 @@ pub(super) fn payload<'a>(
     let path = runtime_path(runtime_grants)?;
     let payload_args: Vec<_> = args
         .iter()
-        .map(|arg| {
-            if cfg!(target_os = "macos") {
-                for (alias, target) in [
-                    ("workspace", &workspace),
-                    ("scratch", &scratch),
-                    ("cache", &cache),
-                    ("inputs", &resources.join("inputs")),
-                    ("skills", &resources.join("skills")),
-                    ("programs", &resources.join("programs")),
-                ] {
-                    if let Ok(relative) = Path::new(arg).strip_prefix(format!("/{alias}")) {
-                        return target.join(relative).into_os_string();
-                    }
-                }
-            }
-            std::ffi::OsString::from(arg)
-        })
+        .map(|arg| guest_path(arg, root, &resources))
         .collect();
     let mut command = Command::new(executable);
     command
@@ -1839,6 +1841,40 @@ pub(super) fn payload<'a>(
         args
     };
     command.args(payload_args);
+    runtime_environment(&mut command, runtime_grants, limits);
+    Ok(command)
+}
+
+pub(super) struct PayloadEnvironment<'a> {
+    pub(super) runtime_grants: &'a [RuntimeGrant],
+    pub(super) cache_enabled: bool,
+    pub(super) limits: &'a ToolLimits,
+}
+
+// macOS has no Guard mounts, so an argument naming a Guard path points into the private root.
+fn guest_path(arg: &str, root: &Path, resources: &Path) -> std::ffi::OsString {
+    if cfg!(target_os = "macos") {
+        for (alias, target) in [
+            ("workspace", root.join("workspace")),
+            ("scratch", root.join("scratch")),
+            ("cache", root.join("cache")),
+            ("inputs", resources.join("inputs")),
+            ("skills", resources.join("skills")),
+            ("programs", resources.join("programs")),
+        ] {
+            if let Ok(relative) = Path::new(arg).strip_prefix(format!("/{alias}")) {
+                return target.join(relative).into_os_string();
+            }
+        }
+    }
+    std::ffi::OsString::from(arg)
+}
+
+fn runtime_environment(
+    command: &mut Command,
+    runtime_grants: &[RuntimeGrant],
+    limits: &ToolLimits,
+) {
     for (name, root) in runtime_grants.iter().filter_map(RuntimeGrant::manager_home) {
         command.env(name, root);
     }
@@ -1866,7 +1902,6 @@ pub(super) fn payload<'a>(
     {
         command.env("SDKROOT", &sdk.path);
     }
-    Ok(command)
 }
 
 #[cfg(target_os = "linux")]
@@ -2042,12 +2077,14 @@ mod tests {
                     &args,
                     "",
                     &root,
-                    grants,
-                    false,
-                    &ToolLimits {
-                        resource_class: class,
-                        build_jobs: u32::from(class == ToolResourceClass::Build) + 1,
-                        ..ToolLimits::default()
+                    PayloadEnvironment {
+                        runtime_grants: grants,
+                        cache_enabled: false,
+                        limits: &ToolLimits {
+                            resource_class: class,
+                            build_jobs: u32::from(class == ToolResourceClass::Build) + 1,
+                            ..ToolLimits::default()
+                        },
                     },
                 )
                 .unwrap();
@@ -3340,9 +3377,11 @@ mod command_output_tests {
             .await
             .unwrap();
             let output = super::super::process::fit_command(
-                status.and_then(|status| status.code()),
-                &out,
-                &err,
+                crate::tools::process::CommandRun {
+                    exit_code: status.and_then(|status| status.code()),
+                    stdout: &out,
+                    stderr: &err,
+                },
                 Default::default(),
                 4096,
                 super::super::process::Truncation::Allow,

@@ -289,7 +289,7 @@ fn dont_ask_preserves_explicit_rule_provenance() {
 }
 
 #[test]
-fn bash_globs_follow_peer_word_boundaries_and_trailing_star() {
+fn bash_globs_follow_word_boundaries_and_trailing_star() {
     for (pattern, program, args, matched) in [
         ("git diff *", "git", vec!["diff"], true),
         ("git diff *", "git", vec!["diff", "--stat", "main"], true),
@@ -369,7 +369,7 @@ fn opaque_argv_never_auto_allows_and_conservatively_matches_restrictions() {
 }
 
 #[test]
-fn file_globs_follow_segment_depth_anchors_and_peer_directory_rules() {
+fn file_globs_follow_segment_depth_anchors_and_directory_rules() {
     for (pattern, path, matched) in [
         ("./src/**", "src/lib.rs", true),
         ("./src/**", "vendor/src/lib.rs", false),
@@ -496,7 +496,7 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
             "{rule}"
         );
     }
-    // The native name selects only its own operation; the peer Glob also keeps List.
+    // The native name selects only its own operation; the rule Glob also keeps List.
     assert_eq!(
         config(json!({"deny":["glob"]})).decision(&ToolCall::List { path: "src".into() }),
         Decision::Allow
@@ -702,7 +702,7 @@ fn permission_limits_accept_boundaries_and_reject_overflow() {
 }
 
 #[test]
-fn hook_schema_accepts_peer_events_defaults_exec_form_and_inert_commands() {
+fn hook_schema_accepts_lifecycle_events_defaults_exec_form_and_inert_commands() {
     let command = "do-not-execute $(exit 9)";
     let settings = json!({"hooks":{
         "PreToolUse":[{"matcher":"Bash", "hooks":[{"type":"command", "command":command}]}],
@@ -1050,7 +1050,7 @@ fn restrictive_paths_cover_case_and_normalization_aliases_without_widening_allow
 }
 
 #[test]
-fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
+fn mcp_rule_names_match_real_servers_tools_and_hook_subjects() {
     for (rule, server, tool, matched) in [
         ("mcp__*", "memory", "read", true),
         ("mcp__memory", "memory", "read", true),
@@ -1326,7 +1326,7 @@ fn unguarded_commands_match_bash_deny_and_ask_but_never_allow() {
         Decision::Deny
     );
     assert_eq!(unguarded.label(), "command_unguarded");
-    assert_eq!(peer_name(&unguarded), "Bash");
+    assert_eq!(rule_name(&unguarded), "Bash");
 }
 
 #[test]
@@ -1361,7 +1361,7 @@ fn ignored(why: HookIgnoreReason) -> HookResult {
 }
 
 #[test]
-fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
+fn hook_output_parsing_maps_exit_codes_and_json_precedence() {
     let specific = |fields: Value| {
         let mut output = json!({"hookEventName": "PreToolUse"});
         output
@@ -1572,8 +1572,15 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
         content: "x".repeat(MAX_HOOK_INPUT_BYTES / 2),
     };
     let id = uuid::Uuid::now_v7();
-    let input =
-        pre_tool_use_input("session", PermissionMode::AcceptEdits, &call, id).expect("fits");
+    let input = pre_tool_use_input(
+        HookHeader {
+            session_id: "session",
+            mode: PermissionMode::AcceptEdits,
+        },
+        &call,
+        id,
+    )
+    .expect("fits");
     let value: Value = serde_json::from_str(&input).unwrap();
     let mut fields: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
     fields.sort();
@@ -1605,13 +1612,22 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
     };
     assert!(large.valid());
     assert!(matches!(
-        pre_tool_use_input("session", PermissionMode::AcceptEdits, &large, id),
+        pre_tool_use_input(
+            HookHeader {
+                session_id: "session",
+                mode: PermissionMode::AcceptEdits
+            },
+            &large,
+            id
+        ),
         Err(ConfigError::Limit(_))
     ));
     assert!(matches!(
         super::hooks::post_tool_use_input(
-            "session",
-            PermissionMode::AcceptEdits,
+            HookHeader {
+                session_id: "session",
+                mode: PermissionMode::AcceptEdits
+            },
             &large,
             id,
             json!(""),
@@ -1733,8 +1749,10 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     let mode = PermissionMode::Default;
     let id = uuid::Uuid::now_v7();
     let small = post_tool_use_input(
-        "s",
-        mode,
+        HookHeader {
+            session_id: "s",
+            mode,
+        },
         &call,
         id,
         json!({"output": "ok"}),
@@ -1743,12 +1761,31 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     .unwrap();
     assert!(small.contains("\"hook_event_name\":\"PostToolUse\"") && !small.contains("truncated"));
     let huge = json!({"output": "\"\n\\".repeat(MAX_HOOK_INPUT_BYTES)});
-    let cut =
-        post_tool_use_input("s", mode, &call, id, huge.clone(), MAX_HOOK_INPUT_BYTES).unwrap();
+    let cut = post_tool_use_input(
+        HookHeader {
+            session_id: "s",
+            mode,
+        },
+        &call,
+        id,
+        huge.clone(),
+        MAX_HOOK_INPUT_BYTES,
+    )
+    .unwrap();
     assert!(cut.len() <= MAX_HOOK_INPUT_BYTES);
     let parsed: serde_json::Value = serde_json::from_str(&cut).unwrap();
     assert_eq!(parsed["tool_response"]["truncated"], true);
-    let bare = post_tool_use_input("s", mode, &call, id, huge, 0).unwrap();
+    let bare = post_tool_use_input(
+        HookHeader {
+            session_id: "s",
+            mode,
+        },
+        &call,
+        id,
+        huge,
+        0,
+    )
+    .unwrap();
     assert!(bare.len() < cut.len() && bare.contains("\"text\":\"\""));
 }
 
@@ -2034,12 +2071,16 @@ fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
         HookEvent::PreCompact,
     ] {
         let input = lifecycle_input(
-            "session",
-            PermissionMode::Default,
-            event,
-            true,
-            &"\"é".repeat(32 * 1024),
-            "auto",
+            HookHeader {
+                session_id: "session",
+                mode: PermissionMode::Default,
+            },
+            LifecycleSubject {
+                event,
+                active: true,
+                message: &"\"é".repeat(32 * 1024),
+                trigger: "auto",
+            },
             MAX_HOOK_INPUT_BYTES,
         );
         assert!(input.len() <= MAX_HOOK_INPUT_BYTES);

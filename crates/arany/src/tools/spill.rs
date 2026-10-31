@@ -268,9 +268,11 @@ mod tests {
             .unwrap();
         let stderr = super::super::output::Window::default();
         let output = super::super::process::fit_command(
-            Some(0),
-            &stdout,
-            &stderr,
+            crate::tools::process::CommandRun {
+                exit_code: Some(0),
+                stdout: &stdout,
+                stderr: &stderr,
+            },
             Default::default(),
             4096,
             super::super::process::Truncation::Allow,
@@ -349,8 +351,10 @@ mod tests {
         assert!(observation.spill.is_some());
         let model = super::super::types::model_observation(&observation);
         let input = super::super::permissions::post_tool_use_input(
-            "session",
-            super::super::permissions::PermissionMode::Default,
+            super::super::permissions::HookHeader {
+                session_id: "session",
+                mode: super::super::permissions::PermissionMode::Default,
+            },
             &observation.intent.call,
             observation.intent.id,
             model,

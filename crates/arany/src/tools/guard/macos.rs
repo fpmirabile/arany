@@ -739,12 +739,8 @@ fn unprivileged_helper() -> Result<(), ToolError> {
     Ok(())
 }
 
-fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
-    use std::os::unix::fs::MetadataExt;
-
-    unprivileged_helper()?;
-    let root = command_root(task)?;
-    let mut required_system_programs = Vec::new();
+fn configured_system_programs(task: &Task) -> Result<Vec<PathBuf>, ToolError> {
+    let mut required = Vec::new();
     for program in task.config.commands.iter().chain(
         task.config
             .mcp
@@ -753,9 +749,18 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     ) {
         program.verify()?;
         if system_program(&program.executable)? {
-            required_system_programs.push(PathBuf::from(&program.executable));
+            required.push(PathBuf::from(&program.executable));
         }
     }
+    Ok(required)
+}
+
+fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf, ToolError> {
+    use std::os::unix::fs::MetadataExt;
+
+    unprivileged_helper()?;
+    let root = command_root(task)?;
+    let mut required_system_programs = configured_system_programs(task)?;
     let mut profile = SeatbeltProfile::new(match task.proxy_port {
         Some(_) => ProfileKind::CommandProxy,
         None => ProfileKind::Command,
@@ -1302,22 +1307,40 @@ type WorkerPlacement<'a> = (
     Option<Vec<crate::tools::toolchains::RuntimeGrant>>,
 );
 
-async fn execute_worker(
+struct WorkerLink<'a> {
+    scope: &'a mut unit::Scope,
+    control: &'a mut tokio::net::unix::OwnedWriteHalf,
+    receive_go: tokio::sync::oneshot::Receiver<()>,
+}
+
+fn worker_task(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: Cancellation,
-    scope: &mut unit::Scope,
-    control: &mut tokio::net::unix::OwnedWriteHalf,
-    receive_go: tokio::sync::oneshot::Receiver<()>,
-    (root, command_deadline, proxy_port, editor_tree, policy_grants): WorkerPlacement<'_>,
-) -> Result<WorkerOutput, ToolError> {
+    (_, command_deadline, proxy_port, editor_tree, policy_grants): WorkerPlacement<'_>,
+) -> Result<Vec<u8>, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let mut task = Task::new(runtime, intent, None)?;
     task.policy_grants = policy_grants;
     task.editor_tree = editor_tree.map(Path::to_owned);
     task.command_deadline = command_deadline;
     task.proxy_port = proxy_port;
-    let task = super::encode_task(&task)?;
+    super::encode_task(&task)
+}
+
+async fn execute_worker(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    mut cancellation: Cancellation,
+    link: WorkerLink<'_>,
+    placement: WorkerPlacement<'_>,
+) -> Result<WorkerOutput, ToolError> {
+    let WorkerLink {
+        scope,
+        control,
+        receive_go,
+    } = link;
+    let root = placement.0;
+    let task = worker_task(runtime, intent, placement)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
@@ -1374,25 +1397,53 @@ async fn execute_worker(
             + RESERVATION_OVERHEAD
             + Duration::from_millis(u64::from(intent.limits.runtime_ms))
             + super::transfer::transfer_time(intent);
-        let execution = tokio::time::timeout_at(deadline, execution);
-        tokio::pin!(execution);
-        let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
-        let mut status = None;
-        let result = loop {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => break Err(ToolError::Operation),
-                result = &mut execution => break result.unwrap_or(Err(ToolError::Limit)),
-                exited = child.wait(), if status.is_none() => {
-                    status = Some(exited.map_err(|_| ToolError::Operation));
-                }
-                _ = samples.tick() => {
-                    if let Err(error) = scope.check_resources() { break Err(error); }
-                }
-            }
-        };
-        (result, status)
+        supervise_worker(
+            tokio::time::timeout_at(deadline, execution),
+            &mut child,
+            &mut cancellation,
+            scope,
+        )
+        .await
     };
+    settle_worker(&mut child, status, &mut stderr_task, scope, result).await
+}
+
+async fn supervise_worker(
+    execution: tokio::time::Timeout<impl Future<Output = Result<WorkerOutput, ToolError>>>,
+    child: &mut tokio::process::Child,
+    cancellation: &mut Cancellation,
+    scope: &mut unit::Scope,
+) -> (
+    Result<WorkerOutput, ToolError>,
+    Option<Result<std::process::ExitStatus, ToolError>>,
+) {
+    tokio::pin!(execution);
+    let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
+    let mut status = None;
+    let result = loop {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => break Err(ToolError::Operation),
+            result = &mut execution => break result.unwrap_or(Err(ToolError::Limit)),
+            exited = child.wait(), if status.is_none() => {
+                status = Some(exited.map_err(|_| ToolError::Operation));
+            }
+            _ = samples.tick() => {
+                if let Err(error) = scope.check_resources() { break Err(error); }
+            }
+        }
+    };
+    (result, status)
+}
+
+// Reaps the launcher; a bootstrap failure it reported outranks the payload's own error.
+async fn settle_worker(
+    child: &mut tokio::process::Child,
+    status: Option<Result<std::process::ExitStatus, ToolError>>,
+    stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
+    scope: &mut unit::Scope,
+    result: Result<WorkerOutput, ToolError>,
+) -> Result<WorkerOutput, ToolError> {
     if result.is_err() {
         let _ = child.start_kill();
     }
@@ -1412,7 +1463,7 @@ async fn execute_worker(
         let _ = child.start_kill();
         let _ = tokio::time::timeout_at(deadline, child.wait()).await;
     }
-    let drained = drain_stderr(&mut stderr_task, deadline).await;
+    let drained = drain_stderr(stderr_task, deadline).await;
     capture.finish(matches!(reaped, Ok(Ok(_))) && drained.is_some());
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)

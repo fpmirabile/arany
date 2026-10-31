@@ -184,9 +184,11 @@ fn prepare_command(site: &GuardContext<'_>) -> Result<tokio::process::Command, T
         args,
         cwd,
         site.root,
-        &site.config.runtime_grants,
-        site.intent.limits.cache_bytes > 0,
-        &site.intent.limits,
+        super::guard::PayloadEnvironment {
+            runtime_grants: &site.config.runtime_grants,
+            cache_enabled: site.intent.limits.cache_bytes > 0,
+            limits: &site.intent.limits,
+        },
     )?;
     set_proxy_environment(&mut command, site);
     command.current_dir(site.workspace.join(cwd));
@@ -271,10 +273,8 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         site,
         exit_code,
         (timed_out, disk_stopped),
-        out,
-        err,
-        changeset,
-        selection,
+        (out, err),
+        (changeset, selection),
     )
 }
 
@@ -362,10 +362,11 @@ fn command_output(
     site: &GuardContext<'_>,
     exit_code: Option<i32>,
     (timed_out, disk_stopped): (bool, bool),
-    out: super::output::Window,
-    err: super::output::Window,
-    changeset: super::types::CommandChangeset,
-    selection: super::types::CommandSelectionSummary,
+    (out, err): (super::output::Window, super::output::Window),
+    (changeset, selection): (
+        super::types::CommandChangeset,
+        super::types::CommandSelectionSummary,
+    ),
 ) -> Result<String, ToolError> {
     let budget = site.intent.limits.command_result_budget();
     let truncation = if site.hook_stdin.is_some() {
@@ -378,7 +379,15 @@ fn command_output(
             Some(super::spill::streams(&out, &err));
     }
     let output = fit_selected_command(
-        exit_code, &out, &err, changeset, budget, truncation, selection,
+        CommandRun {
+            exit_code,
+            stdout: &out,
+            stderr: &err,
+        },
+        changeset,
+        budget,
+        truncation,
+        selection,
     )?;
     #[cfg(target_os = "macos")]
     super::output::CommandWindows {
@@ -395,34 +404,33 @@ fn command_output(
     }
 }
 
+pub(super) struct CommandRun<'a> {
+    pub(super) exit_code: Option<i32>,
+    pub(super) stdout: &'a super::output::Window,
+    pub(super) stderr: &'a super::output::Window,
+}
+
 pub(super) fn fit_command(
-    exit_code: Option<i32>,
-    stdout: &super::output::Window,
-    stderr: &super::output::Window,
+    run: CommandRun<'_>,
     changeset: super::types::CommandChangeset,
     budget: usize,
     truncation: Truncation,
 ) -> Result<String, ToolError> {
-    fit_selected_command(
-        exit_code,
-        stdout,
-        stderr,
-        changeset,
-        budget,
-        truncation,
-        Default::default(),
-    )
+    fit_selected_command(run, changeset, budget, truncation, Default::default())
 }
 
 pub(super) fn fit_selected_command(
-    exit_code: Option<i32>,
-    stdout: &super::output::Window,
-    stderr: &super::output::Window,
+    run: CommandRun<'_>,
     changeset: super::types::CommandChangeset,
     budget: usize,
     truncation: Truncation,
     selection: super::types::CommandSelectionSummary,
 ) -> Result<String, ToolError> {
+    let CommandRun {
+        exit_code,
+        stdout,
+        stderr,
+    } = run;
     if !changeset.valid() || !selection.valid() {
         return Err(ToolError::Limit);
     }
@@ -530,9 +538,11 @@ mod tests {
             .unwrap();
         let err = super::super::output::Window::default();
         let text = fit_command(
-            Some(0),
-            &out,
-            &err,
+            CommandRun {
+                exit_code: Some(0),
+                stdout: &out,
+                stderr: &err,
+            },
             changeset.clone(),
             4096,
             Truncation::Allow,
@@ -543,9 +553,11 @@ mod tests {
         assert_eq!(result.changeset, changeset);
         assert!(matches!(
             fit_command(
-                Some(0),
-                &out,
-                &err,
+                CommandRun {
+                    exit_code: Some(0),
+                    stdout: &out,
+                    stderr: &err
+                },
                 Default::default(),
                 4096,
                 Truncation::Refuse
@@ -556,7 +568,16 @@ mod tests {
         assert!(result.stdout.contains(" bytes, 1 lines total]"));
         assert!(result.valid());
         assert!(matches!(
-            fit_command(Some(0), &out, &err, changeset, 512, Truncation::Allow),
+            fit_command(
+                CommandRun {
+                    exit_code: Some(0),
+                    stdout: &out,
+                    stderr: &err
+                },
+                changeset,
+                512,
+                Truncation::Allow
+            ),
             Err(ToolError::Limit)
         ));
     }

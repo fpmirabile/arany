@@ -528,9 +528,11 @@ mod tests {
                 (&large, &short)
             };
             let text = super::super::process::fit_command(
-                Some(7),
-                out,
-                err,
+                crate::tools::process::CommandRun {
+                    exit_code: Some(7),
+                    stdout: out,
+                    stderr: err,
+                },
                 Default::default(),
                 4096,
                 super::super::process::Truncation::Allow,
