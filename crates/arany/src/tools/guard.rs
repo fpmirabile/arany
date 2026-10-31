@@ -1674,28 +1674,35 @@ fn parser_config(config: &Config) -> Config {
 }
 
 fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
-    use base64::Engine as _;
     match (&task.intent.call, &task.definition) {
         (ToolCall::ParseAgentDefinition { raw_digest, .. }, Some(encoded)) => {
-            if encoded.len() > DEFINITION_TASK_BYTES {
-                return Err(ToolError::Limit);
-            }
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|_| ToolError::Configuration)?;
-            if bytes.len() > 64 * 1024 {
-                return Err(ToolError::Limit);
-            }
-            if digest(&bytes) != *raw_digest
-                || base64::engine::general_purpose::STANDARD.encode(&bytes) != *encoded
-            {
-                return Err(ToolError::ChangedInput);
-            }
-            Ok(Some(bytes))
+            decode_definition(raw_digest, encoded).map(Some)
         }
         (ToolCall::ParseAgentDefinition { .. }, _) | (_, Some(_)) => Err(ToolError::Configuration),
         (_, None) => Ok(None),
     }
+}
+
+pub(super) fn decode_definition(
+    raw_digest: &[u8; 32],
+    encoded: &str,
+) -> Result<Vec<u8>, ToolError> {
+    use base64::Engine as _;
+    if encoded.len() > DEFINITION_TASK_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| ToolError::Configuration)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(ToolError::Limit);
+    }
+    if digest(&bytes) != *raw_digest
+        || base64::engine::general_purpose::STANDARD.encode(&bytes) != *encoded
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    Ok(bytes)
 }
 
 pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {

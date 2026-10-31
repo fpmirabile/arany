@@ -2,6 +2,7 @@ mod background;
 mod bounds;
 mod cargo;
 mod commands;
+pub use commands::HOST_CASE;
 mod waves;
 
 pub use cargo::cargo_editor_journey;
@@ -453,6 +454,9 @@ async fn run_case_inner(
     }
     if commands::is_case(case) {
         commands::configure(&state, case);
+    }
+    if case == commands::HOST_CASE {
+        crate::fault::FaultPlan::make_sandbox_unavailable(&workspace);
     }
     run_live(directory, root, guard, case, LiveStart::New { padding }).await
 }

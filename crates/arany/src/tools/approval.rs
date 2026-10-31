@@ -218,11 +218,20 @@ impl ToolApprovals {
         intent: &EffectIntent,
         offers: ApprovalOffers,
     ) -> ApprovalWait {
+        self.begin(intent, None, offers).await
+    }
+
+    pub(crate) async fn begin(
+        &self,
+        intent: &EffectIntent,
+        unguarded: Option<UnguardedPrompt>,
+        offers: ApprovalOffers,
+    ) -> ApprovalWait {
         let (reply, response) = oneshot::channel();
         let (withdrawal, committed) = oneshot::channel();
         let approval = ToolApproval {
             intent: intent.clone(),
-            unguarded: None,
+            unguarded,
             allow_auto_edits: offers.allow_auto_edits,
             remember_prefix: offers.remember_prefix,
             save_reads: offers.save_reads,

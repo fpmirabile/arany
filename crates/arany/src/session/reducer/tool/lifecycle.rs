@@ -36,6 +36,17 @@ pub(super) fn validate_finished(
         .config
         .as_ref()
         .and_then(|config| config.tool_policy.as_ref());
+    // A definition parses in process only in a Run admitted without a sandbox.
+    if matches!(
+        observation.attestation,
+        Some(crate::tools::Attestation::InProcess { .. })
+    ) && matches!(
+        observation.intent.call,
+        crate::tools::ToolCall::ParseAgentDefinition { .. }
+    ) && policy.is_none_or(|policy| policy.guard.sandbox)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     if let Some(crate::tools::Attestation::Git(receipt)) = &observation.attestation
         && policy
             .and_then(|policy| policy.git.as_ref())

@@ -1115,7 +1115,9 @@ impl ToolRuntime {
         let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
         let command_tools = std::sync::Arc::new(CommandTools::load(state)?);
         let guard_mode = GuardSettings::load()?.mode();
-        let guard_available = guard_mode != GuardMode::Off && guard::check_available().is_ok();
+        let guard_available = guard_mode != GuardMode::Off
+            && guard::check_available().is_ok()
+            && !crate::fault::sandbox_unavailable(workspace);
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
         let account = admission_paths(workspace, state, &config, &root)?;
@@ -1701,16 +1703,30 @@ impl ToolRuntime {
         catalog["mcp_servers"] = serde_json::json!([]);
         catalog["file_tools"] = serde_json::json!(self.in_process_available());
         catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
-        if !grant.commands.is_empty() {
+        // Without a sandbox an editor's Command grant is a per-call host command in its own tree.
+        let host =
+            self.host_fallback() && grant.tools.contains(&crate::worker::WorkerTool::Command);
+        if !grant.commands.is_empty() && !host {
             catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
+        }
+        if host {
+            catalog["host_commands"] = serde_json::json!(true);
+            catalog["sandbox"] = serde_json::json!(catalog::SANDBOX_OFF_CONTRACT);
         }
         catalog["operations"] = serde_json::json!(
             grant
                 .tools
                 .iter()
                 .filter(|tool| **tool != crate::worker::WorkerTool::Command
+                    || host
                     || !grant.commands.is_empty())
-                .map(|tool| tool.label())
+                .map(
+                    |tool| if host && *tool == crate::worker::WorkerTool::Command {
+                        "command_unguarded"
+                    } else {
+                        tool.label()
+                    }
+                )
                 .collect::<Vec<_>>()
         );
         context.set_catalog(&catalog);
@@ -1778,6 +1794,14 @@ impl ToolRuntime {
         } else {
             ToolLimits::default()
         };
+        let target = self.editor_root(agent_run_id).map_or(
+            crate::session::worker::EffectTarget::Workspace,
+            |root| crate::session::worker::EffectTarget::EditorWorkspace {
+                assignment_id: agent_run_id,
+                device: root.identity.device,
+                inode: root.identity.inode,
+            },
+        );
         Ok(EffectIntent {
             host: git::host::pin(
                 &self.workspace,
@@ -1793,8 +1817,10 @@ impl ToolRuntime {
             host_command: match &call {
                 ToolCall::CommandUnguarded { program, .. } => {
                     let requested = self.command_executable(program).unwrap_or(program);
-                    unguarded::pin(requested, &self.workspace, &self.command_environment)
-                        .ok()
+                    self.host_root(&target)
+                        .and_then(|(root, _)| {
+                            unguarded::pin(requested, &root, &self.command_environment).ok()
+                        })
                         .map(|mut pin| {
                             pin.state_roots = [
                                 self.cache_state
@@ -1812,14 +1838,7 @@ impl ToolRuntime {
                 }
                 _ => None,
             },
-            target: self.editor_root(agent_run_id).map_or(
-                crate::session::worker::EffectTarget::Workspace,
-                |root| crate::session::worker::EffectTarget::EditorWorkspace {
-                    assignment_id: agent_run_id,
-                    device: root.identity.device,
-                    inode: root.identity.inode,
-                },
-            ),
+            target,
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
@@ -1898,6 +1917,9 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
+        if matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) && self.host_fallback() {
+            return self.parse_definition_in_process(intent);
+        }
         if match intent.call.facts().site {
             Site::Guard => !self.guard_available,
             Site::InProcess => !self.in_process_available(),
@@ -2091,8 +2113,11 @@ impl ToolRuntime {
         if !self.host_settings_admitted || !self.host_settings_current(pin) {
             return unstarted_observation(intent, ToolError::ChangedInput);
         }
+        let Some((root, root_identity)) = self.host_root(&intent.target) else {
+            return unstarted_observation(intent, ToolError::ChangedInput);
+        };
         let checked_pin = pin.clone();
-        let workspace = self.workspace.clone();
+        let workspace = root.clone();
         let environment = std::sync::Arc::clone(&self.command_environment);
         if !tokio::task::spawn_blocking(move || checked_pin.verify(&workspace, &environment))
             .await
@@ -2115,8 +2140,8 @@ impl ToolRuntime {
                 environment: &self.command_environment,
                 args,
                 cwd,
-                workspace: &self.workspace,
-                workspace_identity: self.workspace_identity,
+                workspace: &root,
+                workspace_identity: root_identity,
                 runtime_grants: &self.config.runtime_grants,
                 result_bytes: intent.limits.result_bytes,
                 runtime_ms: intent.limits.runtime_ms,
@@ -2246,14 +2271,63 @@ impl ToolRuntime {
         self.reads.as_ref()?.editors.lock().ok()?.get(&id).cloned()
     }
 
+    // Without a sandbox the same parser and bounds run in process, under an in-process receipt.
+    fn parse_definition_in_process(&self, intent: EffectIntent) -> ToolObservation {
+        let ToolCall::ParseAgentDefinition { raw_digest, .. } = &intent.call else {
+            return unstarted_observation(intent, ToolError::Configuration);
+        };
+        let result = self
+            .definitions
+            .payload(&intent.call)
+            .and_then(|payload| payload.ok_or(ToolError::Configuration))
+            .and_then(|encoded| guard::decode_definition(raw_digest, &encoded))
+            .and_then(|bytes| definitions::parse(&bytes));
+        let (disposition, output, enforcement_cause, limit_cause) =
+            dispatch::outcome(&intent, result);
+        ToolObservation {
+            spill: None,
+            enforcement_cause,
+            limit_cause,
+            attestation: Some(Attestation::InProcess {
+                receipt: None,
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            }),
+            intent,
+            disposition,
+            output,
+            approval_cause: None,
+            guard_stage: None,
+            cache_update: CacheUpdate::NotApplicable,
+        }
+    }
+
+    // An editor's host command runs in its own private tree, never in the Workspace.
+    fn host_root(
+        &self,
+        target: &crate::session::worker::EffectTarget,
+    ) -> Option<(PathBuf, WorkspaceIdentity)> {
+        match target {
+            crate::session::worker::EffectTarget::Workspace => {
+                Some((self.workspace.clone(), self.workspace_identity))
+            }
+            crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => self
+                .editor_root(*assignment_id)
+                .map(|root| (root.path, root.identity)),
+        }
+    }
+
     // An editor-workspace effect needs that editor's attached root; only typed file operations and commands run there.
     fn target_admitted(&self, intent: &EffectIntent) -> bool {
         match intent.target {
             crate::session::worker::EffectTarget::Workspace => true,
             crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => {
                 self.editor_root(assignment_id).is_some()
-                    && (matches!(intent.call, ToolCall::Command { .. })
-                        || intent.call.facts().family == catalog::Family::File)
+                    && (matches!(
+                        intent.call,
+                        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+                    ) || intent.call.facts().family == catalog::Family::File)
             }
         }
     }

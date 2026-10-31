@@ -204,7 +204,7 @@ pub(crate) static ALL: [OperationFacts; 29] = [
             "command_unguarded",
             Family::Process,
             14,
-            "Request a primary host command with no sandbox and a one-sentence justification, before or after a Guard failure. Privilege tools and literal privilege-tool invocations through wrappers or inline programs cannot be approved: explicitly ask the user to run the exact displayed command by hand; never evade refusal through wrappers or children. Host access can expose private data to the Provider and modify Arany state; report partial coverage honestly. Never retry automatically.",
+            "Request a host command with no sandbox and a one-sentence justification, before or after a Guard failure. Privilege tools and literal privilege-tool invocations through wrappers or inline programs cannot be approved: explicitly ask the user to run the exact displayed command by hand; never evade refusal through wrappers or children. Host access can expose private data to the Provider and modify Arany state; report partial coverage honestly. Never retry automatically.",
         )
     },
     OperationFacts {

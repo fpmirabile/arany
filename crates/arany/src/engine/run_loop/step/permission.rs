@@ -571,6 +571,7 @@ impl RunLoop<'_> {
         let git_write = call.is_git() && call.facts().mutates;
         if (runtime.permissions().is_some() || unguarded || git_write)
             && (!runtime.allows(call)
+                || researcher && unguarded && !runtime.host_fallback()
                 || researcher
                     && !call.is_child_research()
                     && !matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor() && child.definition.as_ref().is_some_and(|definition| definition.allows_worker(call))))

@@ -866,6 +866,113 @@ fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
     }
 }
 
+fn host_editor_fixture(sandbox: bool, epoch: uuid::Uuid) -> Fixture {
+    let mut f = fixture_with_grant(
+        vec!["command".into(), "read".into(), "write".into()],
+        vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Command],
+        None,
+    );
+    for event in &mut f.events {
+        match event {
+            Event::RunStarted { config, .. } => {
+                let policy = config.tool_policy.as_mut().unwrap();
+                policy.host_epoch = Some(epoch);
+                policy.guard.sandbox = sandbox;
+                if !sandbox {
+                    policy.child_unguarded = crate::tools::UnguardedGrant::HumanOnly;
+                }
+            }
+            Event::AgentSpawned {
+                grant: Some(ChildGrant::EditOnly { unguarded }),
+                ..
+            } => *unguarded = crate::tools::UnguardedGrant::HumanOnly,
+            Event::GoalPlanContractRecorded { contract, .. } => {
+                contract.commands = vec!["sh".into()];
+            }
+            _ => {}
+        }
+    }
+    f
+}
+
+#[test]
+fn editor_host_commands_need_a_run_without_a_sandbox_and_a_per_call_verdict() {
+    use crate::tools::permissions::{Decision, HostApproval, PermissionSource, PermissionVerdict};
+    let epoch = uuid::Uuid::now_v7();
+    let sandboxed = host_editor_fixture(true, epoch);
+    assert!(
+        SessionView::replay_open(sandboxed.session, &sandboxed.envelopes()).is_err(),
+        "a sandboxed Run never spawns a host-capable editor"
+    );
+    let mut f = host_editor_fixture(false, epoch);
+    f.view();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let mut intent = f.intent(
+        f.child,
+        ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            justification: "Run the exact host command".into(),
+            prefix_rule: None,
+        },
+        f.editor_workspace(),
+    );
+    intent.host_command = Some(crate::tools::types::test_host_pin());
+    f.started(&intent);
+    let verdict = |source: PermissionSource, session: bool, source_intent: Option<[u8; 32]>| {
+        Event::ToolStarted {
+            intent: intent.clone().into(),
+            active_ceiling_ms: 0,
+            run_id: f.run,
+            agent_run_id: f.child,
+            verdict: Some(PermissionVerdict {
+                host: Some(HostApproval {
+                    rule: None,
+                    epoch,
+                    session,
+                    source_intent,
+                }),
+                intent_digest: intent.digest(),
+                decision: if source == PermissionSource::Human {
+                    Decision::Ask
+                } else {
+                    Decision::Allow
+                },
+                mode: None,
+                basis: if source == PermissionSource::Human {
+                    PermissionSource::Mode
+                } else {
+                    source
+                },
+                source,
+                approved: true,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            }),
+        }
+    };
+    rejected(&f, verdict(PermissionSource::Human, true, None));
+    rejected(
+        &f,
+        verdict(PermissionSource::SessionApproval, false, Some([7; 32])),
+    );
+    f.push(verdict(PermissionSource::Human, false, None));
+    f.observed(
+        &intent,
+        ToolDisposition::Succeeded,
+        Some(Attestation::for_site(&intent)),
+        r#"{"selection":{"elapsed_ms":null,"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#,
+    );
+    f.view();
+}
+
 pub(crate) fn completed_fixture() -> Fixture {
     compacted_fixture(false)
 }

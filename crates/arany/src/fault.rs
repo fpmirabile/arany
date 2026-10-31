@@ -311,6 +311,15 @@ pub(crate) fn record_tool_failure(
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn sandbox_unavailable(workspace: &std::path::Path) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if FaultPlan::sandbox_unavailable(workspace) {
+        return true;
+    }
+    false
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn supervisor_policy(session: SessionId) -> crate::supervisor::SupervisorPolicy {
     #[cfg(any(test, feature = "test-support"))]
     if FaultPlan::take_supervisor_off(session) {
@@ -400,6 +409,7 @@ mod injection {
         CheckpointStall(SessionId),
         SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
+        SandboxUnavailable(std::path::PathBuf),
         GuardReceipt(uuid::Uuid),
         GuardUnavailable(String),
         GuardLimit(String),
@@ -617,6 +627,17 @@ mod injection {
 
         pub(crate) fn take_supervisor_off(session_id: SessionId) -> bool {
             take(|fault| matches!(fault, Fault::SupervisorOff(id) if *id == session_id)).is_some()
+        }
+
+        /// Admits every later Run of `workspace` as if the platform had no sandbox.
+        pub fn make_sandbox_unavailable(workspace: &std::path::Path) {
+            plan().push(Fault::SandboxUnavailable(workspace.to_owned()));
+        }
+
+        pub(crate) fn sandbox_unavailable(workspace: &std::path::Path) -> bool {
+            plan()
+                .iter()
+                .any(|fault| matches!(fault, Fault::SandboxUnavailable(path) if path == workspace))
         }
 
         /// Fails the next Event that `admits` accepts for the Session before it commits.

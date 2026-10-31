@@ -29,7 +29,15 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
     if !valid_profile {
         return Err(ReplayError::InvalidTransition);
     }
-    if grant.is_some_and(|grant| grant.unguarded() != crate::tools::UnguardedGrant::Denied) {
+    // Only an editor of a Run admitted without a sandbox may run host commands, each per call.
+    let host_editor = assignment.is_some()
+        && config.tool_policy.as_ref().is_some_and(|policy| {
+            policy.child_unguarded == crate::tools::UnguardedGrant::HumanOnly
+        });
+    if grant.is_some_and(|grant| {
+        grant.unguarded() != crate::tools::UnguardedGrant::Denied
+            && !(host_editor && matches!(grant, ChildGrant::EditOnly { .. }))
+    }) {
         return Err(ReplayError::InvalidTransition);
     }
     let child_grant = if config.tool_policy.is_some() {

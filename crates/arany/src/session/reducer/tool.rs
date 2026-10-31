@@ -879,20 +879,41 @@ fn valid_host_approval(
     let Some(run) = view.runs.last().filter(|run| run.id == run_id) else {
         return false;
     };
-    if run.primary().is_none_or(|agent| agent.id != actor) {
-        return false;
-    }
-    let Some(tool) = run
-        .tools
-        .iter()
-        .find(|tool| tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest)
-    else {
-        return false;
-    };
     let Some(policy) = run
         .config
         .as_ref()
         .and_then(|config| config.tool_policy.as_ref())
+    else {
+        return false;
+    };
+    let primary = run.primary().is_some_and(|agent| agent.id == actor);
+    // An editor spawned without a sandbox runs host commands per call: never a session or new rule.
+    let tools = if primary {
+        &run.tools
+    } else {
+        match run.agents.iter().find(|agent| {
+            agent.id == actor
+                && agent.grant
+                    == Some(crate::session::ChildGrant::EditOnly {
+                        unguarded: crate::tools::UnguardedGrant::HumanOnly,
+                    })
+        }) {
+            Some(agent)
+                if policy.child_unguarded == crate::tools::UnguardedGrant::HumanOnly
+                    && !verdict.host.as_ref().is_some_and(|host| {
+                        host.session
+                            || host.source_intent.is_some()
+                            || verdict.source == PermissionSource::Human && host.rule.is_some()
+                    }) =>
+            {
+                &agent.tools
+            }
+            _ => return false,
+        }
+    };
+    let Some(tool) = tools
+        .iter()
+        .find(|tool| tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest)
     else {
         return false;
     };

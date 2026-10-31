@@ -878,8 +878,7 @@ impl RunLoop<'_> {
             && intent.call.is_host_pr_read()
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::TypedPrefixRule;
-        let host_prefix_allow = phase.site == DispatchSite::Primary
-            && intent.call.is_unguarded()
+        let host_prefix_allow = intent.call.is_unguarded()
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::HostPrefixRule;
         Ok(DispatchFacts {
@@ -900,7 +899,7 @@ impl RunLoop<'_> {
                         )
                     })),
             unguarded: match grant {
-                Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
+                _ if intent.call.is_unguarded() => Some(Unguarded {
                     gate: unguarded_gate(runtime, intent).await.map(|mut prompt| {
                         prompt.remember = phase.host_permission.remember;
                         prompt.prefix =
@@ -908,7 +907,7 @@ impl RunLoop<'_> {
                         prompt
                     }),
                 }),
-                Grant::Primary { .. } | Grant::Researcher { .. } => None,
+                _ => None,
             },
             goal_allows: phase.goal_allows,
             runtime_allows: runtime.allows(&intent.call),
@@ -1434,11 +1433,19 @@ impl RunLoop<'_> {
     async fn delegated_human_reply(
         &self,
         intent: &EffectIntent,
-        deadline: Option<&crate::engine::ledger::ActiveDeadline>,
         approvals: &crate::tools::ToolApprovals,
-        interrupted: Option<&RunCancellation>,
+        site: &AskSite,
     ) -> Result<(ApprovalReply, Option<ApprovalWithdrawal>), EngineError> {
         use crate::tools::ApprovalWaitReply;
+        let AskSite::Delegated {
+            active_deadline: deadline,
+            interrupted,
+            unguarded_prompt,
+        } = site
+        else {
+            return Ok((ApprovalReply::Unavailable, None));
+        };
+        let (deadline, interrupted) = (deadline.as_ref(), interrupted.as_ref());
 
         let mut cancellation = self.controls.cancellation.clone();
         let activity_started = self.ledger().active_elapsed();
@@ -1447,7 +1454,7 @@ impl RunLoop<'_> {
             biased;
             () = ask::interrupted(interrupted) => return Ok((ApprovalReply::Unavailable, None)),
             () = cancellation.cancelled() => return Ok((ApprovalReply::Unavailable, None)),
-            pending = approvals.begin_local(intent, crate::tools::ApprovalOffers::default()) => pending,
+            pending = approvals.begin(intent, unguarded_prompt.clone(), crate::tools::ApprovalOffers::default()) => pending,
         };
         let (reply, interrupted) = tokio::select! {
             biased;

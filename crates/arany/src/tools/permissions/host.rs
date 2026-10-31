@@ -155,6 +155,13 @@ impl HostPrefixRule {
             return false;
         };
         pin.permissions_digest = None;
+        // An editor's tree mirrors the Workspace, so a folder rule applies there by its relative cwd.
+        if matches!(
+            intent.target,
+            crate::session::worker::EffectTarget::EditorWorkspace { .. }
+        ) {
+            pin.workspace.clone_from(&self.pin.workspace);
+        }
         let tokens = std::iter::once(program)
             .chain(args)
             .cloned()

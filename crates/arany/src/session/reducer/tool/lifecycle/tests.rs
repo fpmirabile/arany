@@ -1205,6 +1205,7 @@ fn continuation_requires_all_requested_observed() {
 
 fn definition_preparation(
     model: Option<&str>,
+    sandbox: bool,
 ) -> (SessionView, GoalId, EffectIntent, ToolObservation) {
     let (session, goal, run, actor) = (
         SessionId::new(),
@@ -1218,6 +1219,7 @@ fn definition_preparation(
         digest: [3; 32],
     }];
     let mut configured = config(CollaborationPolicy::Single, true);
+    configured.tool_policy.as_mut().unwrap().guard.sandbox = sandbox;
     configured.agent_definitions = Some(crate::tools::DefinitionRegistryPin {
         digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
         files,
@@ -1260,7 +1262,7 @@ fn definition_preparation(
 
 #[test]
 fn agent_definition_initialization_replay_requires_pinned_guard_observations() {
-    let (mut view, goal, intent, observation) = definition_preparation(None);
+    let (mut view, goal, intent, observation) = definition_preparation(None, true);
     let reserve = || reserve_child_call(goal, intent.run_id, intent.agent_run_id);
     assert!(
         rejected(&view, reserve()),
@@ -1340,9 +1342,50 @@ fn agent_definition_initialization_replay_requires_pinned_guard_observations() {
 }
 
 #[test]
+fn agent_definitions_parse_in_process_only_in_a_run_without_a_sandbox() {
+    for sandbox in [true, false] {
+        let (mut view, goal, intent, mut observation) = definition_preparation(None, sandbox);
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                verdict: None,
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .unwrap();
+        observation.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
+            policy_digest: intent.policy_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+        });
+        let finished = apply(
+            &mut view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                observation,
+            },
+        );
+        assert_eq!(finished.is_ok(), !sandbox, "sandbox {sandbox}");
+        if !sandbox {
+            apply(
+                &mut view,
+                reserve_child_call(goal, intent.run_id, intent.agent_run_id),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn agent_definition_replay_rejects_noncurrent_normalization() {
     for case in ["missing-field", "unknown-field", "failed"] {
-        let (mut view, goal, intent, mut observation) = definition_preparation(None);
+        let (mut view, goal, intent, mut observation) = definition_preparation(None, true);
         let mut output: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
         match case {
             "missing-field" => {

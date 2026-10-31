@@ -374,7 +374,7 @@ impl RunLoop<'_> {
             definition: Some(assignment.definition.clone()),
             profile: None,
             grant: Some(ChildGrant::EditOnly {
-                unguarded: crate::tools::UnguardedGrant::Denied,
+                unguarded: runtime.receipt().child_unguarded,
             }),
             assignment: Some(WorkerAssignment {
                 request: assignment.clone(),

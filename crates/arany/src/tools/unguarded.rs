@@ -399,7 +399,10 @@ pub(crate) fn state_target(call: &super::ToolCall, pin: &super::types::HostComma
                                     part => normalized.push(part.as_os_str()),
                                 }
                             }
+                            // An editor's private tree lives under the StateRoot; only escaping it counts.
                             normalized.starts_with(root)
+                                && !(Path::new(&pin.workspace).starts_with(root)
+                                    && normalized.starts_with(&pin.workspace))
                         })
             })
     })

@@ -200,3 +200,8 @@ async fn editor_commands_run_in_the_editor_workspace_and_integrate_once() {
         worker_case(case).await;
     }
 }
+
+#[tokio::test]
+async fn editor_host_commands_without_a_sandbox_ask_per_call_and_integrate_once() {
+    worker_case(arany::test_support::worker_teams::HOST_CASE).await;
+}

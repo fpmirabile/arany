@@ -1439,7 +1439,8 @@ impl Attestation {
                 workspace_device,
                 workspace_inode,
             } => {
-                intent.call.facts().site == Site::InProcess
+                (intent.call.facts().site == Site::InProcess
+                    || matches!(intent.call, ToolCall::ParseAgentDefinition { .. }))
                     && (!intent.call.facts().mutates || super::fs::in_process_mutation(intent))
                     && receipt.as_ref().is_none_or(|receipt| {
                         intent.call.facts().mutates && receipt.intent_digest == intent.digest()
@@ -1467,8 +1468,7 @@ impl Attestation {
                     && receipt.valid_for(intent)
             }
             Self::Unguarded(receipt) => {
-                intent.target == EffectTarget::Workspace
-                    && intent.call.facts().site == Site::Unguarded
+                intent.call.facts().site == Site::Unguarded
                     && intent
                         .host_command
                         .as_ref()

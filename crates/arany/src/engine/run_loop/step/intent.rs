@@ -436,7 +436,11 @@ impl RunLoop<'_> {
                         .map(|deadline| deadline.cause),
                 );
                 let deadline = grant.deadline().unwrap_or(*deadline);
-                let intent = if child.kind.is_editor() && matches!(call, ToolCall::Command { .. }) {
+                let intent = if child.kind.is_editor()
+                    && matches!(
+                        call,
+                        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+                    ) {
                     self.editor_command_intent(runtime, child.agent_run_id, call, deadline)
                         .await?
                 } else {

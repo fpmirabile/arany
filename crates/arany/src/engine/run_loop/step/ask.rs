@@ -19,6 +19,7 @@ pub(super) enum AskSite {
     Delegated {
         active_deadline: Option<crate::engine::ledger::ActiveDeadline>,
         interrupted: Option<RunCancellation>,
+        unguarded_prompt: Option<UnguardedPrompt>,
     },
 }
 
@@ -97,6 +98,7 @@ impl RunLoop<'_> {
                     AskSite::Delegated {
                         active_deadline: active_deadline.clone(),
                         interrupted: options.interrupted,
+                        unguarded_prompt: options.unguarded_prompt,
                     },
                 )
                 .await
@@ -138,17 +140,9 @@ impl RunLoop<'_> {
                     }
                 }
                 Resolver::Human => match &site {
-                    AskSite::Delegated {
-                        active_deadline,
-                        interrupted,
-                    } => {
-                        self.resolve_delegated_human(
-                            intent,
-                            active_deadline.as_ref(),
-                            &mut resolution,
-                            interrupted.as_ref(),
-                        )
-                        .await?
+                    AskSite::Delegated { .. } => {
+                        self.resolve_delegated_human(intent, &site, &mut resolution)
+                            .await?
                     }
                     AskSite::Primary(options) => {
                         self.resolve_primary_human(intent, options, &mut resolution)
@@ -180,16 +174,19 @@ impl RunLoop<'_> {
     async fn resolve_delegated_human(
         &self,
         intent: &EffectIntent,
-        active_deadline: Option<&crate::engine::ledger::ActiveDeadline>,
+        site: &AskSite,
         resolution: &mut Resolution,
-        interrupted: Option<&RunCancellation>,
     ) -> Result<(), EngineError> {
-        let Some(approvals) = self.controls.approvals else {
+        let (
+            Some(approvals),
+            AskSite::Delegated {
+                active_deadline, ..
+            },
+        ) = (self.controls.approvals, site)
+        else {
             return Ok(());
         };
-        let (reply, withdrawal) = self
-            .delegated_human_reply(intent, active_deadline, approvals, interrupted)
-            .await?;
+        let (reply, withdrawal) = self.delegated_human_reply(intent, approvals, site).await?;
         resolution.withdrawal = withdrawal;
         resolution.approved = matches!(
             reply,
@@ -203,7 +200,7 @@ impl RunLoop<'_> {
         } else {
             PermissionSource::Human
         };
-        resolution.active_time_exhausted = active_deadline.is_some_and(|deadline| {
+        resolution.active_time_exhausted = active_deadline.as_ref().is_some_and(|deadline| {
             deadline.reached() && deadline.cause == crate::engine::ledger::ActiveDeadlineCause::Goal
         });
         Ok(())

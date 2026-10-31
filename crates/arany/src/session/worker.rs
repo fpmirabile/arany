@@ -79,7 +79,7 @@ impl WorkerTool {
             ToolCall::Move { .. } => Self::Move,
             ToolCall::Skill { .. } => Self::Skill,
             ToolCall::McpList { .. } => Self::McpList,
-            ToolCall::Command { .. } => Self::Command,
+            ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => Self::Command,
             ToolCall::WebFetch { .. } => Self::WebFetch,
             ToolCall::WebSearch { .. } => Self::WebSearch,
             _ => return None,
@@ -210,6 +210,9 @@ impl WorkerGrant {
                 ToolCall::McpList { server } => self.mcp_servers.contains(server),
                 ToolCall::Command { program, cwd, .. } => {
                     self.commands.contains(program) && (cwd == "." || within(cwd, &self.read_paths))
+                }
+                ToolCall::CommandUnguarded { cwd, .. } => {
+                    cwd.is_empty() || cwd == "." || within(cwd, &self.read_paths)
                 }
                 _ => false,
             }

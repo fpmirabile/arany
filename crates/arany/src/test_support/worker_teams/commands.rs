@@ -47,6 +47,8 @@ pub(super) fn is_case(case: &str) -> bool {
     case.starts_with("command")
 }
 
+pub const HOST_CASE: &str = "command_host";
+
 // The dependency-directory output lives and dies with the editor's workspace.
 pub(super) fn call(outside: bool) -> ToolCall {
     ToolCall::Command {
@@ -67,6 +69,15 @@ pub(super) fn call(outside: bool) -> ToolCall {
 
 // An oversized output must refuse integration, whatever the editor's criterion says.
 pub(super) fn case_call(case: &str) -> ToolCall {
+    if case == HOST_CASE {
+        return ToolCall::CommandUnguarded {
+            program: "build".into(),
+            args: vec!["-c".into(), "printf 'edited 0' > notes/0".into()],
+            cwd: String::new(),
+            justification: "Edit the leased note without a sandbox".into(),
+            prefix_rule: None,
+        };
+    }
     if case != "command_large" {
         return call(case == "command_outside");
     }
@@ -191,6 +202,13 @@ impl LiveProvider {
 fn assert_editor_catalog(request: &ProviderRequest) {
     let catalog: serde_json::Value =
         serde_json::from_str(request.input.tools.as_ref().unwrap().catalog()).unwrap();
+    if catalog["host_commands"] == true {
+        let operations = catalog["operations"].as_array().unwrap();
+        assert!(operations.contains(&serde_json::json!("command_unguarded")));
+        assert!(!operations.contains(&serde_json::json!("command")));
+        assert!(catalog["sandbox"].is_string() && catalog.get("command_contract").is_none());
+        return;
+    }
     let contract = catalog["command_contract"].as_str().unwrap();
     for required in [
         "run directly in your private workspace",
@@ -232,6 +250,10 @@ pub(super) fn assert_commands(
     let run = &view.runs[0];
     let editor = &run.agents[1];
     let command = &editor.tools[0];
+    if case == HOST_CASE {
+        assert_host_command(workspace, view);
+        return;
+    }
     assert!(matches!(command.intent.call, ToolCall::Command { .. }));
     assert!(command.intent.target.editor());
     let observation = command.observation.as_ref().unwrap();
@@ -374,4 +396,44 @@ pub(super) fn assert_commands(
     assert_eq!(run.status, RunStatus::Finished);
     assert!(history.verified);
     assert_eq!(view.goals[0].status, GoalStatus::Completed);
+}
+
+fn assert_host_command(workspace: &Path, view: &SessionView) {
+    let run = &view.runs[0];
+    assert_eq!(run.status, RunStatus::Finished);
+    let editor = &run.agents[1];
+    assert_eq!(
+        editor.grant,
+        Some(crate::session::ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::HumanOnly
+        })
+    );
+    let command = &editor.tools[0];
+    assert!(matches!(
+        command.intent.call,
+        ToolCall::CommandUnguarded { .. }
+    ));
+    assert!(command.intent.target.editor());
+    let pin = command.intent.host_command.as_ref().unwrap();
+    assert!(!std::path::Path::new(&pin.workspace).starts_with(workspace));
+    let verdict = command.permission_verdict.as_ref().unwrap();
+    assert_eq!(verdict.source, crate::permissions::PermissionSource::Human);
+    let host = verdict.host.as_ref().unwrap();
+    assert!(host.rule.is_none() && !host.session && host.source_intent.is_none());
+    let observation = command.observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert!(matches!(
+        observation.attestation,
+        Some(Attestation::Unguarded(_))
+    ));
+    assert!(
+        editor
+            .tools
+            .iter()
+            .any(|tool| crate::session::editor_integration(&tool.intent.call))
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("notes/0")).unwrap(),
+        b"edited 0"
+    );
 }
