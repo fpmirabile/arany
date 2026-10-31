@@ -214,12 +214,14 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 2: Chat view: fullscreen (default) (fullscreen|classic)\r\n\
           Choice 3: Copy on select: on (default) (on|off)\r\n\
           Choice 4: Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)\r\n\
-          Choice 5: Limits: opens /limits\r\n";
+          Choice 5: Guard: auto (default) (auto|required|off)\r\n\
+          Choice 6: Guard folders: opens the folders every guarded command may read\r\n\
+          Choice 7: Limits: opens /limits\r\n";
     pty.send_and_wait(
         b"/settings\r",
         format!("{settings}Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\nInput:\r\n").as_bytes(),
     );
-    pty.send_and_wait(b"5\r", format!("Limits: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
+    pty.send_and_wait(b"7\r", format!("Limits: type NUMBER VALUE to change a row or NUMBER default to reset it; empty Enter saves; q cancels\r\n\
           Choice 1: Provider calls per task: unlimited (default) (number or unlimited)\r\n\
           Choice 2: Tokens per task: unlimited (default) (number or unlimited)\r\n\
           Choice 3: Active time per task: unlimited (default) (duration or unlimited)\r\n\

@@ -408,6 +408,7 @@ fn child_steering_requires_its_open_work_reservation() {
                     cwd: String::new(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
             );
             view.runs[0].lifecycle_hooks.push(HookView {

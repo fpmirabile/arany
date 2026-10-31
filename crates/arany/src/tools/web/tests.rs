@@ -244,7 +244,9 @@ fn researchers_need_an_explicit_grant_and_cannot_widen_parent_domains() {
         );
     }
     let before = runtime.config.digest();
-    let mut intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), listed);
+    let mut intent = runtime
+        .intent(crate::RunId::new(), crate::AgentRunId::new(), listed)
+        .unwrap();
     runtime.bind_egress(&mut intent).unwrap();
     assert_eq!(intent.limits.network, crate::tools::NetworkGrant::Proxy);
     assert_eq!(before, runtime.config.digest());

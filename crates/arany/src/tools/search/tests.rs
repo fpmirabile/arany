@@ -17,11 +17,13 @@ async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
         ("link", ToolDisposition::Denied),
         ("missing", ToolDisposition::Failed),
     ] {
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            search(path, "payload"),
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                search(path, "payload"),
+            )
+            .unwrap();
         let inspected = inspect_read(&runtime, intent.clone()).await;
         let observation = runtime.execute(intent, super::Cancellation::new()).await;
         assert_eq!(inspected, observation);
@@ -33,11 +35,13 @@ async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
         ));
         assert!(!observation.output.contains("outside payload"));
     }
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        search("missing", "payload"),
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            search("missing", "payload"),
+        )
+        .unwrap();
     std::fs::rename(&workspace, fixture.path().join("moved")).unwrap();
     std::fs::create_dir(&workspace).unwrap();
     let observation = runtime.execute(intent, super::Cancellation::new()).await;
@@ -80,11 +84,13 @@ pub(super) async fn search_page(
     call: ToolCall,
     result_bytes: u32,
 ) -> Value {
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        call.clone(),
-    );
+    let mut intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call.clone(),
+        )
+        .unwrap();
     intent.limits.result_bytes = result_bytes;
     let observation = inspect_read(runtime, intent).await;
     assert_eq!(
@@ -264,11 +270,13 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
     ] {
         assert!(call.valid(), "{call:?}");
         // Refusals fit the smallest admitted result budget.
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            call.clone(),
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                call.clone(),
+            )
+            .unwrap();
         intent.limits.result_bytes = 128;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Failed, "{call:?}");

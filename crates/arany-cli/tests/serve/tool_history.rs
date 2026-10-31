@@ -22,6 +22,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         limits: arany::ToolLimits::default(),
         use_count: 1,

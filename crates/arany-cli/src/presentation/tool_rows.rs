@@ -379,6 +379,9 @@ pub fn unguarded_approval_lines(
         return tool_approval_lines(intent);
     };
     let mut lines = Vec::new();
+    if prompt.sandbox_off {
+        lines.push(super::model::SANDBOX_OFF_NOTICE.into());
+    }
     if prompt.sensitive {
         lines.push(HOST_SENSITIVE_PATH_WARNING.into());
     }
@@ -787,6 +790,8 @@ pub enum ToolApprovalChoice {
     ExactCommand,
     HostPrefix,
     GitPrefix(arany::permissions::TypedGitPrefix),
+    AlwaysReads,
+    PinRepository,
     No,
 }
 
@@ -797,6 +802,8 @@ impl ToolApprovalChoice {
             Self::AutoEdits => "Yes, and don't ask again for: file edits",
             Self::ExactCommand => "Yes, for this session",
             Self::HostPrefix => "Yes, and allow this host prefix in this folder from the next Run",
+            Self::AlwaysReads => "Yes, and always allow these folders in every trusted folder",
+            Self::PinRepository => "Yes, and treat this destination as this folder's repository",
             Self::GitPrefix(prefix) => match prefix {
                 arany::permissions::TypedGitPrefix::Commit => {
                     "Yes, and allow git commit in this folder from the next Run"
@@ -824,7 +831,9 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
             Self::ExactCommand => arany::ApprovalReply::AllowForSession,
-            Self::GitPrefix(_) | Self::HostPrefix => arany::ApprovalReply::AllowPrefixInFolder,
+            Self::GitPrefix(_) | Self::HostPrefix | Self::AlwaysReads | Self::PinRepository => {
+                arany::ApprovalReply::AllowPrefixInFolder
+            }
             Self::No => arany::ApprovalReply::Deny,
         }
     }
@@ -864,6 +873,12 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         if let Some(prefix) = approval.remember_prefix {
             choices.push(ToolApprovalChoice::GitPrefix(prefix));
         }
+        if approval.save_reads {
+            choices.push(ToolApprovalChoice::AlwaysReads);
+        }
+    }
+    if approval.pin_repository {
+        choices.push(ToolApprovalChoice::PinRepository);
     }
     if approval
         .unguarded

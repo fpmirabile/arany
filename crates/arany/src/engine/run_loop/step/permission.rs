@@ -107,6 +107,8 @@ impl HostPermission {
 #[derive(Clone, Copy)]
 pub(super) struct HostReuseFacts {
     pub(super) host: bool,
+    // Only the primary may reuse a session approval or save a new rule; children use saved rules.
+    pub(super) primary: bool,
     pub(super) settings_admitted: bool,
     pub(super) mode: Option<crate::tools::permissions::PermissionMode>,
     pub(super) terminal_mode: Option<ApprovalMode>,
@@ -129,6 +131,7 @@ pub(super) enum HostReuse {
 pub(super) fn decide_host_reuse(facts: &HostReuseFacts) -> HostReuse {
     use crate::tools::permissions::PermissionMode;
     if !facts.host
+        || !facts.primary
         || !facts.settings_admitted
         || !matches!(
             facts.mode,
@@ -176,7 +179,6 @@ fn decide_host_prefix(
         || !facts.settings_admitted
         || facts.epoch.is_none()
         || facts.state_target != Some(false)
-        || !matches!(facts.terminal_mode, None | Some(ApprovalMode::Request))
         || facts.hook_restriction.is_some()
         || facts.permission.basis == PermissionSource::Rule
     {
@@ -186,7 +188,12 @@ fn decide_host_prefix(
         Some(Decision::Allow)
             if matches!(
                 facts.mode,
-                Some(PermissionMode::Default | PermissionMode::DontAsk)
+                Some(
+                    PermissionMode::Default
+                        | PermissionMode::DontAsk
+                        | PermissionMode::AcceptEdits
+                        | PermissionMode::Auto
+                )
             ) && (facts.permission.decision != Decision::Deny
                 || facts.mode == Some(PermissionMode::DontAsk)
                     && facts.permission.basis == PermissionSource::Mode) =>
@@ -194,8 +201,11 @@ fn decide_host_prefix(
             HostPrefixDecision::Reuse
         }
         None if attached
-            && facts.terminal_mode == Some(ApprovalMode::Request)
-            && matches!(facts.mode, None | Some(PermissionMode::Default))
+            && facts.primary
+            && !matches!(
+                facts.mode,
+                Some(PermissionMode::Plan | PermissionMode::DontAsk)
+            )
             && facts.permission.decision == Decision::Ask
             && facts.permission.basis == PermissionSource::Mode =>
         {
@@ -212,6 +222,8 @@ pub(super) enum RuleSave {
     Prefix(crate::tools::permissions::TypedGitPrefix),
     Session,
     HostPrefix,
+    Reads,
+    Repository,
 }
 
 #[derive(Clone, Copy)]
@@ -327,11 +339,12 @@ impl Permission {
                 PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
             )
             && let Some(mode) = mode.filter(|mode| {
-                // A user-owned typed allow is the prompt-free path in Request and Auto-edits; Auto keeps its review.
+                // A user-owned typed allow is prompt-free in every mode, as Claude Code's allow rules;
+                // auto never reviews what any user allow rule covers.
                 mode.asks(call)
-                    && !(self.basis == PermissionSource::TypedPrefixRule
-                        && self.decision == Decision::Allow
-                        && (call.is_host_pr_read() || *mode != ApprovalMode::Auto))
+                    && !(self.decision == Decision::Allow
+                        && (self.basis == PermissionSource::TypedPrefixRule
+                            || *mode == ApprovalMode::Auto && self.basis == PermissionSource::Rule))
             })
         {
             if self.decision == Decision::Allow {
@@ -394,6 +407,9 @@ impl RunLoop<'_> {
         verdict: Verdict,
         save: Option<RuleSave>,
     ) -> Result<Verdict, EngineError> {
+        if let Verdict::Dispatch { intent, .. } = &verdict {
+            runtime.allow_reads(&intent.call);
+        }
         Ok(match (verdict, save) {
             (
                 Verdict::Dispatch {
@@ -410,6 +426,8 @@ impl RunLoop<'_> {
                     RuleSave::HostPrefix => self.persist_rule(|expected| {
                         runtime.record_host_prefix_rule(&intent, expected)
                     }),
+                    RuleSave::Reads => runtime.save_reads(&intent.call),
+                    RuleSave::Repository => runtime.pin_repository(&intent),
                 };
                 if saved.is_ok() {
                     Verdict::Dispatch {
@@ -495,11 +513,11 @@ impl RunLoop<'_> {
         let rule = runtime
             .permissions()
             .and_then(|config| config.host_rule(intent))
-            .filter(|_| primary)
             .cloned();
         let permission = permission.narrow_host_rule(rule.as_ref().map(|rule| rule.decision));
         let facts = HostReuseFacts {
-            host: primary && intent.call.is_unguarded(),
+            host: intent.call.is_unguarded(),
+            primary,
             settings_admitted: runtime.host_settings_admitted,
             mode: runtime.permissions().map(|config| config.mode()),
             terminal_mode: self.terminal_mode(),
@@ -531,8 +549,9 @@ impl RunLoop<'_> {
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
-        call: &ToolCall,
+        intent: &EffectIntent,
     ) -> Permission {
+        let call = &intent.call;
         // Engine-owned definition parsing and worker preparation are never model Tools, so rules and modes do not apply; each runs only in its fixed grant.
         if call.is_internal() {
             return Permission {
@@ -576,19 +595,63 @@ impl RunLoop<'_> {
                 approval = Some(ApprovalMode::Request);
             }
         }
+        // Outside the sandbox user rules resolve first; then auto mode's review, otherwise a human.
+        let ask_rule = decision == Decision::Ask && basis == PermissionSource::Rule;
+        let reviewed = if !ask_rule
+            && runtime.permissions().is_some_and(|config| {
+                config.mode() == crate::tools::permissions::PermissionMode::Auto
+            }) {
+            ApprovalMode::Auto
+        } else {
+            ApprovalMode::Request
+        };
+        let same_repository = runtime.same_repository(intent);
+        let dont_ask = runtime.permissions().is_some_and(|config| {
+            config.mode() == crate::tools::permissions::PermissionMode::DontAsk
+        });
+        // A remote MCP call leaves the Guard, so only a user allow rule skips its question.
+        if matches!(call, ToolCall::McpCall { .. })
+            && runtime.is_remote_mcp(call)
+            && decision == Decision::Allow
+            && basis == PermissionSource::Mode
+        {
+            if dont_ask {
+                decision = Decision::Deny;
+                approval = None;
+            } else {
+                decision = Decision::Ask;
+                approval = Some(
+                    if runtime.permissions().is_none()
+                        && self.terminal_mode() == Some(ApprovalMode::Auto)
+                    {
+                        ApprovalMode::Auto
+                    } else {
+                        reviewed
+                    },
+                );
+            }
+        }
         if call.is_host()
             && decision != Decision::Deny
-            && !(call.is_host_pr_read()
-                && decision == Decision::Allow
-                && basis == PermissionSource::TypedPrefixRule)
+            && !(decision == Decision::Allow && basis == PermissionSource::TypedPrefixRule)
         {
-            decision = Decision::Ask;
-            approval = Some(ApprovalMode::Request);
+            if dont_ask {
+                decision = Decision::Deny;
+                approval = None;
+            } else {
+                decision = Decision::Ask;
+                // Only auto reviews a push or PR, and only to the folder's pinned repository.
+                approval = Some(if same_repository {
+                    reviewed
+                } else {
+                    ApprovalMode::Request
+                });
+            }
         }
         if unguarded && decision != Decision::Deny {
-            // Host approval never uses AI review or ordinary allow rules.
+            // Ordinary allow rules never cover host commands; their remembered prefixes resolve later.
             decision = Decision::Ask;
-            approval = Some(ApprovalMode::Request);
+            approval = Some(reviewed);
         }
         if git_write
             && runtime.git_hooks_pinned()
@@ -599,9 +662,22 @@ impl RunLoop<'_> {
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule
                 ))
         {
-            // Accepted hooks run host code: only a human or a user-owned allow rule approves the write.
             decision = Decision::Ask;
-            approval = Some(ApprovalMode::Request);
+            approval = Some(reviewed);
+        }
+        // New read directories come only from a human; a child may reuse the Run's but never ask.
+        match runtime.reads_need_approval(call) {
+            _ if decision == Decision::Deny => {}
+            Ok(false) => {}
+            Ok(true) if !researcher => {
+                decision = Decision::Ask;
+                approval = Some(ApprovalMode::Request);
+            }
+            Ok(true) | Err(_) => {
+                decision = Decision::Deny;
+                basis = PermissionSource::PinnedGrant;
+                approval = None;
+            }
         }
         if researcher
             && (call.is_web() && !runtime.allows_research_web(call) || runtime.is_remote_mcp(call))
@@ -629,7 +705,11 @@ impl RunLoop<'_> {
 pub(super) fn typed_allow_takes_effect(
     mode: Option<crate::tools::permissions::PermissionMode>,
 ) -> bool {
-    mode == Some(crate::tools::permissions::PermissionMode::Default)
+    use crate::tools::permissions::PermissionMode;
+    matches!(
+        mode,
+        Some(PermissionMode::Default | PermissionMode::AcceptEdits | PermissionMode::Auto)
+    )
 }
 
 pub(super) fn remember_candidate(
@@ -685,6 +765,7 @@ mod host_prefix_tests {
         let (decision, basis, approval) = config.evaluate(&call);
         let facts = HostReuseFacts {
             host: true,
+            primary: true,
             settings_admitted: true,
             mode: Some(config.mode()),
             terminal_mode: Some(ApprovalMode::Request),
@@ -712,6 +793,7 @@ mod host_prefix_tests {
     fn host_prefix_reuse_requires_every_admitted_fact() {
         let baseline = HostReuseFacts {
             host: true,
+            primary: true,
             settings_admitted: true,
             mode: Some(Mode::Default),
             terminal_mode: Some(ApprovalMode::Request),
@@ -731,6 +813,30 @@ mod host_prefix_tests {
             decide_host_prefix(&baseline, Some(Decision::Allow), true, true),
             HostPrefixDecision::Reuse
         );
+        for mode in [Mode::Auto, Mode::AcceptEdits] {
+            let facts = HostReuseFacts {
+                mode: Some(mode),
+                terminal_mode: Some(ApprovalMode::Auto),
+                ..baseline
+            };
+            assert_eq!(
+                decide_host_prefix(&facts, Some(Decision::Allow), true, true),
+                HostPrefixDecision::Reuse
+            );
+        }
+        let child = HostReuseFacts {
+            primary: false,
+            ..baseline
+        };
+        assert_eq!(
+            decide_host_prefix(&child, Some(Decision::Allow), true, true),
+            HostPrefixDecision::Reuse
+        );
+        assert_eq!(
+            decide_host_prefix(&child, None, true, true),
+            HostPrefixDecision::NoReuse
+        );
+        assert_eq!(decide_host_reuse(&child), HostReuse::OnceOnly);
         for terminal_mode in [None, Some(ApprovalMode::Request)] {
             let facts = HostReuseFacts {
                 terminal_mode,
@@ -766,43 +872,7 @@ mod host_prefix_tests {
             ),
             (
                 HostReuseFacts {
-                    mode: Some(Mode::Auto),
-                    ..baseline
-                },
-                Some(Decision::Allow),
-                true,
-                true,
-            ),
-            (
-                HostReuseFacts {
-                    mode: Some(Mode::AcceptEdits),
-                    ..baseline
-                },
-                Some(Decision::Allow),
-                true,
-                true,
-            ),
-            (
-                HostReuseFacts {
                     mode: Some(Mode::Plan),
-                    ..baseline
-                },
-                Some(Decision::Allow),
-                true,
-                true,
-            ),
-            (
-                HostReuseFacts {
-                    terminal_mode: Some(ApprovalMode::Auto),
-                    ..baseline
-                },
-                Some(Decision::Allow),
-                true,
-                true,
-            ),
-            (
-                HostReuseFacts {
-                    terminal_mode: Some(ApprovalMode::AutoEdits),
                     ..baseline
                 },
                 Some(Decision::Allow),
@@ -906,14 +976,15 @@ pub(super) mod reuse_tests {
         let catalog = ToolCall::McpList {
             server: "server".into(),
         };
-        let restriction = allow(PermissionSource::Rule).narrow_definition(&definition, &catalog);
-        assert_eq!(restriction.decision, Decision::Ask);
-        assert_eq!(restriction.basis, PermissionSource::Mode);
-        assert_eq!(restriction.approval, Some(ApprovalMode::Auto));
+        let sandboxed = allow(PermissionSource::Rule).narrow_definition(&definition, &catalog);
+        assert_eq!(
+            (sandboxed.decision, sandboxed.basis, sandboxed.approval),
+            (Decision::Allow, PermissionSource::Rule, None)
+        );
     }
 
     #[test]
-    fn typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review() {
+    fn typed_prefix_allow_skips_the_prompt_and_the_review_in_every_mode() {
         let commit = ToolCall::GitCommit {
             message: "m".into(),
             paths: vec!["src/lib.rs".into()],
@@ -923,7 +994,7 @@ pub(super) mod reuse_tests {
         for (mode, asks) in [
             (ApprovalMode::Request, false),
             (ApprovalMode::AutoEdits, false),
-            (ApprovalMode::Auto, true),
+            (ApprovalMode::Auto, false),
         ] {
             let narrowed = typed.narrow_terminal(Some(mode), &commit);
             assert_eq!(narrowed.decision == Decision::Ask, asks, "{mode:?}");
@@ -956,6 +1027,7 @@ pub(super) mod reuse_tests {
         use crate::tools::permissions::PermissionMode as M;
         let baseline = HostReuseFacts {
             host: true,
+            primary: true,
             settings_admitted: true,
             mode: Some(M::Default),
             terminal_mode: Some(ApprovalMode::Request),
@@ -1117,14 +1189,10 @@ pub(super) mod reuse_tests {
     fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
         use super::typed_allow_takes_effect;
         use crate::tools::permissions::PermissionMode as M;
-        assert!(typed_allow_takes_effect(Some(M::Default)));
-        for mode in [
-            None,
-            Some(M::AcceptEdits),
-            Some(M::Plan),
-            Some(M::Auto),
-            Some(M::DontAsk),
-        ] {
+        for mode in [M::Default, M::AcceptEdits, M::Auto] {
+            assert!(typed_allow_takes_effect(Some(mode)), "{mode:?}");
+        }
+        for mode in [None, Some(M::Plan), Some(M::DontAsk)] {
             assert!(!typed_allow_takes_effect(mode), "{mode:?}");
         }
     }

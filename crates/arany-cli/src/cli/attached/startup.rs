@@ -96,12 +96,22 @@ pub(super) async fn start(
     startup.archived_history = archived;
     if let Ok(state) = StateRoot::open_existing(&startup.admission.state_dir)
         && let Ok(environment) = arany::CommandEnvironment::load(&state)
-        && environment.process_path_differs()
     {
-        append_notice(
-            &mut startup.setup_notice,
-            "Process PATH differs from the pinned command environment; use /permissions → Command environment to capture explicitly",
-        );
+        if environment.process_path_differs() {
+            append_notice(
+                &mut startup.setup_notice,
+                "Process PATH differs from the pinned command environment; use /permissions → Command environment to capture explicitly",
+            );
+        }
+        if environment.path_over_guard_limit() {
+            append_notice(
+                &mut startup.setup_notice,
+                &format!(
+                    "Commands see only the first {} PATH directories; shorten PATH to reach the rest",
+                    arany::MAX_DISCOVERY_PATH_ENTRIES
+                ),
+            );
+        }
     }
     let explicit_provider = startup.admission.defaults.provider.is_some();
     startup.restore_chatgpt_account();

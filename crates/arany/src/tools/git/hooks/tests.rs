@@ -82,15 +82,17 @@ fn hooked_runtime(temp: &Path, workspace: &Path) -> crate::tools::ToolRuntime {
 }
 
 fn commit(runtime: &crate::tools::ToolRuntime, path: &str) -> serde_json::Value {
-    let intent = runtime.intent(
-        crate::RunId::new(),
-        crate::AgentRunId::new(),
-        crate::tools::ToolCall::GitCommit {
-            message: "hooked".into(),
-            paths: vec![path.into()],
-            staged: false,
-        },
-    );
+    let intent = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            crate::tools::ToolCall::GitCommit {
+                message: "hooked".into(),
+                paths: vec![path.into()],
+                staged: false,
+            },
+        )
+        .unwrap();
     let observation = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

@@ -897,8 +897,8 @@ fn admitted_host_prefixes_follow_h1_without_acp_permission_requests() {
             for (mode, rule, restriction, allowed) in [
                 ("default", true, None, true),
                 ("dontAsk", true, None, true),
-                ("auto", true, None, false),
-                ("acceptEdits", true, None, false),
+                ("auto", true, None, true),
+                ("acceptEdits", true, None, true),
                 ("default", false, None, false),
                 ("default", true, Some("ask"), false),
                 ("dontAsk", true, Some("ask"), false),

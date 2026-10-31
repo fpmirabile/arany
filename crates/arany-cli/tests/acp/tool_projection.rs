@@ -326,6 +326,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     });
     for (call, kind) in [
         (intent.call.clone(), "execute"),
@@ -404,6 +405,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     adapter.permission(&big, 100).await;
     let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =

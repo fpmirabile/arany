@@ -248,17 +248,20 @@ mod tests {
             temp.path(),
             serde_json::json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
         );
-        let intent = runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Command {
-                program: "shell".into(),
-                args: vec![],
-                cwd: "".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "shell".into(),
+                    args: vec![],
+                    cwd: "".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         let mut stdout = super::super::output::Window::capturing(4096);
         stdout
             .push(bytes, super::super::output::DRAIN_BYTES)
@@ -400,15 +403,17 @@ mod tests {
                 limit: None
             }));
         }
-        let intent = runtime.intent(
-            crate::RunId::new(),
-            crate::AgentRunId::new(),
-            ToolCall::Read {
-                path: format!("spill:{}", "a".repeat(64)),
-                offset: None,
-                limit: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::RunId::new(),
+                crate::AgentRunId::new(),
+                ToolCall::Read {
+                    path: format!("spill:{}", "a".repeat(64)),
+                    offset: None,
+                    limit: None,
+                },
+            )
+            .unwrap();
         let observation = runtime
             .execute(intent, super::super::Cancellation::new())
             .await;

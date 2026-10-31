@@ -534,6 +534,7 @@ pub fn uncertain_hook_fixture() -> crate::ToolView {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     observation.disposition = crate::ToolDisposition::Uncertain;
     observation.cache_update = crate::CacheUpdate::NotAttempted;

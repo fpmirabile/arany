@@ -400,6 +400,7 @@ mod tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,

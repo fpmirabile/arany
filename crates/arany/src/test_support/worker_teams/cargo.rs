@@ -60,6 +60,7 @@ fn cargo(script: &str) -> ProviderOutcome {
         cwd: ".".into(),
         resource_class: Some(ToolResourceClass::Build),
         timeout_ms: None,
+        additional_reads: None,
     })
 }
 

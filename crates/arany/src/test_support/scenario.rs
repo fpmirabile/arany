@@ -864,11 +864,11 @@ test "$(arany-pyenv-tool)" = ran-pyenv
 test "$(arany-volta-tool)" = ran-volta
 test "$(arany-brew-tool)" = ran-brew
 test "$(arany-rustup-tool)" = ran-rustup
-test "$(arany-collide)" = collide-local
+test "$(arany-collide)" = collide-pyenv
 test "$PYENV_ROOT" = "{home}/.pyenv"
 test "$VOLTA_HOME" = "{home}/.volta"
 test "$RUSTUP_HOME" = "{home}/.rustup"
-test "$PATH" = "{local}:{pyenv}:/opt/homebrew/bin:/opt/homebrew/Cellar/rustup/1.0/libexec/bin:{volta}:/usr/bin:/bin"
+test "$PATH" = "{pyenv}:/opt/homebrew/Cellar/rustup/1.0/libexec/bin:{volta}:{local}:/opt/homebrew/bin:/usr/bin:/bin"
 case "$HOME" in /scratch*) ;; *) exit 91 ;; esac
 test "$HOME" = "$TMPDIR"
 if (printf changed > "{local}/arany-local-tool") 2>/dev/null; then exit 92; fi
@@ -1016,14 +1016,14 @@ pub async fn guarded_user_programs_journey(root: &Path, workspace: &Path, guard:
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let state = root.join("state");
     let (outcome, provider) = run_user_program_command(workspace, guard, &state, &call).await;
     assert_user_programs_ran(&state, &provider, outcome).await;
 
+    // Selected shims and their roots stay pinned; automatic PATH directories are simply re-granted.
     for directory in [
-        home.join(".local/bin"),
-        root.join("homebrew/bin"),
         root.join("homebrew/Cellar/rustup/1.0/libexec/bin"),
         home.join(".rustup"),
     ] {
@@ -1093,6 +1093,13 @@ pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard:
     let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
     select_offline_cargo_profiles(workspace);
     let state = root.join("cargo-state");
+    // Below this free space every cache session evicts the prior cache, so "warm" would find none.
+    let capacity = rustix::fs::statvfs(root).unwrap();
+    assert!(
+        capacity.f_bavail.saturating_mul(capacity.f_frsize)
+            >= crate::tools::types::GUARD_DISK_EVICTION_BYTES,
+        "the warm case needs the cache volume to keep the eviction floor free"
+    );
     let cores = u32::try_from(std::thread::available_parallelism().unwrap().get()).unwrap();
     let jobs = cores.min(2);
     for (case, script, success) in [
@@ -1195,6 +1202,7 @@ printf cache-changed
             cwd: String::new(),
             resource_class: (case == "guarded").then_some(ToolResourceClass::Build),
             timeout_ms: (case == "guarded").then_some(crate::tools::types::MAX_COMMAND_TIMEOUT_MS),
+            additional_reads: None,
         };
         let mut steps = vec![
             plan_outcome(GoalPlanContract {
@@ -1219,8 +1227,23 @@ printf cache-changed
             steps.remove(0);
         }
         let provider = Arc::new(ScriptedProvider::new(steps));
+        let root = StateRoot::admit(&state).unwrap();
+        // Every PATH directory is granted, so only the selected profiles may reach a toolchain here.
+        crate::CommandEnvironment::for_path("/usr/bin:/bin")
+            .save(&root)
+            .unwrap();
+        // Sandboxed commands ask nothing; the cancellation cases keep a human gate through an ask rule.
+        let human_gate = matches!(case, "cancelled" | "cancelled-report");
+        let settings: &[u8] = if human_gate {
+            br#"{"permissions":{"ask":["Bash"]}}"#
+        } else {
+            b"{}"
+        };
+        root.record(crate::RecordKind::Permissions)
+            .replace(settings)
+            .unwrap();
         let engine = Engine::open(
-            StateRoot::admit(&state).unwrap(),
+            root,
             EngineConfig {
                 guard_executable: Some(guard.to_path_buf()),
                 ..Default::default()
@@ -1245,6 +1268,13 @@ printf cache-changed
             },
         );
         let approve = async {
+            if !human_gate {
+                assert!(
+                    inbox.next().await.is_none(),
+                    "{case}: a sandboxed command asked"
+                );
+                return None;
+            }
             let approval = inbox.next().await.expect("one exact command approval");
             assert_eq!(approval.intent.call, call);
             assert_eq!(
@@ -1312,6 +1342,16 @@ printf cache-changed
             .as_ref()
             .expect("Cargo observation");
         assert_eq!(run.tools.len(), 1);
+        if !human_gate {
+            assert_eq!(
+                run.tools[0]
+                    .permission_verdict
+                    .as_ref()
+                    .map(|verdict| verdict.source),
+                Some(crate::permissions::PermissionSource::Mode),
+                "{case}"
+            );
+        }
         assert_eq!(replay.goals[0].resource_settings.build_jobs, Some(jobs));
         assert_eq!(observation.intent.limits.build_jobs, jobs);
         assert_eq!(

@@ -18,6 +18,38 @@ pub struct HostPrefixRule {
     pub cwd: String,
 }
 
+// Launchers of other programs beyond the interpreter, wrapper and privilege sets: their approval
+// offers only the exact command, never a derived prefix.
+const UNDERIVED_LAUNCHERS: [&str; 2] = ["osascript", "python"];
+
+// Without a model proposal, the approval offers the first two argv tokens as Claude Code's "Always allow".
+pub(crate) fn fill_host_prefix(call: &mut ToolCall) {
+    let ToolCall::CommandUnguarded {
+        program,
+        args,
+        prefix_rule: prefix_rule @ None,
+        ..
+    } = call
+    else {
+        return;
+    };
+    let Some(first) = args.first() else {
+        return;
+    };
+    let name = Path::new(program.as_str())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    let prefix = vec![program.clone(), first.clone()];
+    if !UNDERIVED_LAUNCHERS
+        .iter()
+        .any(|launcher| name.starts_with(launcher))
+        && eligible(program, &prefix)
+    {
+        *prefix_rule = Some(prefix);
+    }
+}
+
 fn eligible(program: &str, tokens: &[String]) -> bool {
     !crate::tools::unguarded::prohibited(program, tokens)
         && !crate::tools::unguarded::wrapper(program)

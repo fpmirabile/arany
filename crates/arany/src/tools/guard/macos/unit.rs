@@ -1908,6 +1908,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             limits: ToolLimits {
                 cache_transfer_ms: 1_000,
@@ -2427,10 +2428,13 @@ done
         ToolRuntime {
             git_environment: None,
             git_hooks: None,
+            repository: None,
             human_approvals: false,
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available: true,
+            guard_mode: crate::tools::GuardMode::Auto,
+            once_reads: Default::default(),
             handover: None,
             definitions: Default::default(),
             permissions: None,
@@ -2576,6 +2580,7 @@ done
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let mut stage = super::super::super::BootstrapStage::Workspace;
         assert!(matches!(
@@ -3672,6 +3677,7 @@ int main(int argc, char **argv) {
                             cwd: ".".into(),
                             resource_class: None,
                             timeout_ms: None,
+                            additional_reads: None,
                         },
                         limits: limits.clone(),
                         use_count: 1,

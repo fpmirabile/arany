@@ -62,11 +62,13 @@ fn supervisor_launch_never_executes_a_path_replacement() {
     );
     runtime.guard_executable = root.path().join("guard");
     std::fs::copy("/usr/bin/echo", &runtime.guard_executable).unwrap();
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        ToolCall::List { path: ".".into() },
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::List { path: ".".into() },
+        )
+        .unwrap();
     let (command, executable) = unit_command(
         &runtime,
         &intent,

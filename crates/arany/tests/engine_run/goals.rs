@@ -807,6 +807,7 @@ async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_ref
             cwd: cwd.into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let provider = Arc::new(ScriptedProvider::new(
             std::iter::once(crate::tool_outcome(facts_read()))
@@ -2123,6 +2124,7 @@ async fn worst_case_reserve_alone_neither_clears_nor_summarizes_before_a_command
         cwd: "notes".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let provider = Arc::new(ScriptedProvider::new(
         (0..4)
@@ -2217,6 +2219,7 @@ async fn near_full_context_refuses_command_before_dispatch() {
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(command)]));
     let mut input = request(&workspace, &"x".repeat(60 * 1024));

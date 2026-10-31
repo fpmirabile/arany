@@ -89,6 +89,7 @@ async fn late_approval_keeps_file_and_executable_preconditions() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         };
         let provider = Arc::new(ScriptedProvider::new(vec![

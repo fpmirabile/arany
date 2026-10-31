@@ -24,11 +24,11 @@ impl ToolRuntime {
             && intent.limits.build_cpu_cores == ToolLimits::default().build_cpu_cores
             && intent.limits.network == NetworkGrant::None
         {
-            return Ok(self.process_enforcement_digest);
+            return self.process_digest(&intent.call);
         }
         super::guard::intent_enforcement_digest(
             true,
-            &self.config.runtime_grants,
+            &self.process_config(&intent.call)?.runtime_grants,
             &intent.limits,
             #[cfg(target_os = "macos")]
             self.system_programs.as_deref(),
@@ -38,6 +38,8 @@ impl ToolRuntime {
 
 pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
 pub(super) const MAX_COMMAND_ARGS: usize = 64;
+pub(super) const MAX_JUSTIFICATION_BYTES: usize = 512;
+pub(crate) const MAX_ADDITIONAL_READS_PER_CALL: usize = 4;
 
 #[derive(Clone, Copy)]
 pub(super) enum Truncation {
@@ -52,10 +54,19 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             args,
             cwd,
             timeout_ms,
+            additional_reads,
             ..
         } => {
             (valid_name(program) || super::config::valid_absolute(program))
                 && valid_command("command", args, cwd)
+                && additional_reads.as_ref().is_none_or(|request| {
+                    (1..=MAX_ADDITIONAL_READS_PER_CALL).contains(&request.paths.len())
+                        && request.paths.iter().enumerate().all(|(index, path)| {
+                            super::config::valid_absolute(path)
+                                && !request.paths[..index].contains(path)
+                        })
+                        && valid_justification(&request.justification)
+                })
                 && timeout_ms.is_none_or(|timeout| {
                     (super::types::MIN_COMMAND_TIMEOUT_MS..=super::types::MAX_COMMAND_TIMEOUT_MS)
                         .contains(&timeout)
@@ -80,13 +91,17 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                     && program.len() <= MAX_PATH_BYTES
                     && !program.chars().any(char::is_control)))
                 && valid_command("host", args, cwd)
-                && (1..=512).contains(&justification.len())
-                && !justification
-                    .chars()
-                    .any(|character| character.is_control() && character != '\t')
+                && valid_justification(justification)
         }
         _ => false,
     }
+}
+
+fn valid_justification(justification: &str) -> bool {
+    (1..=MAX_JUSTIFICATION_BYTES).contains(&justification.len())
+        && !justification
+            .chars()
+            .any(|character| character.is_control() && character != '\t')
 }
 
 pub(super) fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
@@ -107,6 +122,7 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
     if name == "command" {
         fields.push(("resource_class", json!({"type":["string","null"], "enum":["default","build",null], "description":"Optional resource sizing: build for compile and test commands; null inherits the plan or default class. Never widens a recorded plan or grants access."})));
         fields.push(("timeout_ms", json!({"type":["integer","null"], "description":format!("Optional command timeout in milliseconds, {} through {} inclusive; null inherits the plan or pinned default. The pinned maximum and any recorded plan remain ceilings.", super::types::MIN_COMMAND_TIMEOUT_MS, super::types::MAX_COMMAND_TIMEOUT_MS)})));
+        fields.push(("additional_reads", json!({"type":["object","null"], "properties":{"paths":{"type":"array","items":{"type":"string"}},"justification":{"type":"string"}}, "required":["paths","justification"], "additionalProperties":false, "description":format!("Optional request, needing the user's approval, to read and execute up to {MAX_ADDITIONAL_READS_PER_CALL} absolute host directories outside the granted set, with a short reason; null for none. Never writable. Directories the user already allowed need no request.")})));
     }
     if name == "command_unguarded" {
         fields.push(("justification", string()));
@@ -458,17 +474,20 @@ mod tests {
         runtime.config.runtime_grants = serde_json::from_value(json!([{"kind":"rust","manager":"rustup","version":version,"path":directory.path().join(".rustup/toolchains").join(version),"device":1,"inode":1}])).unwrap();
         runtime.process_enforcement_digest =
             super::super::guard::enforcement_digest(&runtime.config.runtime_grants).unwrap();
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Command {
-                program: "sh".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         intent.limits.resource_class = super::super::ToolResourceClass::Build;
         intent.limits.build_jobs = 2;
         intent.limits.cache_bytes = 0;

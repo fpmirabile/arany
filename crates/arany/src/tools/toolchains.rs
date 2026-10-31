@@ -1,13 +1,22 @@
 use super::{ToolError, fs};
-use crate::validate::MAX_PATH_BYTES;
+use crate::validate::{MAX_PATH_BYTES, forbidden};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 
 const EXCLUSIVE_RUNTIME_GRANTS: usize = 11;
-pub(crate) const MAX_USER_PROGRAM_GRANTS: usize = 8;
+pub(crate) const MAX_USER_PROGRAM_GRANTS: usize = MAX_DISCOVERY_PATH_ENTRIES;
 pub(crate) const MAX_MANAGER_SHIM_GRANTS: usize = 4;
-pub(crate) const MAX_RUNTIME_GRANTS: usize =
-    EXCLUSIVE_RUNTIME_GRANTS + MAX_USER_PROGRAM_GRANTS + MAX_MANAGER_SHIM_GRANTS;
+pub(crate) const MAX_LINK_TARGET_GRANTS: usize = 16;
+pub(crate) const MAX_LINK_SCAN_ENTRIES: usize = 16_384;
+const MAX_EXTRA_READ_GRANTS: usize =
+    super::guard_settings::MAX_SAVED_READ_GRANTS + super::guard_settings::MAX_RUN_READ_GRANTS;
+pub(crate) const MAX_RUNTIME_GRANTS: usize = EXCLUSIVE_RUNTIME_GRANTS
+    + MAX_USER_PROGRAM_GRANTS
+    + MAX_MANAGER_SHIM_GRANTS
+    + MAX_LINK_TARGET_GRANTS
+    + MAX_EXTRA_READ_GRANTS;
+// Homes are never system runtime, whoever owns them.
+const HOME_ROOTS: [&str; 4] = ["/home", "/Users", "/root", "/private/var/root"];
 const MAX_TOOLCHAIN_CANDIDATES: usize = 64;
 const MAX_DIRECTORY_ENTRIES: usize = 128;
 #[cfg(target_os = "macos")]
@@ -45,6 +54,8 @@ pub(crate) enum RuntimeKind {
     AppleSdk,
     UserPrograms,
     ManagerShims,
+    LinkTarget,
+    ExtraRead,
 }
 
 struct ShimEntry {
@@ -94,7 +105,7 @@ const MANAGER_SHIMS: [ShimEntry; 5] = [
 ];
 
 const MAX_DISCOVERY_PATH_BYTES: usize = super::command_environment::PATH_LIMIT_BYTES;
-pub(crate) const MAX_DISCOVERY_PATH_ENTRIES: usize = 32;
+pub const MAX_DISCOVERY_PATH_ENTRIES: usize = 32;
 
 const HOMEBREW_PREFIXES: [&str; 3] = ["/home/linuxbrew/.linuxbrew", "/opt/homebrew", "/usr/local"];
 // Homebrew's opt/rustup/bin holds bash wrappers; SIP strips the page-size interposer from bash, so
@@ -119,10 +130,20 @@ impl RuntimeKind {
             Self::AppleSdk => "macOS SDK",
             Self::UserPrograms => "User programs",
             Self::ManagerShims => "Manager shims",
+            Self::LinkTarget => "System link target",
+            Self::ExtraRead => "Extra read",
         }
     }
 
     pub(crate) fn is_multi(self) -> bool {
+        matches!(
+            self,
+            Self::UserPrograms | Self::ManagerShims | Self::LinkTarget | Self::ExtraRead
+        )
+    }
+
+    // Link targets read and execute in place but never join the Guard PATH.
+    pub(crate) fn on_path(self) -> bool {
         matches!(self, Self::UserPrograms | Self::ManagerShims)
     }
 
@@ -173,6 +194,8 @@ impl RuntimeKind {
             Self::AppleSdk => "apple-sdk",
             Self::UserPrograms => "user-programs",
             Self::ManagerShims => "manager-shims",
+            Self::LinkTarget => "link-target",
+            Self::ExtraRead => "extra-read",
         }
     }
 
@@ -220,7 +243,7 @@ pub(crate) struct GrantRoot {
 }
 
 impl GrantRoot {
-    fn valid_shape(&self) -> bool {
+    pub(crate) fn valid_shape(&self) -> bool {
         self.inode != 0
             && self.path.is_absolute()
             && self.path.as_os_str().len() <= MAX_PATH_BYTES
@@ -266,9 +289,10 @@ impl RuntimeGrant {
             self.version.as_deref().unwrap_or(match self.kind {
                 RuntimeKind::AppleCompiler => "selected CLT compiler",
                 RuntimeKind::AppleSdk => "selected physical SDK",
-                RuntimeKind::UserPrograms | RuntimeKind::ManagerShims => {
-                    "runs whatever the directory currently holds"
-                }
+                RuntimeKind::UserPrograms
+                | RuntimeKind::ManagerShims
+                | RuntimeKind::LinkTarget
+                | RuntimeKind::ExtraRead => "runs whatever the directory currently holds",
                 _ => "selected cache",
             }),
             self.path.display()
@@ -411,6 +435,9 @@ impl RuntimeGrant {
             return false;
         }
         match self.kind {
+            RuntimeKind::LinkTarget | RuntimeKind::ExtraRead => {
+                self.manager == RuntimeManager::UserDirectory && self.root.is_none()
+            }
             RuntimeKind::UserPrograms => {
                 self.manager == RuntimeManager::UserDirectory
                     && self
@@ -584,11 +611,14 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
     Ok(candidates)
 }
 
+// Every PATH directory is granted per Run, so consent offers only manager shims and their roots.
 pub(crate) fn discover_user_environment(
     home: &Path,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Vec<Candidate>, ToolError> {
-    discover_user_programs(home, path, &HOMEBREW_PREFIXES)
+    let mut candidates = discover_user_programs(home, path, &HOMEBREW_PREFIXES)?;
+    candidates.retain(|candidate| candidate.grant.kind == RuntimeKind::ManagerShims);
+    Ok(candidates)
 }
 
 pub(crate) fn discover_user_programs(
@@ -599,24 +629,8 @@ pub(crate) fn discover_user_programs(
     if !home.is_absolute() {
         return Err(ToolError::Path);
     }
-    let entries = scoped_path_entries(home, path, prefixes)?;
+    let entries = scoped_path_entries(path)?;
     let shims = shim_candidates(home, prefixes)?;
-    let mut on_path = Vec::new();
-    let mut off_path = Vec::new();
-    for (logical, grant) in &shims {
-        let list = if entries.contains(logical) {
-            &mut on_path
-        } else {
-            &mut off_path
-        };
-        if !list.contains(&grant.manager) {
-            list.push(grant.manager);
-        }
-    }
-    off_path.retain(|manager| !on_path.contains(manager));
-    if entries.len() + off_path.len() > MAX_DISCOVERY_PATH_ENTRIES {
-        return Err(ToolError::Limit);
-    }
     let mut candidates = Vec::new();
     for grant in order_by_environment(entries, shims, prefixes)? {
         push_candidate(&mut candidates, grant)?;
@@ -624,30 +638,159 @@ pub(crate) fn discover_user_programs(
     Ok(candidates)
 }
 
-fn scoped_path_entries(
-    home: &Path,
-    path: Option<&std::ffi::OsStr>,
-    prefixes: &[&str],
-) -> Result<Vec<PathBuf>, ToolError> {
+fn scoped_path_entries(path: Option<&std::ffi::OsStr>) -> Result<Vec<PathBuf>, ToolError> {
     if path.is_some_and(|path| path.len() > MAX_DISCOVERY_PATH_BYTES) {
         return Err(ToolError::Limit);
     }
+    let mut entries = distinct_path_entries(path);
+    entries.truncate(MAX_DISCOVERY_PATH_ENTRIES);
+    Ok(entries)
+}
+
+pub(crate) fn path_entries_truncated(path: &str) -> bool {
+    distinct_path_entries(Some(std::ffi::OsStr::new(path))).len() > MAX_DISCOVERY_PATH_ENTRIES
+}
+
+fn distinct_path_entries(path: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     let mut entries = Vec::new();
-    // Nested shells repeat PATH entries; the first occurrence keeps its search order.
     for entry in path.map(std::env::split_paths).into_iter().flatten() {
-        if entry
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
-            && (entry.starts_with(home) || prefixes.iter().any(|prefix| entry.starts_with(prefix)))
+        if entry.is_absolute()
+            && entry.components().all(|part| match part {
+                Component::RootDir => true,
+                Component::Normal(name) => name.to_str().is_some_and(|name| !forbidden(name)),
+                _ => false,
+            })
+            && !platform_program_directory(&entry)
             && !entries.contains(&entry)
         {
             entries.push(entry);
         }
     }
-    if entries.len() > MAX_DISCOVERY_PATH_ENTRIES {
-        return Err(ToolError::Limit);
+    entries
+}
+
+// macOS platform binaries can carry entitlements, so only the per-program system catalogue admits them.
+fn platform_program_directory(path: &Path) -> bool {
+    super::executable::EXECUTABLES
+        .platform_roots
+        .iter()
+        .any(|root| path.starts_with(root))
+}
+
+pub(crate) fn path_grants(
+    path: &str,
+    saved: &[RuntimeGrant],
+    protected: &[&Path],
+) -> Result<Vec<RuntimeGrant>, ToolError> {
+    let mut grants: Vec<RuntimeGrant> = Vec::new();
+    for entry in scoped_path_entries(Some(std::ffi::OsStr::new(path)))? {
+        // An entry that cannot be pinned safely is left out rather than failing the Run.
+        let Ok(Some(grant)) = user_program_grant(entry, &HOMEBREW_PREFIXES) else {
+            continue;
+        };
+        if saved
+            .iter()
+            .chain(&grants)
+            .any(|other| other.path == grant.path)
+            || grant.reject_overlap(protected).is_err()
+            || !grant.in_system_root(&grant.path) && super::guard::reserved_target(&grant.path)
+        {
+            continue;
+        }
+        grants.push(grant);
     }
-    Ok(entries)
+    Ok(grants)
+}
+
+// A program in a granted directory that links outside every grant brings its target directory along
+// when that directory is system-owned, so `/usr/local/bin/node -> /opt/node/bin/node` runs.
+pub(crate) fn link_target_grants(
+    grants: &[RuntimeGrant],
+    protected: &[&Path],
+) -> Vec<RuntimeGrant> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut targets: Vec<RuntimeGrant> = Vec::new();
+    let mut budget = MAX_LINK_SCAN_ENTRIES;
+    let directories = grants
+        .iter()
+        .filter(|grant| grant.kind.on_path())
+        .map(|grant| grant.path.clone())
+        .chain(["/usr/bin", "/bin"].map(PathBuf::from));
+    for directory in directories {
+        let Ok(listing) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        let mut names = listing
+            .take(budget)
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_symlink()))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        budget = budget.saturating_sub(names.len());
+        names.sort();
+        for link in names {
+            if targets.len() == MAX_LINK_TARGET_GRANTS {
+                return targets;
+            }
+            let Some(target) = system_link_target(&link, home.as_deref()) else {
+                continue;
+            };
+            let covered = super::guard::runtime_roots()
+                .iter()
+                .map(Path::new)
+                .chain(grants.iter().chain(&targets).flat_map(|grant| {
+                    std::iter::once(grant.path.as_path())
+                        .chain(grant.root.as_ref().map(|root| root.path.as_path()))
+                }))
+                .any(|granted| target.starts_with(granted));
+            if covered {
+                continue;
+            }
+            if let Ok(Some(grant)) = admit_directory(
+                RuntimeKind::LinkTarget,
+                RuntimeManager::UserDirectory,
+                None,
+                target,
+                None,
+            ) && grant.reject_overlap(protected).is_ok()
+                && !super::guard::reserved_target(&grant.path)
+            {
+                targets.push(grant);
+            }
+        }
+    }
+    targets
+}
+
+fn system_link_target(link: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let resolved = std::fs::canonicalize(link).ok()?;
+    let metadata = std::fs::metadata(&resolved).ok()?;
+    if !metadata.is_file() || metadata.mode() & 0o111 == 0 {
+        return None;
+    }
+    let directory = resolved.parent()?.to_owned();
+    let names = directory
+        .components()
+        .filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let system_owned = directory.ancestors().all(|ancestor| {
+        std::fs::symlink_metadata(ancestor)
+            .is_ok_and(|metadata| metadata.uid() == 0 && metadata.mode() & 0o022 == 0)
+    });
+    (names.len() >= 2
+        && !names.iter().any(|name| forbidden(name))
+        && !platform_program_directory(&directory)
+        && system_owned
+        && !HOME_ROOTS
+            .iter()
+            .map(Path::new)
+            .chain(home)
+            .any(|home| directory.starts_with(home) || home.starts_with(&directory)))
+    .then_some(directory)
 }
 
 fn shim_candidates(
@@ -842,7 +985,7 @@ pub(super) fn default_profile_selection(
             }
             NpmCache => selected.contains_key(&Node),
             PipHttpCache | PipWheelCache => selected.contains_key(&Python),
-            UserPrograms | ManagerShims => false,
+            UserPrograms | ManagerShims | LinkTarget | ExtraRead => false,
         };
         if !enabled || selected.contains_key(&kind) {
             continue;
@@ -857,7 +1000,8 @@ pub(super) fn default_profile_selection(
                     }
                     AppleSdk => valid_apple_sdk_version(candidate.grant.version.as_deref()?)?,
                     CargoCache | CargoSource | CargoIndex | NpmCache | PipHttpCache
-                    | PipWheelCache | AppleCompiler | UserPrograms | ManagerShims => (0, 0, 0),
+                    | PipWheelCache | AppleCompiler | UserPrograms | ManagerShims | LinkTarget
+                    | ExtraRead => (0, 0, 0),
                 };
                 Some((candidate, version))
             })
@@ -908,6 +1052,8 @@ pub(crate) fn validate_selection(grants: &[RuntimeGrant]) -> Result<(), ToolErro
     let mut identities = std::collections::BTreeSet::new();
     let mut managers = Vec::new();
     let mut user_programs = 0;
+    let mut link_targets = 0;
+    let mut extra_reads = 0;
     for grant in grants {
         grant.validate_shape()?;
         if !grant.kind.is_multi() {
@@ -922,6 +1068,16 @@ pub(crate) fn validate_selection(grants: &[RuntimeGrant]) -> Result<(), ToolErro
         if grant.kind == RuntimeKind::UserPrograms {
             user_programs += 1;
             if user_programs > MAX_USER_PROGRAM_GRANTS {
+                return Err(ToolError::Limit);
+            }
+        } else if grant.kind == RuntimeKind::LinkTarget {
+            link_targets += 1;
+            if link_targets > MAX_LINK_TARGET_GRANTS {
+                return Err(ToolError::Limit);
+            }
+        } else if grant.kind == RuntimeKind::ExtraRead {
+            extra_reads += 1;
+            if extra_reads > MAX_EXTRA_READ_GRANTS {
                 return Err(ToolError::Limit);
             }
         } else if managers.contains(&grant.manager) {
@@ -982,7 +1138,9 @@ fn has_executables(kind: RuntimeKind, path: &Path) -> bool {
         | RuntimeKind::PipHttpCache
         | RuntimeKind::PipWheelCache
         | RuntimeKind::UserPrograms
-        | RuntimeKind::ManagerShims => true,
+        | RuntimeKind::ManagerShims
+        | RuntimeKind::LinkTarget
+        | RuntimeKind::ExtraRead => true,
     }
 }
 
@@ -1458,7 +1616,7 @@ mod user_environment_tests {
             local.clone(),
             cargo.clone(),
             local.clone(),
-            outside,
+            outside.clone(),
             PathBuf::from("relative/bin"),
             home.join("missing"),
         ]);
@@ -1470,6 +1628,7 @@ mod user_environment_tests {
                 prefix.join("Cellar/rustup/1.0/libexec/bin"),
                 prefix.join("Cellar/tool/1.0/bin"),
                 local,
+                outside,
                 volta.clone()
             ]
         );
@@ -1510,7 +1669,7 @@ mod user_environment_tests {
         assert!(grant.mounts(false).unwrap().is_empty());
         assert_eq!(
             super::super::guard::runtime_path(std::slice::from_ref(grant)).unwrap(),
-            "/usr/local/bin:/usr/bin:/bin"
+            format!("/usr/local/bin:{}", super::super::guard::SYSTEM_PATH)
         );
         let hostile = user_directory(&workspace);
         assert!(hostile.reject_overlap(&[workspace.as_path()]).is_err());
@@ -1520,53 +1679,49 @@ mod user_environment_tests {
     fn discovery_bounds_path_bytes_and_scanned_directories_and_offers_every_survivor() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
-        let directories = (0..MAX_USER_PROGRAM_GRANTS + 2)
-            .map(|index| directory(&home.join(format!("tools/{index}"))))
-            .collect::<Vec<_>>();
-        let path = std::env::join_paths(&directories).unwrap();
-        let candidates = discover_user_programs(&home, Some(&path), &[]).unwrap();
-        assert_eq!(candidates.len(), directories.len());
-
         let many = (0..=MAX_DISCOVERY_PATH_ENTRIES)
-            .map(|index| home.join(format!("tools/{index}")))
+            .map(|index| directory(&temp.path().join(format!("tools/{index}"))))
             .collect::<Vec<_>>();
         let path = std::env::join_paths(&many).unwrap();
-        assert!(matches!(
-            discover_user_programs(&home, Some(&path), &[]),
-            Err(ToolError::Limit)
-        ));
-        let at_bound = std::env::join_paths(&many[..MAX_DISCOVERY_PATH_ENTRIES]).unwrap();
-        discover_user_programs(&home, Some(&at_bound), &[]).unwrap();
+        let candidates = discover_user_programs(&home, Some(&path), &[]).unwrap();
+        assert_eq!(paths(&candidates), many[..MAX_DISCOVERY_PATH_ENTRIES]);
+        assert!(path_entries_truncated(path.to_str().unwrap()));
         let repeated = std::env::join_paths(
             many[..MAX_DISCOVERY_PATH_ENTRIES]
                 .iter()
-                .chain(&many[..MAX_DISCOVERY_PATH_ENTRIES]),
+                .chain(&many[..MAX_DISCOVERY_PATH_ENTRIES])
+                .chain([&home.join(".ssh/bin")]),
         )
         .unwrap();
+        assert!(!path_entries_truncated(repeated.to_str().unwrap()));
         assert_eq!(
-            scoped_path_entries(&home, Some(&repeated), &[]).unwrap(),
+            scoped_path_entries(Some(&repeated)).unwrap(),
             many[..MAX_DISCOVERY_PATH_ENTRIES],
-            "duplicates count once and keep first-occurrence order"
+            "duplicates count once and keep first-occurrence order; protected names never qualify"
         );
-
-        let volta = directory(&home.join(".volta/bin"));
-        assert!(matches!(
-            discover_user_programs(&home, Some(&at_bound), &[]),
-            Err(ToolError::Limit)
-        ));
-        let mut mixed = many[..MAX_DISCOVERY_PATH_ENTRIES].to_vec();
-        mixed.push(volta);
-        let mixed = std::env::join_paths(&mixed).unwrap();
-        assert!(matches!(
-            discover_user_programs(&home, Some(&mixed), &[]),
-            Err(ToolError::Limit)
-        ));
 
         let long = std::ffi::OsString::from("a".repeat(MAX_DISCOVERY_PATH_BYTES + 1));
         assert!(matches!(
             discover_user_programs(&home, Some(&long), &[]),
             Err(ToolError::Limit)
         ));
+    }
+
+    #[test]
+    fn link_targets_grant_only_root_owned_directories_outside_every_grant() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let links = directory(&temp.path().join("links"));
+        let tool = directory(&temp.path().join("tool")).join("run");
+        std::fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", links.join("covered")).unwrap();
+        std::os::unix::fs::symlink(&tool, links.join("user-owned")).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", links.join("not-executable")).unwrap();
+        for link in ["user-owned", "not-executable"] {
+            assert_eq!(system_link_target(&links.join(link), None), None, "{link}");
+        }
+        assert!(link_target_grants(&[user_directory(&links)], &[]).is_empty());
     }
 
     #[test]
@@ -1651,10 +1806,11 @@ mod user_environment_tests {
             ..grant(RuntimeKind::Python, RuntimeManager::Pyenv, &python, None)
         };
         let expected = format!(
-            "{}/bin:{}:{}:/usr/bin:/bin",
+            "{}/bin:{}:{}:{}",
             python.display(),
             local.path.display(),
-            pyenv.path.display()
+            pyenv.path.display(),
+            super::super::guard::SYSTEM_PATH
         );
         assert_eq!(
             super::super::guard::runtime_path(&[local, pyenv, toolchain]).unwrap(),
@@ -1683,6 +1839,8 @@ mod tests {
             RuntimeKind::AppleSdk,
             RuntimeKind::UserPrograms,
             RuntimeKind::ManagerShims,
+            RuntimeKind::LinkTarget,
+            RuntimeKind::ExtraRead,
         ];
         assert_eq!(
             kinds.iter().filter(|kind| !kind.is_multi()).count(),
@@ -1702,13 +1860,14 @@ mod tests {
         }
         let path = std::env::join_paths([&local, &home.join(".cargo/bin")]).unwrap();
         let candidates = discover_user_environment(home, Some(&path)).unwrap();
-        assert_eq!(candidates.len(), 2);
         let grants = candidates
             .iter()
             .map(|candidate| candidate.grant.clone())
             .collect::<Vec<_>>();
-        assert_eq!(grants[0].kind, RuntimeKind::UserPrograms);
-        assert_eq!(grants[1].kind, RuntimeKind::ManagerShims);
+        assert_eq!(
+            grants.iter().map(|grant| grant.kind).collect::<Vec<_>>(),
+            [RuntimeKind::ManagerShims]
+        );
         validate_selection(&grants).unwrap();
         for grant in grants {
             grant.verify_host().unwrap();

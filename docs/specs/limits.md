@@ -77,10 +77,15 @@
 | <a id="command_snapshot_depth"></a>[`COMMAND_SNAPSHOT_DEPTH`](#command_snapshot_depth) | 32 | levels | `crates/arany/src/tools/types.rs` |
 | <a id="command_path_metadata_bytes"></a>[`COMMAND_PATH_METADATA_BYTES`](#command_path_metadata_bytes) | 16777216 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="max_runtime_bytes"></a>[`MAX_RUNTIME_BYTES`](#max_runtime_bytes) | 100663296 | bytes | `crates/arany/src/tools/types.rs` |
-| <a id="max_runtime_grants"></a>[`MAX_RUNTIME_GRANTS`](#max_runtime_grants) | 23 | roots | `crates/arany/src/tools/toolchains.rs` |
-| <a id="max_user_program_grants"></a>[`MAX_USER_PROGRAM_GRANTS`](#max_user_program_grants) | 8 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_runtime_grants"></a>[`MAX_RUNTIME_GRANTS`](#max_runtime_grants) | 111 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_user_program_grants"></a>[`MAX_USER_PROGRAM_GRANTS`](#max_user_program_grants) | 32 | roots | `crates/arany/src/tools/toolchains.rs` |
 | <a id="max_manager_shim_grants"></a>[`MAX_MANAGER_SHIM_GRANTS`](#max_manager_shim_grants) | 4 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_link_target_grants"></a>[`MAX_LINK_TARGET_GRANTS`](#max_link_target_grants) | 16 | roots | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_link_scan_entries"></a>[`MAX_LINK_SCAN_ENTRIES`](#max_link_scan_entries) | 16384 | directory entries | `crates/arany/src/tools/toolchains.rs` |
 | <a id="max_discovery_path_entries"></a>[`MAX_DISCOVERY_PATH_ENTRIES`](#max_discovery_path_entries) | 32 | entries | `crates/arany/src/tools/toolchains.rs` |
+| <a id="max_saved_read_grants"></a>[`MAX_SAVED_READ_GRANTS`](#max_saved_read_grants) | 32 | directories | `crates/arany/src/tools/guard_settings.rs` |
+| <a id="max_run_read_grants"></a>[`MAX_RUN_READ_GRANTS`](#max_run_read_grants) | 16 | directories | `crates/arany/src/tools/guard_settings.rs` |
+| <a id="max_additional_reads_per_call"></a>[`MAX_ADDITIONAL_READS_PER_CALL`](#max_additional_reads_per_call) | 4 | directories | `crates/arany/src/tools/process.rs` |
 | <a id="scratch_bytes"></a>[`SCRATCH_BYTES`](#scratch_bytes) | 67108864 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="guard_disk_reserve_bytes"></a>[`GUARD_DISK_RESERVE_BYTES`](#guard_disk_reserve_bytes) | 2147483648 | bytes | `crates/arany/src/tools/types.rs` |
 | <a id="guard_disk_eviction_bytes"></a>[`GUARD_DISK_EVICTION_BYTES`](#guard_disk_eviction_bytes) | 4294967296 | bytes | `crates/arany/src/tools/types.rs` |

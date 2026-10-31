@@ -96,9 +96,9 @@ impl RunLoop<'_> {
             let run = self.run_id;
             tokio::task::spawn_blocking(move || runtime.intent(run, actor, call))
                 .await
-                .map_err(|_| ToolError::Operation)?
+                .map_err(|_| ToolError::Operation)??
         } else {
-            runtime.intent(self.run_id, actor, call)
+            runtime.intent(self.run_id, actor, call)?
         };
         if command {
             command_limits(
@@ -184,7 +184,7 @@ impl RunLoop<'_> {
         call: ToolCall,
         deadline: Instant,
     ) -> Result<Option<EffectIntent>, EngineError> {
-        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call)?;
         if intent.call.is_web() {
             runtime.bind_egress(&mut intent)?;
         }
@@ -421,6 +421,7 @@ impl RunLoop<'_> {
         self.ledger().view(|view| {
             crate::session::fill_expected_digest(view, self.run_id, actor, &mut call);
         })?;
+        crate::tools::permissions::fill_host_prefix(&mut call);
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
             Grant::Researcher {
@@ -580,9 +581,9 @@ impl RunLoop<'_> {
         };
         let mut intents = Vec::with_capacity(calls.len());
         for call in calls {
-            let intent = runtime.intent(self.run_id, child.agent_run_id, call.clone());
+            let intent = runtime.intent(self.run_id, child.agent_run_id, call.clone())?;
             let permission = self
-                .permission(grant, runtime, &intent.call)
+                .permission(grant, runtime, &intent)
                 .narrow_terminal(self.terminal_mode(), &intent.call);
             if let Err(refusal) = self
                 .admit_tool(grant, runtime, &intent, permission, 0, false)
@@ -613,7 +614,7 @@ impl RunLoop<'_> {
     ) -> Result<(), EngineError> {
         let agent_run_id = intent.agent_run_id;
         let permission = self
-            .permission(grant, runtime, &intent.call)
+            .permission(grant, runtime, &intent)
             .narrow_terminal(self.terminal_mode(), &intent.call);
         let verdict =
             effective_permission_mode(runtime.permissions(), grant).map(|mode| PermissionVerdict {
@@ -689,7 +690,7 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
         narrowable: bool,
     ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, intent);
         let (hook_events, _, _) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
             .admit_tool(grant, runtime, intent, permission, hook_events, narrowable)
@@ -718,7 +719,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, &intent);
         let mut narrowed = None;
         let verdict = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable, None)

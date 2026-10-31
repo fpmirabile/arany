@@ -26,3 +26,45 @@ fn rewritten_host_commands_never_qualify_for_remembered_prefixes() {
     assert!(!rule.dispatch_eligible(&intent));
     assert!(HostPrefixRule::from_intent(&intent, 1).is_err());
 }
+
+#[test]
+fn a_missing_proposal_derives_two_tokens_except_for_launchers() {
+    let call = |program: &str, args: &[&str], prefix_rule: Option<Vec<String>>| {
+        ToolCall::CommandUnguarded {
+            program: program.into(),
+            args: args.iter().map(|arg| (*arg).into()).collect(),
+            cwd: String::new(),
+            justification: "Run it".into(),
+            prefix_rule,
+        }
+    };
+    let derived = |mut call: ToolCall| {
+        fill_host_prefix(&mut call);
+        match call {
+            ToolCall::CommandUnguarded { prefix_rule, .. } => prefix_rule,
+            _ => unreachable!(),
+        }
+    };
+    assert_eq!(
+        derived(call("make", &["build", "--quiet"], None)),
+        Some(vec!["make".into(), "build".into()])
+    );
+    let explicit = Some(vec!["make".into(), "build".into(), "--quiet".into()]);
+    assert_eq!(
+        derived(call("make", &["build", "--quiet"], explicit.clone())),
+        explicit
+    );
+    for (program, args) in [
+        ("sh", &["-c", "make"][..]),
+        ("/usr/bin/env", &["make"][..]),
+        ("sudo", &["make"][..]),
+        ("xargs", &["make"][..]),
+        ("python3.12", &["build.py"][..]),
+        ("osascript", &["script.scpt"][..]),
+        ("node", &["build.js"][..]),
+        ("git", &["push"][..]),
+        ("make", &[][..]),
+    ] {
+        assert_eq!(derived(call(program, args, None)), None, "{program}");
+    }
+}

@@ -54,6 +54,7 @@ fn fixture_call(operation: Operation, path: &str) -> arany::ToolCall {
             cwd: "src".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         Operation::Other | Operation::InvalidProposal => panic!("unsupported latency operation"),
     }

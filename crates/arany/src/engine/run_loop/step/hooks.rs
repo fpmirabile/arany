@@ -252,6 +252,7 @@ fn configured_call(hook: &CommandHook) -> ToolCall {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         Some(args) => ToolCall::Command {
             program: hook.command().into(),
@@ -259,6 +260,7 @@ fn configured_call(hook: &CommandHook) -> ToolCall {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     }
 }
@@ -970,7 +972,7 @@ impl RunLoop<'_> {
             hook.subject,
             MAX_HOOK_INPUT_BYTES,
         );
-        let intent = runtime.intent(self.run_id, hook.agent, call);
+        let intent = runtime.intent(self.run_id, hook.agent, call)?;
         self.journal
             .admit(
                 self.session_id,
@@ -1027,9 +1029,12 @@ impl RunLoop<'_> {
         plans: &[HookPlan],
     ) -> bool {
         plans.iter().all(|plan| {
-            let mut probe = runtime.intent(self.run_id, agent_run_id, plan.call.clone());
-            probe.limits.runtime_ms = u32::MAX;
-            runtime.hook_task_fits(&probe)
+            runtime
+                .intent(self.run_id, agent_run_id, plan.call.clone())
+                .is_ok_and(|mut probe| {
+                    probe.limits.runtime_ms = u32::MAX;
+                    runtime.hook_task_fits(&probe)
+                })
         })
     }
 
@@ -1159,7 +1164,7 @@ impl RunLoop<'_> {
         }
         let runtime_ms =
             u32::try_from(active_ms.min(u64::from(plan.timeout_ms))).unwrap_or(u32::MAX);
-        let hook_intent = self.hook_intent(runtime, &occurrence, runtime_ms);
+        let hook_intent = self.hook_intent(runtime, &occurrence, runtime_ms)?;
         let clock = match deadline {
             Some(deadline) => Admission::Reserved(HookClock::Deadline(deadline)),
             None => self.reserve_active_pause()?.map(HookClock::Pause),
@@ -1214,9 +1219,9 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         occurrence: &HookOccurrence<'_>,
         runtime_ms: u32,
-    ) -> EffectIntent {
+    ) -> Result<EffectIntent, crate::tools::ToolError> {
         let mut hook_intent =
-            runtime.intent(self.run_id, occurrence.agent, occurrence.plan.call.clone());
+            runtime.intent(self.run_id, occurrence.agent, occurrence.plan.call.clone())?;
         let limits = &mut hook_intent.limits;
         limits.result_bytes = HOOK_RESULT_BYTES;
         limits.runtime_ms = runtime_ms;
@@ -1224,7 +1229,7 @@ impl RunLoop<'_> {
         limits.cache_bytes = 0;
         limits.cache_candidate_bytes = 0;
         limits.cache_transfer_ms = 0;
-        hook_intent
+        Ok(hook_intent)
     }
 
     async fn record_hook_finished(

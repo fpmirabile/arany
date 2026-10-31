@@ -81,7 +81,7 @@ const ENTRY_BASE: u8 = 2;
 const CAPTURE: u8 = u8::MAX;
 const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
-const HOST_NOTE: &str = "host; human approval required";
+const HOST_NOTE: &str = "host; allow covers every destination";
 const HOST_READ_DISCLOSURE: &str =
     "This host read can send private pull request data to the current Provider.";
 

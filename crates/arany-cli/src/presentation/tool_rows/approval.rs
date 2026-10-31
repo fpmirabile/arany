@@ -201,6 +201,7 @@ fn process(call: &ToolCall) -> Vec<String> {
         cwd,
         resource_class,
         timeout_ms,
+        additional_reads,
     } = call
     else {
         return fallback(call);
@@ -235,6 +236,21 @@ fn process(call: &ToolCall) -> Vec<String> {
             escape_terminal(&serde_json::to_string(argument).expect("argument string"))
         )
     }));
+    if let Some(request) = additional_reads {
+        lines.push(
+            "Also reads and runs, never writes, these host folders and everything in them:".into(),
+        );
+        lines.extend(
+            request
+                .paths
+                .iter()
+                .map(|path| format!("  {}", escape_terminal(path))),
+        );
+        lines.push(format!(
+            "Reason: {}",
+            escape_terminal(&request.justification)
+        ));
+    }
     lines
 }
 

@@ -45,7 +45,15 @@ fn run_case(case: &'static str) {
     std::fs::create_dir(&workspace).unwrap();
     let state = root.join("state");
     StateRoot::admit(&state).unwrap();
-    crate::private_file(&state.join("permissions.json"), br#"{"permissions":{}}"#);
+    // Sandboxed commands ask nothing; an ask rule keeps the guarded prompt these cases answer.
+    crate::private_file(
+        &state.join("permissions.json"),
+        if case.starts_with("unguarded") {
+            br#"{"permissions":{}}"#
+        } else {
+            br#"{"permissions":{"ask":["Bash"]}}"#
+        },
+    );
     crate::private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
         "workspace_paths":["."],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":crate::hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
@@ -473,6 +481,16 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
                 observation.attestation,
                 Some(arany::Attestation::Guard(_))
             ));
+            assert_eq!(
+                run.tools
+                    .last()
+                    .unwrap()
+                    .permission_verdict
+                    .as_ref()
+                    .unwrap()
+                    .source,
+                arany::permissions::PermissionSource::Human
+            );
         }
         store.close().await.unwrap();
     });

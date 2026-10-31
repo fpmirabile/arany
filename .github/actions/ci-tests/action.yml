@@ -65,15 +65,20 @@ runs:
       if: inputs.profile == 'release'
       shell: bash
       run: cargo test --workspace --release --locked --offline
-    - name: Run explicit macOS offline Rust build gate
-      if: runner.os == 'macOS' && inputs.profile == 'debug'
+    - name: Run explicit offline Rust build gate
+      if: inputs.profile == 'debug'
       shell: bash
       run: |
           set -euo pipefail
+          if [ "$RUNNER_OS" = macOS ]; then
+            gate=tools::guarded_offline_rust_build_uses_selected_runtime_and_sdk
+          else
+            gate=tools::native_exec::guarded_offline_cargo_tests_use_selected_runtime_and_registry
+          fi
           ARANY_TEST_RUST_SYSROOT="$(rustc --print sysroot)"
           ARANY_TEST_RUST_SYSROOT="$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ARANY_TEST_RUST_SYSROOT")"
           export ARANY_TEST_RUST_SYSROOT
-          cargo test --locked --offline -p arany-cli --test session_run tools::guarded_offline_rust_build_uses_selected_runtime_and_sdk -- --exact --ignored --nocapture 2>&1 | python3 -c '
+          cargo test --locked --offline -p arany-cli --test session_run "$gate" -- --exact --ignored --nocapture 2>&1 | python3 -c '
           import re
           import sys
 

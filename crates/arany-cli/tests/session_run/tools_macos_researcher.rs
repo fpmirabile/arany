@@ -206,8 +206,7 @@ done
                     args: vec!["-c".into(), "printf changed > src/facts.txt".into()],
                     cwd: "".into(),
                     resource_class: None,
-                    timeout_ms: None,
-                },
+                    timeout_ms: None, additional_reads: None },
             ),
             (
                 "mcp-call",

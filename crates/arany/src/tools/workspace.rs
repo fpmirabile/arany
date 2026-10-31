@@ -71,6 +71,7 @@ pub struct WorkspacePermissions {
     candidates: Vec<Candidate>,
     discovery_error: Option<String>,
     git_hooks: Option<GitHooksAnswer>,
+    repository: Option<String>,
 }
 
 // The user's answer for one exact set of hook files, so a new or edited hook asks again.
@@ -145,6 +146,9 @@ struct Entry {
     runtime_grants: Vec<RuntimeGrant>,
     #[serde(deserialize_with = "Option::deserialize")]
     git_hooks: Option<GitHooksAnswer>,
+    // The push URL a human named as this folder's own repository; never read from the repository.
+    #[serde(deserialize_with = "Option::deserialize")]
+    repository: Option<String>,
 }
 
 fn record_error(error: StoreError) -> TrustRecordError {
@@ -193,6 +197,15 @@ fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
                 || entry.path.as_os_str().len() > MAX_PATH_BYTES
                 || entry.inode == 0
                 || validate_selection(&entry.runtime_grants).is_err()
+                // PATH directories and their link targets are granted per Run, never saved.
+                || entry.runtime_grants.iter().any(|grant| {
+                    matches!(
+                        grant.kind,
+                        super::toolchains::RuntimeKind::UserPrograms
+                            | super::toolchains::RuntimeKind::LinkTarget
+                            | super::toolchains::RuntimeKind::ExtraRead
+                    )
+                })
         })
     {
         return Err(TrustRecordError::Malformed);
@@ -318,6 +331,7 @@ impl WorkspacePermissions {
                     candidates: Vec::new(),
                     discovery_error: None,
                     git_hooks: None,
+                    repository: None,
                 })
             }
             Err(error) => Err(state_error(error)),
@@ -371,6 +385,7 @@ impl WorkspacePermissions {
             candidates: Vec::new(),
             discovery_error: None,
             git_hooks: entry.and_then(|entry| entry.git_hooks.clone()),
+            repository: entry.and_then(|entry| entry.repository.clone()),
         })
     }
 
@@ -419,6 +434,33 @@ impl WorkspacePermissions {
             self.git_hooks = previous;
         }
         saved
+    }
+
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
+    /// Names the push URL Arany treats as this folder's own repository, or forgets it.
+    pub fn remember_repository(&mut self, push_url: Option<String>) -> Result<(), ToolError> {
+        if !self.trusted
+            || push_url
+                .as_deref()
+                .is_some_and(|url| !super::git::host::valid_push_url(url))
+        {
+            return Err(ToolError::Configuration);
+        }
+        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+        let root = StateRoot::admit(&account).map_err(|_| ToolError::Configuration)?;
+        let previous = std::mem::replace(&mut self.repository, push_url);
+        let saved = self.save(&root, true, self.mode, self.runtime_grants.clone());
+        if saved.is_err() {
+            self.repository = previous;
+        }
+        saved
+    }
+
+    pub(crate) fn saved_repository(workspace: &Path) -> Option<String> {
+        Self::open(workspace).ok()?.repository
     }
 
     // A configured Run (serve, ACP, exec) honors the answer saved with the folder's trust entry.
@@ -515,6 +557,7 @@ impl WorkspacePermissions {
                         Vec::new()
                     },
                     git_hooks: self.git_hooks.clone(),
+                    repository: self.repository.clone(),
                 });
             }
             let bytes = serde_json::to_vec(&record).map_err(|_| ToolError::Configuration)?;
@@ -668,6 +711,7 @@ mod tests {
                 candidates,
                 discovery_error: None,
                 git_hooks: None,
+                repository: None,
             };
             assert_eq!(
                 access

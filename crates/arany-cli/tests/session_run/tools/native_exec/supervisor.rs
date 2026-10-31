@@ -411,6 +411,7 @@ async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let provider = Arc::new(arany::test_support::scenario::ScriptedProvider::new(vec![
         crate::tool_outcome(command.clone()),
@@ -419,6 +420,13 @@ async fn assert_lost_guard_evidence(root: &str, loss: LostEvidence) {
     request.session_id = Some(session);
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
     let completion_loss = matches!(loss, LostEvidence::Completion);
+    // Sandboxed commands ask nothing; an ask rule gives the fault its intent before dispatch.
+    if completion_loss {
+        private_file(
+            &fixture.state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Bash"]}}"#,
+        );
+    }
     let inject = async {
         if completion_loss {
             let action = inbox

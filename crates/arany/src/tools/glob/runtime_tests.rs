@@ -16,11 +16,13 @@ pub(super) async fn glob_result(
     call: ToolCall,
     result_bytes: u32,
 ) -> ToolObservation {
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        call,
-    );
+    let mut intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call,
+        )
+        .unwrap();
     intent.limits.result_bytes = result_bytes;
     let observation = inspect_read(runtime, intent).await;
     assert!(observation.valid());

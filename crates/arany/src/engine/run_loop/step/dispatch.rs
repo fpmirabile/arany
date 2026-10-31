@@ -862,6 +862,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         for (calls, intent, overhead, expected) in [
             (1, read_intent(), Duration::ZERO, Serial),
@@ -980,6 +981,7 @@ mod tests {
             attribution: None,
             remember: true,
             prefix: false,
+            sandbox_off: false,
         })
     }
 

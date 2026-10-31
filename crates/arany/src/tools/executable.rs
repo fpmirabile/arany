@@ -10,6 +10,8 @@ pub(super) struct ExecutableIdentities {
     pub(super) program_magics: &'static [&'static [u8]],
     #[cfg(target_os = "macos")]
     pub(super) system_directories: &'static [&'static str],
+    // PATH directories under these roots are never granted whole; programs there need the catalogue.
+    pub(super) platform_roots: &'static [&'static str],
 }
 
 #[cfg(target_os = "linux")]
@@ -19,6 +21,7 @@ pub(super) const EXECUTABLES: ExecutableIdentities = ExecutableIdentities {
         root: "/usr",
     },
     program_magics: &[b"\x7fELF"],
+    platform_roots: &[],
 };
 
 #[cfg(target_os = "macos")]
@@ -38,7 +41,19 @@ pub(super) const EXECUTABLES: ExecutableIdentities = ExecutableIdentities {
         b"\xbf\xba\xfe\xca",
     ],
     system_directories: &["/bin", "/usr/bin"],
+    platform_roots: MACOS_PLATFORM_ROOTS,
 };
+
+#[cfg(target_os = "macos")]
+const MACOS_PLATFORM_ROOTS: &[&str] = &[
+    "/System",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/libexec",
+    "/Library/Apple",
+];
 
 pub(super) fn has_magic(bytes: &[u8], magics: &[&[u8]]) -> bool {
     magics.iter().any(|magic| bytes.starts_with(magic))
@@ -57,6 +72,7 @@ mod tests {
                 root: "/usr",
             },
             program_magics: &[b"\x7fELF"],
+            platform_roots: &[],
         };
         #[cfg(target_os = "macos")]
         let expected = ExecutableIdentities {
@@ -75,6 +91,15 @@ mod tests {
                 b"\xbf\xba\xfe\xca",
             ],
             system_directories: &["/bin", "/usr/bin"],
+            platform_roots: &[
+                "/System",
+                "/bin",
+                "/sbin",
+                "/usr/bin",
+                "/usr/sbin",
+                "/usr/libexec",
+                "/Library/Apple",
+            ],
         };
         assert_eq!(EXECUTABLES, expected);
     }

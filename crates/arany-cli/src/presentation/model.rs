@@ -101,6 +101,9 @@ fn status_fields(
         .or(view.defaults.model.as_deref())
         .unwrap_or("model unset");
     let mut fields = vec![state.to_owned()];
+    if sandbox_off(view) {
+        fields.push(SANDBOX_OFF_NOTICE.into());
+    }
     if width >= 14 {
         let model_label = if width >= 50 {
             let pinned_provider = pinned.map(|config| config.provider.profile());
@@ -135,6 +138,17 @@ fn status_fields(
         }
     }
     fields
+}
+
+pub(crate) const SANDBOX_OFF_NOTICE: &str = "sandbox off: commands run on your machine";
+
+// The last Run's pinned Guard state, so the notice stays after it ends and needs no new probe.
+pub(crate) fn sandbox_off(view: &SessionView) -> bool {
+    view.runs
+        .last()
+        .and_then(|run| run.config.as_ref())
+        .and_then(|config| config.tool_policy.as_ref())
+        .is_some_and(|policy| policy.guard.host_fallback())
 }
 
 fn run_activity(run: &arany::RunView, width: usize) -> Vec<String> {
@@ -597,6 +611,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let guard = arany::GuardReceipt {
             contract_version: 1,

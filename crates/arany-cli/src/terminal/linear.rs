@@ -978,6 +978,7 @@ mod tests {
                 prefix: false,
                 sensitive: true,
                 inactive_rules: false,
+                sandbox_off: false,
             },
         );
         let mut state = LinearState::new("screen-reader");

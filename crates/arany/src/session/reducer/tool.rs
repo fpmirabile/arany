@@ -923,9 +923,17 @@ fn valid_host_approval(
         PermissionSource::HostPrefixRule => {
             valid_host_prefix_approval(policy, &tool.intent, verdict, host)
         }
+        // Auto's review approves a host command no user rule decided; it never saves one.
+        PermissionSource::AiReview => {
+            host.rule.is_none()
+                && !host.session
+                && host.source_intent.is_none()
+                && verdict.decision == Decision::Ask
+                && verdict.basis == PermissionSource::Mode
+                && matches!(verdict.mode, None | Some(PermissionMode::Auto))
+        }
         PermissionSource::Rule
         | PermissionSource::Mode
-        | PermissionSource::AiReview
         | PermissionSource::UnavailableApproval
         | PermissionSource::PinnedGrant
         | PermissionSource::Hook
@@ -1007,7 +1015,12 @@ fn valid_host_prefix_approval(
             .is_some_and(|pin| policy.permissions_digest == pin.permissions_digest)
         && matches!(
             verdict.mode,
-            Some(PermissionMode::Default | PermissionMode::DontAsk)
+            Some(
+                PermissionMode::Default
+                    | PermissionMode::DontAsk
+                    | PermissionMode::AcceptEdits
+                    | PermissionMode::Auto
+            )
         )
         && rule.decision == Decision::Allow
         && rule.matches(intent)

@@ -92,6 +92,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         // Within its field limits, but over the serialized bound every non-content operation keeps.
         ToolCall::Command {
@@ -100,6 +101,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         ToolCall::Command {
             program: "bash".into(),
@@ -107,6 +109,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     ] {
         assert!(!call.valid());
@@ -218,6 +221,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         build.limits.resource_class = ToolResourceClass::Build;
         build.limits.cache_bytes = 0;
@@ -250,6 +254,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         build.limits.resource_class = ToolResourceClass::Build;
         build.limits.cache_bytes = 0;
@@ -304,6 +309,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let command_guard = GuardReceipt {
         contract_version: 1,
@@ -509,6 +515,7 @@ fn guard_stage_is_valid_only_on_unattested_guard_failures() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     assert!(observation(command.clone(), ToolDisposition::Failed).valid());
     assert!(!observation(command, ToolDisposition::Succeeded).valid());

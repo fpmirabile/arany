@@ -19,15 +19,16 @@ use crate::{
     },
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
-        FRAME_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_MCP_RESPONSE_BYTES, MAX_METADATA_BYTES,
-        MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, MAX_QUERY_BYTES,
-        MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS,
-        WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
+        FRAME_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_ADDITIONAL_READS_PER_CALL, MAX_MCP_RESPONSE_BYTES,
+        MAX_METADATA_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
+        MAX_QUERY_BYTES, MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES,
+        NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
         command_tools::{MAX_COMMAND_TOOL_CANDIDATES, MAX_COMMAND_TOOLS},
+        guard_settings::{MAX_RUN_READ_GRANTS, MAX_SAVED_READ_GRANTS},
         permissions::MAX_CONFIG_BYTES,
         toolchains::{
-            MAX_DISCOVERY_PATH_ENTRIES, MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS,
-            MAX_USER_PROGRAM_GRANTS,
+            MAX_DISCOVERY_PATH_ENTRIES, MAX_LINK_SCAN_ENTRIES, MAX_LINK_TARGET_GRANTS,
+            MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS, MAX_USER_PROGRAM_GRANTS,
         },
         types::{
             COMMAND_COMPARE_BYTES_PER_UPPER_BYTE, COMMAND_PATH_METADATA_BYTES,
@@ -520,10 +521,40 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/toolchains.rs",
         },
         Limit {
+            name: "MAX_LINK_TARGET_GRANTS",
+            value: MAX_LINK_TARGET_GRANTS as u64,
+            unit: "roots",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_LINK_SCAN_ENTRIES",
+            value: MAX_LINK_SCAN_ENTRIES as u64,
+            unit: "directory entries",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
             name: "MAX_DISCOVERY_PATH_ENTRIES",
             value: MAX_DISCOVERY_PATH_ENTRIES as u64,
             unit: "entries",
             owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_SAVED_READ_GRANTS",
+            value: MAX_SAVED_READ_GRANTS as u64,
+            unit: "directories",
+            owner: "crates/arany/src/tools/guard_settings.rs",
+        },
+        Limit {
+            name: "MAX_RUN_READ_GRANTS",
+            value: MAX_RUN_READ_GRANTS as u64,
+            unit: "directories",
+            owner: "crates/arany/src/tools/guard_settings.rs",
+        },
+        Limit {
+            name: "MAX_ADDITIONAL_READS_PER_CALL",
+            value: MAX_ADDITIONAL_READS_PER_CALL as u64,
+            unit: "directories",
+            owner: "crates/arany/src/tools/process.rs",
         },
         Limit {
             name: "SCRATCH_BYTES",

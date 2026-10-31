@@ -176,7 +176,7 @@ impl CommandEnvironment {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn save(&self, state: &StateRoot) -> Result<(), CommandEnvironmentError> {
         locked(state, || self.write(state))
     }
@@ -227,6 +227,10 @@ impl CommandEnvironment {
 
     pub fn shell(&self) -> Option<&LoginShellIdentity> {
         self.shell.as_ref()
+    }
+
+    pub fn path_over_guard_limit(&self) -> bool {
+        super::toolchains::path_entries_truncated(&self.path_string())
     }
 
     pub fn process_path_differs(&self) -> bool {
@@ -377,7 +381,7 @@ impl CommandEnvironment {
         Ok(record)
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", test, feature = "test-support"))]
     pub(crate) fn empty() -> Self {
         let mut record = Self {
             source: Source::Process,
@@ -493,7 +497,7 @@ impl CommandEnvironment {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_path(path: &str) -> Self {
         let mut record = Self::empty();
         record.path = std::env::split_paths(path)

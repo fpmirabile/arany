@@ -1076,7 +1076,7 @@ impl Task {
     ) -> Result<Self, ToolError> {
         Ok(Self {
             command_deadline: None,
-            config: runtime.config.clone(),
+            config: runtime.process_config(&intent.call)?.into_owned(),
             intent: intent.clone(),
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1113,8 +1113,11 @@ impl Task {
             host_settings_admitted: false,
             host_settings_saved: Default::default(),
             guard_available: false,
+            guard_mode: crate::tools::GuardMode::Auto,
+            once_reads: Default::default(),
             git_environment: None,
             git_hooks: None,
+            repository: None,
             human_approvals: false,
             handover,
             definitions: super::super::definitions::DefinitionSnapshots::from_payload(

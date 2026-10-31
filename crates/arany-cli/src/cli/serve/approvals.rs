@@ -469,6 +469,7 @@ mod tests {
             attribution: None,
             remember: true,
             prefix: false,
+            sandbox_off: false,
         };
         let warning = lines(&intent, Some(&prompt));
         assert_eq!(warning[0], "Run outside the Guard? (unguarded)");
@@ -578,6 +579,7 @@ mod tests {
                             prefix: true,
                             sensitive: false,
                             inactive_rules: false,
+                            sandbox_off: false,
                         });
                     }
                     let request =

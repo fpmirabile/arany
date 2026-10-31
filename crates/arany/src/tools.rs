@@ -28,7 +28,10 @@ mod grant;
 pub use command_environment::{CommandEnvironment, CommandEnvironmentError};
 mod guard;
 pub use guard::recover_build_cache;
+pub(crate) mod guard_settings;
 pub(crate) use guard::transfer::transfer_time;
+pub use guard_settings::{GuardMode, GuardSettings};
+pub use toolchains::MAX_DISCOVERY_PATH_ENTRIES;
 mod mcp;
 mod network;
 mod web;
@@ -124,12 +127,15 @@ use crate::store::StateRoot;
 pub use approval::{
     ApprovalInbox, ApprovalMode, ApprovalReply, ToolApproval, ToolApprovals, UnguardedPrompt,
 };
-pub(crate) use approval::{ApprovalWaitReply, ApprovalWithdrawal};
+pub(crate) use approval::{ApprovalOffers, ApprovalWaitReply, ApprovalWithdrawal};
 pub use cancel::Cancellation;
 use config::Config;
+pub(crate) use git::host::same_repository;
 pub(crate) use git::stale_locks;
+pub(crate) use process::MAX_ADDITIONAL_READS_PER_CALL;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
+use toolchains::RuntimeGrant;
 pub(crate) use workspace::WORKSPACE_PERMISSIONS;
 pub use workspace::{
     GitHooksQuestion, RuntimeProfileOption, TrustRecordError, WorkspacePermissions, mention_paths,
@@ -175,7 +181,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     ApprovalCause, Attestation, BuildCacheSize, CacheUpdate, CommandChangeset, EffectIntent,
-    EnforcementCause, FailureStage, FileChange, FileReceipt, FileVersion, GuardReceipt,
+    EnforcementCause, FailureStage, FileChange, FileReceipt, FileVersion, GuardPin, GuardReceipt,
     GuardStageFact, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
     OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
     ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
@@ -366,10 +372,14 @@ pub(crate) struct ToolRuntime {
     pub(crate) host_settings_admitted: bool,
     host_settings_saved: std::sync::Arc<std::sync::Mutex<Option<[u8; 32]>>>,
     guard_available: bool,
+    guard_mode: GuardMode,
+    // Directories a human allowed once in this Run; shared by every clone, children included.
+    once_reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     config: Config,
     git_environment: Option<std::sync::Arc<git::Environment>>,
     // Hooks the user accepted for this folder that still match on disk; `None` keeps hooks off.
     git_hooks: Option<std::sync::Arc<git::Hooks>>,
+    pub(crate) repository: Option<String>,
     // Whether a human can answer approvals in this Run.
     human_approvals: bool,
     handover: Option<std::sync::Arc<[u8]>>,
@@ -414,6 +424,7 @@ struct RuntimeState {
     command_tools: std::sync::Arc<CommandTools>,
     workspace_identity: WorkspaceIdentity,
     guard_available: bool,
+    guard_mode: GuardMode,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
     git_environment: Option<std::sync::Arc<git::Environment>>,
@@ -1021,13 +1032,15 @@ impl ToolRuntime {
             return Ok(None);
         }
         let environment = CommandEnvironment::load(state)?;
+        let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
+        let protected = [workspace, state.path(), account.as_path()];
         let git = git_environment(workspace, state)
             .as_deref()
             .and_then(git::resolve);
         let mut config = match Config::load(state) {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
-                config.bind_environment(&environment);
+                config.bind_environment(&environment, &protected)?;
                 merge_network(&mut config, Some(&snapshot))?;
                 config.git = git.clone();
                 if config.digest() == pin.config_digest {
@@ -1044,7 +1057,7 @@ impl ToolRuntime {
             Err(error) => return Err(error),
         };
         config.discover_skills(workspace)?;
-        config.bind_environment(&environment);
+        config.bind_environment(&environment, &protected)?;
         merge_network(&mut config, Some(&snapshot))?;
         config.git = git;
         if config.digest() != pin.config_digest {
@@ -1101,7 +1114,8 @@ impl ToolRuntime {
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
         let command_tools = std::sync::Arc::new(CommandTools::load(state)?);
-        let guard_available = guard::check_available().is_ok();
+        let guard_mode = GuardSettings::load()?.mode();
+        let guard_available = guard_mode != GuardMode::Off && guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
         let account = admission_paths(workspace, state, &config, &root)?;
@@ -1125,7 +1139,10 @@ impl ToolRuntime {
             .transpose()?;
         merge_network(&mut config, permissions.as_ref())?;
         config.discover_skills(workspace)?;
-        config.bind_environment(&command_environment);
+        config.bind_environment(
+            &command_environment,
+            &[workspace, state.path(), account.as_path()],
+        )?;
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
@@ -1153,6 +1170,7 @@ impl ToolRuntime {
                 command_tools,
                 workspace_identity,
                 guard_available,
+                guard_mode,
                 enforcement_digest,
                 process_enforcement_digest,
                 git_environment,
@@ -1181,6 +1199,7 @@ impl ToolRuntime {
             command_tools,
             workspace_identity,
             guard_available,
+            guard_mode,
             enforcement_digest,
             process_enforcement_digest,
             git_environment,
@@ -1193,10 +1212,13 @@ impl ToolRuntime {
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available,
+            guard_mode,
+            once_reads: Default::default(),
             definitions: std::sync::Arc::new(definitions),
             config,
             git_environment,
             git_hooks: None,
+            repository: None,
             human_approvals: false,
             handover: None,
             permissions,
@@ -1255,8 +1277,159 @@ impl ToolRuntime {
             .map_or_else(Vec::new, |permissions| permissions.host.clone());
         if let Some(git) = &mut receipt.git {
             git.hooks = self.git_hooks.as_ref().map(|hooks| hooks.digest);
+            git.repository = self.repository.clone();
+        }
+        receipt.guard.mode = self.guard_mode;
+        receipt.guard.sandbox = self.guard_available;
+        if !self.guard_available {
+            receipt.guard.saved_reads.clear();
+        }
+        if self.host_fallback() {
+            receipt.child_unguarded = UnguardedGrant::HumanOnly;
         }
         receipt
+    }
+
+    pub(crate) fn pin_repository(&self, intent: &EffectIntent) -> Result<(), ToolError> {
+        let destination = intent
+            .host
+            .as_ref()
+            .map(|host| host.destination.clone())
+            .ok_or(ToolError::Configuration)?;
+        WorkspacePermissions::open(&self.workspace)
+            .map_err(|_| ToolError::Configuration)?
+            .remember_repository(Some(destination))
+    }
+
+    pub(crate) fn same_repository(&self, intent: &EffectIntent) -> bool {
+        self.repository
+            .as_deref()
+            .is_some_and(|pin| git::host::same_repository(pin, &intent.call, intent.host.as_ref()))
+    }
+
+    pub(crate) fn host_fallback(&self) -> bool {
+        !self.guard_available && self.guard_mode != GuardMode::Required
+    }
+
+    // In-process file Tools and editors need no sandbox, only a Guard setting that admits work.
+    fn in_process_available(&self) -> bool {
+        self.guard_available || self.host_fallback()
+    }
+
+    fn protected_roots(&self) -> Vec<PathBuf> {
+        std::iter::once(self.workspace.clone())
+            .chain(
+                self.cache_state
+                    .as_ref()
+                    .map(|state| state.path().to_owned()),
+            )
+            .chain(StateRoot::account_path().ok())
+            .collect()
+    }
+
+    pub(crate) fn requested_reads(&self, call: &ToolCall) -> Result<Vec<RuntimeGrant>, ToolError> {
+        let ToolCall::Command {
+            additional_reads: Some(request),
+            ..
+        } = call
+        else {
+            return Ok(Vec::new());
+        };
+        let protected = self.protected_roots();
+        let protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        request
+            .paths
+            .iter()
+            .map(Path::new)
+            .filter(|path| {
+                !self
+                    .config
+                    .runtime_grants
+                    .iter()
+                    .any(|grant| grant.path == *path)
+            })
+            .map(|path| guard_settings::admit_read(path, &protected))
+            .collect()
+    }
+
+    pub(crate) fn reads_need_approval(&self, call: &ToolCall) -> Result<bool, ToolError> {
+        self.requested_reads(call)?;
+        let once = self.once_reads.lock().expect("once reads");
+        let new = Self::read_paths(call)
+            .filter(|path| {
+                !once.iter().any(|allowed| allowed == path)
+                    && !self.config.runtime_grants.iter().any(|grant| {
+                        grant.kind == toolchains::RuntimeKind::ExtraRead && grant.path == *path
+                    })
+            })
+            .count();
+        if new > 0 && once.len() + new > guard_settings::MAX_RUN_READ_GRANTS {
+            return Err(ToolError::Limit);
+        }
+        Ok(new > 0)
+    }
+
+    pub(crate) fn allow_reads(&self, call: &ToolCall) {
+        let mut once = self.once_reads.lock().expect("once reads");
+        for path in Self::read_paths(call) {
+            if !once.iter().any(|allowed| allowed == path) {
+                once.push(path.to_owned());
+            }
+        }
+    }
+
+    fn read_paths(call: &ToolCall) -> impl Iterator<Item = &Path> {
+        match call {
+            ToolCall::Command {
+                additional_reads: Some(request),
+                ..
+            } => request.paths.as_slice(),
+            _ => &[],
+        }
+        .iter()
+        .map(Path::new)
+    }
+
+    // Saved folders apply from the next Run; this Run keeps them as allowed once.
+    pub(crate) fn save_reads(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let requested = self.requested_reads(call)?;
+        GuardSettings::update(|settings| {
+            requested
+                .iter()
+                .try_for_each(|grant| settings.add_read(grant))
+        })
+        .map(|_| ())
+    }
+
+    pub(crate) fn process_config(
+        &self,
+        call: &ToolCall,
+    ) -> Result<std::borrow::Cow<'_, Config>, ToolError> {
+        let requested = self.requested_reads(call)?;
+        if requested.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(&self.config));
+        }
+        let mut config = self.config.clone();
+        config.runtime_grants.extend(requested);
+        Ok(std::borrow::Cow::Owned(config))
+    }
+
+    fn process_digest(&self, call: &ToolCall) -> Result<[u8; 32], ToolError> {
+        let config = self.process_config(call)?;
+        if matches!(config, std::borrow::Cow::Borrowed(_)) {
+            return Ok(self.process_enforcement_digest);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            guard::macos_runtime_enforcement_digest(
+                self.system_programs.as_deref(),
+                &config.runtime_grants,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            guard::enforcement_digest(&config.runtime_grants)
+        }
     }
 
     // Accepted hooks run only while they match what the user accepted for this folder.
@@ -1414,8 +1587,8 @@ impl ToolRuntime {
         let mut catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
-            "write": self.config.write && self.guard_available,
-            "file_tools": self.guard_available,
+            "write": self.config.write && self.in_process_available(),
+            "file_tools": self.in_process_available(),
             "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
             "host_commands": true,
@@ -1439,6 +1612,9 @@ impl ToolRuntime {
                 "contract": catalog::NETWORK_CONTRACT,
             });
         }
+        if self.host_fallback() {
+            catalog["sandbox"] = serde_json::json!(catalog::SANDBOX_OFF_CONTRACT);
+        }
         if self.guard_available && cfg!(target_os = "linux") {
             catalog["web"] = serde_json::json!({
                 "web_fetch": true,
@@ -1455,7 +1631,7 @@ impl ToolRuntime {
 
     pub(crate) fn worker_policy(&self) -> Option<crate::session::worker::WorkerPolicy> {
         use crate::session::worker::*;
-        (self.guard_available && self.config.write && self.definitions.pin().is_some())
+        (self.in_process_available() && self.config.write && self.definitions.pin().is_some())
             .then(|| WorkerPolicy {
                 parent_grant: WorkerGrant {
                     commands: {
@@ -1520,10 +1696,10 @@ impl ToolRuntime {
             serde_json::from_str(context.catalog()).map_err(|_| ToolError::Configuration)?;
         catalog.as_object_mut().expect("catalog").remove("web");
         catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
-        catalog["write"] = serde_json::json!(self.guard_available);
+        catalog["write"] = serde_json::json!(self.in_process_available());
         catalog["skills"] = serde_json::json!([]);
         catalog["mcp_servers"] = serde_json::json!([]);
-        catalog["file_tools"] = serde_json::json!(self.guard_available);
+        catalog["file_tools"] = serde_json::json!(self.in_process_available());
         catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
         if !grant.commands.is_empty() {
             catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
@@ -1552,7 +1728,7 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
-            "file_tools": self.guard_available,
+            "file_tools": self.in_process_available(),
             "commands": [],
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|server| self.guard_available && server.url.is_none()).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
@@ -1577,14 +1753,14 @@ impl ToolRuntime {
         run_id: RunId,
         agent_run_id: AgentRunId,
         call: ToolCall,
-    ) -> EffectIntent {
+    ) -> Result<EffectIntent, ToolError> {
         let enforcement_digest = if call.facts().family == catalog::Family::File
             && call.facts().mutates
             && call.facts().site == Site::InProcess
         {
             FileReceipt::enforcement_digest()
         } else if call.is_process() {
-            self.process_enforcement_digest
+            self.process_digest(&call)?
         } else if call.facts().site == Site::Git {
             git::enforcement_digest()
         } else {
@@ -1602,7 +1778,7 @@ impl ToolRuntime {
         } else {
             ToolLimits::default()
         };
-        EffectIntent {
+        Ok(EffectIntent {
             host: git::host::pin(
                 &self.workspace,
                 &call,
@@ -1654,7 +1830,7 @@ impl ToolRuntime {
             call,
             limits,
             use_count: 1,
-        }
+        })
     }
 
     pub(crate) fn host_settings_current(&self, pin: &types::HostCommandPin) -> bool {
@@ -1722,9 +1898,11 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
-            && !self.guard_available
-        {
+        if match intent.call.facts().site {
+            Site::Guard => !self.guard_available,
+            Site::InProcess => !self.in_process_available(),
+            _ => false,
+        } {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
         }
         if matches!(
@@ -1800,7 +1978,7 @@ impl ToolRuntime {
     }
 
     async fn run_file(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
-        if !self.guard_available {
+        if !self.in_process_available() {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
         }
         if !fs::in_process_mutation(&intent) {

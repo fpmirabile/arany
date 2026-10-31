@@ -7,7 +7,7 @@ pub struct RecordFormat {
 }
 
 // Strict records the library owns; the CLI owns the others.
-pub const RECORD_FORMATS: [&RecordFormat; 8] = [
+pub const RECORD_FORMATS: [&RecordFormat; 9] = [
     &crate::tools::config::TOOLS_CONFIG,
     &crate::tools::WORKSPACE_PERMISSIONS,
     &crate::tools::permissions::PERMISSION_SETTINGS,
@@ -16,4 +16,5 @@ pub const RECORD_FORMATS: [&RecordFormat; 8] = [
     &crate::tools::command_tools::COMMAND_TOOLS,
     &crate::provider::PROVIDER_PROFILES,
     &crate::tools::MCP_OAUTH,
+    &crate::tools::guard_settings::GUARD_SETTINGS,
 ];

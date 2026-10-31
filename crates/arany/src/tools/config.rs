@@ -161,9 +161,24 @@ pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
 };
 
 impl Config {
-    pub(crate) fn bind_environment(&mut self, environment: &super::CommandEnvironment) {
+    pub(crate) fn bind_environment(
+        &mut self,
+        environment: &super::CommandEnvironment,
+        protected: &[&std::path::Path],
+    ) -> Result<(), ToolError> {
         self.locale = environment.locale();
         self.environment_sha256 = Some(environment.sha256().to_owned());
+        let path = super::toolchains::path_grants(
+            &environment.path_string(),
+            &self.runtime_grants,
+            protected,
+        )?;
+        self.runtime_grants.extend(path);
+        let targets = super::toolchains::link_target_grants(&self.runtime_grants, protected);
+        self.runtime_grants.extend(targets);
+        let reads = super::GuardSettings::load()?.grants(protected);
+        self.runtime_grants.extend(reads);
+        Ok(())
     }
 
     pub(crate) fn load(state: &StateRoot) -> Result<Self, ToolError> {
@@ -378,7 +393,22 @@ impl Config {
                 executable: git.executable.clone(),
                 sha256: git.sha256.clone(),
                 hooks: None,
+                repository: None,
             }),
+            guard: GuardPin {
+                mode: super::GuardMode::Auto,
+                sandbox: true,
+                saved_reads: self
+                    .runtime_grants
+                    .iter()
+                    .filter(|grant| grant.kind == super::toolchains::RuntimeKind::ExtraRead)
+                    .map(|grant| ReadPin {
+                        path: grant.path.to_string_lossy().into_owned(),
+                        device: grant.device,
+                        inode: grant.inode,
+                    })
+                    .collect(),
+            },
         }
     }
 

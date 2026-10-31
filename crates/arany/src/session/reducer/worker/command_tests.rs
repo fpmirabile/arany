@@ -63,6 +63,7 @@ fn command_criterion() -> GoalSuccessCriterion {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         }),
     }
 }
@@ -83,6 +84,7 @@ fn command(f: &mut Fixture) -> EffectIntent {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         f.editor_workspace(),
     );
@@ -184,6 +186,7 @@ fn editor_commands_never_start_with_the_egress_proxy() {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         EffectTarget::Workspace,
     );
@@ -452,6 +455,7 @@ fn background_lease_admission_is_symmetric_with_sibling_and_primary_writes() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     for (actor, allowed) in [(f.primary, false), (f.child, true), (other, true)] {
         assert_eq!(

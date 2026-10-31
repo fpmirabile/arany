@@ -900,6 +900,7 @@ mod child_tool_report_tests {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,

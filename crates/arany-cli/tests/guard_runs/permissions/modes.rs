@@ -13,15 +13,11 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                 let fixture = Fixture::new(Some(&settings), true);
                 let call = call(kind);
                 let denied = mode == "plan" || rule == "deny" || mode == "dontAsk" && rule == "ask";
-                let ai = !denied && mode == "auto" && rule == "allow";
-                let human = !denied && (rule == "ask" || mode == "acceptEdits" && kind != "edit");
+                let human = !denied && rule == "ask";
                 let mut outcomes = vec![
                     arany::test_support::scenario::plan_outcome(plan(&call)),
                     tool_outcome(call.clone()),
                 ];
-                if ai {
-                    outcomes.push(verdict("approve"));
-                }
                 outcomes.push(finish("answer"));
                 let (result, requests, humans) = fixture
                     .run(
@@ -32,13 +28,11 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                     .await;
                 let case = format!("{mode}/{rule}/{kind}");
                 assert_eq!(humans, usize::from(human), "{case}");
-                assert_eq!(
+                assert!(
                     requests
                         .iter()
-                        .filter(|request| request.phase == AgentPhase::ToolReview)
-                        .count(),
-                    usize::from(ai),
-                    "{case}"
+                        .all(|request| request.phase != AgentPhase::ToolReview),
+                    "{case}: user rules resolve before any review"
                 );
                 assert_eq!(
                     fixture.workspace.join("notes/new.txt").exists(),
@@ -51,9 +45,7 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                 assert_eq!(verdict.approved, !denied, "{case}");
                 assert_eq!(
                     verdict.source,
-                    if ai {
-                        PermissionSource::AiReview
-                    } else if human {
+                    if human {
                         PermissionSource::Human
                     } else if mode == "plan" {
                         PermissionSource::Mode
@@ -84,7 +76,7 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                     .iter()
                     .position(|event| matches!(event.event, Event::ToolFinished { .. }))
                     .unwrap();
-                if ai || human {
+                if human {
                     assert!(
                         proposed.is_some_and(|proposed| proposed < started),
                         "{case}"
@@ -113,7 +105,7 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
             json!({"permissions":{"allow":["Bash(sh -c true)"]}}),
             "command",
             arany::ApprovalMode::Request,
-            true,
+            false,
             false,
             false,
         ),
@@ -123,6 +115,14 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
             arany::ApprovalMode::Request,
             true,
             false,
+            false,
+        ),
+        (
+            json!({"permissions":{"defaultMode":"auto"}}),
+            "edit",
+            arany::ApprovalMode::Auto,
+            false,
+            true,
             false,
         ),
         (
@@ -138,7 +138,7 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
             "edit",
             arany::ApprovalMode::Auto,
             false,
-            true,
+            false,
             false,
         ),
         (
@@ -184,10 +184,13 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
         );
         let (_, view) = fixture.reopen(result.session_id).await;
         let verdict = view.runs[0].tools[0].permission_verdict.as_ref().unwrap();
+        let allowed = !human && !ai && !denied;
         assert_eq!(
             verdict.decision,
             if denied {
                 Decision::Deny
+            } else if allowed {
+                Decision::Allow
             } else {
                 Decision::Ask
             }
@@ -195,7 +198,7 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
         assert_eq!(verdict.approved, !denied);
         assert_eq!(
             verdict.basis,
-            if denied || settings["permissions"]["ask"].is_array() {
+            if denied || allowed || settings["permissions"]["ask"].is_array() {
                 PermissionSource::Rule
             } else {
                 PermissionSource::Mode
@@ -203,7 +206,7 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
         );
         assert_eq!(
             verdict.source,
-            if denied {
+            if denied || allowed {
                 PermissionSource::Rule
             } else if human {
                 PermissionSource::Human
@@ -281,25 +284,22 @@ async fn permission_dispatch_missing_settings_preserves_existing_approval_flow()
 
 #[tokio::test]
 async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
-    for (settings, kind, denied, ai, human) in [
+    for (settings, kind, denied, human) in [
         (
             json!({"permissions":{"allow":["Read"],"deny":["Read(./notes/**)"]}}),
             "read",
             true,
-            false,
             false,
         ),
         (
             json!({"permissions":{"defaultMode":"auto","allow":["mcp__server"]}}),
             "catalog",
             false,
-            true,
             false,
         ),
         (
             json!({"permissions":{"defaultMode":"auto","ask":["Read"]}}),
             "read",
-            false,
             false,
             true,
         ),
@@ -316,9 +316,6 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
             }),
             tool_outcome(call(kind)),
         ];
-        if ai {
-            outcomes.push(verdict("approve"));
-        }
         outcomes.extend([finish("report"), finish("answer")]);
         let (result, requests, humans) = fixture
             .run(outcomes, Some(arany::ApprovalMode::Auto), true)
@@ -344,12 +341,10 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
             child.tools[0].permission_verdict.as_ref().unwrap().approved,
             !denied
         );
-        assert_eq!(
+        assert!(
             requests
                 .iter()
-                .filter(|request| request.phase == AgentPhase::ToolReview)
-                .count(),
-            usize::from(ai)
+                .all(|request| request.phase != AgentPhase::ToolReview)
         );
         if denied {
             let continuation = requests
@@ -491,92 +486,77 @@ async fn researcher_enforcement_cause_reaches_primary_report() {
 }
 
 #[tokio::test]
-async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
-    let fixture = Fixture::new(
-        Some(&json!({"permissions":{"defaultMode":"auto","allow":["mcp__server"]}})),
-        false,
-    );
+async fn review_approval_dispatches_within_a_short_goal_budget() {
+    let fixture = Fixture::new(Some(&json!({"permissions":{"defaultMode":"auto"}})), true);
     let short = arany::GoalBudget {
         max_active_ms: Some(10 * 60 * 1000),
         ..budget()
     };
+    let call = call("edit");
     let (result, _, humans) = fixture
         .run_budgeted(
             vec![
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Inspect the facts".into(),
-                        profile: None,
-                    }],
-                }),
-                tool_outcome(call("catalog")),
+                arany::test_support::scenario::plan_outcome(plan(&call)),
+                tool_outcome(call.clone()),
                 verdict("approve"),
-                finish("report"),
                 finish("answer"),
             ],
             Some(arany::ApprovalMode::Auto),
-            true,
+            false,
             short,
         )
         .await;
     assert_eq!(humans, 0);
     assert_eq!(result.run.status, RunStatus::Finished);
     let (events, view) = fixture.reopen(result.session_id).await;
-    let child = &view.runs[0].agents[1];
-    let verdict = child.tools[0].permission_verdict.as_ref().unwrap();
+    let tool = &view.runs[0].tools[0];
+    let verdict = tool.permission_verdict.as_ref().unwrap();
     assert!(verdict.approved);
     assert_eq!(verdict.source, PermissionSource::AiReview);
     assert_eq!(
-        child.tools[0].observation.as_ref().unwrap().disposition,
+        tool.observation.as_ref().unwrap().disposition,
         arany::ToolDisposition::Succeeded
     );
-    let reservations: Vec<u64> = events
+    let proposed = events
         .iter()
-        .filter_map(|event| match &event.event {
-            Event::GoalProviderCallReserved {
-                agent_run_id,
-                active_ceiling_ms,
-                ..
-            } if *agent_run_id == child.id => Some(*active_ceiling_ms),
-            _ => None,
-        })
-        .collect();
-    assert!(reservations.len() >= 2, "child call and review reserved");
+        .position(|event| matches!(event.event, Event::ToolProposed { .. }))
+        .expect("review proposal");
+    let ceiling = |event: &arany::EventEnvelope| match &event.event {
+        Event::GoalProviderCallReserved {
+            active_ceiling_ms, ..
+        } => Some(*active_ceiling_ms),
+        _ => None,
+    };
+    let call_ceiling = events[..proposed]
+        .iter()
+        .rev()
+        .find_map(ceiling)
+        .expect("tool call reserved");
+    let review_ceiling = events[proposed..]
+        .iter()
+        .find_map(ceiling)
+        .expect("review reserved");
     assert!(
-        reservations[1] <= reservations[0],
-        "the review's crash ceiling adds no Tool action time: {reservations:?}"
+        review_ceiling <= call_ceiling,
+        "the review's crash ceiling adds no Tool action time: {call_ceiling} then {review_ceiling}"
     );
 }
 
 #[tokio::test]
-async fn researcher_review_503_falls_back_and_the_run_completes() {
+async fn review_503_falls_back_and_the_run_completes() {
     use arany::test_support::engine::run_routed;
     use arany::test_support::routing::{input, route, routes};
-    let fixture = Fixture::new(
-        Some(&json!({"permissions":{"defaultMode":"auto","allow":["mcp__server"]}})),
-        false,
-    );
+    let fixture = Fixture::new(Some(&json!({"permissions":{"defaultMode":"auto"}})), true);
+    let call = call("edit");
     let primary = route(
         ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect the facts".into(),
-                    profile: None,
-                }],
-            }),
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
             finish("answer"),
         ])
         .with_profile("openai", "primary"),
     );
-    let child = route(
-        ScriptedProvider::new(vec![tool_outcome(call("catalog")), finish("report")])
-            .with_profile("openai", "child"),
-    );
-    // The clock pauses only for the review's backoff; the Guard runs after it resumes.
+    // The clock pauses only for the review's backoff; the edit runs after it resumes.
     let mut review = ScriptedProvider::new(vec![])
         .with_profile("openai", "review")
         .with_before_call(0, tokio::time::pause);
@@ -592,13 +572,9 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
             .with_before_call(0, tokio::time::resume),
     );
     let mut bindings = routes(&primary);
-    bindings.roles.child = vec![child.clone()];
     bindings.roles.review = vec![review.clone(), fallback.clone()];
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
     let mut request = input(&fixture.workspace);
-    request.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
     request.goal.budget = Some(budget());
     let result = run_routed(
         &fixture.engine,
@@ -614,16 +590,15 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
     .unwrap();
     assert_eq!(result.run.status, RunStatus::Finished);
     let (_events, view) = fixture.reopen(result.session_id).await;
-    let child_id = view.runs[0].agents[1].id;
     let switches = &view.runs[0].provider_fallbacks;
     assert_eq!(switches.len(), 1);
-    assert_eq!(switches[0].0, child_id);
+    assert_eq!(switches[0].0, view.runs[0].agents[0].id);
     assert_eq!(switches[0].1.role, arany::ProviderRole::Review);
     assert_eq!(view.runs[0].provider_retries.len(), 3);
     assert_eq!(review.requests.lock().unwrap().len(), 4);
     assert_eq!(fallback.requests.lock().unwrap().len(), 1);
     assert_eq!(
-        view.runs[0].agents[1].tools[0]
+        view.runs[0].tools[0]
             .observation
             .as_ref()
             .unwrap()
@@ -778,15 +753,16 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
             }),
             tool_outcome(call(if review { "catalog" } else { "read" })),
         ];
-        if review {
-            responses.push(verdict("approve"));
-        }
         responses.extend([finish("report"), finish("answer")]);
         let (result, requests, humans) = fixture
             .run(responses, Some(arany::ApprovalMode::Auto), true)
             .await;
         assert_eq!(result.run.status, RunStatus::Finished);
-        assert_eq!(requests.len(), if review { 5 } else { 4 });
+        assert_eq!(
+            requests.len(),
+            4,
+            "the child's allow rule resolves before review"
+        );
         assert_eq!(humans, usize::from(!review && !dont_ask));
         let (_, view) = fixture.reopen(result.session_id).await;
         let verdict = view.runs[0].agents[1].tools[0]
@@ -799,7 +775,7 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
             if dont_ask {
                 PermissionSource::Mode
             } else if review {
-                PermissionSource::AiReview
+                PermissionSource::Rule
             } else {
                 PermissionSource::Human
             }

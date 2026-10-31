@@ -23,6 +23,8 @@ pub(super) mod bridge;
 mod cpu;
 pub(super) mod overlay;
 pub(super) mod supervisor;
+mod system;
+pub(super) use system::targets as system_targets;
 
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
@@ -70,13 +72,18 @@ const LINUX_REWIND_CONTRACT: &[u8] = b";rewind-handover-framed-v1-no-host-worksp
 const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v2-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-command-runtime-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-snapshot-files16384-bytes134217728-scan131072-depth32-path-metadata16777216-project-storage268435456";
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v26:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
+    let mut bytes = b"arany-guard-v27:build-cpu-goal-pinned-controller-cores;primary-cache-directory-overlay-default-and-build-no-archive-mirror-durable-guard-ownership-before-mount-bounded-proc-fd-handoff-post-namespace-teardown-unavailable-before-apply-explicit-clear;baseline-subtree-whiteouts-opaque-recreation-streaming-content-exec-dedup-before-caps-compare-twice-upper;single-link-file-grants-narrow-only-parent-mount;per-root-overlay-readonly-file-grants-bounded-readonly-parent-tmpfs-aggregate-capture-cloned-readonly-lower-d5-launch-masks-bounded-root-fallback-protected-inode-alias-refusal-disposable-overlay-probe-cap-free-post-reap-launch-baseline-frozen-selection-bounded-create-edit-capture-ignored-whiteout-opaque-metadata;shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;same-binary-supervisor-retained-fd-exec-bwrap-readonly-data-helper-pinned-source-identity-import-digest-in-process-user-map-current-recursive-private-sized-inode-tmpfs-direct-user-xattr-probe-cap-bounding-ambient-permitted-effective-inheritable-zero-nnp-before-bwrap-pidfd-wait-reap;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu-goal-pinned-controller-cores;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace-command-default268435456;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go".to_vec();
     bytes.extend_from_slice(cpu::contract().as_bytes());
     bytes.extend_from_slice(&overlay::MASK_ARGUMENT_BYTES.to_le_bytes());
     bytes.extend_from_slice(&overlay::cache::HANDOFF_BYTES.to_le_bytes());
     bytes.extend_from_slice(&supervisor::MAX_PIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(LINUX_REWIND_CONTRACT);
+    bytes.extend_from_slice(b";system-entries-root-owned-ro-bind-or-verbatim-link-attested-ro");
+    for target in system::targets() {
+        bytes.extend_from_slice(target.as_bytes());
+        bytes.push(b';');
+    }
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
@@ -1028,7 +1035,7 @@ fn task_bytes(
             .handover
             .as_ref()
             .and_then(|_| super::transfer::handover_ref(intent)),
-        config: runtime.config.clone(),
+        config: runtime.process_config(&intent.call)?.into_owned(),
         intent: intent.clone(),
         cache,
         hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1055,14 +1062,7 @@ pub(super) async fn execute_inner(
     let (preparation_deadline, go_deadline, deadline) =
         action_deadlines(active_window, intent, capacity_started);
     crate::tools::fs::validate_workspace(runtime)?;
-    let runtime_grants = if intent.call.is_process() {
-        runtime.config.runtime_grants.as_slice()
-    } else {
-        &[]
-    };
-    let (runtime_directories, mounts) =
-        runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
-    let runtime_path = super::runtime_path(runtime_grants)?;
+    let ((runtime_directories, mounts), runtime_path) = process_mounts(runtime, intent)?;
     let (seed_path, seed_dir) = prepare_seed(runtime, intent, &permit)?;
     let (mut cache, launch) =
         overlay::cache::prepare(runtime, &seed_path, intent, go_deadline).await?;
@@ -1280,10 +1280,8 @@ fn proxy_for(
 
 const PREPARATION_ROOT: &str = "/prepared";
 
-const PROFILE_MOUNT_TARGETS: [&str; 14] = [
+const PROFILE_MOUNT_TARGETS: [&str; 12] = [
     RUNTIME_ROOT,
-    "/lib",
-    "/lib64",
     "/proc",
     "/dev",
     "/scratch",
@@ -1297,13 +1295,14 @@ const PROFILE_MOUNT_TARGETS: [&str; 14] = [
     "/arany",
 ];
 
-fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
+pub(super) fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
     if PROFILE_MOUNT_TARGETS
-        .iter()
+        .into_iter()
+        .chain(system::targets())
         .chain([
-            &PREPARATION_ROOT,
-            &crate::tools::network::PROXY_SOCKET_TARGET,
-            &crate::tools::network::WEB_CA_TARGET,
+            PREPARATION_ROOT,
+            crate::tools::network::PROXY_SOCKET_TARGET,
+            crate::tools::network::WEB_CA_TARGET,
         ])
         .map(Path::new)
         .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))
@@ -1324,6 +1323,20 @@ fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
 }
 
 type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
+
+fn process_mounts(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<(RuntimeMounts, String), ToolError> {
+    let config = runtime.process_config(&intent.call)?;
+    let grants = if intent.call.is_process() {
+        config.runtime_grants.as_slice()
+    } else {
+        &[]
+    };
+    let mounts = runtime_mounts(grants, intent.limits.cache_bytes > 0)?;
+    Ok((mounts, super::runtime_path(grants)?))
+}
 
 fn mount_plan(
     grants: &[super::super::toolchains::RuntimeGrant],
@@ -1405,17 +1418,14 @@ fn profile_arguments(
         "--ro-bind",
         RUNTIME_ROOT,
         RUNTIME_ROOT,
-        "--symlink",
-        "usr/lib",
-        "/lib",
-        "--symlink",
-        "usr/lib64",
-        "/lib64",
         "--proc",
         "/proc",
         "--dev",
         "/dev",
     ]);
+    for entry in system::entries(Path::new("/"), system::root_owner()) {
+        entry.arguments(command);
+    }
     command
         .args(["--size"])
         .arg(limits.scratch_bytes.to_string())
@@ -1461,11 +1471,28 @@ pub(super) fn verify_runtime_mounts(
     cache_enabled: bool,
 ) -> Result<(), ToolError> {
     let mounts = read_mountinfo()?;
+    let system = std::iter::once(PathBuf::from(RUNTIME_ROOT))
+        .chain(system::mounted())
+        .collect::<Vec<_>>();
     let targets = mount_plan(grants, cache_enabled)?
         .into_iter()
         .map(|(_, target, _)| target)
+        .chain(system.iter().cloned())
         .collect::<Vec<_>>();
-    verify_mount_entries(&mounts, &targets)
+    verify_mount_entries(&mounts, &targets)?;
+    verify_read_only(&mounts, &system)
+}
+
+fn verify_read_only(mounts: &[MountInfoEntry], targets: &[PathBuf]) -> Result<(), ToolError> {
+    for target in targets {
+        if !mounts
+            .iter()
+            .any(|mount| mount.path == *target && mount_option_count(&mount.options, b"ro") == 1)
+        {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    }
+    Ok(())
 }
 
 fn read_mountinfo() -> Result<Vec<MountInfoEntry>, ToolError> {
@@ -2060,6 +2087,7 @@ mod tests {
             "/usr",
             "/usr/local/node",
             "/lib/x",
+            "/etc/ssl/certs",
             "/dev/shm",
             "/scratch/rust",
             "/workspace",
@@ -2198,11 +2226,13 @@ mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            serde_json::from_value(call).unwrap(),
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                serde_json::from_value(call).unwrap(),
+            )
+            .unwrap();
         unit_command(
             &runtime,
             &intent,
@@ -2251,13 +2281,15 @@ mod tests {
             let destinations = mount_destinations(&arguments);
             assert_eq!(
                 destinations.len(),
-                PROFILE_MOUNT_TARGETS.len(),
+                PROFILE_MOUNT_TARGETS.len()
+                    + system::entries(Path::new("/"), system::root_owner()).len(),
                 "{destinations:?}"
             );
             for destination in destinations {
                 assert!(
                     PROFILE_MOUNT_TARGETS
-                        .iter()
+                        .into_iter()
+                        .chain(system::targets())
                         .any(|fixed| Path::new(&destination).starts_with(fixed)),
                     "{destination}"
                 );
@@ -2348,6 +2380,15 @@ mod tests {
         );
 
         let shared_root = b"1 0 8:1 / / rw shared:1 - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust ro - ext4 /dev/root ro\n";
+        assert!(verify_read_only(&valid, std::slice::from_ref(&target)).is_ok());
+        let writable = b"1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust rw - ext4 /dev/root ro\n";
+        assert!(
+            verify_read_only(
+                &parse_mountinfo(writable).unwrap(),
+                std::slice::from_ref(&target)
+            )
+            .is_err()
+        );
         assert!(
             verify_mount_entries(
                 &parse_mountinfo(shared_root).unwrap(),
@@ -3091,6 +3132,7 @@ mod tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             };
             let grants = std::slice::from_ref(&grant);
             let mut stage = super::super::BootstrapStage::Workspace;

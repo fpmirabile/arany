@@ -43,7 +43,6 @@ struct UserPrograms {
     shims: PathBuf,
 }
 
-// Selects the detected Homebrew rustup shims and the Homebrew prefix's bin, nothing else.
 fn selected_permissions(workspace: &Path) -> (arany::WorkspacePermissions, UserPrograms) {
     let account = StateRoot::account_path().unwrap();
     let mut permissions = arany::WorkspacePermissions::open(workspace)
@@ -60,27 +59,25 @@ fn selected_permissions(workspace: &Path) -> (arany::WorkspacePermissions, UserP
         .iter()
         .find(|option| option.group == "Manager shims" && option.path.join("rustup").is_file())
         .expect("CI installs a rustup proxy");
-    let programs = choices
-        .iter()
-        .find(|option| {
-            option.group == "User programs"
-                && option.path.ends_with("bin")
-                && option
-                    .path
+    // Every PATH directory is granted per Run, so the Homebrew prefix comes from PATH, not a choice.
+    let prefix = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .find(|entry| {
+            entry.ends_with("bin")
+                && entry
                     .parent()
                     .is_some_and(|prefix| prefix.join("Cellar").is_dir())
         })
-        .expect("Homebrew bin on PATH");
-    let prefix = programs.path.parent().unwrap().to_owned();
-    for option in [shims, programs] {
-        assert!(option.detected && !option.exclusive && !option.selected);
-        assert!(
-            option
-                .label
-                .contains("runs whatever the directory currently holds")
-        );
-    }
-    let selected = [shims.token.clone(), programs.token.clone()];
+        .expect("Homebrew bin on PATH")
+        .parent()
+        .unwrap()
+        .to_owned();
+    assert!(shims.detected && !shims.exclusive && !shims.selected);
+    assert!(
+        shims
+            .label
+            .contains("runs whatever the directory currently holds")
+    );
+    let selected = [shims.token.clone()];
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     // Checked before the cleanup owner exists, so a real file is never removed.
     for probe in probes(&home, &prefix) {
@@ -129,7 +126,8 @@ impl UserPrograms {
 toolchain=$(rustc --version) || exit 83
 case "$toolchain" in "rustc {channel} "*) ;; *) exit 84 ;; esac
 test "$RUSTUP_HOME" = '{home}/.rustup' || exit 85
-test "$PATH" = '{shims}:{prefix}/bin:/usr/bin:/bin' || test "$PATH" = '{prefix}/bin:{shims}:/usr/bin:/bin' || exit 86
+case "$PATH" in '{shims}:'*':/usr/bin:/bin') ;; *) exit 86 ;; esac
+case ":$PATH:" in *':{prefix}/bin:'*) ;; *) exit 86 ;; esac
 test "$HOME" = "$TMPDIR" || exit 87
 test "$HOME" != '{home}' || exit 88
 for path in '{prefix_probe}' '{cargo_probe}' '{rustup_probe}'; do
@@ -181,13 +179,14 @@ async fn native_user_programs_helper() {
     let canary = root.join("home/unselected-canary");
     private_file(&canary, b"UNSELECTED_HOME_CANARY");
     let (permissions, programs) = selected_permissions(&workspace);
-    assert_eq!(permissions.selected_runtime_profiles().len(), 2);
+    assert_eq!(permissions.selected_runtime_profiles().len(), 1);
     let call = ToolCall::Command {
         program: "sh".into(),
         args: vec!["-c".into(), programs.script(&canary)],
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut request =
         arany::test_support::scenario::request(&workspace, "Run selected user programs offline");

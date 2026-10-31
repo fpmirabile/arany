@@ -16,6 +16,7 @@ mod peer_row_tests {
             cwd: String::new(),
             resource_class: Some(arany::ToolResourceClass::Build),
             timeout_ms: Some(600_000),
+            additional_reads: None,
         };
         let lines = approval_call_lines(&call);
         assert!(lines.iter().any(|line| line == "Resources: Build"));
@@ -97,6 +98,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "untrusted timeout text\u{1b}[2J",
         );
@@ -729,6 +731,7 @@ mod peer_row_tests {
                     cwd: String::new(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
                 "Command(sh )",
                 60_000,
@@ -797,6 +800,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             &output,
         );
@@ -912,6 +916,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             &result.to_string(),
         );
@@ -950,6 +955,7 @@ mod peer_row_tests {
                     cwd: String::new(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
                 "",
             );
@@ -965,6 +971,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "",
         );
@@ -1334,6 +1341,7 @@ mod unguarded_tests {
                 prefix: offered,
                 sensitive: false,
                 inactive_rules: false,
+                sandbox_off: false,
             };
             let lines = unguarded_approval_lines(&intent, &prompt);
             let prefix =
@@ -1370,6 +1378,7 @@ mod unguarded_tests {
             attribution: None,
             remember: true,
             prefix: false,
+            sandbox_off: false,
         };
         let lines = unguarded_approval_lines(&intent(&["-c", "cargo test"], ""), &prompt);
         assert_eq!(
@@ -1612,6 +1621,7 @@ mod rewrite_summary_tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let fact = |stage| arany::CommandRewrite {
             hook_intent_id: None,

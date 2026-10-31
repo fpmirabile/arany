@@ -75,6 +75,13 @@ impl Engine {
             runtime
                 .admit_git_hooks(accepted, submission.approvals.is_some())
                 .await;
+            runtime.repository = match (&submission.grant, submission.permissions()) {
+                (_, Some(permissions)) => permissions.repository().map(str::to_owned),
+                (ToolGrant::Configured, None) => {
+                    crate::tools::WorkspacePermissions::saved_repository(&request.workspace)
+                }
+                _ => None,
+            };
         }
         if let Some(runtime) = &tools
             && runtime.workspace_identity() != workspace_identity

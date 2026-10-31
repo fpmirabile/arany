@@ -14,7 +14,7 @@ pub(super) fn validate_modes(
         let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(mode, call).0;
         if verdict.approved
             && !(call.is_unguarded()
-                && mode == PermissionMode::DontAsk
+                && mode != PermissionMode::Plan
                 && matches!(
                     verdict.source,
                     PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
@@ -30,6 +30,33 @@ pub(super) fn validate_modes(
         }
     }
     Ok(())
+}
+
+fn has_new_reads(run: &crate::session::reducer::RunView, call: &crate::tools::ToolCall) -> bool {
+    let crate::tools::ToolCall::Command {
+        additional_reads: Some(request),
+        ..
+    } = call
+    else {
+        return false;
+    };
+    let saved = run
+        .config
+        .as_ref()
+        .and_then(|config| config.tool_policy.as_ref())
+        .map_or(&[][..], |policy| policy.guard.saved_reads.as_slice());
+    request.paths.iter().any(|path| {
+        !saved.iter().any(|read| read.path == *path)
+            && !run.tools.iter().any(|tool| {
+                tool.permission_verdict.as_ref().is_some_and(|verdict| {
+                    verdict.approved && verdict.source == PermissionSource::Human
+                }) && matches!(
+                    &tool.intent.call,
+                    crate::tools::ToolCall::Command { additional_reads: Some(earlier), .. }
+                        if earlier.paths.contains(path)
+                )
+            })
+    })
 }
 
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
@@ -52,6 +79,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             let hooks_pinned = policy
                 .and_then(|policy| policy.git.as_ref())
                 .is_some_and(|git| git.hooks.is_some());
+            let repository = policy
+                .and_then(|policy| policy.git.as_ref())
+                .and_then(|git| git.repository.clone());
             let pending_call = tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?
                 .intent
                 .call
@@ -63,6 +93,12 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             )?;
             let unguarded = pending_call.is_unguarded();
             let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
+            if verdict.approved
+                && has_new_reads(run, &pending_call)
+                && !(primary && verdict.source == PermissionSource::Human)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             let first_use = !permissions_pinned
                 && definition_mode.is_none()
                 && !unguarded
@@ -88,7 +124,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            // With accepted hooks a Git write is approved only by a human or a user-owned allow rule.
+            // With accepted hooks a Git write is approved by a human, a user-owned allow rule or auto's review.
             if verdict.approved
                 && pending_call.facts().site == crate::tools::catalog::Site::Git
                 && pending_call.mutates()
@@ -99,6 +135,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                         | PermissionSource::SessionApproval
                         | PermissionSource::Rule
                         | PermissionSource::TypedPrefixRule
+                        | PermissionSource::AiReview
                 )
             {
                 return Err(ReplayError::InvalidTransition);
@@ -115,7 +152,12 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                         || verdict.decision == Decision::Allow
                             && (matches!(
                                 verdict.mode,
-                                Some(PermissionMode::Default | PermissionMode::DontAsk)
+                                Some(
+                                    PermissionMode::Default
+                                        | PermissionMode::DontAsk
+                                        | PermissionMode::AcceptEdits
+                                        | PermissionMode::Auto
+                                )
                             ) || pending_call.is_host_pr_read())
                         || !verdict.approved && verdict.decision == Decision::Deny))
             {
@@ -158,12 +200,33 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                                 || verdict.decision != Decision::Ask
                                 || matches!(verdict.mode, Some(PermissionMode::DontAsk)))
                     } else {
-                        verdict.source != PermissionSource::Human
-                            || verdict.decision != Decision::Ask
-                            || matches!(
+                        let human = verdict.source == PermissionSource::Human
+                            && verdict.decision == Decision::Ask
+                            && !matches!(
                                 verdict.mode,
                                 Some(PermissionMode::Plan | PermissionMode::DontAsk)
-                            )
+                            );
+                        // A user's typed allow covers any push or PR; auto's review only the pinned repository.
+                        let same_repository = {
+                            let intent =
+                                &tool_by_digest(run, *agent_run_id, &verdict.intent_digest)?.intent;
+                            repository.as_deref().is_some_and(|pin| {
+                                crate::tools::same_repository(
+                                    pin,
+                                    &intent.call,
+                                    intent.host.as_ref(),
+                                )
+                            })
+                        };
+                        let delegated = same_repository
+                            && verdict.source == PermissionSource::AiReview
+                            && verdict.decision == Decision::Ask
+                            && matches!(verdict.mode, None | Some(PermissionMode::Auto))
+                            || verdict.source == PermissionSource::TypedPrefixRule
+                                && verdict.basis == PermissionSource::TypedPrefixRule
+                                && verdict.decision == Decision::Allow
+                                && permissions_pinned;
+                        !human && !delegated
                     })
             {
                 return Err(ReplayError::InvalidTransition);

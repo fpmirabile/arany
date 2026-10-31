@@ -24,6 +24,7 @@ fn command_resources_only_narrow_the_recorded_plan() {
             cwd: String::new(),
             resource_class: Some(class),
             timeout_ms: Some(timeout),
+            additional_reads: None,
         };
         assert_eq!(
             crate::session::validate_primary_tool_scope(&view, run, &call),
@@ -44,6 +45,7 @@ fn command_replay_rejects_class_runtime_and_receipt_tampering() {
         cwd: String::new(),
         resource_class: Some(ToolResourceClass::Build),
         timeout_ms: Some(5_000),
+        additional_reads: None,
     };
     intent.limits.resource_class = ToolResourceClass::Build;
     intent.limits.runtime_ms = 5_000;
@@ -87,6 +89,7 @@ fn requested_time_receipt_must_match_the_call_and_cannot_claim_dispatch() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: Some(2_000),
+        additional_reads: None,
     };
     intent.limits.runtime_ms = 2_000;
     intent.limits.cache_bytes = 0;

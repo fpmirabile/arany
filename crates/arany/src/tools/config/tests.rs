@@ -104,6 +104,7 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None
     }));
     assert!(!config.allows(&ToolCall::Skill {
         name: "unconfigured".into(),

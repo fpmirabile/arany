@@ -209,6 +209,7 @@ fn tool_proposal_payload_round_trips_and_rejects_a_verdict() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = 2;
@@ -325,6 +326,7 @@ fn command_resource_fields_preserve_omitted_event_bytes_and_intent_digests() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let event = Event::ToolProposed {
         run_id: run,

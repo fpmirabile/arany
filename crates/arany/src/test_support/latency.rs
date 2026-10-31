@@ -671,6 +671,7 @@ mod tests {
                 cwd: "src".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         ] {
             for disposition in [

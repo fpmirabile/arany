@@ -105,6 +105,7 @@ record_kinds!(
     ChatgptAccounts,
     McpOauth,
     UserInstructions,
+    GuardSettings,
 );
 
 impl RecordKind {
@@ -176,6 +177,7 @@ impl RecordKind {
             ),
             Self::McpOauth => ("mcp-oauth.json", "mcp-oauth.pending", 64 * 1024, true),
             Self::UserInstructions => ("AGENTS.md", "AGENTS.pending", 64 * 1024, false),
+            Self::GuardSettings => ("guard.json", "guard.pending", 16 * 1024, true),
             Self::ChatgptAccounts => (
                 "chatgpt-accounts.json",
                 "chatgpt-accounts.pending",

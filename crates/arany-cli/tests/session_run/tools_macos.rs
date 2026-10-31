@@ -107,7 +107,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "depth-32"
                         | "depth-33"
                         | "nonzero"
-                        | "ai-approve"
+                        | "auto"
                         | "deny"
                         | "drop"
                         | "cancel"
@@ -727,8 +727,7 @@ async fn native_file_journey_helper() {
             args: vec!["-c".into(), "set -eu; if /bin/cat /etc/passwd >/dev/null 2>&1; then exit 90; fi; if /bin/cat /usr/bin/sudo >/dev/null 2>&1; then exit 91; fi; test \"$(/bin/cat src/main.txt)\" = after; test \"$(/bin/cat src/generated/note.txt)\" = replaced; i=0; while test \"$i\" -lt 128; do /usr/bin/true; i=$((i + 1)); done; printf 'command create\\n' > src/command-output.txt; printf 'command modify\\n' > src/generated/note.txt; /usr/bin/find src/deleted.txt -type f -delete; printf native-command-success".into()],
             cwd: "".into(),
             resource_class: None,
-            timeout_ms: None,
-        },
+            timeout_ms: None, additional_reads: None },
         ToolCall::McpList {
             server: "synthetic".into(),
         },
@@ -979,8 +978,7 @@ async fn native_file_journey_helper() {
                 args: vec!["-c".into(), "set -eu; test \"$(/bin/cat src/command-output.txt)\" = 'command create'; test \"$(/bin/cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            }],
+                timeout_ms: None, additional_reads: None }],
             linked_file: None,
         });
     let fresh = arany::test_support::engine::open(
@@ -1232,16 +1230,17 @@ async fn native_offline_rust_build_helper() {
         args: vec![
             "-c".into(),
             format!(
-                "set -eu; if {{ IFS= read -r _; }} < '{apple_sdk}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; if '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1; then exit 42; fi; printf 'unselected-apple-runtimes-denied\\n'"
+                "set -eu; if {{ IFS= read -r _; }} < '{apple_sdk}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1 || exit 42; printf 'unselected-apple-sdk-denied\\n'"
             ),
         ],
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut requested = arany::test_support::scenario::request(
         &workspace,
-        "Verify Apple compiler and SDK access remain denied without those profiles",
+        "Verify the Apple SDK stays denied without its profile while PATH grants the compiler",
     );
     requested.title = Some("Unselected Apple runtimes".into());
     requested.include_paths.clear();
@@ -1263,10 +1262,7 @@ async fn native_offline_rust_build_helper() {
     let denied_output: serde_json::Value =
         serde_json::from_str(&denied_observation.output).unwrap();
     assert_eq!(denied_output["exit_code"], 0);
-    assert_eq!(
-        denied_output["stdout"],
-        "unselected-apple-runtimes-denied\n"
-    );
+    assert_eq!(denied_output["stdout"], "unselected-apple-sdk-denied\n");
     assert_guarded_build_observation(denied_observation);
     assert_provider_journal(&denied_requests, &denied_apple);
     assert_closed_build_replay(root, "state-denied-apple", &denied).await;
@@ -1437,6 +1433,7 @@ async fn native_command_latency_helper() {
             cwd: String::new(),
             resource_class: Some(class),
             timeout_ms: None,
+            additional_reads: None,
         };
         let mut requested =
             arany::test_support::scenario::request(&workspace, "Measure one guarded command");
@@ -1522,20 +1519,12 @@ async fn run_offline_build_case(
     let approve = async {
         let mut calls = Vec::new();
         while let Some(approval) = inbox.next().await {
-            assert!(
-                !approval.allow_auto_edits,
-                "commands cannot offer file-edit remembering"
-            );
-            let matches = calls.is_empty() && approval.intent.call == call;
             calls.push(approval.intent.call.clone());
-            approval.decide(matches);
-            if calls.len() == 2 {
-                break;
-            }
+            approval.decide(false);
         }
         calls
     };
-    let (outcome, approved_calls) = tokio::time::timeout(
+    let (outcome, asked) = tokio::time::timeout(
         Duration::from_millis(u64::from(timeout_ms)) + Duration::from_secs(60),
         async { tokio::join!(run, approve) },
     )
@@ -1543,7 +1532,10 @@ async fn run_offline_build_case(
     .expect("bounded native offline build run");
     engine.close().await.unwrap();
     let outcome = outcome.unwrap_or_else(|error| panic!("native build Engine failed: {error}"));
-    assert_eq!(approved_calls, [call], "one exact native build approval");
+    assert!(
+        asked.is_empty(),
+        "a sandboxed build asks nothing: {asked:?}"
+    );
     (outcome, requests)
 }
 
@@ -1749,12 +1741,13 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let refused_requests = Arc::new(Mutex::new(Vec::new()));
     let refused_state = root.join("state-mounted");
     let provider = Arc::new(RuntimeJourney {
         requests: refused_requests.clone(),
-        calls: vec![runtime_call.clone()],
+        calls: vec![runtime_call],
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
     });
@@ -1792,21 +1785,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         engine_controls,
     );
-    let approve = async {
-        let approval = inbox
-            .next()
-            .await
-            .expect("one approval for the mounted-runtime command");
-        assert_eq!(approval.intent.call, runtime_call);
-        approval.decide(true);
-    };
-    let (refused, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(run, approve)
-    })
-    .await
-    .expect("bounded mounted-runtime refusal journey");
-    let refused = refused.unwrap();
+    let refused = tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("bounded mounted-runtime refusal journey")
+        .unwrap();
     engine.close().await.unwrap();
+    drop(approvals);
+    assert!(
+        inbox.next().await.is_none(),
+        "a sandboxed command asks nothing"
+    );
     assert_eq!(
         refused.run.status,
         RunStatus::Failed,
@@ -1882,12 +1870,11 @@ async fn native_runtime_mount_journey_helper() {
         ],
         cwd: String::new(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let seed_requests = Arc::new(Mutex::new(Vec::new()));
     let seed_engine_provider = Arc::new(RuntimeJourney {
         requests: seed_requests,
-        calls: vec![cache_seed.clone()],
+        calls: vec![cache_seed],
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
     });
@@ -1922,24 +1909,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         seed_engine_controls,
     );
-    let approve_seed = async {
-        let approval = seed_inbox
-            .next()
-            .await
-            .expect("private cache seed approval");
-        assert!(
-            approval.intent.call == cache_seed,
-            "private cache seed approval intent differs"
-        );
-        approval.decide(true);
-    };
-    let (seed_outcome, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(seed_run, approve_seed)
-    })
-    .await
-    .expect("bounded private cache seed");
-    let seed_outcome = seed_outcome.unwrap();
+    let seed_outcome = tokio::time::timeout(Duration::from_secs(90), seed_run)
+        .await
+        .expect("bounded private cache seed")
+        .unwrap();
     seed_engine.close().await.unwrap();
+    drop(seed_approvals);
+    assert!(
+        seed_inbox.next().await.is_none(),
+        "a sandboxed cache seed asks nothing"
+    );
     assert_eq!(
         seed_outcome.run.status,
         RunStatus::Finished,
@@ -2019,6 +1998,7 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let cache_read = ToolCall::Command {
         program: "sh".into(),
@@ -2031,6 +2011,7 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let cache_overflow = ToolCall::Command {
         program: "sh".into(),
@@ -2040,8 +2021,7 @@ async fn native_runtime_mount_journey_helper() {
         ],
         cwd: String::new(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let accepted_calls = vec![cache_write, cache_read, cache_overflow];
     let provider = Arc::new(RuntimeJourney {
         requests: accepted_requests.clone(),
@@ -2110,26 +2090,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         engine_controls,
     );
-    let approve = async {
-        for call in &accepted_calls {
-            let approval = inbox
-                .next()
-                .await
-                .expect("approval for a selected-runtime command");
-            assert!(
-                &approval.intent.call == call,
-                "selected-runtime approval intent differs"
-            );
-            approval.decide(true);
-        }
-    };
-    let (accepted, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(run, approve)
-    })
-    .await
-    .expect("bounded selected-runtime success journey");
-    let accepted = accepted.unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(90), run)
+        .await
+        .expect("bounded selected-runtime success journey")
+        .unwrap();
     engine.close().await.unwrap();
+    drop(approvals);
+    assert!(
+        inbox.next().await.is_none(),
+        "sandboxed selected-runtime commands ask nothing"
+    );
     assert_eq!(
         accepted.run.status,
         RunStatus::Finished,
@@ -2324,12 +2294,11 @@ async fn native_runtime_mount_journey_helper() {
         ],
         cwd: String::new(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let verify_requests = Arc::new(Mutex::new(Vec::new()));
     let verify_engine_provider = Arc::new(RuntimeJourney {
         requests: verify_requests,
-        calls: vec![verify_cache.clone()],
+        calls: vec![verify_cache],
         resource_class: arany::ToolResourceClass::Default,
         command_timeout_ms: None,
     });
@@ -2365,21 +2334,16 @@ async fn native_runtime_mount_journey_helper() {
         },
         verify_engine_controls,
     );
-    let approve_verify = async {
-        let approval = verify_inbox.next().await.expect("cache recovery approval");
-        assert!(
-            approval.intent.call == verify_cache,
-            "cache recovery approval intent differs"
-        );
-        approval.decide(true);
-    };
-    let (verified, ()) = tokio::time::timeout(Duration::from_secs(90), async {
-        tokio::join!(verify_run, approve_verify)
-    })
-    .await
-    .expect("bounded cache recovery journey");
-    let verified = verified.unwrap();
+    let verified = tokio::time::timeout(Duration::from_secs(90), verify_run)
+        .await
+        .expect("bounded cache recovery journey")
+        .unwrap();
     verify_engine.close().await.unwrap();
+    drop(verify_approvals);
+    assert!(
+        verify_inbox.next().await.is_none(),
+        "a sandboxed command asks nothing"
+    );
     assert_eq!(verified.run.status, RunStatus::Finished);
     let retained = verified.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(retained.cache_update, arany::CacheUpdate::Published);
@@ -2473,7 +2437,8 @@ int main(void) {
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
         );
-        if case == "headless" {
+        // Sandboxed commands ask nothing; an ask rule keeps the human gate these cases stop at.
+        if matches!(case, "headless" | "denied" | "cancelled") {
             private_file(
                 &state_path.join("permissions.json"),
                 br#"{"permissions":{"ask":["Bash"]}}"#,
@@ -2491,6 +2456,7 @@ int main(void) {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else {
             let script = if case == "overflow" {
@@ -2504,6 +2470,7 @@ int main(void) {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         };
         let provider = Arc::new(Journey {
@@ -2808,6 +2775,11 @@ fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &
         assert_eq!(verdict.decision, Decision::Ask, "approval is required");
         assert_eq!(verdict.source, PermissionSource::UnavailableApproval);
         assert_eq!(verdict.basis, PermissionSource::Rule);
+        assert!(!verdict.approved);
+    }
+    if case == "denied" {
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert_eq!(verdict.source, PermissionSource::Human);
         assert!(!verdict.approved);
     }
     assert_eq!(

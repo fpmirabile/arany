@@ -43,8 +43,11 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         host_settings_admitted: true,
         host_settings_saved: Default::default(),
         guard_available: true,
+        guard_mode: crate::tools::GuardMode::Auto,
+        once_reads: Default::default(),
         git_environment: None,
         git_hooks: None,
+        repository: None,
         human_approvals: false,
         handover: None,
         definitions: Default::default(),
@@ -340,8 +343,9 @@ async fn skill_text_reads_are_bounded_inert_and_pinned_without_guard_execution()
         resource: None,
     };
     for limit in [128, 1024, MAX_TOOL_RESULT_BYTES] {
-        let mut intent =
-            runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+        let mut intent = runtime
+            .intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone())
+            .unwrap();
         intent.limits.result_bytes = limit as u32;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);

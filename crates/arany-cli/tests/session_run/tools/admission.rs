@@ -32,6 +32,7 @@ impl Provider for OverTimeoutCommand {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: (!self.planned).then_some(2_000),
+                additional_reads: None,
             };
             if self.planned && step == 0 {
                 let mut contract = proposal_plan_contract(&call).unwrap();

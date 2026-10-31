@@ -1324,7 +1324,12 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
     let transcript = consent_probe(root, &search, true, None);
     assert!(!record_path.exists(), "Ctrl+C must save no choice");
     assert!(!state.exists(), "cancelled consent must create no State");
-    for row in ["3. ", "4. ", "5. "] {
+    let rows: &[&str] = if homebrew {
+        &["3. ", "4. ", "5. "]
+    } else {
+        &["3. ", "4. "]
+    };
+    for row in rows {
         assert!(transcript.contains(row), "{transcript}");
     }
     assert!(transcript.contains("runs whatever the directory currently holds"));
@@ -1338,9 +1343,9 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
         &search,
         true,
         Some(if homebrew {
-            b"trust 3 4 5 6 7\n"
-        } else {
             b"trust 3 4 5\n"
+        } else {
+            b"trust 3 4\n"
         }),
     );
     let trusted: serde_json::Value =
@@ -1352,9 +1357,9 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
         .iter()
         .map(|grant| grant["path"].as_str().unwrap())
         .collect::<Vec<_>>();
-    let mut expected = vec![local.to_str().unwrap(), pyenv.to_str().unwrap()];
+    let mut expected = vec![pyenv.to_str().unwrap()];
     if homebrew {
-        expected.extend(["/opt/homebrew/bin", "/opt/homebrew/Cellar/rustup/1.0/bin"]);
+        expected.push("/opt/homebrew/Cellar/rustup/1.0/libexec/bin");
     }
     expected.push(volta.to_str().unwrap());
     assert_eq!(selected, expected);
@@ -1689,13 +1694,13 @@ fn run_permissions_journey(journey: PermissionsJourney) {
         until(
             &mut pty,
             "verb menu",
-            &shows("gh pr create (host; human approval required)"),
+            &shows("gh pr create (host; allow covers every destination)"),
         );
         assert!(super::session_picker::screen_contains(
             &pty.transcript,
             80,
             24,
-            "host; human approval required"
+            "host; allow covers every destination"
         ));
         pty.send(b"\r");
         until(&mut pty, "decision menu", &shows("Rule decision"));

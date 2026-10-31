@@ -27,22 +27,11 @@ async fn prefix_binds_guard_host_approval_failure_drift_and_closed_replay() {
 
 fn prefix_fixture(root: &Path, ending: Ending, compose: bool) -> CommandFixture {
     let mut fixture = CommandFixture::new(root, None);
-    let path = [
-        fixture.executable.parent().unwrap().to_str().unwrap(),
-        "/usr/bin",
-        "/bin",
-    ];
-    let canonical = serde_json::to_vec(&json!(["process", null, path, [], []])).unwrap();
+    // Sandboxed commands ask nothing; an ask rule keeps the human approval this journey binds.
     fixture
         .state
-        .record(arany::RecordKind::CommandEnvironment)
-        .replace(
-            &serde_json::to_vec(&json!({
-                "source":"process","shell":null,"captured_at":0,"path":path,
-                "names":[],"excluded":[],"sha256":hash(&canonical)
-            }))
-            .unwrap(),
-        )
+        .record(arany::RecordKind::Permissions)
+        .replace(br#"{"permissions":{"ask":["Bash"]}}"#)
         .unwrap();
     let rewrite = fixture.executable.with_file_name("rewrite");
     if compose {
@@ -261,6 +250,10 @@ fn assert_prefix_outcome(run: &arany::RunView, ending: Ending, compose: bool) {
         .filter(|tool| tool.intent.wrap.is_some())
         .collect::<Vec<_>>();
     assert_eq!(wrapped.len(), 1);
+    assert_eq!(
+        wrapped[0].permission_verdict.as_ref().unwrap().source,
+        arany::permissions::PermissionSource::Human
+    );
     let observation = wrapped[0].observation.as_ref().unwrap();
     match ending {
         Ending::Unknown => {

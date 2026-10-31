@@ -701,6 +701,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         for name in ["Bash", "command"] {
             let (researcher, notes) =

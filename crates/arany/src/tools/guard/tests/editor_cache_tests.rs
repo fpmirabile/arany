@@ -14,17 +14,20 @@ fn editor_build_jobs_bind_selected_rust_before_guard_dispatch() {
     );
     runtime.process_enforcement_digest =
         enforcement_digest(&runtime.config.runtime_grants).unwrap();
-    let mut intent = runtime.intent(
-        crate::RunId::new(),
-        crate::AgentRunId::new(),
-        ToolCall::Command {
-            program: "sh".into(),
-            args: Vec::new(),
-            cwd: ".".into(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let mut intent = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
     intent.limits.build_jobs = 2;
     intent.limits.cache_bytes = 0;
@@ -58,17 +61,20 @@ async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_
         }),
     );
     runtime.cache_state = Some(Arc::new(state.try_clone().unwrap()));
-    let mut editor = runtime.intent(
-        crate::RunId::new(),
-        crate::AgentRunId::new(),
-        ToolCall::Command {
-            program: "build".into(),
-            args: vec![],
-            cwd: ".".into(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let mut editor = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "build".into(),
+                args: vec![],
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     let (view_bytes, candidate_bytes) = runtime
         .effective_cache_bytes(editor.limits.cache_requested_bytes)
         .unwrap();

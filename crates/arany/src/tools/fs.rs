@@ -2413,15 +2413,17 @@ mod path_tests {
             ("outside/missing", ToolDisposition::Denied),
             ("../missing", ToolDisposition::Denied),
         ] {
-            let intent = runtime.intent(
-                crate::session::RunId::new(),
-                crate::session::AgentRunId::new(),
-                ToolCall::Read {
-                    path: path.into(),
-                    offset: None,
-                    limit: None,
-                },
-            );
+            let intent = runtime
+                .intent(
+                    crate::session::RunId::new(),
+                    crate::session::AgentRunId::new(),
+                    ToolCall::Read {
+                        path: path.into(),
+                        offset: None,
+                        limit: None,
+                    },
+                )
+                .unwrap();
             let observation = runtime
                 .execute(intent, super::super::Cancellation::new())
                 .await;
@@ -2450,14 +2452,16 @@ mod path_tests {
             open_absolute(workspace.join("src/missing").to_str().unwrap()),
             Err(ToolError::Path)
         ));
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Skill {
-                name: "review".into(),
-                resource: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Skill {
+                    name: "review".into(),
+                    resource: None,
+                },
+            )
+            .unwrap();
         assert_eq!(
             super::super::dispatch::outcome(&intent, Err(ToolError::NotFound)),
             (

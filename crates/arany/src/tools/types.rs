@@ -349,6 +349,8 @@ pub enum ToolCall {
         resource_class: Option<ToolResourceClass>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_reads: Option<Box<ReadRequest>>,
     },
     CommandUnguarded {
         program: String,
@@ -791,6 +793,36 @@ pub struct ToolPolicyReceipt {
     pub child_web: bool,
     #[serde(deserialize_with = "Option::deserialize")]
     pub git: Option<GitRunPin>,
+    pub guard: GuardPin,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardPin {
+    pub mode: super::GuardMode,
+    pub sandbox: bool,
+    pub saved_reads: Vec<ReadPin>,
+}
+
+impl GuardPin {
+    // Without a sandbox, `auto` and `off` run commands on the host under approval.
+    pub fn host_fallback(&self) -> bool {
+        !self.sandbox && self.mode != super::GuardMode::Required
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPin {
+    pub path: String,
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl ReadPin {
+    fn valid(&self) -> bool {
+        super::config::valid_absolute(&self.path) && self.inode != 0
+    }
 }
 
 // The Git a Run resolved from PATH, and the digest of its accepted hooks (null: hooks off).
@@ -801,6 +833,8 @@ pub struct GitRunPin {
     pub sha256: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub hooks: Option<[u8; 32]>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub repository: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -842,7 +876,10 @@ impl ToolPolicyReceipt {
             && self.config_digest != [0; 32]
             && self.permissions_digest != Some([0; 32])
             && self.unguarded_rules_digest != Some([0; 32])
-            && self.child_unguarded == UnguardedGrant::Denied
+            && (self.child_unguarded == UnguardedGrant::Denied || self.guard.host_fallback())
+            && (self.guard.sandbox || self.guard.saved_reads.is_empty())
+            && self.guard.saved_reads.len() <= super::guard_settings::MAX_SAVED_READ_GRANTS
+            && self.guard.saved_reads.iter().all(ReadPin::valid)
             && self
                 .host_epoch
                 .is_none_or(|epoch| epoch.get_version() == Some(uuid::Version::SortRand))
@@ -852,6 +889,10 @@ impl ToolPolicyReceipt {
                 super::config::valid_absolute(&git.executable)
                     && valid_digest(&git.sha256)
                     && git.hooks != Some([0; 32])
+                    && git
+                        .repository
+                        .as_deref()
+                        .is_none_or(super::git::host::valid_push_url)
             })
     }
 }
@@ -908,6 +949,13 @@ pub struct EffectIntent {
     pub call: ToolCall,
     pub limits: ToolLimits,
     pub use_count: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadRequest {
+    pub paths: Vec<String>,
+    pub justification: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2485,6 +2533,7 @@ mod unguarded_vocabulary_tests {
             cwd: cwd.into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         }
     }
 

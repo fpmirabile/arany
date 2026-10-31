@@ -21,6 +21,7 @@ pub(super) async fn refuse_options(root: &Path, workspace: &Path, config: &serde
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let provider = Arc::new(Journey {
             requests: requests.clone(),

@@ -268,17 +268,20 @@ pub(in crate::tools::guard) mod tests {
             root.path(),
             crate::tools::tests::config_value(),
         );
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Command {
-                program: "shell".into(),
-                args: vec![],
-                cwd: String::new(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "shell".into(),
+                    args: vec![],
+                    cwd: String::new(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         let duration = Duration::from_millis(u64::from(intent.limits.runtime_ms));
         let now = tokio::time::Instant::now();
         let preparation = crate::tools::guard::RESERVATION_OVERHEAD;

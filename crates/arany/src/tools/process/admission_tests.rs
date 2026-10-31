@@ -87,17 +87,20 @@ fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
         temp.path(),
         json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        ToolCall::Command {
-            program: "sh".into(),
-            args: vec!["-c".into(), "true".into()],
-            cwd: String::new(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "true".into()],
+                cwd: String::new(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     assert!(
         runtime
             .clone()

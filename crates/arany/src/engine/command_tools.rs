@@ -82,13 +82,14 @@ impl Engine {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let stdin = match tool.role {
             command_tools::CommandToolRole::Rewrite => command_tools::input(&sample)?,
             command_tools::CommandToolRole::Prefix => String::new(),
         };
         let runtime = runtime.command_tool_runtime(tool, &stdin)?;
-        let mut intent = runtime.intent(RunId::new(), AgentRunId::new(), tool.call());
+        let mut intent = runtime.intent(RunId::new(), AgentRunId::new(), tool.call())?;
         if tool.role == command_tools::CommandToolRole::Prefix {
             intent.wrap = Some(Box::new(command_tools::prefix::probe_wrap(tool)));
         }

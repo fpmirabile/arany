@@ -423,7 +423,7 @@ impl RunLoop<'_> {
         intents: &[EffectIntent],
     ) -> Result<Result<(), StopCause>, EngineError> {
         for intent in intents {
-            let permission = self.permission(grant, runtime, &intent.call);
+            let permission = self.permission(grant, runtime, intent);
             let hooks = self.hook_admission(runtime, &intent.call, &intent.call).0;
             if let Err(refusal) = self
                 .admit_tool(
@@ -506,7 +506,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
     ) -> Result<ToolObservation, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, &intent);
         let mode = effective_permission_mode(runtime.permissions(), grant);
         let records_permission = mode.is_some()
             || intent.call.is_unguarded()
@@ -938,18 +938,39 @@ impl RunLoop<'_> {
             .ask()
             .filter(|_| !interrupted.is_some_and(RunCancellation::is_cancelled))
         {
-            Some(mode) => Box::pin(self.ask(
-                grant,
-                &phase.intent,
-                mode,
-                AskOptions {
-                    unguarded_prompt: facts.unguarded_prompt(),
-                    allow_auto_edits: phase.allow_auto_edits
-                        && phase.hooks.restriction != Some(Decision::Ask),
-                    remember_prefix,
-                    interrupted: interrupted.cloned(),
-                },
-            ))
+            Some(mode) => Box::pin(
+                self.ask(
+                    grant,
+                    &phase.intent,
+                    mode,
+                    AskOptions {
+                        unguarded_prompt: facts.unguarded_prompt(),
+                        allow_auto_edits: phase.allow_auto_edits
+                            && phase.hooks.restriction != Some(Decision::Ask),
+                        remember_prefix,
+                        // Only auto mode reviews pushes to a pinned repository, so only it offers the pin.
+                        pin_repository: matches!(grant, Grant::Primary { .. })
+                            && matches!(phase.intent.call, crate::tools::ToolCall::GitPush { .. })
+                            && runtime.permissions().is_some_and(|config| {
+                                config.mode() == crate::tools::permissions::PermissionMode::Auto
+                            })
+                            && self
+                                .controls
+                                .approvals
+                                .is_some_and(|approvals| approvals.admits_prefix_rules())
+                            && !runtime.same_repository(&phase.intent),
+                        save_reads: matches!(grant, Grant::Primary { .. })
+                            && self
+                                .controls
+                                .approvals
+                                .is_some_and(|approvals| approvals.admits_prefix_rules())
+                            && runtime
+                                .reads_need_approval(&phase.intent.call)
+                                .unwrap_or(false),
+                        interrupted: interrupted.cloned(),
+                    },
+                ),
+            )
             .await?
             .map(Some),
             None => Admission::Reserved(None),
@@ -1320,6 +1341,10 @@ impl RunLoop<'_> {
                                     .as_ref()
                                     .filter(|prompt| prompt.prefix)
                                     .map(|_| RuleSave::HostPrefix)
+                                    .or_else(|| options.save_reads.then_some(RuleSave::Reads))
+                                    .or_else(|| {
+                                        options.pin_repository.then_some(RuleSave::Repository)
+                                    })
                             })
                         }
                         ApprovalReply::Deny
@@ -1348,7 +1373,6 @@ impl RunLoop<'_> {
 
     async fn resolve_review(
         &self,
-        objective: &str,
         intent: &EffectIntent,
         site: &AskSite,
         initial_mode: Option<ApprovalMode>,
@@ -1357,13 +1381,10 @@ impl RunLoop<'_> {
             Some(cause) => ReviewOutcome::Stopped(cause),
             None => {
                 let review = match site {
-                    AskSite::Primary(_) => self.review_tool(objective, intent, None).await?,
+                    AskSite::Primary(_) => self.review_tool(intent, None).await?,
                     AskSite::Delegated {
                         active_deadline, ..
-                    } => {
-                        self.review_tool(objective, intent, active_deadline.as_ref())
-                            .await?
-                    }
+                    } => self.review_tool(intent, active_deadline.as_ref()).await?,
                 };
                 match self.review_exhaustion_cause(site) {
                     Some(cause) => ReviewOutcome::Stopped(cause),
@@ -1426,7 +1447,7 @@ impl RunLoop<'_> {
             biased;
             () = ask::interrupted(interrupted) => return Ok((ApprovalReply::Unavailable, None)),
             () = cancellation.cancelled() => return Ok((ApprovalReply::Unavailable, None)),
-            pending = approvals.begin_local(intent, false, None) => pending,
+            pending = approvals.begin_local(intent, crate::tools::ApprovalOffers::default()) => pending,
         };
         let (reply, interrupted) = tokio::select! {
             biased;

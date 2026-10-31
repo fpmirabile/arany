@@ -83,6 +83,7 @@ async fn native_network_proxy_helper() {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }],
             linked_file: None,
         });

@@ -17,6 +17,7 @@ fn guarded(script: &str) -> ToolCall {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     }
 }
 
@@ -401,30 +402,29 @@ async fn guard_aliases_are_never_translated_into_host_paths() {
 }
 
 #[tokio::test]
-async fn unguarded_rerun_is_never_ai_reviewed_and_dont_ask_or_deny_rules_refuse_it() {
+async fn unguarded_rerun_is_reviewed_in_auto_and_dont_ask_or_deny_rules_refuse_it() {
     let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
     let auto = Host::new(Some(&json!({"permissions":{"defaultMode":"auto"}})));
     let seen = auto
         .run(
             &auto.workspace,
-            // The review of the guarded command, after the plan call, is the only AI review in the script.
-            script(&first, &second, vec![])
-                .into_iter()
-                .fold(Vec::new(), |mut all, outcome| {
-                    all.push(outcome);
-                    if all.len() == 2 {
-                        all.push(ProviderOutcome::Review(arany::ReviewVerdict::Approve));
-                    }
-                    all
-                }),
+            // The guarded command runs unreviewed; only the host rerun reaches the review.
+            script(
+                &first,
+                &second,
+                vec![ProviderOutcome::Review(arany::ReviewVerdict::Approve)],
+            ),
             Some(ApprovalMode::Auto),
-            vec![ApprovalReply::AllowOnce],
+            vec![],
         )
         .await;
-    assert_eq!(seen.prompts.len(), 1);
-    assert_eq!(seen.requests, 5, "the unguarded run adds no review call");
+    assert!(seen.prompts.is_empty());
+    assert_eq!(seen.requests, 5, "one review call, for the host rerun");
+    assert_eq!(seen.unconsumed, 0);
+    let verdict = seen.outcome.run.tools[0].permission_verdict.as_ref();
+    assert!(verdict.is_none_or(|verdict| verdict.source == PermissionSource::Mode));
     let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
-    assert_eq!(verdict.source, PermissionSource::Human);
+    assert_eq!(verdict.source, PermissionSource::AiReview);
     assert_eq!(verdict.mode, Some(arany::permissions::PermissionMode::Auto));
 
     for (settings, source) in [
@@ -1501,7 +1501,7 @@ async fn host_prefix_save_reuses_next_run_and_revocation_restores_the_prompt() {
                     .unwrap()
                     .decision = Decision::Deny
             }
-            "mode" => verdict.mode = Some(arany::permissions::PermissionMode::Auto),
+            "mode" => verdict.mode = Some(arany::permissions::PermissionMode::Plan),
             "session" => verdict.host.as_mut().unwrap().session = true,
             "epoch" => verdict.host.as_mut().unwrap().epoch = uuid::Uuid::now_v7(),
             "typed" => verdict.source = PermissionSource::TypedPrefixRule,
@@ -1524,21 +1524,22 @@ async fn host_prefix_save_reuses_next_run_and_revocation_restores_the_prompt() {
 
 #[tokio::test]
 async fn host_prefix_modes_channels_and_explicit_rules_never_widen_authority() {
+    // A saved prefix is a user allow: it applies in every mode but plan, and ask or deny rules win.
     for (mode, terminal, channel, restriction, reuse) in [
         ("default", ApprovalMode::Request, true, None, true),
         ("dontAsk", ApprovalMode::Request, true, None, true),
         ("dontAsk", ApprovalMode::Request, true, Some("ask"), false),
-        ("auto", ApprovalMode::Request, true, None, false),
-        ("acceptEdits", ApprovalMode::Request, true, None, false),
-        ("default", ApprovalMode::Auto, true, None, false),
-        ("default", ApprovalMode::AutoEdits, true, None, false),
+        ("auto", ApprovalMode::Request, true, None, true),
+        ("acceptEdits", ApprovalMode::Request, true, None, true),
+        ("default", ApprovalMode::Auto, true, None, true),
+        ("default", ApprovalMode::AutoEdits, true, None, true),
         ("default", ApprovalMode::Request, false, None, true),
         ("dontAsk", ApprovalMode::Request, false, None, true),
         ("dontAsk", ApprovalMode::Request, false, Some("ask"), false),
         ("default", ApprovalMode::Request, false, Some("ask"), false),
         ("default", ApprovalMode::Request, false, Some("deny"), false),
-        ("auto", ApprovalMode::Request, false, None, false),
-        ("acceptEdits", ApprovalMode::Request, false, None, false),
+        ("auto", ApprovalMode::Request, false, None, true),
+        ("acceptEdits", ApprovalMode::Request, false, None, true),
         ("plan", ApprovalMode::Request, false, None, false),
         ("default", ApprovalMode::Request, true, Some("ask"), false),
         ("default", ApprovalMode::Request, true, Some("deny"), false),

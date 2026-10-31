@@ -321,6 +321,7 @@ fn proposal_pre_hook_events(
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     events.push(Event::HookStarted {

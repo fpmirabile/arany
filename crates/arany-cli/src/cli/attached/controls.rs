@@ -24,6 +24,7 @@ const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleare
 const BUILD_CACHE_LABEL: &str = "Build cache";
 mod build_cpu;
 mod build_jobs;
+mod guard;
 
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
@@ -50,6 +51,9 @@ pub(super) struct Preferences {
     pub copy_on_select: bool,
     pub newline: NewlineShortcut,
     pub context_window: arany::ContextWindow,
+    // Saved in the account root's guard.json, never in ui-preferences.json.
+    #[serde(skip)]
+    pub guard: arany::GuardMode,
 }
 
 impl Default for Preferences {
@@ -66,6 +70,7 @@ impl Default for Preferences {
             copy_on_select: PointerSettings::default().copy_on_select,
             newline: NewlineShortcut::default(),
             context_window: arany::ContextWindow::default(),
+            guard: arany::GuardMode::default(),
         }
     }
 }
@@ -191,6 +196,8 @@ const SETTINGS: &[Setting] = &[
         reset: |p, default| p.newline = default.newline,
         guidance: Some(AttachedTerminal::newline_shortcut_guidance),
     },
+    guard::GUARD_MODE,
+    guard::GUARD_FOLDERS,
     LIMITS_LINK,
 ];
 
@@ -622,13 +629,13 @@ fn apply_setting(table: &[Setting], preferences: &mut Preferences, value: &str) 
 }
 
 // A linear bare row NUMBER selects a link row.
-fn linear_link(table: &[Setting], value: &str) -> bool {
+fn linear_link<'a>(table: &'a [Setting], value: &str) -> Option<&'a Setting> {
     value
         .parse::<usize>()
         .ok()
         .and_then(|number| number.checked_sub(1))
         .and_then(|row| table.get(row))
-        .is_some_and(|setting| setting.input == SettingInput::Link)
+        .filter(|setting| setting.input == SettingInput::Link)
 }
 
 // Linear `NUMBER VALUE` and the visual value field share this parser.
@@ -1081,8 +1088,8 @@ async fn choose_panel(
                 match value.as_str() {
                     "" => return Ok(Some(chosen)),
                     "q" => return Ok(None),
-                    value if linear_link(dialog.table, value) => {
-                        chosen = open_limits(terminal, chosen, cache_used, view).await?;
+                    value if let Some(link) = linear_link(dialog.table, value) => {
+                        chosen = open_link(terminal, link, chosen, cache_used, view).await?;
                     }
                     value => dialog.invalid = !apply_setting(dialog.table, &mut chosen, value),
                 }
@@ -1091,7 +1098,8 @@ async fn choose_panel(
                 dialog.field = Some(String::new());
             }
             TerminalInput::Submit if input_kind == SettingInput::Link => {
-                chosen = open_limits(terminal, chosen, cache_used, view).await?;
+                let link = &dialog.table[dialog.selected_row];
+                chosen = open_link(terminal, link, chosen, cache_used, view).await?;
             }
             TerminalInput::Submit => return Ok(Some(chosen)),
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
@@ -1110,6 +1118,21 @@ async fn choose_panel(
             _ => {}
         }
     }
+}
+
+async fn open_link(
+    terminal: &mut AttachedTerminal,
+    link: &Setting,
+    chosen: Preferences,
+    cache_used: Option<u64>,
+    view: &SessionView,
+) -> Result<Preferences, String> {
+    if link.label == guard::GUARD_FOLDERS.label {
+        guard::folders(terminal, view).await?;
+        terminal.begin_dialog();
+        return Ok(chosen);
+    }
+    open_limits(terminal, chosen, cache_used, view).await
 }
 
 // The Limits panel opened from Settings returns to the Settings dialog.
@@ -1281,9 +1304,16 @@ pub(super) async fn settings(
     current.completion = composer.completion_layout();
     current.newline = composer.newline_shortcut();
     current.view = *saved_view;
+    current.guard = guard::saved_mode();
     let cache_used = build_cache_used(admission).await;
     let notice = match choose_settings(terminal, current, cache_used, view, panel).await? {
         None => format!("{} unchanged", panel.title()),
+        Some(chosen)
+            if chosen.guard != current.guard
+                && let Err(error) = guard::save_mode(chosen.guard) =>
+        {
+            error
+        }
         Some(chosen) => match save_settings(admission, chosen).await {
             Ok(()) => {
                 let view_changed = chosen.view != *saved_view;
@@ -2471,12 +2501,21 @@ mod tests {
                 "Chat view: fullscreen (default) (fullscreen|classic)",
                 "Copy on select: on (default) (on|off)",
                 "Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)",
+                "Guard: auto (default) (auto|required|off)",
+                "Guard folders: opens the folders every guarded command may read",
                 "Limits: opens /limits",
             ]
         );
-        assert_eq!(setting_rows(SETTINGS, preferences, None)[4], "Limits ›");
-        assert!(linear_link(SETTINGS, "5") && !linear_link(SETTINGS, "4"));
-        assert!(!apply_setting(SETTINGS, &mut preferences, "5 on"));
+        assert_eq!(setting_rows(SETTINGS, preferences, None)[6], "Limits ›");
+        assert!(linear_link(SETTINGS, "7").is_some() && linear_link(SETTINGS, "5").is_none());
+        assert!(apply_setting(SETTINGS, &mut preferences, "5 off"));
+        assert_eq!(preferences.guard, arany::GuardMode::Off);
+        assert_eq!(
+            decode_settings(&encode_settings(preferences).expect("encoded settings")).guard,
+            arany::GuardMode::Auto
+        );
+        assert!(apply_setting(SETTINGS, &mut preferences, "5 default"));
+        assert!(!apply_setting(SETTINGS, &mut preferences, "7 on"));
         assert_eq!(
             linear_setting_rows(LIMITS, preferences, None),
             [
@@ -2757,6 +2796,7 @@ mod tests {
             copy_on_select: false,
             newline: NewlineShortcut::AltEnter,
             context_window: arany::ContextWindow::Tokens(123_456),
+            guard: arany::GuardMode::Required,
         };
         let rows = setting_rows(LIMITS, custom, None);
         assert!(rows.contains(&"Build memory: 1.0009765625 KB".into()));

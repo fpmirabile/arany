@@ -616,6 +616,7 @@ async fn guard_failure_before_dispatch_case(
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         }),
         finish_with("The command sandbox is unavailable; answered without it."),
     ]));

@@ -112,17 +112,20 @@ fn grants_reject_file_directory_and_ancestor_replacement_without_widening_mounts
             "workspace_paths":["nested/src","Cargo.toml"],"write":true,
             "commands":[],"skills":[],"mcp":[]}),
         );
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Command {
-                program: "shell".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "shell".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         let grant = Grant::new(
             &runtime,
             &intent,
@@ -240,17 +243,20 @@ fn exact_file_grants_refuse_protected_hard_links_before_and_after_admission() {
         "workspace_paths":["Cargo.toml"],"write":false,
         "commands":[],"skills":[],"mcp":[]}),
     );
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        ToolCall::Command {
-            program: "shell".into(),
-            args: Vec::new(),
-            cwd: ".".into(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Command {
+                program: "shell".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     let grant = Grant::new(
         &runtime,
         &intent,

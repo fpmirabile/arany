@@ -40,6 +40,7 @@ async fn command_resources_refuse_invalid_requests_and_plan_widening_before_disp
             cwd: String::new(),
             resource_class: Some(class),
             timeout_ms: Some(timeout),
+            additional_reads: None,
         };
         let mut steps = Vec::new();
         if let Some((resource_class, command_timeout_ms)) = plan {

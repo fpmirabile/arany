@@ -104,6 +104,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let mut observation = make_observation(call, requested);
         super::guard::publish_cache_candidate(

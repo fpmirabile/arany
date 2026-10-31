@@ -27,6 +27,11 @@ fn cache_overlay_reuses_deletes_recreates_and_bounds_writes() {
 
 async fn journey() {
     let fixture = SpillFixture::new();
+    // Sandboxed commands ask nothing; an ask rule gives the fault its intent before dispatch.
+    private_file(
+        &fixture.state.join("permissions.json"),
+        br#"{"permissions":{"ask":["Bash"]}}"#,
+    );
     let mut outcomes = Vec::new();
     for class in [
         arany::ToolResourceClass::Default,
@@ -80,6 +85,7 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         })
         .collect::<Vec<_>>();
     let mut steps = calls
@@ -323,6 +329,11 @@ fn cache_completion_loss_retains_the_lower_and_stops_without_retry() {
 
 async fn completion_loss(class: arany::ToolResourceClass) {
     let fixture = SpillFixture::new();
+    // Sandboxed commands ask nothing; an ask rule gives the fault its intent before dispatch.
+    private_file(
+        &fixture.state.join("permissions.json"),
+        br#"{"permissions":{"ask":["Bash"]}}"#,
+    );
     let session = fixture
         .engine
         .create_session(fixture.workspace.clone(), None)
@@ -337,6 +348,7 @@ async fn completion_loss(class: arany::ToolResourceClass) {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut steps = vec![crate::tool_outcome(command.clone())];
     add_build_plan(&mut steps, class, command.clone());

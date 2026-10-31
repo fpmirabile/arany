@@ -31,11 +31,13 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
         ),
         (ToolCall::List { path: "src".into() }, 128),
     ] {
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            call.clone(),
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                call.clone(),
+            )
+            .unwrap();
         intent.limits.result_bytes = result_bytes;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(
@@ -59,11 +61,13 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
         },
     ] {
         std::fs::create_dir_all(workspace.join("empty")).unwrap();
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            call.clone(),
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                call.clone(),
+            )
+            .unwrap();
         intent.limits.result_bytes = 1024;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(

@@ -445,6 +445,7 @@ async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "Later action stopped",
         );
@@ -494,6 +495,7 @@ async fn limited_tool_feedback_names_the_limit() {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         "Guard resource limit reached",
     );

@@ -280,7 +280,7 @@ impl RunLoop<'_> {
         batch: &mut ReadBatch<'_>,
     ) -> Result<Result<Admission<Verdict>, PendingToolRefusal>, EngineError> {
         let interrupted = RunCancellation::new();
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, intent);
         let narrowable = matches!(grant, Grant::Primary { .. })
             && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
         let admission = self.before_dispatch(

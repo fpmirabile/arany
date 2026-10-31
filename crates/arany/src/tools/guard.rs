@@ -20,6 +20,7 @@ const RUST_GUARD_FLAGS: &str = "--cfg\x1farany_guard";
 pub(super) const TASK_BYTES_CAP: usize = 1024 * 1024;
 // Only a task carrying one base64 agent definition file may exceed the common cap.
 const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
+#[cfg(not(target_os = "macos"))]
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -73,11 +74,34 @@ pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError>
     return admission::recover_private(ids).await;
 }
 
-pub(super) fn runtime_roots() -> &'static [&'static str] {
-    if cfg!(target_os = "macos") {
-        &["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
-    } else {
-        &[RUNTIME_ROOT]
+pub(super) const SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+pub(super) fn runtime_roots() -> Vec<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        vec!["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::iter::once(RUNTIME_ROOT)
+            .chain(linux::system_targets())
+            .collect()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        vec![RUNTIME_ROOT]
+    }
+}
+
+pub(super) fn reserved_target(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::reject_profile_overlap(path).is_err()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        false
     }
 }
 
@@ -769,7 +793,9 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
                 command_deadline: selection_phase::primary_command(intent).then_some([u8::MAX; 8]),
-                config: runtime.config.clone(),
+                config: runtime
+                    .process_config(&intent.call)
+                    .map_or_else(|_| runtime.config.clone(), std::borrow::Cow::into_owned),
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
@@ -1681,10 +1707,14 @@ pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, To
         let bin = grant.path.join("bin");
         paths.push(bin.to_str().ok_or(ToolError::Path)?.to_owned());
     }
-    for grant in runtime_grants.iter().filter(|grant| grant.kind.is_multi()) {
+    for grant in runtime_grants.iter().filter(|grant| grant.kind.on_path()) {
         paths.push(grant.path.to_str().ok_or(ToolError::Path)?.to_owned());
     }
-    paths.extend(["/usr/bin".into(), "/bin".into()]);
+    for system in SYSTEM_PATH.split(':') {
+        if !paths.iter().any(|path| path == system) {
+            paths.push(system.into());
+        }
+    }
     Ok(paths.join(":"))
 }
 
@@ -2261,6 +2291,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
@@ -2283,6 +2314,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
@@ -2468,6 +2500,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         let (disposition, output, enforcement_cause, limit_cause) =
             super::super::dispatch::outcome(&intent, expired.map(|_| String::new()));
@@ -2504,6 +2537,7 @@ mod tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             });
             command.policy_digest = [1; 32];
             command.enforcement_digest = [2; 32];
@@ -2559,6 +2593,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -2850,6 +2885,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -2927,6 +2963,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }),
             disposition: ToolDisposition::Denied,
             enforcement_cause: None,
@@ -2985,6 +3022,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         command.policy_digest = [1; 32];
         command.enforcement_digest = [2; 32];
@@ -2998,6 +3036,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         ] {
             let mut other = command.clone();
@@ -3033,6 +3072,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         assert!(verify_intent_runtime_grants(&file, &config).is_ok());
         assert!(matches!(
@@ -3073,6 +3113,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         assert!(verify_intent_runtime_grants(&process, &config).is_ok());
 
@@ -3104,6 +3145,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         });
         intent.policy_digest = [1; 32];
         intent.enforcement_digest = [2; 32];
@@ -3203,6 +3245,7 @@ mod tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         assert!(validate_task(&task(command.clone())).is_ok());
         assert!(matches!(

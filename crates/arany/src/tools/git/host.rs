@@ -168,6 +168,33 @@ fn destination(value: &str) -> Option<(&str, bool)> {
     .then_some((host, ssh))
 }
 
+pub(crate) fn valid_push_url(value: &str) -> bool {
+    destination(value).is_some()
+}
+
+// A push matches the folder's pinned repository by its exact effective URL; a PR by that URL's host/owner/repo.
+pub(crate) fn same_repository(pin: &str, call: &ToolCall, host: Option<&HostIntent>) -> bool {
+    match call {
+        ToolCall::GitPush { .. } => host.is_some_and(|host| host.destination == pin),
+        ToolCall::GhPrCreate { repository, .. } => {
+            let pinned = destination(pin).and_then(|(pin_host, _)| {
+                let path = pin.split_once(pin_host)?.1.strip_prefix('/')?;
+                let (owner, repo) = path.split_once('/')?;
+                Some((pin_host, owner, repo.strip_suffix(".git").unwrap_or(repo)))
+            });
+            matches!(
+                (pinned, repository_parts(repository)),
+                (Some((pin_host, pin_owner, pin_repo)), Some((host, owner, repo)))
+                    if pin_host == host
+                        && pin_owner.eq_ignore_ascii_case(owner)
+                        && pin_repo.eq_ignore_ascii_case(repo)
+                        && !pin_repo.contains('/')
+            )
+        }
+        _ => false,
+    }
+}
+
 fn repository_parts(value: &str) -> Option<(&str, &str, &str)> {
     let mut parts = value.split('/');
     let (host, owner, repo) = (parts.next()?, parts.next()?, parts.next()?);
@@ -1900,6 +1927,49 @@ mod tests {
         assert!(valid_graphql_delimiters(input["query"].as_str().unwrap()));
         assert!(!valid_graphql_delimiters("query { repository("));
         assert!(serde_json::to_vec(&input).unwrap().len() <= PR_VIEW_QUERY_BYTES);
+    }
+
+    #[test]
+    fn same_repository_matches_only_the_pinned_push_url_and_its_pr_repository() {
+        let pin = "https://github.com/Example/Project.git";
+        let push = ToolCall::GitPush {
+            remote: pin.into(),
+            branch: "main".into(),
+        };
+        let host = |destination: &str| HostIntent {
+            source_oid: "0".repeat(40),
+            refspec: "0:refs/heads/main".into(),
+            destination: destination.into(),
+        };
+        assert!(same_repository(pin, &push, Some(&host(pin))));
+        assert!(!same_repository(
+            pin,
+            &push,
+            Some(&host("https://github.com/example/project.git"))
+        ));
+        assert!(!same_repository(pin, &push, None));
+        let pr = |repository: &str| ToolCall::GhPrCreate {
+            repository: repository.into(),
+            base: "main".into(),
+            head: "topic".into(),
+            title: "Title".into(),
+            body: String::new(),
+            draft: false,
+        };
+        assert!(same_repository(
+            pin,
+            &pr("github.com/example/project"),
+            None
+        ));
+        for other in ["github.com/example/other", "gitlab.com/example/project"] {
+            assert!(!same_repository(pin, &pr(other), None), "{other}");
+        }
+        assert!(!same_repository(
+            "https://github.com/a/b/c",
+            &pr("github.com/a/b"),
+            None
+        ));
+        assert!(valid_push_url(pin) && !valid_push_url("origin"));
     }
 
     #[test]

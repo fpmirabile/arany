@@ -500,6 +500,11 @@ fn fixture_with_grant(
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
             git: None,
+            guard: crate::tools::GuardPin {
+                mode: crate::tools::GuardMode::Auto,
+                sandbox: true,
+                saved_reads: Vec::new(),
+            },
         })),
         ..crate::test_support::run_config()
     };

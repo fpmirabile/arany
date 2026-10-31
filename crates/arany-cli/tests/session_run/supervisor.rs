@@ -59,6 +59,7 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
         cwd: canaries[1].into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     }));
     outcomes.push(tool_outcome(arany::ToolCall::Write {
         path: format!("{}/new", canaries[1]),

@@ -87,6 +87,7 @@ fn a_later_git_switch_invalidates_a_satisfied_command_criterion() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
         call: Box::new(call.clone()),
@@ -223,6 +224,7 @@ fn success_criterion_rejects_inspection_and_internal_tools() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }),
         },
         budget: GoalBudget::default(),

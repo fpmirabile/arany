@@ -373,6 +373,7 @@ fn sensitive_host_warning_leads_and_wraps_with_the_color_policy() {
             prefix: false,
             sensitive: true,
             inactive_rules: false,
+            sandbox_off: false,
         },
     );
     for width in [120, 50, 16] {

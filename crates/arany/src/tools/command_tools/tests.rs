@@ -28,10 +28,14 @@ pub(super) fn fixture(root: &Path) -> (StateRoot, std::path::PathBuf, String, Ru
         .replace(
             &serde_json::to_vec(&serde_json::json!({"workspaces":[{
                 "path":workspace,"device":metadata.dev(),"inode":metadata.ino(),
-                "mode":"request","runtime_grants":[grant],"git_hooks":null
+                "mode":"request","runtime_grants":[],"git_hooks":null,"repository":null
             }]}))
             .unwrap(),
         )
+        .unwrap();
+    // Every PATH directory is granted, so the programs directory comes from the command environment.
+    super::super::CommandEnvironment::for_path(grant.path.to_str().unwrap())
+        .save(&state)
         .unwrap();
     (state, workspace, executable.to_str().unwrap().into(), grant)
 }
@@ -104,20 +108,20 @@ fn discovery_refuses_overflow_and_selection_confines_links_to_granted_roots() {
         command_tool_candidates(&state, &workspace),
         Err(ToolError::Limit)
     ));
-    let record = state.record(RecordKind::WorkspacePermissions);
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&record.read().unwrap().unwrap()).unwrap();
-    let metadata = workspace.metadata().unwrap();
-    value["workspaces"][0]["runtime_grants"][0]["path"] = serde_json::json!(workspace);
-    value["workspaces"][0]["runtime_grants"][0]["device"] = serde_json::json!(metadata.dev());
-    value["workspaces"][0]["runtime_grants"][0]["inode"] = serde_json::json!(metadata.ino());
-    record
-        .replace(&serde_json::to_vec(&value).unwrap())
+    std::fs::write(workspace.join("planted"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(
+        workspace.join("planted"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    super::super::CommandEnvironment::for_path(workspace.to_str().unwrap())
+        .save(&state)
         .unwrap();
-    assert!(matches!(
-        command_tool_candidates(&state, &workspace),
-        Err(ToolError::Path)
-    ));
+    assert!(
+        command_tool_candidates(&state, &workspace)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -128,6 +132,7 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
         cwd: "src".into(),
         resource_class: Some(ToolResourceClass::Build),
         timeout_ms: Some(1_000),
+        additional_reads: None,
     };
     assert_eq!(script(&original).unwrap(), "printf 'a b' 'it'\\''s' '$(x)'");
     let input: serde_json::Value = serde_json::from_str(&input(&original).unwrap()).unwrap();
@@ -182,7 +187,8 @@ fn peer_output_only_rewrites_command_and_shell_quoting_preserves_explicit_argv()
 #[test]
 fn a_relative_program_link_can_reach_the_granted_prefix_and_pins_its_target() {
     let temp = tempfile::tempdir().unwrap();
-    let (state, workspace, _, mut grant) = fixture(temp.path());
+    let (_, _, _, mut grant) = fixture(temp.path());
+    // A Homebrew PATH directory is granted with its whole prefix, so its links may reach libexec.
     let prefix = temp.path().join("prefix");
     let bin = prefix.join("bin");
     let libexec = prefix.join("libexec");
@@ -202,27 +208,36 @@ fn a_relative_program_link_can_reach_the_granted_prefix_and_pins_its_target() {
         device: metadata.dev(),
         inode: metadata.ino(),
     });
-    let record = state.record(RecordKind::WorkspacePermissions);
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&record.read().unwrap().unwrap()).unwrap();
-    value["workspaces"][0]["runtime_grants"] = serde_json::json!([grant]);
-    record
-        .replace(&serde_json::to_vec(&value).unwrap())
-        .unwrap();
-    let candidates = command_tool_candidates(&state, &workspace).unwrap();
-    assert_eq!(
-        candidates,
-        [bin.join("filter").to_str().unwrap().to_owned()]
-    );
-    let tool = CommandTool::pin(&state, &workspace, &candidates[0], Vec::new()).unwrap();
-    assert_eq!(tool.executable, executable.to_str().unwrap());
-    assert!(tool.pin_status(&state, &workspace));
+    let grants = std::slice::from_ref(&grant);
+    let selected = bin.join("filter").to_str().unwrap().to_owned();
+    let (pinned, ..) = pin_in(grants, &selected).unwrap();
+    assert_eq!(pinned, executable.to_str().unwrap());
+    let tool = CommandTool {
+        selected_path: selected.clone(),
+        executable: pinned,
+        args: Vec::new(),
+        role: CommandToolRole::Rewrite,
+        device: 0,
+        inode: 0,
+        sha256: String::new(),
+        enabled: false,
+        last_probe: None,
+    };
+    let (_, device, inode, sha256) = pin_in(grants, &selected).unwrap();
+    let tool = CommandTool {
+        device,
+        inode,
+        sha256,
+        ..tool
+    };
+    tool.verify(grants).unwrap();
     let replacement = libexec.join("replacement");
     std::fs::copy(&executable, &replacement).unwrap();
     std::fs::remove_file(bin.join("filter")).unwrap();
     std::os::unix::fs::symlink("../libexec/replacement", bin.join("filter")).unwrap();
-    assert!(!tool.pin_status(&state, &workspace));
-    let repinned = CommandTool::pin(&state, &workspace, &tool.selected_path, Vec::new()).unwrap();
-    assert_eq!(repinned.executable, replacement.to_str().unwrap());
-    assert!(!repinned.enabled);
+    assert!(tool.verify(grants).is_err());
+    assert_eq!(
+        pin_in(grants, &selected).unwrap().0,
+        replacement.to_str().unwrap()
+    );
 }

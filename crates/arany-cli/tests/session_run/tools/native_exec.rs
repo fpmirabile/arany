@@ -98,103 +98,6 @@ fn enum_label(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
         .unwrap_or("unknown")
 }
 
-fn cache_public_failure_stage(output: &str) -> &'static str {
-    match output.split(" Cause:").next().unwrap_or(output) {
-        "Guard admission unavailable before dispatch; no operation was dispatched." => "admission",
-        "Guard pinned input unavailable before dispatch; no operation was dispatched." => {
-            "pinned-input"
-        }
-        "Guard native protection unavailable before dispatch; no operation was dispatched." => {
-            "native-protection"
-        }
-        "Guard resource limit unavailable before dispatch; no operation was dispatched." => {
-            "resource-limit"
-        }
-        "Guard execution unavailable before dispatch; no operation was dispatched." => "execution",
-        "Guard runtime mount topology unavailable before dispatch; no operation was dispatched." => {
-            "runtime-mounts"
-        }
-        "Guard handshake unavailable before dispatch; no operation was dispatched." => "handshake",
-        "Guard receipt unavailable before dispatch; no operation was dispatched." => "receipt",
-        "Guard resource attestation unavailable before dispatch; no operation was dispatched." => {
-            "resource-attestation"
-        }
-        "Guard process cleanup unavailable before dispatch; no operation was dispatched." => {
-            "process-cleanup"
-        }
-        "Guard storage cleanup unavailable before dispatch; no operation was dispatched." => {
-            "storage-cleanup"
-        }
-        "Guard launcher reap unavailable before dispatch; no operation was dispatched." => {
-            "launcher-reap"
-        }
-        "Guard output EOF unavailable before dispatch; no operation was dispatched." => {
-            "output-eof"
-        }
-        "Guard namespace bootstrap unavailable before dispatch; no operation was dispatched." => {
-            "namespace-bootstrap"
-        }
-        "Guard native manager unavailable before dispatch; no operation was dispatched." => {
-            "native-manager"
-        }
-        "Guard control protocol unavailable before dispatch; no operation was dispatched." => {
-            "control-protocol"
-        }
-        "Guard project selection timed out before dispatch; no operation was dispatched." => {
-            "selection-timed-out"
-        }
-        "Guard project input vanished before dispatch; no operation was dispatched." => {
-            "selection-input-vanished"
-        }
-        "Guard project input conflict before dispatch; no operation was dispatched." => {
-            "selection-input-conflict"
-        }
-        "Guard waiting queue is full; retry when capacity is available. No operation was dispatched." => {
-            "queue-full"
-        }
-        _ => "other",
-    }
-}
-
-fn cache_run_return(result: &Result<arany::RunOutcome, arany::EngineError>) -> String {
-    match result {
-        Ok(outcome) => {
-            let receipts = outcome
-                .run
-                .tools
-                .iter()
-                .map(|tool| {
-                    tool.observation.as_ref().map(|observation| {
-                        (
-                            observation.disposition,
-                            observation.attestation.is_some(),
-                            observation.cache_update,
-                            cache_public_failure_stage(&observation.output),
-                            observation.output.len(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            format!(
-                "Run status {:?}; tool receipts {receipts:?}",
-                outcome.run.status
-            )
-        }
-        Err(error) => {
-            let category = match error {
-                arany::EngineError::Store(_) => "store",
-                arany::EngineError::Tool(_) => "tool",
-                arany::EngineError::CoordinatorFailed => "coordinator",
-                arany::EngineError::CancellationDrainTimeout => "cancellation-drain",
-                arany::EngineError::CancelledBeforeStart => "cancelled",
-                arany::EngineError::InvalidHistory => "history",
-                _ => "request-or-state",
-            };
-            format!("EngineError category {category}")
-        }
-    }
-}
-
 struct CacheCanary {
     requests: std::sync::Arc<std::sync::Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
@@ -401,12 +304,11 @@ async fn selected_cache_canary_helper_inner() {
         ],
         cwd: ".".into(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let seed_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let seed_engine_provider = Arc::new(CacheCanary {
         requests: seed_requests.clone(),
-        calls: vec![seed_cache.clone()],
+        calls: vec![seed_cache],
         stage: "seed",
         resource_class: arany::ToolResourceClass::Default,
     });
@@ -449,21 +351,15 @@ async fn selected_cache_canary_helper_inner() {
         outcome
     });
     let seed_outcome = tokio::time::timeout(Duration::from_secs(90), async {
-        cache_progress("seed-approval-waiting");
-        let approval = tokio::select! {
-            result = &mut seed_run => panic!(
-                "cache seed Run returned before approval: {}",
-                cache_run_return(&result),
-            ),
-            approval = seed_inbox.next() => approval.expect("private cache seed approval"),
-        };
-        cache_progress("seed-approval-received");
-        assert_eq!(approval.intent.call, seed_cache);
-        approval.decide(true);
-        seed_run.await
+        tokio::select! {
+            biased;
+            result = &mut seed_run => result,
+            approval = seed_inbox.next() => panic!("a sandboxed cache seed asked ({})", approval.is_some()),
+        }
     })
     .await
     .expect("bounded private cache seed");
+    drop(seed_run);
     let seed_outcome = seed_outcome.unwrap();
     seed_engine.close().await.unwrap();
     let seed_observation = seed_outcome
@@ -533,6 +429,7 @@ async fn selected_cache_canary_helper_inner() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let read_caches = ToolCall::Command {
         program: "sh".into(),
@@ -545,6 +442,7 @@ async fn selected_cache_canary_helper_inner() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let overflow_cache = ToolCall::Command {
         program: "sh".into(),
@@ -554,13 +452,12 @@ async fn selected_cache_canary_helper_inner() {
         ],
         cwd: ".".into(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let calls = vec![write_cache, read_caches, overflow_cache];
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let provider = Arc::new(CacheCanary {
         requests: requests.clone(),
-        calls: calls.clone(),
+        calls,
         stage: "selected",
         resource_class: arany::ToolResourceClass::Build,
     });
@@ -600,26 +497,15 @@ async fn selected_cache_canary_helper_inner() {
             outcome
         });
     let outcome = tokio::time::timeout(Duration::from_secs(90), async {
-        for (index, call) in calls.iter().enumerate() {
-            cache_progress(&format!("selected-approval-waiting-{index}"));
-            let approval = tokio::select! {
-                result = &mut run => panic!(
-                    "selected-cache Run returned before approval {index}: {}",
-                    cache_run_return(&result),
-                ),
-                approval = inbox.next() => approval.expect("approval for a selected-cache command"),
-            };
-            cache_progress(&format!("selected-approval-received-{index}"));
-            assert!(
-                &approval.intent.call == call,
-                "selected-cache approval intent differs"
-            );
-            approval.decide(true);
+        tokio::select! {
+            biased;
+            result = &mut run => result,
+            approval = inbox.next() => panic!("a sandboxed selected-cache command asked ({})", approval.is_some()),
         }
-        run.await
     })
     .await
     .expect("bounded selected-cache approval journey");
+    drop(run);
     let outcome = outcome.unwrap();
     engine.close().await.unwrap();
     assert_eq!(
@@ -687,7 +573,9 @@ async fn selected_cache_canary_helper_inner() {
     assert!(
         command_results[1]["stderr"]
             .as_str()
-            .is_some_and(str::is_empty)
+            .is_some_and(str::is_empty),
+        "{}",
+        command_results[1]["stderr"]
     );
     let expected_stdout = format!("{PRIVATE_CACHE_CANARY}\n{CACHE_CANARY}");
     assert!(
@@ -796,11 +684,12 @@ async fn selected_cache_canary_helper_inner() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let verify_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let verify_engine_provider = Arc::new(CacheCanary {
         requests: verify_requests,
-        calls: vec![verify_cache.clone()],
+        calls: vec![verify_cache],
         stage: "verify",
         resource_class: arany::ToolResourceClass::Default,
     });
@@ -843,24 +732,15 @@ async fn selected_cache_canary_helper_inner() {
         outcome
     });
     let verified = tokio::time::timeout(Duration::from_secs(90), async {
-        cache_progress("verify-approval-waiting");
-        let approval = tokio::select! {
-            result = &mut verify_run => panic!(
-                "cache recovery Run returned before approval: {}",
-                cache_run_return(&result),
-            ),
-            approval = verify_inbox.next() => approval.expect("cache recovery approval"),
-        };
-        cache_progress("verify-approval-received");
-        assert!(
-            approval.intent.call == verify_cache,
-            "cache recovery approval intent differs"
-        );
-        approval.decide(true);
-        verify_run.await
+        tokio::select! {
+            biased;
+            result = &mut verify_run => result,
+            approval = verify_inbox.next() => panic!("a sandboxed cache recovery asked ({})", approval.is_some()),
+        }
     })
     .await
     .expect("bounded cache recovery journey");
+    drop(verify_run);
     let verified = verified.unwrap();
     verify_engine.close().await.unwrap();
     assert_eq!(verified.run.status, RunStatus::Finished);
@@ -1509,6 +1389,7 @@ impl SpillFixture {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         Self {
             _temp: temp,

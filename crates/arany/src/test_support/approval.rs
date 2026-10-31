@@ -11,7 +11,9 @@ pub async fn delay_withdrawal(
     rejected: tokio::sync::oneshot::Sender<()>,
     committed: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut pending = approvals.begin_local(&intent, false, None).await;
+    let mut pending = approvals
+        .begin_local(&intent, crate::tools::ApprovalOffers::default())
+        .await;
     if reject.await.is_err() {
         return;
     }

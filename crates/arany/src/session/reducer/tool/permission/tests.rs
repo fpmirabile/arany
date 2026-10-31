@@ -229,6 +229,7 @@ fn unguarded_scenario(
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         );
         apply(
@@ -822,8 +823,6 @@ fn change_host_prefix_proof(
         "reference" => host.source_intent = Some([6; 32]),
         "digest" => pin.permissions_digest = Some([4; 32]),
         "unpinned" => policy.permissions_digest = None,
-        "auto" => verdict.mode = Some(PermissionMode::Auto),
-        "edits" => verdict.mode = Some(PermissionMode::AcceptEdits),
         "plan" => verdict.mode = Some(PermissionMode::Plan),
         "no-mode" => verdict.mode = None,
         "hook" => verdict.hook_restriction = Some(Decision::Ask),
@@ -871,7 +870,12 @@ fn host_prefix_replay_checks_each_approval_proof() {
         agent_run_id: scenario.agent,
         verdict: Some(verdict),
     };
-    for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
+    for mode in [
+        PermissionMode::Default,
+        PermissionMode::DontAsk,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Auto,
+    ] {
         let (scenario, mut verdict) = host_prefix_scenario();
         verdict.mode = Some(mode);
         assert!(
@@ -888,8 +892,6 @@ fn host_prefix_replay_checks_each_approval_proof() {
         "reference",
         "digest",
         "unpinned",
-        "auto",
-        "edits",
         "plan",
         "no-mode",
         "hook",
@@ -1678,16 +1680,15 @@ fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
         verdict_event(&intent, mode, decision, basis, source, approved)
     };
     let allowed = |mode| event(mode, Decision::Allow, typed, typed, true);
-    for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
-        assert!(!rejected(&view, allowed(Some(mode))), "{mode:?}");
-    }
     for mode in [
-        PermissionMode::Plan,
+        PermissionMode::Default,
+        PermissionMode::DontAsk,
         PermissionMode::AcceptEdits,
         PermissionMode::Auto,
     ] {
-        assert!(rejected(&view, allowed(Some(mode))), "{mode:?}");
+        assert!(!rejected(&view, allowed(Some(mode))), "{mode:?}");
     }
+    assert!(rejected(&view, allowed(Some(PermissionMode::Plan))));
     assert!(rejected(&view, allowed(None)));
     let default = Some(PermissionMode::Default);
     assert!(rejected(
@@ -1743,19 +1744,16 @@ fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
             false
         )
     ));
-    for mode in [
-        PermissionMode::Plan,
-        PermissionMode::AcceptEdits,
-        PermissionMode::Auto,
-    ] {
-        assert!(
-            rejected(
-                &view,
-                event(Some(mode), Decision::Allow, typed, typed, false)
-            ),
-            "{mode:?}"
-        );
-    }
+    assert!(rejected(
+        &view,
+        event(
+            Some(PermissionMode::Plan),
+            Decision::Allow,
+            typed,
+            typed,
+            false
+        )
+    ));
     let mut once = view.clone();
     apply(&mut once, allowed(default)).unwrap();
     assert!(rejected(&once, allowed(default)));
@@ -1872,6 +1870,7 @@ fn hooked_git_writes_reject_ai_review_and_mode_approvals() {
             executable: "/usr/bin/git".into(),
             sha256: "0".repeat(64),
             hooks: Some([4; 32]),
+            repository: None,
         });
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(&mut view, requesting_step(run, agent, 1)).unwrap();

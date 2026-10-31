@@ -1040,7 +1040,7 @@ mod tests {
         );
         assert_eq!(provider.requests.lock().unwrap().len(), 2);
         assert!(provider.responses.lock().unwrap().is_empty());
-        assert_host_exec_output(&state_dir, &output, matches!(mode, "default" | "dontAsk")).await;
+        assert_host_exec_output(&state_dir, &output, mode != "plan").await;
     }
 
     async fn assert_host_exec_output(

@@ -1233,7 +1233,9 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
     let call = ToolCall::Mkdir {
         path: "cancelled".into(),
     };
-    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+    let intent = runtime
+        .intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone())
+        .unwrap();
     let cancelled = super::Cancellation::new();
     cancelled.cancel();
     assert_eq!(
@@ -1241,7 +1243,9 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
         ToolDisposition::Cancelled
     );
     assert!(!temp.path().join("cancelled").exists());
-    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call);
+    let intent = runtime
+        .intent(crate::RunId::new(), crate::AgentRunId::new(), call)
+        .unwrap();
     crate::FaultPlan::fail_file_parent_sync(intent.id);
     let observed = runtime.execute(intent, super::Cancellation::new()).await;
     assert_eq!(observed.disposition, ToolDisposition::Uncertain);

@@ -751,7 +751,7 @@ fn rewind_intent(
                 sha256: crate::validate::digest(bytes),
             },
         },
-    );
+    )?;
     intent.id = started.rewind_id;
     Ok(intent)
 }

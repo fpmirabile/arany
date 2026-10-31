@@ -169,6 +169,11 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
             git: None,
+            guard: crate::tools::GuardPin {
+                mode: crate::tools::GuardMode::Auto,
+                sandbox: true,
+                saved_reads: Vec::new(),
+            },
         })),
         ..crate::test_support::run_config()
     }
@@ -1051,6 +1056,7 @@ pub async fn selection_failure_session(
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     intent.workspace_device = identity.device;

@@ -392,6 +392,29 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "additional_reads": {
+            "additionalProperties": false,
+            "description": "Optional request, needing the user's approval, to read and execute up to 4 absolute host directories outside the granted set, with a short reason; null for none. Never writable. Directories the user already allowed need no request.",
+            "properties": {
+              "justification": {
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "paths",
+              "justification"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "args": {
             "items": {
               "type": "string"
@@ -432,7 +455,8 @@
           "args",
           "cwd",
           "resource_class",
-          "timeout_ms"
+          "timeout_ms",
+          "additional_reads"
         ],
         "type": "object"
       },
@@ -1015,6 +1039,29 @@
                       {
                         "additionalProperties": false,
                         "properties": {
+                          "additional_reads": {
+                            "additionalProperties": false,
+                            "description": "Optional request, needing the user's approval, to read and execute up to 4 absolute host directories outside the granted set, with a short reason; null for none. Never writable. Directories the user already allowed need no request.",
+                            "properties": {
+                              "justification": {
+                                "type": "string"
+                              },
+                              "paths": {
+                                "items": {
+                                  "type": "string"
+                                },
+                                "type": "array"
+                              }
+                            },
+                            "required": [
+                              "paths",
+                              "justification"
+                            ],
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          },
                           "args": {
                             "items": {
                               "type": "string"
@@ -1062,7 +1109,8 @@
                           "args",
                           "cwd",
                           "resource_class",
-                          "timeout_ms"
+                          "timeout_ms",
+                          "additional_reads"
                         ],
                         "type": "object"
                       },

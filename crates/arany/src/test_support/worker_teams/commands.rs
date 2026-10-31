@@ -62,8 +62,7 @@ pub(super) fn call(outside: bool) -> ToolCall {
         ],
         cwd: ".".into(),
         resource_class: None,
-        timeout_ms: None,
-    }
+        timeout_ms: None, additional_reads: None }
 }
 
 // An oversized output must refuse integration, whatever the editor's criterion says.
@@ -80,6 +79,7 @@ pub(super) fn case_call(case: &str) -> ToolCall {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     }
 }
 
@@ -88,6 +88,13 @@ pub(super) fn configure(state: &Path, case: &str) {
         crate::test_support::private_file(
             &state.join("permissions.json"),
             br#"{"permissions":{"defaultMode":"auto"}}"#,
+        );
+    }
+    // Sandboxed commands ask nothing; an ask rule gives the fault its intent before dispatch.
+    if case == "command_cache_unknown" {
+        crate::test_support::private_file(
+            &state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Bash"]}}"#,
         );
     }
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
@@ -343,11 +350,12 @@ pub(super) fn assert_commands(
     );
     if case == "command_auto" {
         for tool in [command, publication] {
-            assert_eq!(
-                tool.permission_verdict.as_ref().unwrap().source,
-                crate::permissions::PermissionSource::AiReview
+            assert!(
+                tool.permission_verdict.as_ref().is_none_or(
+                    |verdict| verdict.source == crate::permissions::PermissionSource::Mode
+                )
             );
-            assert!(tool.review_call_index.is_some());
+            assert!(tool.review_call_index.is_none());
         }
     }
     if case == "command_bash_only" {

@@ -1,6 +1,7 @@
 mod hooks;
 mod host;
 pub use host::HostPrefixRule;
+pub(crate) use host::fill_host_prefix;
 mod prefix;
 
 pub use hooks::{
@@ -422,28 +423,19 @@ impl PermissionConfig {
         {
             return (Decision::Deny, PermissionSource::Mode);
         }
-        let auto_review = self.mode == PermissionMode::Auto
-            && (facts.asks_approval
-                || facts.spawns_process
-                || matches!(facts.family, Family::Mcp | Family::Git));
-        let typed_host_read = call.is_host_pr_read();
-        let allow_skips_approval = typed_host_read
-            || !call.is_unguarded()
-                && !call.is_host()
-                && !auto_review
-                && !(self.mode == PermissionMode::AcceptEdits
-                    && facts.asks_approval
-                    && !facts.typed_edit());
+        // Only work outside the sandbox asks; auto reviews what no user rule decided.
+        let auto_review = self.mode == PermissionMode::Auto && facts.asks_approval;
+        // User allow rules resolve before any mode or review, but never cover host work; its
+        // typed and remembered prefixes are the user's allows there.
+        let host = call.is_unguarded() || call.is_host();
         let matched = self.rules.iter().find_map(|(decision, rule)| {
-            if *decision == Decision::Allow && (!allow_skips_approval || typed_host_read) {
+            if *decision == Decision::Allow && host {
                 None
             } else {
                 rule.matches_call(call, *decision).then_some(*decision)
             }
         });
-        let typed = self
-            .typed_decision(call)
-            .filter(|decision| *decision != Decision::Allow || allow_skips_approval);
+        let typed = self.typed_decision(call);
         let (matched, typed_wins) = match (matched, typed) {
             (Some(rule), Some(typed)) => {
                 let narrowed = rule.narrow(typed);

@@ -29,6 +29,7 @@ fn call(kind: &str) -> arany::ToolCall {
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
         "mcp" => arany::ToolCall::McpCall {
             server: "server".into(),

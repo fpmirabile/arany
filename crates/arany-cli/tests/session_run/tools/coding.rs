@@ -60,15 +60,13 @@ impl Provider for Journey {
                 args: vec!["src/check.sh".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            },
+                timeout_ms: None, additional_reads: None },
             8 => ToolCall::Command {
                 program: "bash".into(),
                 args: vec!["-c".into(), "set -eu; test \"$(cat src/command-output.txt)\" = 'command create'; test \"$(cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
                 cwd: "".into(),
                 resource_class: None,
-                timeout_ms: None,
-            },
+                timeout_ms: None, additional_reads: None },
             9 => ToolCall::Skill {
                 name: "synthetic".into(),
                 resource: None,

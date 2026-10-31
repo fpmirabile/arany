@@ -81,6 +81,7 @@ mod tests {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             };
             let error = validate_command(&config, &call).unwrap_err();
             let observation =
@@ -104,6 +105,7 @@ mod tests {
                     cwd: ".".into(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
             )
             .unwrap();

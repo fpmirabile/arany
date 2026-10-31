@@ -202,6 +202,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                     cwd: String::new(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
                 "untrusted output",
             );
@@ -337,6 +338,7 @@ fn command_row_frames_show_first_script_line_and_nonzero_counters() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             r"⏺ Command(sh -c  echo \u{001b}[2J\u{000d}hi …)",
         ),
