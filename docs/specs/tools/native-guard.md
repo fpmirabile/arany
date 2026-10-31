@@ -2,7 +2,7 @@
 
 ## macOS enforcement and compatibility
 
-Primary Workspace mutations and typed discovery use no Guard unit. Skill loading and definition parsing use a non-spawning profile that never grants Workspace writes. Commands and MCP run native binaries with ordinary child launches, `posix_spawn` included.
+Primary Workspace mutations, typed discovery and [Skill text reads](./skills-and-mcp.md#portable-skills) use no Guard unit. Agent definition parsing uses a non-spawning profile that never grants Workspace writes. Commands and MCP run native binaries with ordinary child launches, `posix_spawn` included.
 
 Commands and MCP run in a separate attested Seatbelt worker under a trusted, bounded supervisor in its own kernel resource coalition, launched in the Background launchd user domain; there is no unsandboxed fallback. Before Tools are offered, admission probes that domain and coalition support (three-second deadline); availability is not attestation, and unit authentication, coalition ownership, storage preparation and installed enforcement are checked again before GO. A stale executable pin rejects before any Provider request and keeps the committed history prefix. Completion is accepted only after every member of the unit, descendants included, has terminated and its storage holds no mount; a process group or PID never counts as containment. Without the Apple compiler and SDK profiles, a guarded command cannot read or execute the Command Line Tools or an SDK, even where the host baseline allows it.
 
