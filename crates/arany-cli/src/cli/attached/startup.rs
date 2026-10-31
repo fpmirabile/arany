@@ -12,10 +12,7 @@ use super::{
 use crate::accounts::chatgpt;
 use crate::cli::provider::{roster::SelectedRoster, select::ProviderArg};
 use crate::terminal::{AttachedTerminal, Composer, Submission, TerminalMode};
-use arany::{
-    Engine, ProviderKind, SessionDefaults, SessionId, SessionView, StateRoot, Telemetry,
-    native_protection_supported,
-};
+use arany::{Engine, ProviderKind, SessionDefaults, SessionId, SessionView, StateRoot, Telemetry};
 use std::{io::Write, ops::ControlFlow, str::FromStr};
 
 struct Startup {
@@ -73,11 +70,18 @@ pub(super) async fn start(
     mut args: AttachedArgs,
     telemetry: Telemetry,
 ) -> Result<ControlFlow<(), AttachedSession>, String> {
+    let (_, state_dir) =
+        super::super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+            .map_err(str::to_owned)?;
+    let archived_records = super::super::record_formats::archive_incompatible(&state_dir)?;
     let selected = select_roster(&mut args)?;
     let admission = args.admit(telemetry)?;
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut startup = Startup::acquire(admission, &restored_settings)?;
+    for notice in archived_records {
+        append_notice(&mut startup.setup_notice, &notice);
+    }
     let ControlFlow::Continue(archived) = admit_startup(
         &mut startup.terminal,
         &mut startup.admission,
@@ -92,15 +96,22 @@ pub(super) async fn start(
     startup.archived_history = archived;
     if let Ok(state) = StateRoot::open_existing(&startup.admission.state_dir)
         && let Ok(environment) = arany::CommandEnvironment::load(&state)
-        && environment.process_path_differs()
     {
-        append_notice(
-            &mut startup.setup_notice,
-            "Process PATH differs from the pinned command environment; use /permissions → Command environment to capture explicitly",
-        );
-    }
-    if !native_protection_supported() {
-        append_notice(&mut startup.setup_notice, permissions::UNAVAILABLE_NOTICE);
+        if environment.process_path_differs() {
+            append_notice(
+                &mut startup.setup_notice,
+                "Process PATH differs from the pinned command environment; use /permissions → Command environment to capture explicitly",
+            );
+        }
+        if environment.path_over_guard_limit() {
+            append_notice(
+                &mut startup.setup_notice,
+                &format!(
+                    "Commands see only the first {} PATH directories; shorten PATH to reach the rest",
+                    arany::MAX_DISCOVERY_PATH_ENTRIES
+                ),
+            );
+        }
     }
     let explicit_provider = startup.admission.defaults.provider.is_some();
     startup.restore_chatgpt_account();
@@ -536,11 +547,11 @@ impl Startup {
         skills_supported
     }
 
-    async fn open_session(
-        mut self,
+    // The selected Session, or a new one; a resumed Goal must be that Session's interrupted Goal.
+    async fn session_view(
+        &self,
         goal_resume: Option<arany::GoalId>,
-        reuse_saved_selection: bool,
-    ) -> Result<ControlFlow<(), AttachedSession>, String> {
+    ) -> Result<(SessionId, SessionView), String> {
         let (session_id, view) = match self.setup_session_id {
             Some(id) => {
                 let view = super::load_view(&self.admission.state_dir, id).await?;
@@ -553,6 +564,33 @@ impl Startup {
         {
             return Err("selected Session does not contain that interrupted Goal".into());
         }
+        Ok((session_id, view))
+    }
+
+    // An authorized account refreshes its model catalog; an uncertain environment capture is noted.
+    fn refresh_saved_state(&mut self, view: &SessionView) {
+        if matches!(self.access, SavedAccess::Authorized)
+            && let Some(profile) = view.defaults.provider.clone()
+        {
+            models::refresh_at_startup(
+                self.admission.workspace.clone(),
+                profile,
+                view.defaults.account_id,
+            );
+        }
+        if let Some(capture) = &view.environment_capture
+            && capture.outcome() == arany::EnvironmentCaptureStage::Uncertain
+        {
+            append_notice(&mut self.setup_notice, capture.outcome().summary());
+        }
+    }
+
+    async fn open_session(
+        mut self,
+        goal_resume: Option<arany::GoalId>,
+        reuse_saved_selection: bool,
+    ) -> Result<ControlFlow<(), AttachedSession>, String> {
+        let (session_id, view) = self.session_view(goal_resume).await?;
         let has_objective = self.admission.prompt.is_some() || goal_resume.is_some();
         let startup_goal = if goal_resume.is_some() {
             GoalStart::Resume
@@ -564,11 +602,7 @@ impl Startup {
             return Ok(ControlFlow::Break(()));
         }
         let engine = self.open_engine()?;
-        if let Some(capture) = &view.environment_capture
-            && capture.outcome() == arany::EnvironmentCaptureStage::Uncertain
-        {
-            append_notice(&mut self.setup_notice, capture.outcome().summary());
-        }
+        self.refresh_saved_state(&view);
         let skills_supported = self.prepare_composer(&view, reuse_saved_selection).await;
         let setup_notice = self.take_setup_notice();
         let saved_session_id = (view.created_sequence != 0).then_some(session_id);

@@ -9,6 +9,7 @@ mod display;
 pub use display::DisplayFacts;
 mod discovery;
 mod dispatch;
+mod editors;
 pub use discovery::{
     FileSuggestionSource, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
 };
@@ -27,11 +28,13 @@ mod grant;
 pub use command_environment::{CommandEnvironment, CommandEnvironmentError};
 mod guard;
 pub use guard::recover_build_cache;
-pub(crate) use guard::transfer::{recover_private, transfer_time};
+pub(crate) mod guard_settings;
+pub(crate) use guard::transfer::transfer_time;
+pub use guard_settings::{GuardMode, GuardSettings};
+pub use toolchains::MAX_DISCOVERY_PATH_ENTRIES;
 mod mcp;
 mod network;
 mod web;
-pub(crate) use git::WRITE_FRAME_BYTES;
 pub(crate) use mcp::FRAME_BYTES;
 pub(crate) use mcp::MAX_MCP_RESPONSE_BYTES;
 pub(crate) use mcp::oauth::{MAX_ACCESS_TOKEN_BYTES, MAX_METADATA_BYTES, MCP_OAUTH};
@@ -124,21 +127,19 @@ use crate::store::StateRoot;
 pub use approval::{
     ApprovalInbox, ApprovalMode, ApprovalReply, ToolApproval, ToolApprovals, UnguardedPrompt,
 };
-pub(crate) use approval::{ApprovalWaitReply, ApprovalWithdrawal};
+pub(crate) use approval::{ApprovalOffers, ApprovalWaitReply, ApprovalWithdrawal};
 pub use cancel::Cancellation;
 use config::Config;
-pub(crate) use git::host::sweep_stale as sweep_host_scratch;
-pub(crate) use git::recover_locks as report_git_locks;
+pub(crate) use git::host::same_repository;
+pub(crate) use git::stale_locks;
+pub(crate) use process::MAX_ADDITIONAL_READS_PER_CALL;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
+use toolchains::RuntimeGrant;
 pub(crate) use workspace::WORKSPACE_PERMISSIONS;
 pub use workspace::{
-    RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
+    GitHooksQuestion, RuntimeProfileOption, TrustRecordError, WorkspacePermissions, mention_paths,
 };
-/// Whether this OS implements admitted native Tool protection.
-pub const fn native_protection_supported() -> bool {
-    cfg!(any(target_os = "linux", target_os = "macos"))
-}
 
 pub fn configured_skill_names(state: &StateRoot) -> Result<Vec<String>, ToolError> {
     Ok(Config::load(state)?
@@ -176,19 +177,15 @@ pub(crate) fn workspace_identity(workspace: &Path) -> Result<WorkspaceIdentity, 
     fs::workspace_identity(&root)
 }
 use catalog::Site;
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub(crate) const GIT_STORAGE_FAULT: &str = "git-storage-fault";
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub(crate) const GIT_STORAGE_CANARY: &str = "git-storage-canary";
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
-    ApprovalCause, Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause,
-    FailureStage, FileChange, FileReceipt, FileVersion, GuardReceipt, GuardStageFact, HostIntent,
-    LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall,
-    ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
-    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
-    UnguardedReceipt,
+    ApprovalCause, Attestation, BuildCacheSize, CacheUpdate, CommandChangeset, EffectIntent,
+    EnforcementCause, FailureStage, FileChange, FileReceipt, FileVersion, GuardPin, GuardReceipt,
+    GuardStageFact, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
+    OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
+    ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
+    ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -201,10 +198,6 @@ pub enum ToolError {
         #[source]
         source: Box<ToolError>,
     },
-    #[error("No admitted credential-helper search directory")]
-    HostHelperSearch,
-    #[error("Credential includes cannot be safely omitted")]
-    CredentialIncludes,
     #[error("tools require a private tools.json; see docs/tools.md")]
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
@@ -257,8 +250,12 @@ pub enum ToolError {
     OutputCeiling,
     #[error("Tool runtime expired")]
     Timeout(String),
+    #[error("{0}")]
+    DiskSpace(String),
     #[error("Tool file precondition changed")]
     Conflict,
+    #[error("Workspace files changed since the editor started: {0}")]
+    Conflicts(String),
     #[error("Search pattern refused: {0}")]
     Pattern(&'static str),
     #[error("Tool operation failed")]
@@ -307,8 +304,6 @@ impl ToolError {
         match self {
             Self::SpillUnavailable => "SpillUnavailable",
             Self::AtPath { source, .. } => source.variant(),
-            Self::HostHelperSearch => "HostHelperSearch",
-            Self::CredentialIncludes => "CredentialIncludes",
             Self::MissingConfiguration => "MissingConfiguration",
             Self::Configuration => "Configuration",
             Self::HostPrefixConflict { .. } => "HostPrefixConflict",
@@ -331,7 +326,9 @@ impl ToolError {
             Self::Limit => "Limit",
             Self::OutputCeiling => "OutputCeiling",
             Self::Timeout(_) => "Timeout",
+            Self::DiskSpace(_) => "DiskSpace",
             Self::Conflict => "Conflict",
+            Self::Conflicts(_) => "Conflicts",
             Self::Pattern(_) => "Pattern",
             Self::Operation => "Operation",
             Self::Cancelled => "Cancelled",
@@ -375,9 +372,16 @@ pub(crate) struct ToolRuntime {
     pub(crate) host_settings_admitted: bool,
     host_settings_saved: std::sync::Arc<std::sync::Mutex<Option<[u8; 32]>>>,
     guard_available: bool,
+    guard_mode: GuardMode,
+    // Directories a human allowed once in this Run; shared by every clone, children included.
+    once_reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     config: Config,
-    git_writes_available: bool,
-    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
+    git_environment: Option<std::sync::Arc<git::Environment>>,
+    // Hooks the user accepted for this folder that still match on disk; `None` keeps hooks off.
+    git_hooks: Option<std::sync::Arc<git::Hooks>>,
+    pub(crate) repository: Option<String>,
+    // Whether a human can answer approvals in this Run.
+    human_approvals: bool,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
@@ -391,7 +395,8 @@ pub(crate) struct ToolRuntime {
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
-    context_limit_bytes: usize,
+    // Shared by clones within a Run; admission replaces it, so a raise never reaches another Run.
+    context_limit_bytes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
     active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
     hook_stdin: Option<std::sync::Arc<str>>,
@@ -419,9 +424,10 @@ struct RuntimeState {
     command_tools: std::sync::Arc<CommandTools>,
     workspace_identity: WorkspaceIdentity,
     guard_available: bool,
+    guard_mode: GuardMode,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
-    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
+    git_environment: Option<std::sync::Arc<git::Environment>>,
     definitions: definitions::DefinitionSnapshots,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
@@ -448,6 +454,15 @@ fn admission_paths(
         grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
     }
     Ok(account)
+}
+
+// Each admission resolves Git from the user's PATH, so readmission pins the same Git or refuses.
+fn git_environment(
+    workspace: &Path,
+    state: &StateRoot,
+) -> Option<std::sync::Arc<git::Environment>> {
+    git::Environment::capture(workspace, &state.path().join(editors::EDITORS))
+        .map(std::sync::Arc::new)
 }
 
 fn skill_roots(
@@ -479,9 +494,6 @@ fn admission_resources(
             .filter_map(|server| server.program.as_ref()),
     ) {
         program.verify()?;
-    }
-    if let Some(git) = &config.git {
-        git::verify_host_executable(git)?;
     }
     for path in config.resource_paths() {
         fs::reject_overlap(Path::new(path), state.path())?;
@@ -758,7 +770,10 @@ impl ToolRuntime {
             | ToolCall::Edit { .. }
             | ToolCall::MultiEdit { .. }
             | ToolCall::Delete { .. }
-            | ToolCall::Move { .. } => paths
+            | ToolCall::Move { .. }
+            | ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::EditorWorkspace { .. },
+            } => paths
                 .iter()
                 .map(|(path, expected)| {
                     let bytes =
@@ -877,17 +892,26 @@ impl ToolRuntime {
         {
             return Err(ToolError::Limit);
         }
-        self.context_limit_bytes = limit;
+        self.context_limit_bytes = std::sync::Arc::new(limit.into());
         Ok(())
+    }
+
+    // Calibration only raises the allowance, within the hard window ceiling.
+    pub(crate) fn raise_context_limit(&self, limit: usize) {
+        self.context_limit_bytes.fetch_max(
+            limit.min(crate::session::MAX_WINDOW_CONTENT_BYTES),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn context_limit_bytes(&self) -> usize {
         self.context_limit_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn result_capacity(&self, overhead: usize, reserved: usize) -> Option<usize> {
         let capacity = self
-            .context_limit_bytes
+            .context_limit_bytes()
             .saturating_sub(overhead.saturating_add(reserved));
         (capacity >= 128).then_some(capacity)
     }
@@ -906,13 +930,11 @@ impl ToolRuntime {
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         match call {
-            _ if call.is_host() => {
-                self.config.allows(call)
-                    && self
-                        .host_authentication
-                        .as_ref()
-                        .as_ref()
-                        .is_some_and(|auth| auth.allows(call))
+            _ if call.facts().site == Site::Git
+                && call.mutates()
+                && !git::offers_write(self, call) =>
+            {
+                false
             }
             ToolCall::Command { program, .. } if Path::new(program).is_absolute() => {
                 self.command_tools.entries().iter().any(|tool| {
@@ -958,8 +980,12 @@ impl ToolRuntime {
             })
     }
 
-    pub(crate) fn effective_cache_bytes(&self, requested: u64) -> Result<(u64, u64), ToolError> {
-        if requested == 0 {
+    // The view is the disk headroom above the Guard reserve; a set size caps only publication.
+    pub(crate) fn effective_cache_bytes(
+        &self,
+        requested: BuildCacheSize,
+    ) -> Result<(u64, u64), ToolError> {
+        if !requested.enabled() {
             return Ok((0, 0));
         }
         let Some(state) = self.cache_state.as_ref() else {
@@ -971,8 +997,14 @@ impl ToolRuntime {
             self.workspace_identity.inode,
         )
         .map_err(|_| ToolError::Operation)?;
-        match state.effective_build_cache_bytes(&identity, requested) {
-            Ok(limits) => Ok(limits),
+        match state.build_cache_headroom(&identity, types::GUARD_DISK_RESERVE_BYTES) {
+            Ok(view) => Ok((
+                view,
+                match requested {
+                    BuildCacheSize::Bytes(limit) => view.min(limit),
+                    BuildCacheSize::Unlimited => view,
+                },
+            )),
             Err(crate::store::StoreError::StorageFull) => Ok((0, 0)),
             Err(_) => Err(ToolError::Operation),
         }
@@ -1000,11 +1032,17 @@ impl ToolRuntime {
             return Ok(None);
         }
         let environment = CommandEnvironment::load(state)?;
+        let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
+        let protected = [workspace, state.path(), account.as_path()];
+        let git = git_environment(workspace, state)
+            .as_deref()
+            .and_then(git::resolve);
         let mut config = match Config::load(state) {
             Ok(mut config) => {
                 config.discover_skills(workspace)?;
-                config.bind_environment(&environment);
+                config.bind_environment(&environment, &protected)?;
                 merge_network(&mut config, Some(&snapshot))?;
+                config.git = git.clone();
                 if config.digest() == pin.config_digest {
                     config
                 } else {
@@ -1019,8 +1057,9 @@ impl ToolRuntime {
             Err(error) => return Err(error),
         };
         config.discover_skills(workspace)?;
-        config.bind_environment(&environment);
+        config.bind_environment(&environment, &protected)?;
         merge_network(&mut config, Some(&snapshot))?;
+        config.git = git;
         if config.digest() != pin.config_digest {
             return Err(ToolError::ChangedInput);
         }
@@ -1075,11 +1114,16 @@ impl ToolRuntime {
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
         let command_environment = std::sync::Arc::new(CommandEnvironment::load(state)?);
         let command_tools = std::sync::Arc::new(CommandTools::load(state)?);
-        let guard_available = guard::check_available().is_ok();
+        let guard_mode = GuardSettings::load()?.mode();
+        let guard_available = guard_mode != GuardMode::Off
+            && guard::check_available().is_ok()
+            && !crate::fault::sandbox_unavailable(workspace);
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
         let account = admission_paths(workspace, state, &config, &root)?;
         let workspace_identity = fs::workspace_identity(&root)?;
+        let git_environment = git_environment(workspace, state);
+        config.git = git_environment.as_deref().and_then(git::resolve);
         let permissions = permissions
             .map(|mut snapshot| {
                 let mut scoped = (*snapshot.config).clone();
@@ -1096,9 +1140,11 @@ impl ToolRuntime {
             })
             .transpose()?;
         merge_network(&mut config, permissions.as_ref())?;
-        let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
-        config.bind_environment(&command_environment);
+        config.bind_environment(
+            &command_environment,
+            &[workspace, state.path(), account.as_path()],
+        )?;
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
@@ -1126,9 +1172,10 @@ impl ToolRuntime {
                 command_tools,
                 workspace_identity,
                 guard_available,
+                guard_mode,
                 enforcement_digest,
                 process_enforcement_digest,
-                host_authentication,
+                git_environment,
                 definitions,
                 #[cfg(target_os = "macos")]
                 system_programs,
@@ -1154,9 +1201,10 @@ impl ToolRuntime {
             command_tools,
             workspace_identity,
             guard_available,
+            guard_mode,
             enforcement_digest,
             process_enforcement_digest,
-            host_authentication,
+            git_environment,
             definitions,
             #[cfg(target_os = "macos")]
             system_programs,
@@ -1166,10 +1214,14 @@ impl ToolRuntime {
             host_settings_admitted: true,
             host_settings_saved: Default::default(),
             guard_available,
+            guard_mode,
+            once_reads: Default::default(),
             definitions: std::sync::Arc::new(definitions),
             config,
-            git_writes_available: guard::git_writes_available(),
-            host_authentication,
+            git_environment,
+            git_hooks: None,
+            repository: None,
+            human_approvals: false,
             handover: None,
             permissions,
             result_filter: None,
@@ -1191,12 +1243,13 @@ impl ToolRuntime {
                 skills,
                 root: std::sync::Arc::new(root),
                 slots: std::sync::Arc::clone(&IN_PROCESS_READS),
+                editors: Default::default(),
             }),
             workspace_identity,
             guard_executable,
             enforcement_digest,
             process_enforcement_digest,
-            context_limit_bytes: types::MAX_TOOL_CONTEXT_BYTES,
+            context_limit_bytes: std::sync::Arc::new(types::MAX_TOOL_CONTEXT_BYTES.into()),
             #[cfg(target_os = "macos")]
             system_programs,
         })
@@ -1217,14 +1270,194 @@ impl ToolRuntime {
 
     pub(crate) fn receipt(&self) -> ToolPolicyReceipt {
         let mut receipt = self.config.receipt();
-        receipt.max_context_bytes = self.context_limit_bytes as u32;
+        receipt.max_context_bytes = self.context_limit_bytes() as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
         receipt.unguarded_rules_digest = None;
         receipt.command_tools_digest = Some(self.command_tools.digest());
         receipt.host_prefixes = self
             .permissions()
             .map_or_else(Vec::new, |permissions| permissions.host.clone());
+        if let Some(git) = &mut receipt.git {
+            git.hooks = self.git_hooks.as_ref().map(|hooks| hooks.digest);
+            git.repository = self.repository.clone();
+        }
+        receipt.guard.mode = self.guard_mode;
+        receipt.guard.sandbox = self.guard_available;
+        if !self.guard_available {
+            receipt.guard.saved_reads.clear();
+        }
+        if self.host_fallback() {
+            receipt.child_unguarded = UnguardedGrant::HumanOnly;
+        }
         receipt
+    }
+
+    pub(crate) fn pin_repository(&self, intent: &EffectIntent) -> Result<(), ToolError> {
+        let destination = intent
+            .host
+            .as_ref()
+            .map(|host| host.destination.clone())
+            .ok_or(ToolError::Configuration)?;
+        WorkspacePermissions::open(&self.workspace)
+            .map_err(|_| ToolError::Configuration)?
+            .remember_repository(Some(destination))
+    }
+
+    pub(crate) fn same_repository(&self, intent: &EffectIntent) -> bool {
+        self.repository
+            .as_deref()
+            .is_some_and(|pin| git::host::same_repository(pin, &intent.call, intent.host.as_ref()))
+    }
+
+    pub(crate) fn host_fallback(&self) -> bool {
+        !self.guard_available && self.guard_mode != GuardMode::Required
+    }
+
+    // In-process file Tools and editors need no sandbox, only a Guard setting that admits work.
+    fn in_process_available(&self) -> bool {
+        self.guard_available || self.host_fallback()
+    }
+
+    fn protected_roots(&self) -> Vec<PathBuf> {
+        std::iter::once(self.workspace.clone())
+            .chain(
+                self.cache_state
+                    .as_ref()
+                    .map(|state| state.path().to_owned()),
+            )
+            .chain(StateRoot::account_path().ok())
+            .collect()
+    }
+
+    pub(crate) fn requested_reads(&self, call: &ToolCall) -> Result<Vec<RuntimeGrant>, ToolError> {
+        let ToolCall::Command {
+            additional_reads: Some(request),
+            ..
+        } = call
+        else {
+            return Ok(Vec::new());
+        };
+        let new = request
+            .paths
+            .iter()
+            .map(Path::new)
+            .filter(|path| {
+                !self
+                    .config
+                    .runtime_grants
+                    .iter()
+                    .any(|grant| grant.path == *path)
+            })
+            .collect::<Vec<_>>();
+        // The Guard process holds the admitted grants already and never resolves the account root.
+        if new.is_empty() {
+            return Ok(Vec::new());
+        }
+        let protected = self.protected_roots();
+        let protected = protected.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        new.into_iter()
+            .map(|path| guard_settings::admit_read(path, &protected))
+            .collect()
+    }
+
+    pub(crate) fn reads_need_approval(&self, call: &ToolCall) -> Result<bool, ToolError> {
+        self.requested_reads(call)?;
+        let once = self.once_reads.lock().expect("once reads");
+        let new = Self::read_paths(call)
+            .filter(|path| {
+                !once.iter().any(|allowed| allowed == path)
+                    && !self.config.runtime_grants.iter().any(|grant| {
+                        grant.kind == toolchains::RuntimeKind::ExtraRead && grant.path == *path
+                    })
+            })
+            .count();
+        if new > 0 && once.len() + new > guard_settings::MAX_RUN_READ_GRANTS {
+            return Err(ToolError::Limit);
+        }
+        Ok(new > 0)
+    }
+
+    pub(crate) fn allow_reads(&self, call: &ToolCall) {
+        let mut once = self.once_reads.lock().expect("once reads");
+        for path in Self::read_paths(call) {
+            if !once.iter().any(|allowed| allowed == path) {
+                once.push(path.to_owned());
+            }
+        }
+    }
+
+    fn read_paths(call: &ToolCall) -> impl Iterator<Item = &Path> {
+        match call {
+            ToolCall::Command {
+                additional_reads: Some(request),
+                ..
+            } => request.paths.as_slice(),
+            _ => &[],
+        }
+        .iter()
+        .map(Path::new)
+    }
+
+    // Saved folders apply from the next Run; this Run keeps them as allowed once.
+    pub(crate) fn save_reads(&self, call: &ToolCall) -> Result<(), ToolError> {
+        let requested = self.requested_reads(call)?;
+        GuardSettings::update(|settings| {
+            requested
+                .iter()
+                .try_for_each(|grant| settings.add_read(grant))
+        })
+        .map(|_| ())
+    }
+
+    pub(crate) fn process_config(
+        &self,
+        call: &ToolCall,
+    ) -> Result<std::borrow::Cow<'_, Config>, ToolError> {
+        let mut grants = self.config.runtime_grants.clone();
+        grants.extend(self.requested_reads(call)?);
+        if call.is_process() {
+            grants = guard::mask_grants(grants);
+        }
+        if grants == self.config.runtime_grants {
+            return Ok(std::borrow::Cow::Borrowed(&self.config));
+        }
+        let mut config = self.config.clone();
+        config.runtime_grants = grants;
+        Ok(std::borrow::Cow::Owned(config))
+    }
+
+    fn process_digest(&self, call: &ToolCall) -> Result<[u8; 32], ToolError> {
+        let config = self.process_config(call)?;
+        if matches!(config, std::borrow::Cow::Borrowed(_)) {
+            return Ok(self.process_enforcement_digest);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            guard::macos_runtime_enforcement_digest(
+                self.system_programs.as_deref(),
+                &config.runtime_grants,
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            guard::enforcement_digest(&config.runtime_grants)
+        }
+    }
+
+    // Accepted hooks run only while they match what the user accepted for this folder.
+    pub(crate) async fn admit_git_hooks(
+        &mut self,
+        accepted: Option<[u8; 32]>,
+        human_approvals: bool,
+    ) {
+        self.human_approvals = human_approvals;
+        self.git_hooks = git::accepted_hooks(self, accepted)
+            .await
+            .map(std::sync::Arc::new);
+    }
+
+    pub(crate) fn git_hooks_pinned(&self) -> bool {
+        self.git_hooks.is_some()
     }
 
     pub(crate) fn hidden_paths(&self, call: &ToolCall) -> permissions::HiddenPaths {
@@ -1366,27 +1599,15 @@ impl ToolRuntime {
         let mut catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
-            "write": self.config.write && self.guard_available,
-            "file_tools": if self.guard_available { catalog::FILE_TOOLS } else { "" },
+            "write": self.config.write && self.in_process_available(),
+            "file_tools": self.in_process_available(),
             "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
             "host_commands": true,
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| server.catalog_row(catalog::MCP_PROTOCOL)).collect::<Vec<_>>(),
-            "git": if self.guard_available && self.config.git_available() {
-                let write = self.config.write && self.git_writes_available;
-                let operations: Vec<_> = catalog::git_operations(write, true)
-                    .into_iter()
-                    .filter(|name| match *name {
-                        "git_push" | "gh_pr_create" => self.config.write && self.host_authentication.as_ref().as_ref()
-                            .is_some_and(|auth| auth.offers(name)),
-                        "gh_pr_list" | "gh_pr_view" => self.host_authentication.as_ref().as_ref()
-                            .is_some_and(|auth| auth.offers(name)),
-                        _ => true,
-                    })
-                    .filter(|name| !matches!(*name, "gh_pr_create" | "gh_pr_list" | "gh_pr_view") || self.config.pinned_gh().is_some())
-                    .collect();
-                serde_json::json!({"write":write,"host":true,"operations":operations,"scope":catalog::GIT_SCOPE})
+            "git": if self.config.git_available() {
+                git::catalog(self)
             } else {
                 serde_json::json!("unavailable")
             },
@@ -1402,6 +1623,9 @@ impl ToolRuntime {
                 "deny": network.deny,
                 "contract": catalog::NETWORK_CONTRACT,
             });
+        }
+        if self.host_fallback() {
+            catalog["sandbox"] = serde_json::json!(catalog::SANDBOX_OFF_CONTRACT);
         }
         if self.guard_available && cfg!(target_os = "linux") {
             catalog["web"] = serde_json::json!({
@@ -1419,7 +1643,7 @@ impl ToolRuntime {
 
     pub(crate) fn worker_policy(&self) -> Option<crate::session::worker::WorkerPolicy> {
         use crate::session::worker::*;
-        (self.guard_available && self.config.write && self.definitions.pin().is_some())
+        (self.in_process_available() && self.config.write && self.definitions.pin().is_some())
             .then(|| WorkerPolicy {
                 parent_grant: WorkerGrant {
                     commands: {
@@ -1484,25 +1708,35 @@ impl ToolRuntime {
             serde_json::from_str(context.catalog()).map_err(|_| ToolError::Configuration)?;
         catalog.as_object_mut().expect("catalog").remove("web");
         catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
-        catalog["write"] = serde_json::json!(self.guard_available);
+        catalog["write"] = serde_json::json!(self.in_process_available());
         catalog["skills"] = serde_json::json!([]);
         catalog["mcp_servers"] = serde_json::json!([]);
-        catalog["file_tools"] = serde_json::json!(if self.guard_available {
-            catalog::FILE_TOOLS
-        } else {
-            ""
-        });
+        catalog["file_tools"] = serde_json::json!(self.in_process_available());
         catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
-        if !grant.commands.is_empty() {
+        // Without a sandbox an editor's Command grant is a per-call host command in its own tree.
+        let host =
+            self.host_fallback() && grant.tools.contains(&crate::worker::WorkerTool::Command);
+        if !grant.commands.is_empty() && !host {
             catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
+        }
+        if host {
+            catalog["host_commands"] = serde_json::json!(true);
+            catalog["sandbox"] = serde_json::json!(catalog::SANDBOX_OFF_CONTRACT);
         }
         catalog["operations"] = serde_json::json!(
             grant
                 .tools
                 .iter()
                 .filter(|tool| **tool != crate::worker::WorkerTool::Command
+                    || host
                     || !grant.commands.is_empty())
-                .map(|tool| tool.label())
+                .map(
+                    |tool| if host && *tool == crate::worker::WorkerTool::Command {
+                        "command_unguarded"
+                    } else {
+                        tool.label()
+                    }
+                )
                 .collect::<Vec<_>>()
         );
         context.set_catalog(&catalog);
@@ -1520,7 +1754,7 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
-            "file_tools": if self.guard_available { catalog::RESEARCH_FILE_TOOLS } else { "" },
+            "file_tools": self.in_process_available(),
             "commands": [],
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|server| self.guard_available && server.url.is_none()).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
@@ -1545,14 +1779,16 @@ impl ToolRuntime {
         run_id: RunId,
         agent_run_id: AgentRunId,
         call: ToolCall,
-    ) -> EffectIntent {
+    ) -> Result<EffectIntent, ToolError> {
         let enforcement_digest = if call.facts().family == catalog::Family::File
             && call.facts().mutates
             && call.facts().site == Site::InProcess
         {
             FileReceipt::enforcement_digest()
         } else if call.is_process() {
-            self.process_enforcement_digest
+            self.process_digest(&call)?
+        } else if call.facts().site == Site::Git {
+            git::enforcement_digest()
         } else {
             self.enforcement_digest
         };
@@ -1560,7 +1796,7 @@ impl ToolRuntime {
             ToolLimits {
                 network: NetworkGrant::Host,
                 runtime_ms: 600_000,
-                cache_requested_bytes: 0,
+                cache_requested_bytes: BuildCacheSize::DISABLED,
                 cache_bytes: 0,
                 cache_candidate_bytes: 0,
                 ..ToolLimits::default()
@@ -1568,15 +1804,33 @@ impl ToolRuntime {
         } else {
             ToolLimits::default()
         };
-        EffectIntent {
-            host: git::host::pin(&self.workspace, &call).ok(),
+        let target = self.editor_root(agent_run_id).map_or(
+            crate::session::worker::EffectTarget::Workspace,
+            |root| crate::session::worker::EffectTarget::EditorWorkspace {
+                assignment_id: agent_run_id,
+                device: root.identity.device,
+                inode: root.identity.inode,
+            },
+        );
+        Ok(EffectIntent {
+            host: git::host::pin(
+                &self.workspace,
+                &call,
+                self.config
+                    .git
+                    .as_ref()
+                    .zip(self.git_environment.as_deref()),
+            )
+            .ok(),
             wrap: None,
             rewrite: Vec::new(),
             host_command: match &call {
                 ToolCall::CommandUnguarded { program, .. } => {
                     let requested = self.command_executable(program).unwrap_or(program);
-                    unguarded::pin(requested, &self.workspace, &self.command_environment)
-                        .ok()
+                    self.host_root(&target)
+                        .and_then(|(root, _)| {
+                            unguarded::pin(requested, &root, &self.command_environment).ok()
+                        })
                         .map(|mut pin| {
                             pin.state_roots = [
                                 self.cache_state
@@ -1594,7 +1848,7 @@ impl ToolRuntime {
                 }
                 _ => None,
             },
-            target: crate::session::worker::EffectTarget::Workspace,
+            target,
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
@@ -1605,7 +1859,7 @@ impl ToolRuntime {
             call,
             limits,
             use_count: 1,
-        }
+        })
     }
 
     pub(crate) fn host_settings_current(&self, pin: &types::HostCommandPin) -> bool {
@@ -1654,27 +1908,10 @@ impl ToolRuntime {
     }
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
-        if discovery::possible(call) {
-            let exact = self
-                .reads
-                .as_ref()
-                .is_some_and(|reads| discovery::exact_search(&reads.root, call).unwrap_or(false));
-            if !exact {
-                return guard::RESERVATION_OVERHEAD;
-            }
-        }
         match call.facts().site {
-            Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
+            Site::InProcess | Site::Unguarded | Site::Host | Site::Git => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
         }
-    }
-
-    pub(crate) async fn execute_concurrent_read(
-        &self,
-        intent: EffectIntent,
-        cancellation: Cancellation,
-    ) -> ToolObservation {
-        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::InProcess)).await
     }
 
     pub(crate) async fn execute(
@@ -1682,18 +1919,22 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        Box::pin(self.execute_inner(intent, cancellation, ReadDispatch::Automatic)).await
+        Box::pin(self.execute_inner(intent, cancellation)).await
     }
 
     async fn execute_inner(
         &self,
         intent: EffectIntent,
         cancellation: Cancellation,
-        reads: ReadDispatch,
     ) -> ToolObservation {
-        if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
-            && !self.guard_available
-        {
+        if matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) && self.host_fallback() {
+            return self.parse_definition_in_process(intent);
+        }
+        if match intent.call.facts().site {
+            Site::Guard => !self.guard_available,
+            Site::InProcess => !self.in_process_available(),
+            _ => false,
+        } {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
         }
         if matches!(
@@ -1712,8 +1953,7 @@ impl ToolRuntime {
         if let Err(error) = self.verify_wrap_async(&intent).await {
             return unstarted_observation(intent, error);
         }
-        if intent.target != crate::session::worker::EffectTarget::Workspace
-            || !command_tools::prefix::allowed(&self.config, &intent)
+        if !self.target_admitted(&intent) || !command_tools::prefix::allowed(&self.config, &intent)
         {
             return ToolObservation {
                 spill: None,
@@ -1732,38 +1972,45 @@ impl ToolRuntime {
             Site::InProcess if intent.call.facts().mutates => {
                 self.run_file(intent, cancellation).await
             }
-            Site::InProcess => match reads {
-                ReadDispatch::Automatic => self.run_read(intent, cancellation).await,
-                ReadDispatch::InProcess => self.run_in_process(intent, cancellation).await,
-            },
+            Site::InProcess => self.run_in_process(intent, cancellation).await,
             Site::Host => {
                 if let Err(error) = self.pinned_root(&intent) {
                     return unstarted_observation(intent, error);
                 }
                 git::host::run(
                     &self.config,
-                    self.host_authentication.as_ref().as_ref(),
-                    self.cache_state.as_deref(),
-                    &self.workspace,
+                    self.git_environment.as_deref(),
                     intent,
                     cancellation,
                 )
                 .await
             }
-            Site::Unguarded => self.run_unguarded(intent, cancellation).await,
-            Site::Guard => match guard::execute(self, &intent, cancellation).await {
-                Ok(observation) => observation,
-                Err(error) => {
-                    let cache_update =
-                        guard_error_cache_update(&intent.call, self.cache_state.is_some());
-                    uncertain_observation(intent, error, cache_update)
+            Site::Git => {
+                if let Err(error) = self.pinned_root(&intent) {
+                    return unstarted_observation(intent, error);
                 }
-            },
+                // Boxed so Git's state machine stays off the dispatching task's stack.
+                Box::pin(git::run(self, intent, cancellation)).await
+            }
+            Site::Unguarded => self.run_unguarded(intent, cancellation).await,
+            Site::Guard => {
+                if let Err(error) = crate::fault::guard_before_dispatch(&intent.call) {
+                    return unstarted_observation(intent, error);
+                }
+                match guard::execute(self, &intent, cancellation).await {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        let cache_update =
+                            guard_error_cache_update(&intent.call, self.cache_state.is_some());
+                        uncertain_observation(intent, error, cache_update)
+                    }
+                }
+            }
         }
     }
 
     async fn run_file(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
-        if !self.guard_available {
+        if !self.in_process_available() {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
         }
         if !fs::in_process_mutation(&intent) {
@@ -1807,6 +2054,18 @@ impl ToolRuntime {
                 let changeset =
                     guard::transfer::decode_handover(&file_intent, bytes, &runtime.config)?;
                 fs::apply_worker_changeset(&root, &changeset, &control)
+            } else if let ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::EditorWorkspace { files },
+            } = &file_intent.call
+            {
+                let tree = runtime
+                    .editor_root(file_intent.agent_run_id)
+                    .ok_or(ToolError::Configuration)?
+                    .dir;
+                if !runtime.config.allows(&file_intent.call) {
+                    return Err(ToolError::Path);
+                }
+                fs::apply_editor_changes(&root, &tree, files, &control)
             } else {
                 fs::mutate(&root, &file_intent.call, &runtime.config, &control)
             };
@@ -1864,8 +2123,11 @@ impl ToolRuntime {
         if !self.host_settings_admitted || !self.host_settings_current(pin) {
             return unstarted_observation(intent, ToolError::ChangedInput);
         }
+        let Some((root, root_identity)) = self.host_root(&intent.target) else {
+            return unstarted_observation(intent, ToolError::ChangedInput);
+        };
         let checked_pin = pin.clone();
-        let workspace = self.workspace.clone();
+        let workspace = root.clone();
         let environment = std::sync::Arc::clone(&self.command_environment);
         if !tokio::task::spawn_blocking(move || checked_pin.verify(&workspace, &environment))
             .await
@@ -1888,8 +2150,8 @@ impl ToolRuntime {
                 environment: &self.command_environment,
                 args,
                 cwd,
-                workspace: &self.workspace,
-                workspace_identity: self.workspace_identity,
+                workspace: &root,
+                workspace_identity: root_identity,
                 runtime_grants: &self.config.runtime_grants,
                 result_bytes: intent.limits.result_bytes,
                 runtime_ms: intent.limits.runtime_ms,
@@ -1942,13 +2204,26 @@ impl ToolRuntime {
         &self,
         intent: &EffectIntent,
     ) -> Result<std::sync::Arc<cap_std::fs::Dir>, ToolError> {
-        let root = self
-            .reads
-            .as_ref()
-            .map(|reads| std::sync::Arc::clone(&reads.root))
-            .ok_or(ToolError::ProtectionUnavailable)?;
-        if intent.target != crate::session::worker::EffectTarget::Workspace
-            || !intent.valid()
+        let (root, identity) = match intent.target {
+            crate::session::worker::EffectTarget::Workspace => (
+                self.reads
+                    .as_ref()
+                    .map(|reads| std::sync::Arc::clone(&reads.root))
+                    .ok_or(ToolError::ProtectionUnavailable)?,
+                (intent.workspace_device, intent.workspace_inode),
+            ),
+            crate::session::worker::EffectTarget::EditorWorkspace {
+                assignment_id,
+                device,
+                inode,
+            } => (
+                self.editor_root(assignment_id)
+                    .ok_or(ToolError::Configuration)?
+                    .dir,
+                (device, inode),
+            ),
+        };
+        if !intent.valid()
             || intent.policy_digest != self.config.digest()
             || intent.enforcement_digest
                 != if fs::in_process_mutation(intent) {
@@ -1957,33 +2232,122 @@ impl ToolRuntime {
                     self.build_jobs_digest(intent)?
                 } else if intent.call.facts().family == catalog::Family::Web {
                     self.web_digest(intent)?
+                } else if intent.call.facts().site == Site::Git {
+                    git::enforcement_digest()
                 } else {
                     self.enforcement_digest
                 }
         {
             return Err(ToolError::Configuration);
         }
-        if fs::identity(&root)? != (intent.workspace_device, intent.workspace_inode) {
+        if fs::identity(&root)? != identity {
             return Err(ToolError::ChangedInput);
         }
         fs::validate_workspace(self)?;
         Ok(root)
     }
 
-    async fn run_read(&self, intent: EffectIntent, cancellation: Cancellation) -> ToolObservation {
-        if !discovery::possible(&intent.call) {
-            return self.run_in_process(intent, cancellation).await;
+    pub(crate) fn attach_editor(&self, id: AgentRunId, path: &Path) -> Result<(), ToolError> {
+        let reads = self
+            .reads
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let dir = fs::open_directory(path)?;
+        let identity = fs::workspace_identity(&dir)?;
+        reads
+            .editors
+            .lock()
+            .map_err(|_| ToolError::Operation)?
+            .insert(
+                id,
+                EditorRoot {
+                    path: path.to_owned(),
+                    dir: std::sync::Arc::new(dir),
+                    identity,
+                },
+            );
+        Ok(())
+    }
+
+    pub(crate) fn detach_editor(&self, id: AgentRunId) {
+        if let Some(reads) = &self.reads
+            && let Ok(mut editors) = reads.editors.lock()
+        {
+            editors.remove(&id);
         }
-        let root = match self.pinned_root(&intent) {
-            Ok(root) => root,
-            Err(error) => return unstarted_observation(intent, error),
+    }
+
+    fn editor_root(&self, id: AgentRunId) -> Option<EditorRoot> {
+        self.reads.as_ref()?.editors.lock().ok()?.get(&id).cloned()
+    }
+
+    // Without a sandbox the same parser and bounds run in process, under an in-process receipt.
+    fn parse_definition_in_process(&self, intent: EffectIntent) -> ToolObservation {
+        let ToolCall::ParseAgentDefinition { raw_digest, .. } = &intent.call else {
+            return unstarted_observation(intent, ToolError::Configuration);
         };
-        match discovery::exact_search(&root, &intent.call) {
-            Ok(false) => match guard::execute(self, &intent, cancellation).await {
-                Ok(observation) => observation,
-                Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
-            },
-            Ok(true) | Err(_) => self.run_in_process(intent, cancellation).await,
+        let result = self
+            .definitions
+            .payload(&intent.call)
+            .and_then(|payload| payload.ok_or(ToolError::Configuration))
+            .and_then(|encoded| guard::decode_definition(raw_digest, &encoded))
+            .and_then(|bytes| definitions::parse(&bytes));
+        let (disposition, output, enforcement_cause, limit_cause) =
+            dispatch::outcome(&intent, result);
+        ToolObservation {
+            spill: None,
+            enforcement_cause,
+            limit_cause,
+            attestation: Some(Attestation::InProcess {
+                receipt: None,
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            }),
+            intent,
+            disposition,
+            output,
+            approval_cause: None,
+            guard_stage: None,
+            cache_update: CacheUpdate::NotApplicable,
+        }
+    }
+
+    // An editor's host command runs in its own private tree, never in the Workspace.
+    fn host_root(
+        &self,
+        target: &crate::session::worker::EffectTarget,
+    ) -> Option<(PathBuf, WorkspaceIdentity)> {
+        match target {
+            crate::session::worker::EffectTarget::Workspace => {
+                Some((self.workspace.clone(), self.workspace_identity))
+            }
+            crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => self
+                .editor_root(*assignment_id)
+                .map(|root| (root.path, root.identity)),
+        }
+    }
+
+    // An editor-workspace effect needs that editor's attached root; only typed file operations and commands run there.
+    fn target_admitted(&self, intent: &EffectIntent) -> bool {
+        match intent.target {
+            crate::session::worker::EffectTarget::Workspace => true,
+            crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => {
+                self.editor_root(assignment_id).is_some()
+                    && (matches!(
+                        intent.call,
+                        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+                    ) || intent.call.facts().family == catalog::Family::File)
+            }
+        }
+    }
+
+    pub(crate) fn editor_tree(&self, intent: &EffectIntent) -> Option<PathBuf> {
+        match intent.target {
+            crate::session::worker::EffectTarget::EditorWorkspace { assignment_id, .. } => {
+                self.editor_root(assignment_id).map(|root| root.path)
+            }
+            crate::session::worker::EffectTarget::Workspace => None,
         }
     }
 
@@ -2018,7 +2382,7 @@ impl ToolRuntime {
                 }
             },
         }
-        let (runtime, read_intent) = (self.clone(), intent.clone());
+        let (runtime, read_intent, walk) = (self.clone(), intent.clone(), cancellation.clone());
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let root = runtime.pinned_root(&read_intent)?;
@@ -2068,14 +2432,29 @@ impl ToolRuntime {
                 }));
             }
             let hidden = runtime.hidden_paths(&read_intent.call);
+            let deadline = std::time::Instant::now()
+                + Duration::from_millis(u64::from(read_intent.limits.runtime_ms));
+            if discovery::possible(&read_intent.call)
+                && matches!(discovery::exact_search(&root, &read_intent.call), Ok(false))
+            {
+                return Ok(discovery::inspect(discovery::Request {
+                    root: &root,
+                    call: &read_intent.call,
+                    config: &runtime.config,
+                    hidden: &|path| hidden.covers(path),
+                    result_bytes: read_intent.limits.result_bytes as usize,
+                    deadline,
+                    output: discovery::Output::Tool,
+                    cancellation: Some(&walk),
+                }));
+            }
             Ok(fs::inspect(
                 &root,
                 &read_intent.call,
                 &runtime.config,
                 &|path| hidden.covers(path),
                 read_intent.limits.result_bytes as usize,
-                std::time::Instant::now()
-                    + Duration::from_millis(u64::from(read_intent.limits.runtime_ms)),
+                deadline,
             ))
         });
         let result = tokio::select! {
@@ -2136,16 +2515,20 @@ impl ToolRuntime {
     }
 }
 
-enum ReadDispatch {
-    Automatic,
-    InProcess,
-}
-
 #[derive(Clone)]
 struct InProcessReads {
     skills: std::collections::BTreeMap<String, Option<std::sync::Arc<cap_std::fs::Dir>>>,
     root: std::sync::Arc<cap_std::fs::Dir>,
     slots: std::sync::Arc<tokio::sync::Semaphore>,
+    // Shared by the Run's clones; each live editor works only in its own workspace.
+    editors: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<AgentRunId, EditorRoot>>>,
+}
+
+#[derive(Clone)]
+struct EditorRoot {
+    path: PathBuf,
+    dir: std::sync::Arc<cap_std::fs::Dir>,
+    identity: WorkspaceIdentity,
 }
 
 const MAX_IN_PROCESS_READS: usize = 16;
@@ -2251,16 +2634,11 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     if matches!(error, ToolError::Timeout(_)) {
         return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired");
     }
-    if matches!(error, ToolError::QueueFull) && discovery::possible(&intent.call) {
-        return unattested_limit(
-            intent,
-            LimitCause::ReadCapacity,
-            "Discovery capacity is busy; nothing was read",
-        );
+    if let ToolError::DiskSpace(message) = &error {
+        return unattested_limit(intent, LimitCause::Resource, message);
     }
-    let resource_limit = matches!(&error, ToolError::Limit)
-        && matches!(&intent.call, ToolCall::Command { .. })
-        && intent.target == crate::session::worker::EffectTarget::Workspace;
+    let resource_limit =
+        matches!(&error, ToolError::Limit) && matches!(&intent.call, ToolCall::Command { .. });
     let enforcement_cause =
         matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
             .then_some(EnforcementCause::GuardBootstrap);
@@ -2270,6 +2648,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
         Site::Host => "host",
+        Site::Git => "Git",
     };
     record_failure(site, &intent, &error);
     let mut output = if resource_limit {

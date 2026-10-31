@@ -97,60 +97,6 @@ fn public_client_accounts_keep_separate_slots_and_logout_deletes_only_the_select
 }
 
 #[test]
-fn migrated_file_token_is_retained_until_reauthorization_and_routes_refuse_before_loading() {
-    let (_temp, workspace, state) = root();
-    let credentials = fixture("remote-one");
-    let consent = receipt(&credentials, AccountStorage::PrivateFile);
-    let id = save_private_file_at(&state, &workspace, credentials, consent, None).unwrap();
-    let current = state
-        .record(RecordKind::ChatgptAccounts)
-        .read()
-        .unwrap()
-        .unwrap();
-    let mut legacy: serde_json::Value = serde_json::from_slice(&current).unwrap();
-    legacy["schema"] = 3.into();
-    let entry = &mut legacy["accounts"][0];
-    entry["client_id"] = "oaiapp_legacy".into();
-    entry["chatgpt_account_id"] = serde_json::Value::Null;
-    entry["plan_permission_missing"] = false.into();
-    entry.as_object_mut().unwrap().remove("slot_client_id");
-    entry["token"]["credentials"]["client_id"] = "oaiapp_legacy".into();
-    entry["token"]["credentials"]
-        .as_object_mut()
-        .unwrap()
-        .remove("chatgpt_account_id");
-    let token = entry["token"].clone();
-    state
-        .record(RecordKind::ChatgptAccounts)
-        .replace(&serde_json::to_vec(&legacy).unwrap())
-        .unwrap();
-    let reopened = StateRoot::open_existing(state.path()).unwrap();
-    let index = AccountIndex::read(&reopened).unwrap();
-    assert!(index.accounts[0].disconnected);
-    assert!(serde_json::to_value(index.accounts[0].token.as_ref().unwrap()).unwrap() == token);
-    assert!(matches!(
-        load_selected_private_file_at(&reopened, id),
-        Err(AuthorizationError::NoSelectedAccount)
-    ));
-    let replacement = fixture("remote-one");
-    let consent = receipt(&replacement, AccountStorage::PrivateFile);
-    assert_eq!(
-        save_private_file_at(&reopened, &workspace, replacement, consent, Some(id)).unwrap(),
-        id
-    );
-    assert!(matches!(
-        refuse_backend_route_at(&reopened, &workspace, id),
-        Err(AuthorizationError::BackendRouteNotAdmitted)
-    ));
-    let index = AccountIndex::read(&reopened).unwrap();
-    assert!(!index.accounts[0].renewal_pending);
-    assert_eq!(
-        index.accounts[0].chatgpt_account_id.as_deref(),
-        Some("remote-one")
-    );
-}
-
-#[test]
 fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes() {
     let (_temp, workspace, state) = root();
     let credentials = fixture("remote-one");
@@ -176,22 +122,21 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
             == before
     );
     let mut index = AccountIndex::read(&state).unwrap();
-    let legacy_id = Uuid::now_v7();
+    let other_account = Uuid::now_v7();
     index.accounts.push(AccountEntry {
-        id: legacy_id,
+        id: other_account,
         host_id: super::super::fixture_host_id(),
-        client_id: "oaiapp_legacy".into(),
+        client_id: super::super::CLIENT_ID.into(),
         subject: "same-subject".into(),
-        chatgpt_account_id: None,
+        chatgpt_account_id: "remote-other".into(),
         keyring_slot: None,
-        slot_client_id: None,
         storage: AccountStorage::PrivateFile,
         renewal_pending: false,
         signout_pending: false,
         disconnected: true,
         token: None,
     });
-    index.selected = Some(legacy_id);
+    index.selected = Some(other_account);
     index.write(&state).unwrap();
     let before = state
         .record(RecordKind::ChatgptAccounts)
@@ -201,7 +146,13 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
     let replacement = fixture("remote-one");
     let consent = receipt(&replacement, AccountStorage::PrivateFile);
     assert!(matches!(
-        save_private_file_at(&state, &workspace, replacement, consent, Some(legacy_id)),
+        save_private_file_at(
+            &state,
+            &workspace,
+            replacement,
+            consent,
+            Some(other_account)
+        ),
         Err(AuthorizationError::RegistrationConflict)
     ));
     assert!(
@@ -227,107 +178,4 @@ fn reauthorization_rejects_account_drift_and_duplicate_identity_without_writes()
     )
     .unwrap();
     assert!(removed.local_cleared);
-    let replacement = fixture("remote-one");
-    let consent = receipt(&replacement, AccountStorage::PrivateFile);
-    assert_eq!(
-        save_private_file_at(&state, &workspace, replacement, consent, Some(legacy_id)).unwrap(),
-        legacy_id
-    );
-}
-
-#[test]
-fn reauthorization_keeps_the_original_keyring_slot_after_the_client_changes() {
-    let (_temp, workspace, state) = root();
-    let legacy_client = "oaiapp_legacy_slot";
-    let id = Uuid::now_v7();
-    let slot = legacy_keyring_slot(legacy_client);
-    let source = serde_json::json!({
-        "schema": 3, "selected": id, "model_checks": [],
-        "accounts": [{
-            "id": id, "host_id": super::super::fixture_host_id(),
-            "client_id": legacy_client, "subject": "same-subject",
-            "chatgpt_account_id": null, "keyring_slot": slot,
-            "storage": "keyring", "renewal_pending": false,
-            "signout_pending": true, "disconnected": false,
-            "plan_permission_missing": false, "token": null
-        }]
-    });
-    state
-        .record(RecordKind::ChatgptAccounts)
-        .replace(&serde_json::to_vec(&source).unwrap())
-        .unwrap();
-    let migrated = AccountIndex::read(&state).unwrap();
-    assert!(migrated.accounts[0].disconnected);
-    assert!(migrated.accounts[0].signout_pending);
-    assert_eq!(
-        migrated.accounts[0].keyring_slot.as_deref(),
-        Some(slot.as_str())
-    );
-    let replacement = fixture("remote-one");
-    let consent = receipt(&replacement, AccountStorage::Keyring);
-    save_keyring_at_with(
-        &state,
-        &workspace,
-        replacement,
-        consent,
-        Some(id),
-        |addressed, bytes| {
-            assert_eq!(addressed, slot);
-            assert!(valid_written_keyring_record(addressed, bytes.as_bytes()));
-            assert!(AccountIndex::read(&state).unwrap().accounts[0].renewal_pending);
-            Ok(())
-        },
-    )
-    .unwrap();
-    let reopened = StateRoot::open_existing(state.path()).unwrap();
-    let index = AccountIndex::read(&reopened).unwrap();
-    assert_eq!(
-        index.accounts[0].slot_client_id.as_deref(),
-        Some(legacy_client)
-    );
-    assert_eq!(index.accounts[0].client_id, super::super::CLIENT_ID);
-    assert_eq!(
-        index.accounts[0].keyring_slot.as_deref(),
-        Some(slot.as_str())
-    );
-    assert!(!index.accounts[0].signout_pending);
-    assert!(!index.accounts[0].renewal_pending);
-}
-
-#[test]
-fn profile_migration_preserves_pending_renewal_and_signout_markers() {
-    for (disconnected, renewal_pending, signout_pending) in [
-        (false, false, false),
-        (false, true, false),
-        (false, false, true),
-        (false, true, true),
-        (true, false, true),
-    ] {
-        let id = Uuid::now_v7();
-        let client = "oaiapp_pending_migration";
-        let slot = legacy_keyring_slot(client);
-        let source = serde_json::json!({
-            "schema": 3, "selected": id, "model_checks": [],
-            "accounts": [{
-                "id": id, "host_id": super::super::fixture_host_id(),
-                "client_id": client, "subject": "same-subject",
-                "chatgpt_account_id": null, "keyring_slot": slot,
-                "storage": "keyring", "renewal_pending": renewal_pending,
-                "signout_pending": signout_pending, "disconnected": disconnected,
-                "plan_permission_missing": false, "token": null
-            }]
-        });
-        let upgraded = CHATGPT_ACCOUNTS.upgrade(&serde_json::to_vec(&source).unwrap());
-        if signout_pending && (renewal_pending || disconnected) {
-            assert!(upgraded.is_none());
-            continue;
-        }
-        let index = AccountIndex::decode(&upgraded.unwrap()).unwrap();
-        let entry = &index.accounts[0];
-        assert!(entry.disconnected);
-        assert_eq!(entry.renewal_pending, renewal_pending);
-        assert_eq!(entry.signout_pending, signout_pending);
-        assert_eq!(entry.keyring_slot.as_deref(), Some(slot.as_str()));
-        assert!(entry.ensure_usable().is_err());
-    }
 }

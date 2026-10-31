@@ -219,13 +219,7 @@ impl CallRouter<'_> {
             run_id: request.run_id,
             agent_run_id: request.agent_run_id,
         };
-        // A private observer guards a fallback chain against visible output.
-        let preview = match preview {
-            None if self.chain(role, request.agent_run_id)?.len() > 1 => {
-                Some(ResponsePreview::new().0)
-            }
-            preview => preview,
-        };
+        let preview = self.chain_preview(role, request.agent_run_id, preview)?;
         loop {
             let provider = self.bind(
                 role,
@@ -235,24 +229,15 @@ impl CallRouter<'_> {
             )?;
             let attempt = invoke_attempt(
                 provider.as_ref(),
-                request.clone(),
-                deadline,
-                cancellation.clone(),
-                preview.clone(),
-                limits.clone(),
+                AttemptInput {
+                    request: request.clone(),
+                    deadline,
+                    cancellation: cancellation.clone(),
+                    preview: preview.clone(),
+                    limits: limits.clone(),
+                },
                 crate::fault::LatencyReceipt::new(&self.journal.tool_latency, &request, || {
-                    self.ledger
-                        .view(|view| {
-                            view.runs
-                                .last()
-                                .and_then(|run| {
-                                    run.agents
-                                        .iter()
-                                        .find(|agent| agent.id == scope.agent_run_id)
-                                })
-                                .map_or(0, |agent| agent.provider_calls.len())
-                        })
-                        .expect("live measurement scope")
+                    self.recorded_calls(scope.agent_run_id)
                 }),
             )
             .await;
@@ -271,26 +256,47 @@ impl CallRouter<'_> {
                 preview.clear();
             }
             let Some(delay) = self
-                .continue_attempt(scope, role, decision, &request, &limits, || Ok(provider))
+                .continue_attempt(
+                    scope,
+                    role,
+                    decision,
+                    AttemptCharge {
+                        request: Some(&request),
+                        limits: &limits,
+                    },
+                    || Ok(provider),
+                )
                 .await?
             else {
                 return Ok(attempt.result);
             };
             // A pause ends the call unsent, as a pause during an approval does.
-            if matches!(decision, AttemptDecision::Retry { .. }) {
-                match back_off(
+            if matches!(decision, AttemptDecision::Retry { .. })
+                && back_off(
                     scope.session_id,
                     delay,
                     &mut cancellation,
                     self.steering.as_ref(),
                 )
                 .await
-                {
-                    Backoff::Elapsed => {}
-                    Backoff::Paused | Backoff::Cancelled => return Ok(CallResult::Cancelled),
-                }
+                    != Backoff::Elapsed
+            {
+                return Ok(CallResult::Cancelled);
             }
         }
+    }
+
+    // A private observer guards a fallback chain against visible output.
+    fn chain_preview(
+        &self,
+        role: ProviderRole,
+        actor: AgentRunId,
+        preview: Option<ResponsePreview>,
+    ) -> Result<Option<ResponsePreview>, EngineError> {
+        Ok(match preview {
+            None if self.chain(role, actor)?.len() > 1 => Some(ResponsePreview::new().0),
+            preview => preview,
+        })
     }
 
     pub(super) async fn continue_attempt(
@@ -298,20 +304,19 @@ impl CallRouter<'_> {
         scope: CallScope,
         role: ProviderRole,
         decision: AttemptDecision,
-        request: &ProviderRequest,
-        limits: &RateLimitSlot,
+        charge: AttemptCharge<'_>,
         provider: impl FnOnce() -> Result<Arc<dyn Provider>, EngineError>,
     ) -> Result<Option<Duration>, EngineError> {
         Ok(match decision {
             AttemptDecision::Accept => None,
             AttemptDecision::Retry { cause, delay } => self
-                .retry(scope, role, cause, delay, Some(request), limits)
+                .retry(scope, role, cause, delay, charge)
                 .await?
                 .then_some(delay),
             AttemptDecision::Switch => {
                 // The wave resolves its provider only after deciding to switch.
                 let provider = provider()?;
-                self.switch(scope, role, provider.identity(), Some(request), limits)
+                self.switch(scope, role, provider.identity(), charge)
                     .await?
                     .then_some(Duration::ZERO)
             }
@@ -359,8 +364,7 @@ impl CallRouter<'_> {
         })?;
         // Without a running Goal only a between-Run compaction can retry, with nothing to charge.
         let admitted = if running {
-            self.ledger.can_start_provider_call()
-                && self.ledger.remaining_calls() != Some(0)
+            self.ledger.calls_open()
                 && self
                     .ledger
                     .effective_budget()
@@ -396,18 +400,16 @@ impl CallRouter<'_> {
             if cancellation.is_cancelled() {
                 return Ok(None);
             }
-            let attempt_deadline =
-                deadline.min(Instant::now() + provider.identity().limits.deadline);
-            let response = if Instant::now() >= attempt_deadline {
-                Err(ProviderError::CallTimedOut)
-            } else {
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => return Ok(None),
-                    response = tokio::time::timeout_at(attempt_deadline, provider.compact_observed(request.clone(), limits.clone())) => {
-                        response.unwrap_or(Err(ProviderError::CallTimedOut))
-                    }
-                }
+            let Some(response) = compaction_attempt(
+                provider.as_ref(),
+                &request,
+                &limits,
+                deadline,
+                &mut cancellation,
+            )
+            .await
+            else {
+                return Ok(None);
             };
             // A failure under cancellation or pause ends the compaction unsent, with no further attempt.
             if response.is_err() && (cancellation.is_cancelled() || self.pause_requested()) {
@@ -430,43 +432,89 @@ impl CallRouter<'_> {
                 cancellation.is_cancelled() || self.pause_requested(),
                 false,
             )?;
-            let continued = match decide_attempt(transient, facts) {
-                AttemptDecision::Accept => false,
-                AttemptDecision::Retry { cause, delay } => {
-                    if !self
-                        .retry(scope, ProviderRole::Compaction, cause, delay, None, &limits)
-                        .await?
-                    {
-                        false
-                    } else {
-                        match back_off(
-                            scope.session_id,
-                            delay,
-                            &mut cancellation,
-                            self.steering.as_ref(),
-                        )
-                        .await
-                        {
-                            Backoff::Elapsed => true,
-                            Backoff::Paused | Backoff::Cancelled => return Ok(None),
-                        }
-                    }
-                }
-                AttemptDecision::Switch => {
-                    self.switch(
-                        scope,
-                        ProviderRole::Compaction,
-                        provider.identity(),
-                        None,
-                        &limits,
-                    )
-                    .await?
-                }
+            let decision = decide_attempt(transient, facts);
+            let Some(continued) = self
+                .continue_compaction(
+                    scope,
+                    decision,
+                    provider.identity(),
+                    &limits,
+                    &mut cancellation,
+                )
+                .await?
+            else {
+                return Ok(None);
             };
             if !continued {
                 return Ok(Some(CompactionOutcome { response, provider }));
             }
         }
+    }
+
+    // Whether compaction tries again; None when a back-off ends in pause or cancellation.
+    async fn continue_compaction(
+        &self,
+        scope: CallScope,
+        decision: AttemptDecision,
+        identity: &ProviderIdentity,
+        limits: &RateLimitSlot,
+        cancellation: &mut RunCancellation,
+    ) -> Result<Option<bool>, EngineError> {
+        Ok(Some(match decision {
+            AttemptDecision::Accept => false,
+            AttemptDecision::Retry { cause, delay } => {
+                if !self
+                    .retry(
+                        scope,
+                        ProviderRole::Compaction,
+                        cause,
+                        delay,
+                        AttemptCharge {
+                            request: None,
+                            limits,
+                        },
+                    )
+                    .await?
+                {
+                    false
+                } else {
+                    match back_off(
+                        scope.session_id,
+                        delay,
+                        cancellation,
+                        self.steering.as_ref(),
+                    )
+                    .await
+                    {
+                        Backoff::Elapsed => true,
+                        Backoff::Paused | Backoff::Cancelled => return Ok(None),
+                    }
+                }
+            }
+            AttemptDecision::Switch => {
+                self.switch(
+                    scope,
+                    ProviderRole::Compaction,
+                    identity,
+                    AttemptCharge {
+                        request: None,
+                        limits,
+                    },
+                )
+                .await?
+            }
+        }))
+    }
+
+    fn recorded_calls(&self, actor: AgentRunId) -> usize {
+        self.ledger
+            .view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| run.agents.iter().find(|agent| agent.id == actor))
+                    .map_or(0, |agent| agent.provider_calls.len())
+            })
+            .expect("live measurement scope")
     }
 
     fn next(
@@ -488,9 +536,9 @@ impl CallRouter<'_> {
         scope: CallScope,
         role: ProviderRole,
         from: &ProviderIdentity,
-        request: Option<&ProviderRequest>,
-        limits: &RateLimitSlot,
+        charge: AttemptCharge<'_>,
     ) -> Result<bool, EngineError> {
+        let AttemptCharge { request, limits } = charge;
         let CallScope {
             run_id,
             agent_run_id,
@@ -569,9 +617,9 @@ impl CallRouter<'_> {
         role: ProviderRole,
         cause: RetryCause,
         delay: Duration,
-        request: Option<&ProviderRequest>,
-        limits: &RateLimitSlot,
+        charge: AttemptCharge<'_>,
     ) -> Result<bool, EngineError> {
+        let AttemptCharge { request, limits } = charge;
         let retry = self.ledger.view(|view| {
             let run = view.runs.last()?;
             let agent = run
@@ -721,25 +769,48 @@ pub(super) struct AttemptResult {
     pub(super) visible: bool,
 }
 
+// One compaction attempt within its deadline; None when cancellation interrupts it.
+async fn compaction_attempt(
+    provider: &dyn Provider,
+    request: &crate::provider::CompactionRequest,
+    limits: &RateLimitSlot,
+    deadline: Instant,
+    cancellation: &mut RunCancellation,
+) -> Option<Result<crate::provider::CompactionResponse, ProviderError>> {
+    let attempt_deadline = deadline.min(Instant::now() + provider.identity().limits.deadline);
+    if Instant::now() >= attempt_deadline {
+        return Some(Err(ProviderError::CallTimedOut));
+    }
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        response = tokio::time::timeout_at(attempt_deadline, provider.compact_observed(request.clone(), limits.clone())) => {
+            Some(response.unwrap_or(Err(ProviderError::CallTimedOut)))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AttemptCharge<'a> {
+    pub(super) request: Option<&'a ProviderRequest>,
+    pub(super) limits: &'a RateLimitSlot,
+}
+
+pub(crate) struct AttemptInput {
+    pub(crate) request: ProviderRequest,
+    pub(crate) deadline: Instant,
+    pub(crate) cancellation: RunCancellation,
+    pub(crate) preview: Option<ResponsePreview>,
+    pub(crate) limits: RateLimitSlot,
+}
+
 pub(super) async fn invoke_attempt(
     provider: &dyn Provider,
-    request: ProviderRequest,
-    deadline: Instant,
-    cancellation: RunCancellation,
-    preview: Option<ResponsePreview>,
-    limits: RateLimitSlot,
+    input: AttemptInput,
     receipt: crate::fault::LatencyReceipt<'_>,
 ) -> AttemptResult {
-    let (result, transient) = invoke_bounded_with_preview(
-        provider,
-        request,
-        deadline,
-        cancellation,
-        preview.clone(),
-        limits,
-        receipt,
-    )
-    .await;
+    let preview = input.preview.clone();
+    let (result, transient) = invoke_bounded_with_preview(provider, input, receipt).await;
     AttemptResult {
         result,
         transient,

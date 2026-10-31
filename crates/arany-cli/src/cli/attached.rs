@@ -19,6 +19,9 @@ mod active;
 mod agents;
 pub(crate) mod controls;
 mod files;
+// Linux release builds have no tests in this module: each one is debug-only or macOS-only.
+#[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
+mod journeys;
 pub(crate) mod models;
 pub(in crate::cli) mod permissions;
 mod picker;
@@ -152,7 +155,7 @@ fn open_state(admission: &Admission) -> Result<StateRoot, LoopError> {
 #[derive(Clone, Copy)]
 enum Selector {
     Usage,
-    Models,
+    Models(models::ModelOpen),
     Agents,
     Resume,
     Setup,
@@ -201,7 +204,9 @@ impl AttachedArgs {
 
     fn validate_text_inputs(&self) -> Result<(), String> {
         if self.model.as_ref().is_some_and(|model| {
-            model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)
+            model.is_empty()
+                || model.len() > arany::MAX_MODEL_ID_BYTES
+                || model.chars().any(char::is_control)
         }) {
             return Err("invalid model".into());
         }
@@ -356,12 +361,15 @@ async fn close_engine(engine: std::sync::Arc<Engine>) -> Result<(), String> {
 async fn run_selector(
     engine: &Engine,
     selector: Selector,
-    terminal: &mut AttachedTerminal,
     admission: &mut Admission,
     session_id: &mut SessionId,
-    view: &mut SessionView,
-    composer: &mut Composer,
+    ui: run::RunUi<'_>,
 ) -> Result<Option<Feedback>, LoopError> {
+    let run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
     Ok(Some(match selector {
         Selector::Usage => {
             terminal
@@ -373,8 +381,19 @@ async fn run_selector(
         Selector::Setup => {
             configure_account(terminal, admission, session_id, view, composer).await?
         }
-        Selector::Models => {
-            match models::browse(terminal, admission, *session_id, view, composer).await? {
+        Selector::Models(open) => {
+            match models::browse(
+                run::RunUi {
+                    terminal: &mut *terminal,
+                    view: &mut *view,
+                    composer: &mut *composer,
+                },
+                admission,
+                *session_id,
+                open,
+            )
+            .await?
+            {
                 ModelBrowse::Notice(notice) => notice,
                 ModelBrowse::Shutdown(signal) => {
                     return Err(format!("terminated by {}", signal.name()).into());
@@ -505,8 +524,10 @@ async fn configure_account(
     update_defaults(admission, *session_id, view, defaults.clone()).await?;
     admission.defaults = defaults;
     seed_setup_catalog(composer, &view.defaults, Some(&catalog));
+    // A failed or empty setup read leaves the catalog unread, so `/model` reads it.
+    let read = (!catalog.is_empty()).then_some(catalog.as_slice());
     if let Err(error) =
-        models::remember_models(&admission.workspace, &view.defaults, Some(&catalog), true).await
+        models::remember_models(&admission.workspace, &view.defaults, read, true).await
     {
         return Ok(Feedback::History(format!(
             "{notice}; Error: {error}; selection kept for this conversation only"
@@ -549,13 +570,16 @@ fn consume_local_command(composer: &mut Composer, submission: &Submission<'_>) {
 }
 
 async fn reconcile_failed_submission(
-    terminal: &mut AttachedTerminal,
+    ui: run::RunUi<'_>,
     state_dir: &Path,
-    view: &mut SessionView,
-    composer: &mut Composer,
     submitted: ComposerDraft,
     starting_sequence: u64,
 ) -> Result<(), String> {
+    let run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
     loop {
         match load_view(state_dir, view.id).await {
             Ok(reloaded) => {
@@ -600,8 +624,18 @@ async fn reconcile_failed_submission(
 const INTERRUPTED_GOAL_NOTICE: &str = "Goal paused; use /goal resume to continue.";
 const OUT_OF_BUDGET_GOAL_NOTICE: &str =
     "Goal paused and out of budget; /goal resume will close it.";
+const INTERRUPTED_CHAT_NOTICE: &str = "Interrupted. Send a message to continue.";
 
-fn paused_goal_notice(resume_admitted: bool) -> &'static str {
+// Only a Goal started with /goal speaks of resuming it; a plain message continues with the next one.
+fn paused_goal_notice(goal: &arany::GoalView, view: &SessionView) -> &'static str {
+    if goal.autonomous {
+        goal_resume_notice(goal.admits_resume(view))
+    } else {
+        INTERRUPTED_CHAT_NOTICE
+    }
+}
+
+fn goal_resume_notice(resume_admitted: bool) -> &'static str {
     if resume_admitted {
         INTERRUPTED_GOAL_NOTICE
     } else {
@@ -774,9 +808,17 @@ async fn admit_startup(
     )
     .await
     {
-        Ok(permissions::PermissionChoice::Selected(access)) => {
+        Ok(permissions::PermissionChoice::Selected(mut access)) => {
             for notice in access.stale_runtime_notices() {
                 append_notice(setup_notice, &notice);
+            }
+            match permissions::ask_git_hooks(terminal, &mut access, &admission.state_dir, false)
+                .await
+            {
+                Ok(Some(notice)) => append_notice(setup_notice, &notice),
+                Ok(None) => {}
+                Err(setup::SetupError::Recoverable(error)) => return Err(error),
+                Err(error) => return Err(error.into()),
             }
             admission.workspace_permissions = Some(access);
         }
@@ -1219,7 +1261,7 @@ fn emit_outcome(
                 "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
             }
             Some(config) if config.custom_profile_provenance.is_some() => {
-                "Provider: custom verified\n"
+                "Provider: custom\n"
             }
             _ => "",
         }
@@ -1521,12 +1563,13 @@ mod tests {
 
     #[test]
     fn paused_goal_notice_offers_resume_only_while_a_run_is_admitted() {
-        assert_eq!(paused_goal_notice(true), INTERRUPTED_GOAL_NOTICE);
-        assert_eq!(paused_goal_notice(false), OUT_OF_BUDGET_GOAL_NOTICE);
+        assert_eq!(goal_resume_notice(true), INTERRUPTED_GOAL_NOTICE);
+        assert_eq!(goal_resume_notice(false), OUT_OF_BUDGET_GOAL_NOTICE);
         assert!(!OUT_OF_BUDGET_GOAL_NOTICE.contains("use /goal resume to continue"));
+        assert!(!INTERRUPTED_CHAT_NOTICE.contains("/goal"));
         assert_eq!(
             submission_notice(
-                Some(paused_goal_notice(false)),
+                Some(goal_resume_notice(false)),
                 RunStatus::Cancelled,
                 Some("Run cancelled.".to_owned()),
                 None

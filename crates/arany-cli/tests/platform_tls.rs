@@ -1,5 +1,3 @@
-#![cfg(any(target_os = "linux", target_os = "macos"))]
-
 pub use arany::test_support::process;
 use process::BoundedOutput;
 

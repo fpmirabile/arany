@@ -327,6 +327,10 @@ pub fn render_goal_provider_attempts<'a>(
     (!notices.is_empty()).then(|| notices.join("\n"))
 }
 
+const REFUSAL_DETAIL_UNAVAILABLE: &str = " Committed refused reservation detail is unavailable.";
+const UNREAD_TOOL_REQUEST: &str =
+    "The model requested another Tool, but no Provider call remained to read its result.";
+
 pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String> {
     let Some(goal) = view.budget_stop_goal(run) else {
         return run_feedback(run);
@@ -349,30 +353,8 @@ pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String>
             }
         }
     } else {
-        let budget = goal.effective_budget();
-        let (dimension, used, limit) = match view.budget_stop_limit(run)? {
-            arany::GoalLimit::Calls => (
-                "Provider calls",
-                goal.provider_calls.to_string(),
-                budget.max_provider_calls.map(|calls| calls.to_string()),
-            ),
-            arany::GoalLimit::Tokens => (
-                "tokens",
-                goal.known_tokens.to_string(),
-                budget.max_tokens.map(|tokens| tokens.to_string()),
-            ),
-            arany::GoalLimit::ActiveTime => (
-                "active time",
-                format_duration(goal.active_ms),
-                budget.max_active_ms.map(format_duration),
-            ),
-            arany::GoalLimit::Runs => (
-                "Runs",
-                goal.run_ids.len().to_string(),
-                Some(budget.max_runs.to_string()),
-            ),
-        };
-        text.push_str(&format!("Run stopped at a budget boundary: {dimension}; committed usage {used}, pinned limit {}. Committed refused reservation detail is unavailable.", limit?));
+        let (_, dimension, used, limit) = budget_stop_usage(view, run, goal)?;
+        text.push_str(&format!("Run stopped at a budget boundary: {dimension}; committed usage {used}, pinned limit {}.{REFUSAL_DETAIL_UNAVAILABLE}", limit?));
         if goal.token_usage_unknown {
             text.push_str(" Token usage is unknown.");
         }
@@ -380,12 +362,90 @@ pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String>
             text.push_str(" Active time includes conservative crash charges.");
         }
     }
+    if unread_tool_request(run) {
+        text.push('\n');
+        text.push_str(UNREAD_TOOL_REQUEST);
+    }
     text.push_str(if run.assistant_message.is_some() {
         "\nThe committed answer is preserved."
     } else {
         "\nNo answer was committed; completed actions remain in the Session."
     });
     Some(text)
+}
+
+// Attached-chat copy: a plain Goal's budget stop reads as a chat turn limit, and `show` keeps the full projection.
+pub fn interactive_run_feedback(view: &SessionView, run: &RunView) -> Option<String> {
+    let plain_stop = view
+        .budget_stop_goal(run)
+        .filter(|goal| !goal.autonomous)
+        .and_then(|goal| budget_stop_usage(view, run, goal));
+    let Some((limit, dimension, used, _)) =
+        plain_stop.filter(|(limit, ..)| *limit != arany::GoalLimit::Runs)
+    else {
+        return session_run_feedback(view, run)
+            .map(|text| text.replace(REFUSAL_DETAIL_UNAVAILABLE, ""));
+    };
+    let used = match limit {
+        arany::GoalLimit::ActiveTime => format!("{used} of active time"),
+        arany::GoalLimit::Calls | arany::GoalLimit::Tokens | arany::GoalLimit::Runs => {
+            format!("{used} {dimension}")
+        }
+    };
+    let stop =
+        format!("Stopped after {used} (limit set in /settings). Send a message to continue.");
+    Some(if unread_tool_request(run) {
+        format!("{UNREAD_TOOL_REQUEST} {stop}")
+    } else {
+        stop
+    })
+}
+
+fn budget_stop_usage(
+    view: &SessionView,
+    run: &RunView,
+    goal: &arany::GoalView,
+) -> Option<(arany::GoalLimit, &'static str, String, Option<String>)> {
+    let budget = goal.effective_budget();
+    let limit = view.budget_stop_limit(run)?;
+    let (dimension, used, ceiling) = match limit {
+        arany::GoalLimit::Calls => (
+            "Provider calls",
+            goal.provider_calls.to_string(),
+            budget.max_provider_calls.map(|calls| calls.to_string()),
+        ),
+        arany::GoalLimit::Tokens => (
+            "tokens",
+            goal.known_tokens.to_string(),
+            budget.max_tokens.map(|tokens| tokens.to_string()),
+        ),
+        arany::GoalLimit::ActiveTime => (
+            "active time",
+            format_duration(goal.active_ms),
+            budget.max_active_ms.map(format_duration),
+        ),
+        arany::GoalLimit::Runs => (
+            "Runs",
+            goal.run_ids.len().to_string(),
+            Some(budget.max_runs.to_string()),
+        ),
+    };
+    Some((limit, dimension, used, ceiling))
+}
+
+// A decoded proposal refused only by budget admission commits as a null-reason invalid response with usage.
+fn unread_tool_request(run: &RunView) -> bool {
+    run.failure == Some(arany::RunFailure::BudgetExhausted)
+        && run
+            .agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Primary)
+            .and_then(|agent| agent.provider_calls.last())
+            .is_some_and(|call| {
+                call.disposition == ProviderCallDisposition::InvalidResponse
+                    && call.failure_reason.is_none()
+                    && call.output_tokens.is_some()
+            })
 }
 
 pub fn budget_refusal_feedback(view: &SessionView, goal: Option<GoalId>) -> Option<String> {
@@ -410,124 +470,7 @@ pub fn budget_stop_run(view: &SessionView, goal: Option<GoalId>) -> Option<&RunV
 pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
-        RunStatus::Failed => {
-            let tool = run.stopping_tool().or_else(|| run.tools.last());
-            if let Some(reason) = run.failure.and_then(run_failure_notice) {
-                let last_refusal = run
-                    .agents
-                    .iter()
-                    .find(|agent| agent.role == arany::AgentRole::Primary)
-                    .and_then(|agent| agent.provider_calls.last())
-                    .and_then(|call| call.refusal.as_ref())
-                    .map(|refusal| refusal_notice(refusal.cause));
-                let preflight = run
-                    .agents
-                    .iter()
-                    .find(|agent| agent.role == arany::AgentRole::Primary)
-                    .and_then(|agent| agent.tool_refusal.as_ref());
-                let detail = match (run.failure, preflight, last_refusal) {
-                    (Some(arany::RunFailure::ProposalRefused), Some(record), _) => {
-                        format!("{} The refused action was not dispatched.", record.refusal)
-                    }
-                    (Some(arany::RunFailure::ProposalRefused), None, Some(cause)) => {
-                        cause.to_owned()
-                    }
-                    (Some(arany::RunFailure::RefusalLimit), _, Some(cause)) => {
-                        format!("{reason} {cause}")
-                    }
-                    _ => reason.to_owned(),
-                };
-                return Some(format!(
-                    "Error: Run failed. {detail} No answer was committed. Use /agents to inspect this Run."
-                ));
-            }
-            let reason = run
-                .agents
-                .iter()
-                .filter(|agent| agent.status == AgentStatus::Failed)
-                .filter_map(|agent| agent.provider_calls.last())
-                .filter(|call| call.phase != arany::AgentPhase::ToolReview)
-                .find_map(provider_failure_notice);
-            if let Some(reason) = reason {
-                return Some(format!(
-                    "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
-                ));
-            }
-            if let Some(tool) = tool.filter(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == arany::ToolDisposition::Failed
-                        && observation.attestation.is_none()
-                })
-            }) {
-                if tool.intent.call.site() == arany::Site::InProcess
-                    && matches!(
-                        tool.intent.call,
-                        arany::ToolCall::Read { .. }
-                            | arany::ToolCall::Search { .. }
-                            | arany::ToolCall::Skill { .. }
-                    )
-                {
-                    return Some("Error: A Workspace read stopped before it started because the admitted Workspace or its intent no longer verified. Nothing was read; earlier completed actions remain. Use /agents to inspect this Run.".into());
-                }
-                if tool.intent.call.site() == arany::Site::InProcess {
-                    return Some("Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run.".into());
-                }
-                return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to open this Run; its Command row names the Guard stage and cause.".into());
-            }
-            if tool.is_some_and(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == arany::ToolDisposition::Succeeded
-                        && observation.cache_update == arany::CacheUpdate::Uncertain
-                })
-            }) {
-                return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
-            }
-            if let Some(observation) =
-                tool.and_then(|tool| tool.observation.as_ref())
-                    .filter(|observation| {
-                        observation.disposition == arany::ToolDisposition::Denied
-                            && observation.attestation.is_none()
-                    })
-            {
-                let disposition = match observation.approval_cause {
-                    Some(arany::ApprovalCause::Cancelled) => "Run cancelled.",
-                    Some(arany::ApprovalCause::Paused) => "Goal paused.",
-                    Some(arany::ApprovalCause::ChannelUnavailable) => {
-                        "Approval channel unavailable."
-                    }
-                    Some(arany::ApprovalCause::ChildTimeout) => "Child approval wait timed out.",
-                    Some(arany::ApprovalCause::Declined) | None => "Action denied.",
-                };
-                let recovery = if observation.approval_cause
-                    == Some(arany::ApprovalCause::ChannelUnavailable)
-                {
-                    "Start a new request from an interactive approval channel."
-                } else {
-                    "Use /permissions or Shift+Tab to review approval settings."
-                };
-                return Some(format!(
-                    "{disposition} No further action ran; earlier completed actions remain. {recovery}"
-                ));
-            }
-            if let Some(tool) = tool
-                && tool.started_sequence.is_some()
-                && tool.observation.as_ref().is_none_or(|observation| {
-                    matches!(
-                        observation.disposition,
-                        arany::ToolDisposition::Uncertain | arany::ToolDisposition::Cancelled
-                    ) || observation.cache_update == arany::CacheUpdate::Uncertain
-                })
-            {
-                return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());
-            }
-            if run.primary_tool_limit_reached() {
-                return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
-            }
-            Some(
-                "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
-                    .into(),
-            )
-        }
+        RunStatus::Failed => Some(failed_feedback(run)),
         RunStatus::StoppedByHook => Some(match run.hook_stop_reason().flatten() {
             Some(reason) => format!("Run stopped by hook: {}", escape_terminal(reason)),
             None => "Run stopped by hook".into(),
@@ -556,6 +499,131 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     }
 }
 
+// The first known cause wins: the Run's failure, a failed Provider call, then its stopping Tool.
+fn failed_feedback(run: &RunView) -> String {
+    let tool = run.stopping_tool().or_else(|| run.tools.last());
+    if let Some(reason) = run.failure.and_then(run_failure_notice) {
+        return format!(
+            "Error: Run failed. {} No answer was committed. Use /agents to inspect this Run.",
+            run_failure_detail(run, reason)
+        );
+    }
+    let reason = run
+        .agents
+        .iter()
+        .filter(|agent| agent.status == AgentStatus::Failed)
+        .filter_map(|agent| agent.provider_calls.last())
+        .filter(|call| call.phase != arany::AgentPhase::ToolReview)
+        .find_map(provider_failure_notice);
+    if let Some(reason) = reason {
+        return format!(
+            "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
+        );
+    }
+    if let Some(feedback) = tool.and_then(tool_failure_feedback) {
+        return feedback;
+    }
+    if run.primary_tool_limit_reached() {
+        return "Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into();
+    }
+    "Error: Run failed. No answer was committed. Use /agents to inspect this Run.".into()
+}
+
+// A refused proposal names the refusal; a refusal limit adds the last Provider refusal's cause.
+fn run_failure_detail(run: &RunView, reason: &str) -> String {
+    let primary = run
+        .agents
+        .iter()
+        .find(|agent| agent.role == arany::AgentRole::Primary);
+    let last_refusal = primary
+        .and_then(|agent| agent.provider_calls.last())
+        .and_then(|call| call.refusal.as_ref())
+        .map(|refusal| refusal_notice(refusal.cause));
+    let preflight = primary.and_then(|agent| agent.tool_refusal.as_ref());
+    match (run.failure, preflight, last_refusal) {
+        (Some(arany::RunFailure::ProposalRefused), Some(record), _) => {
+            format!("{} The refused action was not dispatched.", record.refusal)
+        }
+        (Some(arany::RunFailure::ProposalRefused), None, Some(cause)) => cause.to_owned(),
+        (Some(arany::RunFailure::RefusalLimit), _, Some(cause)) => format!("{reason} {cause}"),
+        _ => reason.to_owned(),
+    }
+}
+
+fn tool_failure_feedback(tool: &arany::ToolView) -> Option<String> {
+    let observation = tool.observation.as_ref();
+    if observation.is_some_and(|observation| {
+        observation.disposition == arany::ToolDisposition::Failed
+            && observation.attestation.is_none()
+    }) {
+        return Some(unattested_failure(tool).into());
+    }
+    if observation.is_some_and(|observation| {
+        observation.disposition == arany::ToolDisposition::Succeeded
+            && observation.cache_update == arany::CacheUpdate::Uncertain
+    }) {
+        return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
+    }
+    if let Some(observation) = observation.filter(|observation| {
+        observation.disposition == arany::ToolDisposition::Denied
+            && observation.attestation.is_none()
+    }) {
+        return Some(denied_feedback(observation));
+    }
+    if tool.started_sequence.is_some()
+        && observation.is_none_or(|observation| {
+            matches!(
+                observation.disposition,
+                arany::ToolDisposition::Uncertain | arany::ToolDisposition::Cancelled
+            ) || observation.cache_update == arany::CacheUpdate::Uncertain
+        })
+    {
+        return Some("Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed.".into());
+    }
+    observation
+        .filter(|observation| observation.disposition == arany::ToolDisposition::Limit)
+        .map(|observation| {
+            format!(
+                "Error: Tool stopped: {}. No answer was committed; earlier completed actions remain. Use /agents to inspect this Run.",
+                tool_rows::limit_summary(observation)
+            )
+        })
+}
+
+// A Tool that failed before attestation never ran; its site names what could not be verified.
+fn unattested_failure(tool: &arany::ToolView) -> &'static str {
+    if tool.intent.call.site() == arany::Site::InProcess
+        && matches!(
+            tool.intent.call,
+            arany::ToolCall::Read { .. }
+                | arany::ToolCall::Search { .. }
+                | arany::ToolCall::Skill { .. }
+        )
+    {
+        return "Error: A Workspace read stopped before it started because the admitted Workspace or its intent no longer verified. Nothing was read; earlier completed actions remain. Use /agents to inspect this Run.";
+    }
+    if tool.intent.call.site() == arany::Site::InProcess {
+        return "Error: A Workspace action stopped before it started because native Tool protection was unavailable or its Workspace or intent could not be verified. That action did not run; earlier completed actions remain. Use /agents to inspect this Run.";
+    }
+    "Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to open this Run; its Command row names the Guard stage and cause."
+}
+
+fn denied_feedback(observation: &arany::ToolObservation) -> String {
+    let disposition = match observation.approval_cause {
+        Some(arany::ApprovalCause::Cancelled) => "Run cancelled.",
+        Some(arany::ApprovalCause::Paused) => "Goal paused.",
+        Some(arany::ApprovalCause::ChannelUnavailable) => "Approval channel unavailable.",
+        Some(arany::ApprovalCause::ChildTimeout) => "Child approval wait timed out.",
+        Some(arany::ApprovalCause::Declined) | None => "Action denied.",
+    };
+    let recovery = if observation.approval_cause == Some(arany::ApprovalCause::ChannelUnavailable) {
+        "Start a new request from an interactive approval channel."
+    } else {
+        "Use /permissions or Shift+Tab to review approval settings."
+    };
+    format!("{disposition} No further action ran; earlier completed actions remain. {recovery}")
+}
+
 fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
     use arany::RunFailure;
     Some(match cause {
@@ -581,6 +649,9 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
         }
         Cause::InvalidArguments => {
             "Arany refused invalid operation arguments. The proposed action did not run."
+        }
+        Cause::DigestUnknown => {
+            "Arany refused an edit of a file not read in this Run. The proposed action did not run."
         }
         Cause::Phase => {
             "Arany refused an operation unavailable in this phase. The proposed action did not run."
@@ -632,80 +703,19 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
 
 fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
     use arany::ProviderFailureReason;
-    match (call.disposition, call.failure_reason) {
-        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::ProposalRefused)) => {
-            return call
-                .refusal
-                .as_ref()
-                .map(|refusal| refusal_notice(refusal.cause));
-        }
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(
-                ProviderFailureReason::WorkerAnswerDeferred
-                | ProviderFailureReason::WorkerDelegateRefused
-                | ProviderFailureReason::WorkerToolRefused
-                | ProviderFailureReason::CriterionNotMetInView,
-            ),
-        ) => {
-            return Some("Arany refused the proposed worker coordination outcome.");
-        }
-        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::AccountAccess)) => {
-            return Some(
-                "Provider denied account access. Check the selected account and model permissions.",
-            );
-        }
-        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::UsageLimit)) => {
-            return Some(
-                "Provider reported a usage limit. Check the selected account's usage before trying again.",
-            );
-        }
-        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::RateLimited)) => {
-            return Some("Provider rate limited the request. Wait before trying again.");
-        }
-        (
-            ProviderCallDisposition::Unavailable,
-            Some(ProviderFailureReason::UsageTemporarilyUnavailable),
-        ) => {
-            return Some(
-                "Provider usage is temporarily unavailable. Check provider status before trying again.",
-            );
-        }
-        (ProviderCallDisposition::Unavailable, Some(ProviderFailureReason::ServiceUnavailable)) => {
-            return Some(
-                "Provider service unavailable. Check provider status before trying again.",
-            );
-        }
-        (ProviderCallDisposition::InvalidResponse, Some(ProviderFailureReason::StreamProtocol)) => {
-            return Some(
-                "Provider stream was incomplete or malformed. No answer was accepted; plan usage may have occurred.",
-            );
-        }
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(ProviderFailureReason::ResponseContract),
-        ) => {
-            return Some(
-                "Provider response did not match the selected model, completed-message, or usage contract. No answer was accepted.",
-            );
-        }
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(ProviderFailureReason::OutcomeContract),
-        ) => {
-            return Some(
-                "Provider output did not match Arany's structured outcome contract. No answer was accepted.",
-            );
-        }
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(ProviderFailureReason::LocalOutputLimit),
-        ) => {
-            return Some(
-                "Provider reported output above Arany's local token limit. No answer was accepted; this limit does not cap remote plan usage.",
-            );
-        }
-        _ => {}
+    if call.disposition == ProviderCallDisposition::Rejected
+        && call.failure_reason == Some(ProviderFailureReason::ProposalRefused)
+    {
+        return call
+            .refusal
+            .as_ref()
+            .map(|refusal| refusal_notice(refusal.cause));
+    }
+    if let Some(notice) = call
+        .failure_reason
+        .and_then(|reason| failure_reason_notice(call.disposition, reason))
+    {
+        return Some(notice);
     }
     Some(match call.disposition {
         ProviderCallDisposition::Unavailable => {
@@ -728,41 +738,59 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
     })
 }
 
+fn failure_reason_notice(
+    disposition: ProviderCallDisposition,
+    reason: arany::ProviderFailureReason,
+) -> Option<&'static str> {
+    use ProviderCallDisposition::{InvalidResponse, Rejected, Unavailable};
+    use arany::ProviderFailureReason as Reason;
+    Some(match (disposition, reason) {
+        (
+            InvalidResponse,
+            Reason::WorkerAnswerDeferred
+            | Reason::WorkerDelegateRefused
+            | Reason::WorkerToolRefused
+            | Reason::CriterionNotMetInView,
+        ) => "Arany refused the proposed worker coordination outcome.",
+        (Rejected, Reason::AccountAccess) => {
+            "Provider denied account access. Check the selected account and model permissions."
+        }
+        (Rejected, Reason::UsageLimit) => {
+            "Provider reported a usage limit. Check the selected account's usage before trying again."
+        }
+        (Rejected, Reason::RateLimited) => {
+            "Provider rate limited the request. Wait before trying again."
+        }
+        (Unavailable, Reason::UsageTemporarilyUnavailable) => {
+            "Provider usage is temporarily unavailable. Check provider status before trying again."
+        }
+        (Unavailable, Reason::ServiceUnavailable) => {
+            "Provider service unavailable. Check provider status before trying again."
+        }
+        (InvalidResponse, Reason::StreamProtocol) => {
+            "Provider stream was incomplete or malformed. No answer was accepted; plan usage may have occurred."
+        }
+        (InvalidResponse, Reason::ResponseContract) => {
+            "Provider response did not match the selected model, completed-message, or usage contract. No answer was accepted."
+        }
+        (InvalidResponse, Reason::OutcomeDecode) => {
+            "Provider reply could not be decoded as one complete answer, Tool call or delegation from the selected model. No answer was accepted."
+        }
+        (InvalidResponse, Reason::OutcomeContract) => {
+            "Provider output did not match Arany's structured outcome contract. No answer was accepted."
+        }
+        (InvalidResponse, Reason::LocalOutputLimit) => {
+            "Provider reported output above Arany's local token limit. No answer was accepted; this limit does not cap remote plan usage."
+        }
+        _ => return None,
+    })
+}
+
 pub fn goal_status(view: &SessionView) -> String {
     let Some(goal) = view.goals.last() else {
         return "No Goal in this Session; send a message or use /goal <objective>".into();
     };
-    let budget = goal.effective_budget();
-    let mut text = format!(
-        "Goal {} · {} · {} · {} · Runs {}/{} · calls {}/{} · tokens {}/{}{} · active {}/{}",
-        goal.id.to_string().chars().take(8).collect::<String>(),
-        goal.status.as_str(),
-        goal_phase_word(goal.phase),
-        if goal.autonomous {
-            "autonomous"
-        } else {
-            "single Run"
-        },
-        goal.run_ids.len(),
-        budget.max_runs,
-        goal.provider_calls,
-        budget
-            .max_provider_calls
-            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
-        goal.known_tokens,
-        budget
-            .max_tokens
-            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
-        if goal.token_usage_unknown {
-            " (some unknown)"
-        } else {
-            ""
-        },
-        format_duration(goal.active_ms),
-        budget
-            .max_active_ms
-            .map_or_else(|| "unlimited".to_owned(), format_duration),
-    );
+    let mut text = goal_summary(goal);
     let unguarded: usize = view
         .runs
         .iter()
@@ -793,26 +821,69 @@ pub fn goal_status(view: &SessionView) -> String {
             " · out of budget"
         });
     }
-    if let Some(paused) = view
-        .interrupted_goal_id()
-        .and_then(|id| view.goal(id))
-        .filter(|paused| paused.id != goal.id)
-    {
-        let short = paused.id.to_string().chars().take(8).collect::<String>();
-        if paused.include_paths.is_none() {
-            text.push_str(&format!(
-                "\nPaused Goal {short}: {}",
-                arany::EngineError::GoalIncludesUnavailable
-            ));
-        } else if paused.admits_resume(view) {
-            text.push_str(&format!(
-                "\nPaused Goal {short} can be resumed with /goal resume"
-            ));
-        } else {
-            text.push_str(&format!("\nPaused Goal {short} is out of budget"));
-        }
+    if let Some(paused) = paused_goal_line(view, goal) {
+        text.push_str(&paused);
     }
     text
+}
+
+const SHORT_GOAL_ID_CHARS: usize = 8;
+
+fn short_goal_id(id: GoalId) -> String {
+    id.to_string().chars().take(SHORT_GOAL_ID_CHARS).collect()
+}
+
+fn goal_summary(goal: &arany::GoalView) -> String {
+    let budget = goal.effective_budget();
+    format!(
+        "Goal {} · {} · {} · {} · Runs {}/{} · calls {}/{} · tokens {}/{}{} · active {}/{}",
+        short_goal_id(goal.id),
+        goal.status.as_str(),
+        goal_phase_word(goal.phase),
+        if goal.autonomous {
+            "autonomous"
+        } else {
+            "single Run"
+        },
+        goal.run_ids.len(),
+        budget.max_runs,
+        goal.provider_calls,
+        budget
+            .max_provider_calls
+            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
+        goal.known_tokens,
+        budget
+            .max_tokens
+            .map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string()),
+        if goal.token_usage_unknown {
+            " (some unknown)"
+        } else {
+            ""
+        },
+        format_duration(goal.active_ms),
+        budget
+            .max_active_ms
+            .map_or_else(|| "unlimited".to_owned(), format_duration),
+    )
+}
+
+// Another interrupted Goal in this Session says whether it can resume.
+fn paused_goal_line(view: &SessionView, goal: &arany::GoalView) -> Option<String> {
+    let paused = view
+        .interrupted_goal_id()
+        .and_then(|id| view.goal(id))
+        .filter(|paused| paused.id != goal.id)?;
+    let short = short_goal_id(paused.id);
+    Some(if paused.include_paths.is_none() {
+        format!(
+            "\nPaused Goal {short}: {}",
+            arany::EngineError::GoalIncludesUnavailable
+        )
+    } else if paused.admits_resume(view) {
+        format!("\nPaused Goal {short} can be resumed with /goal resume")
+    } else {
+        format!("\nPaused Goal {short} is out of budget")
+    })
 }
 
 fn goal_phase_word(phase: arany::GoalPhase) -> &'static str {
@@ -1287,16 +1358,11 @@ mod goal_status_tests {
     fn goal_status_names_a_paused_goal_that_is_not_the_last_one() {
         let mut view = session_with_goal(true);
         view.goals[0].status = GoalStatus::Interrupted;
-        let paused = view.goals[0]
-            .id
-            .to_string()
-            .chars()
-            .take(8)
-            .collect::<String>();
+        let paused = short_goal_id(view.goals[0].id);
         let mut newer = view.goals[0].clone();
         newer.id = arany::GoalId::new();
         newer.status = GoalStatus::Completed;
-        let newer_short = newer.id.to_string().chars().take(8).collect::<String>();
+        let newer_short = short_goal_id(newer.id);
         view.goals.push(newer);
         let status = goal_status(&view);
         assert!(
@@ -1349,12 +1415,7 @@ mod goal_status_tests {
                     includes_known && exhausted
                 );
 
-                let paused = view.goals[0]
-                    .id
-                    .to_string()
-                    .chars()
-                    .take(8)
-                    .collect::<String>();
+                let paused = short_goal_id(view.goals[0].id);
                 let mut newer = view.goals[0].clone();
                 newer.id = arany::GoalId::new();
                 newer.status = GoalStatus::Completed;
@@ -1475,6 +1536,50 @@ mod goal_status_tests {
         assert_eq!(
             session_run_feedback(&view, &view.runs[0]).unwrap(),
             "Arany status: Goal budget refused Provider: Provider calls; exhausted; used at refusal 64, pinned limit 64; requested 1; required minimum 1; final settled usage 64.\nThe committed answer is preserved."
+        );
+    }
+
+    #[test]
+    fn interactive_budget_stop_reads_as_a_chat_limit_and_names_an_unread_tool_request() {
+        let mut view = session_with_goal(false);
+        let mut run = crate::presentation::team_view().runs.remove(0);
+        run.status = RunStatus::Failed;
+        run.failure = Some(arany::RunFailure::BudgetExhausted);
+        run.assistant_message = None;
+        let goal = &mut view.goals[0];
+        goal.run_ids = vec![run.id];
+        goal.provider_calls = 64;
+        goal.status = GoalStatus::Failed;
+        goal.budget_closed = true;
+        view.runs = vec![run];
+        assert_eq!(
+            interactive_run_feedback(&view, &view.runs[0]).unwrap(),
+            "Stopped after 64 Provider calls (limit set in /settings). Send a message to continue."
+        );
+        view.runs[0].agents[0].provider_calls = vec![ProviderCallRecord {
+            disposition: ProviderCallDisposition::InvalidResponse,
+            input_tokens: Some(100),
+            output_tokens: Some(36),
+            ..arany::test_support::provider_call_record()
+        }];
+        assert_eq!(
+            interactive_run_feedback(&view, &view.runs[0]).unwrap(),
+            format!(
+                "{UNREAD_TOOL_REQUEST} Stopped after 64 Provider calls (limit set in /settings). Send a message to continue."
+            )
+        );
+        let recorded = session_run_feedback(&view, &view.runs[0]).unwrap();
+        assert!(
+            recorded.contains(REFUSAL_DETAIL_UNAVAILABLE.trim()),
+            "{recorded}"
+        );
+        assert!(recorded.contains(UNREAD_TOOL_REQUEST), "{recorded}");
+        view.goals[0].autonomous = true;
+        let autonomous = interactive_run_feedback(&view, &view.runs[0]).unwrap();
+        assert!(autonomous.starts_with("Arany status: Run stopped at a budget boundary"));
+        assert!(
+            !autonomous.contains(REFUSAL_DETAIL_UNAVAILABLE.trim()),
+            "{autonomous}"
         );
     }
 

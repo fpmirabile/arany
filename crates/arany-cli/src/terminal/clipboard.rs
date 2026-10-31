@@ -51,13 +51,11 @@ impl ClipboardWorker {
 
 pub(super) fn shutdown() -> std::io::Result<()> {
     WORKER.shutdown(CLEANUP_TIMEOUT).map_err(|message| {
-        #[cfg(unix)]
         warn_cleanup_unconfirmed();
         std::io::Error::other(message)
     })
 }
 
-#[cfg(unix)]
 fn warn_cleanup_unconfirmed() {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if WARNED.swap(true, Ordering::Relaxed) {
@@ -180,11 +178,6 @@ impl<T> Drop for ClipboardJob<T> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn read(_cancelled: &AtomicBool, _cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
-    Err("explicit clipboard access is unavailable on this platform")
-}
-
 #[cfg(target_os = "linux")]
 fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
     use super::composer::MAX_PASTE_BYTES;
@@ -197,7 +190,15 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
         LocalDisplay::Wayland { .. } => {
             let mut command = display.command("wl-paste")?;
             command.arg("--list-types");
-            let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
+            let types = run_process(
+                &mut command,
+                ProcessDeadline {
+                    cancelled,
+                    at: deadline,
+                },
+                16 * 1024,
+                cleanup,
+            )?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
                 types,
@@ -211,7 +212,15 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
         LocalDisplay::X11 { .. } => {
             let mut command = display.command("xclip")?;
             command.args(["-selection", "clipboard", "-out", "-target", "TARGETS"]);
-            let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
+            let types = run_process(
+                &mut command,
+                ProcessDeadline {
+                    cancelled,
+                    at: deadline,
+                },
+                16 * 1024,
+                cleanup,
+            )?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
                 types,
@@ -228,7 +237,15 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
     } else {
         MAX_PASTE_BYTES
     };
-    let bytes = run_process(&mut command, cancelled, deadline, limit, cleanup)?;
+    let bytes = run_process(
+        &mut command,
+        ProcessDeadline {
+            cancelled,
+            at: deadline,
+        },
+        limit,
+        cleanup,
+    )?;
     if image {
         ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
     } else {
@@ -352,8 +369,10 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
     let mut command = native_command(None)?;
     let bytes = run_process(
         &mut command,
-        cancelled,
-        Instant::now() + Duration::from_secs(2),
+        ProcessDeadline {
+            cancelled,
+            at: Instant::now() + Duration::from_secs(2),
+        },
         super::composer::MAX_PASTE_BYTES.max(arany::MAX_IMAGE_BYTES) + 2,
         cleanup,
     )?;
@@ -416,7 +435,6 @@ fn local_x11_display(display: &str) -> bool {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn installed(name: &str) -> Result<std::path::PathBuf, &'static str> {
     use std::os::unix::fs::MetadataExt;
     #[cfg(target_os = "linux")]
@@ -443,14 +461,12 @@ fn installed(name: &str) -> Result<std::path::PathBuf, &'static str> {
     Err("trusted clipboard client unavailable; use terminal paste")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct OwnedChild<'a> {
     child: Option<std::process::Child>,
     group: Option<rustix::process::Pid>,
     cleanup: &'a mut Cleanup,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl OwnedChild<'_> {
     fn spawn<'a>(
         command: &mut std::process::Command,
@@ -537,7 +553,6 @@ impl OwnedChild<'_> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for OwnedChild<'_> {
     fn drop(&mut self) {
         self.kill();
@@ -547,7 +562,6 @@ impl Drop for OwnedChild<'_> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn set_nonblocking(pipe: &impl std::os::fd::AsFd) -> Result<(), &'static str> {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     fcntl_setfl(
@@ -557,18 +571,28 @@ fn set_nonblocking(pipe: &impl std::os::fd::AsFd) -> Result<(), &'static str> {
     .map_err(|_| "clipboard pipe unavailable")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+// Cancellation and the overall deadline that every clipboard child must finish within.
+#[derive(Clone, Copy)]
+struct ProcessDeadline<'a> {
+    cancelled: &'a AtomicBool,
+    at: Instant,
+}
+
+impl ProcessDeadline<'_> {
+    fn passed(self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || Instant::now() >= self.at
+    }
+}
+
 fn run_process(
     command: &mut std::process::Command,
-    cancelled: &AtomicBool,
-    deadline: std::time::Instant,
+    deadline: ProcessDeadline<'_>,
     limit: usize,
     cleanup: &mut Cleanup,
 ) -> Result<Vec<u8>, &'static str> {
-    use std::io::{self, Read};
     use std::process::Stdio;
 
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+    if deadline.passed() {
         return Err("clipboard read cancelled or timed out");
     }
     let mut owner = OwnedChild::spawn(
@@ -578,75 +602,84 @@ fn run_process(
             .stderr(Stdio::piped()),
         cleanup,
     )?;
-    let result = (|| {
-        let child = owner.child.as_mut().expect("owned clipboard child");
-        let mut stdout = child.stdout.take().ok_or("clipboard pipe unavailable")?;
-        let mut stderr = child.stderr.take().ok_or("clipboard pipe unavailable")?;
-        set_nonblocking(&stdout)?;
-        set_nonblocking(&stderr)?;
-        let mut output = Vec::new();
-        let mut output_bytes = 0;
-        let mut error_bytes = 0;
-        let mut stdout_closed = false;
-        let mut stderr_closed = false;
-        loop {
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err("clipboard read cancelled or timed out");
-            }
-            let mut buffer = [0; 4096];
-            for (stream, closed, count, cap, collect) in [
-                (
-                    &mut stdout as &mut dyn Read,
-                    &mut stdout_closed,
-                    &mut output_bytes,
-                    limit,
-                    true,
-                ),
-                (
-                    &mut stderr as &mut dyn Read,
-                    &mut stderr_closed,
-                    &mut error_bytes,
-                    4096,
-                    false,
-                ),
-            ] {
-                if *closed {
-                    continue;
-                }
-                match stream.read(&mut buffer) {
-                    Ok(0) => *closed = true,
-                    Ok(length) => {
-                        if length > cap.saturating_sub(*count) {
-                            return Err("clipboard output exceeds its limit");
-                        }
-                        *count += length;
-                        if collect {
-                            output.extend_from_slice(&buffer[..length]);
-                        }
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) => {}
-                    Err(_) => return Err("clipboard read unavailable"),
-                }
-            }
-            if let Some(success) = owner.exited()?
-                && stdout_closed
-                && stderr_closed
-            {
-                return if success {
-                    Ok(output)
-                } else {
-                    Err("clipboard read unavailable")
-                };
-            }
-            std::thread::park_timeout(Duration::from_millis(5));
-        }
-    })();
+    let result = collect_output(&mut owner, deadline, limit);
     owner.finish()?;
     result
+}
+
+// Reads stdout up to `limit` and a bounded stderr until the child exits with both closed.
+fn collect_output(
+    owner: &mut OwnedChild,
+    deadline: ProcessDeadline<'_>,
+    limit: usize,
+) -> Result<Vec<u8>, &'static str> {
+    use std::io::{self, Read};
+
+    let child = owner.child.as_mut().expect("owned clipboard child");
+    let mut stdout = child.stdout.take().ok_or("clipboard pipe unavailable")?;
+    let mut stderr = child.stderr.take().ok_or("clipboard pipe unavailable")?;
+    set_nonblocking(&stdout)?;
+    set_nonblocking(&stderr)?;
+    let mut output = Vec::new();
+    let mut output_bytes = 0;
+    let mut error_bytes = 0;
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
+    loop {
+        if deadline.passed() {
+            return Err("clipboard read cancelled or timed out");
+        }
+        let mut buffer = [0; 4096];
+        for (stream, closed, count, cap, collect) in [
+            (
+                &mut stdout as &mut dyn Read,
+                &mut stdout_closed,
+                &mut output_bytes,
+                limit,
+                true,
+            ),
+            (
+                &mut stderr as &mut dyn Read,
+                &mut stderr_closed,
+                &mut error_bytes,
+                4096,
+                false,
+            ),
+        ] {
+            if *closed {
+                continue;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) => *closed = true,
+                Ok(length) => {
+                    if length > cap.saturating_sub(*count) {
+                        return Err("clipboard output exceeds its limit");
+                    }
+                    *count += length;
+                    if collect {
+                        output.extend_from_slice(&buffer[..length]);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err("clipboard read unavailable"),
+            }
+        }
+        if let Some(success) = owner.exited()?
+            && stdout_closed
+            && stderr_closed
+        {
+            return if success {
+                Ok(output)
+            } else {
+                Err("clipboard read unavailable")
+            };
+        }
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
 }
 
 pub(super) const MAX_COPY_BYTES: usize = 100_000;
@@ -829,17 +862,6 @@ pub(super) async fn copy(
     copy_to_terminal(&request, terminal)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn copy_locally(
-    _destinations: &[Destination],
-    _payload: &[u8],
-    _cancelled: &AtomicBool,
-    _cleanup: &mut Cleanup,
-) -> Result<&'static str, &'static str> {
-    Err("native clipboard copy is unavailable on this platform")
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn copy_locally(
     destinations: &[Destination],
     payload: &[u8],
@@ -852,15 +874,33 @@ fn copy_locally(
     for destination in destinations {
         let attempt = match destination {
             Destination::Native => native_writer(&var).and_then(|(mut command, label, serving)| {
-                write_process(&mut command, payload, cancelled, deadline, serving, cleanup)
-                    .map(|()| label)
+                write_process(
+                    &mut command,
+                    payload,
+                    ProcessDeadline {
+                        cancelled,
+                        at: deadline,
+                    },
+                    serving,
+                    cleanup,
+                )
+                .map(|()| label)
             }),
             Destination::Tmux => var("TMUX")
                 .ok_or("tmux unavailable")
                 .and_then(|value| tmux_writer(&value))
                 .and_then(|(mut command, socket)| {
                     socket.unchanged()?;
-                    write_process(&mut command, payload, cancelled, deadline, false, cleanup)?;
+                    write_process(
+                        &mut command,
+                        payload,
+                        ProcessDeadline {
+                            cancelled,
+                            at: deadline,
+                        },
+                        false,
+                        cleanup,
+                    )?;
                     socket.unchanged().map(|()| "tmux buffer")
                 }),
             Destination::Osc52 => continue,
@@ -907,13 +947,11 @@ fn native_writer(
     Ok((command, "clipboard (pbcopy)", false))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct TmuxSocket {
     path: std::path::PathBuf,
     identity: (u64, u64),
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl TmuxSocket {
     fn admit(value: &std::ffi::OsStr) -> Result<Self, &'static str> {
         use std::os::unix::{
@@ -966,7 +1004,6 @@ impl TmuxSocket {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn tmux_writer(
     value: &std::ffi::OsStr,
 ) -> Result<(std::process::Command, TmuxSocket), &'static str> {
@@ -980,19 +1017,17 @@ fn tmux_writer(
     Ok((command, socket))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn write_process(
     command: &mut std::process::Command,
     payload: &[u8],
-    cancelled: &AtomicBool,
-    deadline: Instant,
+    deadline: ProcessDeadline<'_>,
     serving: bool,
     cleanup: &mut Cleanup,
 ) -> Result<(), &'static str> {
     use std::io::{ErrorKind, Write};
     use std::process::Stdio;
 
-    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+    if deadline.passed() {
         return Err("clipboard copy cancelled or timed out");
     }
     // A serving descendant inherits no pipe, so its lifetime never holds the copy open.
@@ -1013,7 +1048,7 @@ fn write_process(
         set_nonblocking(stdin.as_ref().ok_or("clipboard pipe unavailable")?)?;
         let mut written = 0;
         loop {
-            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            if deadline.passed() {
                 return Err("clipboard copy cancelled or timed out");
             }
             if written == payload.len() {
@@ -1053,7 +1088,6 @@ pub(super) mod cleanup_tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
 
-    #[cfg(unix)]
     pub(in crate::terminal) fn released_terminal(
         linear: Option<crate::terminal::linear::LinearState>,
     ) -> super::super::AttachedTerminal {
@@ -1067,13 +1101,7 @@ pub(super) mod cleanup_tests {
             active_run: None,
             panels: Default::default(),
             pointer: Default::default(),
-            image_chip_areas: Vec::new(),
-            hovered_image: None,
-            pointer_position: None,
-            graphics_hover_changed: false,
-            graphics_placement: None,
-            hovered_image_digest: None,
-            sixel_preview: crate::terminal::graphics::SixelPreview::default(),
+            hover: crate::terminal::graphics::GraphicsHover::default(),
             linear,
             secret_echo: None,
             agent_panel: None,
@@ -1099,7 +1127,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn written_tool_rows_survive_release_and_reacquisition() {
         use crate::terminal::linear::LinearState;
@@ -1156,19 +1183,15 @@ pub(super) mod cleanup_tests {
             });
     }
 
-    #[cfg(unix)]
     struct WarningWriteGate {
         ready: mpsc::SyncSender<()>,
         release: mpsc::Receiver<()>,
     }
 
-    #[cfg(unix)]
     static WARNING_WRITE_GATE: Mutex<Option<WarningWriteGate>> = Mutex::new(None);
 
-    #[cfg(unix)]
     pub(super) struct WarningMessage(pub(super) &'static str);
 
-    #[cfg(unix)]
     impl std::fmt::Display for WarningMessage {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             formatter.write_str(self.0)?;
@@ -1181,7 +1204,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn clipboard_cleanup_warning_never_waits_for_a_lock_or_full_pipe() {
         use arany::test_support::process::capture;
@@ -1242,7 +1264,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     #[ignore = "blocked stderr fixture for the clipboard cleanup owner"]
     fn clipboard_warning_fixture() {
@@ -1369,7 +1390,6 @@ pub(super) mod cleanup_tests {
         drop(read);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn clipboard_process_cleanup_preserves_reap_evidence_and_reports_deadline_faults() {
         use rustix::process::{Pid, WaitId, WaitIdOptions, test_kill_process, waitid};
@@ -1427,8 +1447,10 @@ pub(super) mod cleanup_tests {
                     ]);
                 let result = run_process(
                     &mut command,
-                    cancelled,
-                    Instant::now() + Duration::from_secs(5),
+                    ProcessDeadline {
+                        cancelled,
+                        at: Instant::now() + Duration::from_secs(5),
+                    },
                     16 * 1024,
                     cleanup,
                 );
@@ -1555,7 +1577,6 @@ pub(super) mod cleanup_tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     #[ignore = "held subprocess fixture for the clipboard cleanup owner"]
     fn clipboard_child_fixture() {
@@ -1767,7 +1788,6 @@ mod copy_tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn tmux_copy_requires_an_absolute_private_socket_under_unreplaceable_ancestors() {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -1841,7 +1861,6 @@ mod copy_tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn copy_client_receives_the_whole_payload_and_a_serving_descendant_survives() {
         use rustix::process::{Pid, Signal, kill_process, test_kill_process};
@@ -1861,8 +1880,10 @@ mod copy_tests {
         let result = write_process(
             &mut command,
             &payload,
-            &AtomicBool::new(false),
-            deadline(),
+            ProcessDeadline {
+                cancelled: &AtomicBool::new(false),
+                at: deadline(),
+            },
             true,
             &mut cleanup,
         );
@@ -1891,10 +1912,12 @@ mod copy_tests {
             write_process(
                 &mut failing,
                 b"text",
-                &AtomicBool::new(false),
-                deadline(),
+                ProcessDeadline {
+                    cancelled: &AtomicBool::new(false),
+                    at: deadline()
+                },
                 true,
-                &mut cleanup,
+                &mut cleanup
             ),
             Err("clipboard copy unavailable")
         );
@@ -1935,8 +1958,10 @@ function run(args) {
                 .args(args);
             run_process(
                 &mut command,
-                &AtomicBool::new(false),
-                Instant::now() + Duration::from_secs(5),
+                ProcessDeadline {
+                    cancelled: &AtomicBool::new(false),
+                    at: Instant::now() + Duration::from_secs(5),
+                },
                 1024,
                 &mut Cleanup::default(),
             )
@@ -2037,8 +2062,10 @@ function run(args) {
             let mut command = native_command(Some(&board.0)).unwrap();
             let result = run_process(
                 &mut command,
-                &AtomicBool::new(false),
-                Instant::now() + Duration::from_secs(5),
+                ProcessDeadline {
+                    cancelled: &AtomicBool::new(false),
+                    at: Instant::now() + Duration::from_secs(5),
+                },
                 arany::MAX_IMAGE_BYTES + 2,
                 &mut Cleanup::default(),
             )

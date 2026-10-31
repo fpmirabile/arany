@@ -134,112 +134,9 @@ impl<'a> StreamDecoder<'a> {
                 limits::event(&value, &self.limits);
                 Ok(None)
             }
-            "response.created" => {
-                self.stage = Stage::CompletedResponse;
-                let created: CreatedEvent = serde_json::from_slice(&data)
-                    .map_err(|_| ProviderError::InvalidResponseContract)?;
-                if let Some(response) = created.response {
-                    if self.response_id.is_some()
-                        || !self.done_items.is_empty()
-                        || response.id.is_empty()
-                        || response.id.len() > 128
-                        || !response.id.bytes().all(|byte| byte.is_ascii_graphic())
-                    {
-                        return Err(ProviderError::InvalidResponseContract);
-                    }
-                    self.response_id = Some(response.id);
-                }
-                Ok(None)
-            }
-            "response.completed" => {
-                self.stage = Stage::CompletedResponse;
-                if value.get("response").is_none() {
-                    return Err(ProviderError::InvalidResponseContract);
-                }
-                self.output_tokens_details = value
-                    .pointer("/response/usage/output_tokens_details")
-                    .cloned();
-                if cfg!(debug_assertions)
-                    && let Some(output) =
-                        value.pointer("/response/output").and_then(Value::as_array)
-                {
-                    for item in output {
-                        if item.get("type").and_then(Value::as_str) != Some("message") {
-                            continue;
-                        }
-                        self.response_shape.messages += 1;
-                        match item.get("phase").and_then(Value::as_str) {
-                            Some("commentary") => self.response_shape.commentary += 1,
-                            Some("final_answer") => self.response_shape.finals += 1,
-                            None => self.response_shape.unphased += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                if !self.done_items.is_empty() {
-                    let id = self
-                        .response_id
-                        .as_deref()
-                        .ok_or(ProviderError::InvalidResponseContract)?;
-                    let completed = wire::reconcile_streamed_output(
-                        &data,
-                        id,
-                        std::mem::take(&mut self.done_items),
-                    )
-                    .map_err(|error| {
-                        self.stage = match error {
-                            wire::ResponseError::Identifier => Stage::ResponseIdentifier,
-                            wire::ResponseError::Message => Stage::ResponseMessage,
-                            _ => Stage::ResponseEnvelope,
-                        };
-                        error.provider_error()
-                    })?;
-                    self.stage = Stage::StreamLimit;
-                    if completed.len() > MAX_RESPONSE_BYTES {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    Ok(Some(completed))
-                } else {
-                    if self.response_id.as_deref().is_some_and(|id| {
-                        value.pointer("/response/id").and_then(Value::as_str) != Some(id)
-                    }) {
-                        self.stage = Stage::ResponseIdentifier;
-                        return Err(ProviderError::InvalidResponseContract);
-                    }
-                    Ok(Some(data))
-                }
-            }
-            "response.output_item.done" => {
-                if cfg!(debug_assertions)
-                    && value.pointer("/item/type").and_then(Value::as_str) == Some("message")
-                {
-                    self.response_shape.done_messages += 1;
-                    if value.pointer("/item/phase").and_then(Value::as_str) == Some("final_answer")
-                    {
-                        self.response_shape.done_finals += 1;
-                    }
-                }
-                self.stage = Stage::CompletedResponse;
-                let done: DoneEvent = serde_json::from_slice(&data)
-                    .map_err(|_| ProviderError::InvalidResponseContract)?;
-                if self.response_id.is_none()
-                    || done.output_index != self.done_items.len()
-                    || done.output_index >= MAX_EVENTS
-                    || done.item.completed_id().is_none()
-                    || self
-                        .done_items
-                        .iter()
-                        .any(|(item, _)| item.completed_id() == done.item.completed_id())
-                {
-                    return Err(ProviderError::InvalidResponseContract);
-                }
-                let raw = value
-                    .get("item")
-                    .cloned()
-                    .ok_or(ProviderError::InvalidResponseContract)?;
-                self.done_items.push((done.item, raw));
-                Ok(None)
-            }
+            "response.created" => self.created(&data),
+            "response.completed" => self.completed(&value, data),
+            "response.output_item.done" => self.item_done(&value, &data),
             "response.failed" | "error" => {
                 self.stage = Stage::RemoteFailure;
                 Err(remote_stream_error(&value, kind))
@@ -250,6 +147,114 @@ impl<'a> StreamDecoder<'a> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn created(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
+        self.stage = Stage::CompletedResponse;
+        let created: CreatedEvent =
+            serde_json::from_slice(data).map_err(|_| ProviderError::InvalidResponseContract)?;
+        if let Some(response) = created.response {
+            if self.response_id.is_some()
+                || !self.done_items.is_empty()
+                || !crate::provider::valid_wire_id(&response.id)
+            {
+                return Err(ProviderError::InvalidResponseContract);
+            }
+            self.response_id = Some(response.id);
+        }
+        Ok(None)
+    }
+
+    fn completed(
+        &mut self,
+        value: &Value,
+        data: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, ProviderError> {
+        self.stage = Stage::CompletedResponse;
+        if value.get("response").is_none() {
+            return Err(ProviderError::InvalidResponseContract);
+        }
+        self.output_tokens_details = value
+            .pointer("/response/usage/output_tokens_details")
+            .cloned();
+        if cfg!(debug_assertions)
+            && let Some(output) = value.pointer("/response/output").and_then(Value::as_array)
+        {
+            for item in output {
+                if item.get("type").and_then(Value::as_str) != Some("message") {
+                    continue;
+                }
+                self.response_shape.messages += 1;
+                match item.get("phase").and_then(Value::as_str) {
+                    Some("commentary") => self.response_shape.commentary += 1,
+                    Some("final_answer") => self.response_shape.finals += 1,
+                    None => self.response_shape.unphased += 1,
+                    _ => {}
+                }
+            }
+        }
+        if !self.done_items.is_empty() {
+            let id = self
+                .response_id
+                .as_deref()
+                .ok_or(ProviderError::InvalidResponseContract)?;
+            let completed =
+                wire::reconcile_streamed_output(&data, id, std::mem::take(&mut self.done_items))
+                    .map_err(|error| {
+                        self.stage = match error {
+                            wire::ResponseError::Identifier => Stage::ResponseIdentifier,
+                            wire::ResponseError::Message => Stage::ResponseMessage,
+                            _ => Stage::ResponseEnvelope,
+                        };
+                        error.provider_error()
+                    })?;
+            self.stage = Stage::StreamLimit;
+            if completed.len() > MAX_RESPONSE_BYTES {
+                return Err(ProviderError::InvalidStream);
+            }
+            Ok(Some(completed))
+        } else {
+            if self
+                .response_id
+                .as_deref()
+                .is_some_and(|id| value.pointer("/response/id").and_then(Value::as_str) != Some(id))
+            {
+                self.stage = Stage::ResponseIdentifier;
+                return Err(ProviderError::InvalidResponseContract);
+            }
+            Ok(Some(data))
+        }
+    }
+
+    fn item_done(&mut self, value: &Value, data: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
+        if cfg!(debug_assertions)
+            && value.pointer("/item/type").and_then(Value::as_str) == Some("message")
+        {
+            self.response_shape.done_messages += 1;
+            if value.pointer("/item/phase").and_then(Value::as_str) == Some("final_answer") {
+                self.response_shape.done_finals += 1;
+            }
+        }
+        self.stage = Stage::CompletedResponse;
+        let done: DoneEvent =
+            serde_json::from_slice(data).map_err(|_| ProviderError::InvalidResponseContract)?;
+        if self.response_id.is_none()
+            || done.output_index != self.done_items.len()
+            || done.output_index >= MAX_EVENTS
+            || done.item.completed_id().is_none()
+            || self
+                .done_items
+                .iter()
+                .any(|(item, _)| item.completed_id() == done.item.completed_id())
+        {
+            return Err(ProviderError::InvalidResponseContract);
+        }
+        let raw = value
+            .get("item")
+            .cloned()
+            .ok_or(ProviderError::InvalidResponseContract)?;
+        self.done_items.push((done.item, raw));
+        Ok(None)
     }
 
     pub(super) fn set_limits(&mut self, limits: RateLimitSlot) {

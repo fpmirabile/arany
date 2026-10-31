@@ -10,17 +10,6 @@ fn semantic_input(stream: &mut std::net::TcpStream) -> serde_json::Value {
     crate::semantic::input(&wire)
 }
 
-fn answer_check(stream: &mut std::net::TcpStream, index: usize) {
-    let outcome = match index {
-        0 => serde_json::json!("ok"),
-        1 => {
-            serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-        }
-        _ => serde_json::json!(r#"synthetic summary"#),
-    };
-    send_response(stream, index, outcome);
-}
-
 fn replay(state: &std::path::Path) -> (Vec<arany::EventEnvelope>, arany::SessionView) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -91,7 +80,7 @@ fn run_native(note_delivery: bool, classic: bool) {
     let (stop_sender, stop) = mpsc::channel();
     let peer = thread::spawn(move || {
         let count = if note_delivery { 6 } else { 4 };
-        for index in 0..count {
+        for index in 3..count {
             let mut stream = crate::process::accept_with_deadline(
                 &listener,
                 Duration::from_secs(15),
@@ -99,10 +88,6 @@ fn run_native(note_delivery: bool, classic: bool) {
             );
             stream.set_nonblocking(false).unwrap();
             let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_check(&mut stream, index);
-                continue;
-            }
             if note_delivery {
                 match index {
                     3 => {
@@ -144,7 +129,6 @@ fn run_native(note_delivery: bool, classic: bool) {
             );
         }
     });
-    check_profile(&workspace, &state);
 
     let geometry = nix::pty::Winsize {
         ws_row: 24,
@@ -174,7 +158,6 @@ fn run_native(note_delivery: bool, classic: bool) {
         command.arg("--classic");
     }
     command
-        .arg(if note_delivery { "steer" } else { "pause" })
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::piped())
         .stderr(Stdio::from(slave));
@@ -183,6 +166,8 @@ fn run_native(note_delivery: bool, classic: bool) {
     drop(command);
     let (mut child, mut input, master) = (ChildGuard::new(child), input_master, master);
     let mut declined = false;
+    let mut declined_after = None;
+    let mut submitted = false;
     let mut transcript = Vec::new();
     let mut offered = false;
     let mut controlled = false;
@@ -222,6 +207,25 @@ fn run_native(note_delivery: bool, classic: bool) {
                     &transcript,
                     &mut declined,
                 );
+                if declined && declined_after.is_none() {
+                    declined_after = Some(transcript.len());
+                }
+                // New conversations default to single; delegation needs an explicit opt-in.
+                if !submitted
+                    && declined_after.is_some_and(|offset| {
+                        ordered_cues_end(&transcript[offset..], &[b"Ask"]).is_some()
+                    })
+                {
+                    input.write_all(b"/agents auto\r").unwrap();
+                    input
+                        .write_all(if note_delivery {
+                            b"steer\r"
+                        } else {
+                            b"pause\r"
+                        })
+                        .unwrap();
+                    submitted = true;
+                }
                 if !provider_ready {
                     provider_ready = ready.try_recv().is_ok();
                 }
@@ -297,12 +301,12 @@ fn run_native(note_delivery: bool, classic: bool) {
                     && !goal_paused
                     && let Some(offset) = ordered_cues_end(
                         &transcript[pause_reply_after..],
+                        // A plain message's Goal pauses as an interruption.
                         &[
-                            b"Goal",
-                            b"paused;",
-                            b"use",
-                            b"/goal",
-                            b"resume",
+                            b"Interrupted.",
+                            b"Send",
+                            b"a",
+                            b"message",
                             b"to",
                             b"continue.",
                         ],

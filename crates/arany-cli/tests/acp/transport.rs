@@ -215,11 +215,13 @@ async fn frame_recovery_uses_real_codec_and_stdio_without_private_state() {
     config.authenticated = Some(false);
     let reader_task = tokio::spawn(read_messages(
         input,
-        config,
-        Arc::default(),
-        serve_tx,
-        outbound,
-        shutdown,
+        AcpReader {
+            config,
+            shared: Arc::default(),
+            inbound: serve_tx,
+            outbound,
+            shutdown,
+        },
     ));
     let writer_task = tokio::spawn(serve::write_messages(output, writer_rx));
     let producer = tokio::spawn(async move {

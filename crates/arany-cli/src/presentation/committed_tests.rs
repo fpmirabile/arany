@@ -212,6 +212,10 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                             "Provider output did not match Arany's structured outcome contract.",
                         ),
                         (
+                            arany::ProviderFailureReason::OutcomeDecode,
+                            "Provider reply could not be decoded as one complete answer",
+                        ),
+                        (
                             arany::ProviderFailureReason::LocalOutputLimit,
                             "Provider reported output above Arany's local token limit.",
                         ),
@@ -228,7 +232,6 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], envelope.event.version());
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }
@@ -352,7 +355,11 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
         )
         .unwrap();
         let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let plan = GoalPlanContract {
             mission: if plan_calls.is_some() {
@@ -438,6 +445,7 @@ async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
                 cwd: ".".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "Later action stopped",
         );
@@ -468,6 +476,42 @@ async fn later_single_call_feedback_ignores_an_earlier_reserved_denial() {
 }
 
 #[tokio::test]
+async fn limited_tool_feedback_names_the_limit() {
+    let (root, workspace, engine) = fixture();
+    let provider = Arc::new(ScriptedProvider::new(vec![finish("seed")]));
+    let outcome = run_to_end(&engine, &provider, request(&workspace, "Seed presentation"))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let (view, _) = committed(root.path(), outcome.session_id).await;
+    let mut run = view.runs[0].clone();
+    run.status = RunStatus::Failed;
+    run.failure = Some(arany::RunFailure::ToolStopped);
+    run.assistant_message = None;
+    let mut tool = tool_fixture(
+        arany::ToolCall::Command {
+            program: "sh".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+            resource_class: None,
+            timeout_ms: None,
+            additional_reads: None,
+        },
+        "Guard resource limit reached",
+    );
+    let observation = tool.observation.as_mut().unwrap();
+    observation.disposition = arany::ToolDisposition::Limit;
+    observation.limit_cause = Some(arany::LimitCause::Resource);
+    run.tools = vec![tool];
+    let feedback = run_feedback(&run).unwrap();
+    assert!(
+        feedback.starts_with("Error: Tool stopped: resource limit reached."),
+        "{feedback}"
+    );
+    assert!(!feedback.contains("continuation budget"), "{feedback}");
+}
+
+#[tokio::test]
 async fn preflight_refusal_feedback_and_exports_use_the_reopened_receipt() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
@@ -481,7 +525,11 @@ async fn preflight_refusal_feedback_and_exports_use_the_reopened_receipt() {
         },
     )
     .unwrap();
-    std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(
+        state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .unwrap();
     std::fs::set_permissions(
         state.join("tools.json"),
         std::fs::Permissions::from_mode(0o600),

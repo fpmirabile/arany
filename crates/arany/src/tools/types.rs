@@ -40,11 +40,13 @@ pub(crate) const COMMAND_PATH_METADATA_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const DEFAULT_COMMAND_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
 pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const GUARD_DISK_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// Free space below this evicts least-recently-used build caches before the reserve is reached.
+pub(crate) const GUARD_DISK_EVICTION_BYTES: u64 = 2 * GUARD_DISK_RESERVE_BYTES;
 pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
 pub const MAX_BUILD_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_BUILD_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
-pub const MAX_BUILD_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_BUILD_PROCESSES_OR_THREADS: u32 = 256;
 pub const MAX_COMMAND_TIMEOUT_MS: u32 = 600_000;
 pub(super) const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
@@ -161,6 +163,9 @@ pub struct CommandResult {
     pub selection: Option<CommandSelectionSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_refusals: Vec<NetworkRefusal>,
+    // Approved read folders withheld from this command because their first level outgrew its bound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_grants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -229,26 +234,6 @@ pub enum CacheUpdate {
 }
 
 impl CommandResult {
-    pub(crate) fn fit_migrated(&self, budget: usize) -> Option<String> {
-        if !self.changeset.valid()
-            || !self.selection.is_none_or(CommandSelectionSummary::valid)
-            || !self.network_valid()
-        {
-            return None;
-        }
-        let stdout = super::output::Window::from_recorded(&self.stdout, self.stdout_total)?;
-        let stderr = super::output::Window::from_recorded(&self.stderr, self.stderr_total)?;
-        super::output::fit_streams(&stdout, &stderr, budget, |stdout, stderr| {
-            serde_json::to_string(&Self {
-                stdout: stdout.into(),
-                stderr: stderr.into(),
-                ..self.clone()
-            })
-            .map_err(|_| super::ToolError::Operation)
-        })
-        .ok()
-    }
-
     fn network_valid(&self) -> bool {
         self.network_refusals.len() <= super::network::NETWORK_REFUSAL_ENTRIES
             && self.network_refusals.iter().all(NetworkRefusal::valid)
@@ -258,6 +243,7 @@ impl CommandResult {
         self.changeset.valid()
             && self.selection.is_none_or(CommandSelectionSummary::valid)
             && self.network_valid()
+            && self.hidden_grants.len() <= super::toolchains::MAX_RUNTIME_GRANTS
             && self.stdout_total.valid_for(&self.stdout)
             && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
@@ -336,24 +322,28 @@ pub enum ToolCall {
     },
     Edit {
         path: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
         old: String,
         new: String,
     },
     #[serde(rename = "multiedit")]
     MultiEdit {
         file_path: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
         edits: Vec<LiteralEdit>,
     },
     Delete {
         path: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
     },
     Move {
         source: String,
         destination: String,
-        expected_digest: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
     },
     Command {
         program: String,
@@ -363,6 +353,8 @@ pub enum ToolCall {
         resource_class: Option<ToolResourceClass>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        additional_reads: Option<Box<ReadRequest>>,
     },
     CommandUnguarded {
         program: String,
@@ -459,7 +451,7 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
-    // Null or omitted path and limit normalize to their defaults before intent hashing.
+    // Null or omitted path, offset and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
         #[serde(
@@ -467,6 +459,12 @@ pub enum ToolCall {
             deserialize_with = "super::glob::path_or_default"
         )]
         path: String,
+        #[serde(
+            default,
+            skip_serializing_if = "is_zero",
+            deserialize_with = "or_default"
+        )]
+        offset: u32,
         #[serde(
             default = "super::glob::default_limit",
             deserialize_with = "super::glob::limit_or_default"
@@ -609,11 +607,31 @@ impl ToolCall {
         self.facts().researcher
     }
 
+    // Paths a command-receipt or editor integration publishes; empty for every other call.
+    pub(crate) fn changeset_paths(&self) -> Vec<&str> {
+        match self {
+            Self::ApplyChangeset {
+                source: ChangesetSource::CommandReceipt { changeset, .. },
+            } => changeset
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect(),
+            Self::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            } => files.iter().map(|file| file.path.as_str()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn argument_limit(&self) -> usize {
         match self {
-            Self::Write { .. } | Self::Edit { .. } | Self::MultiEdit { .. } => {
-                MAX_TOOL_ARGUMENT_BYTES
-            }
+            Self::Write { .. }
+            | Self::Edit { .. }
+            | Self::MultiEdit { .. }
+            | Self::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { .. },
+            } => MAX_TOOL_ARGUMENT_BYTES,
             Self::ApplyChangeset {
                 source: ChangesetSource::CommandReceipt { .. },
             } => MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES,
@@ -653,6 +671,63 @@ impl ToolCall {
             | Self::GhPrView { .. }
             | Self::WebFetch { .. }
             | Self::WebSearch { .. } => None,
+        }
+    }
+
+    // The file whose SHA-256 guards this typed mutation, with its digest slot.
+    pub(crate) fn precondition_mut(&mut self) -> Option<(&str, &mut Option<String>)> {
+        match self {
+            Self::Write {
+                path,
+                expected_digest,
+                ..
+            }
+            | Self::Edit {
+                path,
+                expected_digest,
+                ..
+            }
+            | Self::MultiEdit {
+                file_path: path,
+                expected_digest,
+                ..
+            }
+            | Self::Delete {
+                path,
+                expected_digest,
+            }
+            | Self::Move {
+                source: path,
+                expected_digest,
+                ..
+            } => Some((path, expected_digest)),
+            _ => None,
+        }
+    }
+
+    // An omitted digest that only the Engine may fill; Write without one creates a missing file instead.
+    pub(crate) fn pending_precondition(&self) -> Option<&str> {
+        match self {
+            Self::Edit {
+                path,
+                expected_digest: None,
+                ..
+            }
+            | Self::MultiEdit {
+                file_path: path,
+                expected_digest: None,
+                ..
+            }
+            | Self::Delete {
+                path,
+                expected_digest: None,
+            }
+            | Self::Move {
+                source: path,
+                expected_digest: None,
+                ..
+            } => Some(path),
+            _ => None,
         }
     }
 
@@ -720,6 +795,50 @@ pub struct ToolPolicyReceipt {
     pub child_unguarded: UnguardedGrant,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub child_web: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub git: Option<GitRunPin>,
+    pub guard: GuardPin,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardPin {
+    pub mode: super::GuardMode,
+    pub sandbox: bool,
+    pub saved_reads: Vec<ReadPin>,
+}
+
+impl GuardPin {
+    // Without a sandbox, `auto` and `off` run commands on the host under approval.
+    pub fn host_fallback(&self) -> bool {
+        !self.sandbox && self.mode != super::GuardMode::Required
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPin {
+    pub path: String,
+    pub device: u64,
+    pub inode: u64,
+}
+
+impl ReadPin {
+    fn valid(&self) -> bool {
+        super::config::valid_absolute(&self.path) && self.inode != 0
+    }
+}
+
+// The Git a Run resolved from PATH, and the digest of its accepted hooks (null: hooks off).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRunPin {
+    pub executable: String,
+    pub sha256: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub hooks: Option<[u8; 32]>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub repository: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -761,12 +880,24 @@ impl ToolPolicyReceipt {
             && self.config_digest != [0; 32]
             && self.permissions_digest != Some([0; 32])
             && self.unguarded_rules_digest != Some([0; 32])
-            && self.child_unguarded == UnguardedGrant::Denied
+            && (self.child_unguarded == UnguardedGrant::Denied || self.guard.host_fallback())
+            && (self.guard.sandbox || self.guard.saved_reads.is_empty())
+            && self.guard.saved_reads.len() <= super::guard_settings::MAX_SAVED_READ_GRANTS
+            && self.guard.saved_reads.iter().all(ReadPin::valid)
             && self
                 .host_epoch
                 .is_none_or(|epoch| epoch.get_version() == Some(uuid::Version::SortRand))
             && (MIN_TOOL_CONTEXT_BYTES as u32..=crate::session::MAX_WINDOW_CONTENT_BYTES as u32)
                 .contains(&self.max_context_bytes)
+            && self.git.as_ref().is_none_or(|git| {
+                super::config::valid_absolute(&git.executable)
+                    && valid_digest(&git.sha256)
+                    && git.hooks != Some([0; 32])
+                    && git
+                        .repository
+                        .as_deref()
+                        .is_none_or(super::git::host::valid_push_url)
+            })
     }
 }
 
@@ -826,9 +957,18 @@ pub struct EffectIntent {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReadRequest {
+    pub paths: Vec<String>,
+    pub justification: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostIntent {
     pub source_oid: String,
     pub refspec: String,
+    // A push's effective URL after the user's `insteadOf`/`pushInsteadOf`; empty for other host calls.
+    pub destination: String,
 }
 
 impl EffectIntent {
@@ -880,6 +1020,7 @@ impl EffectIntent {
             && self.workspace_inode > 0
             && self.use_count == 1
             && self.call.valid()
+            && self.call.pending_precondition().is_none()
             && (self.limits.network == NetworkGrant::Host) == self.call.is_host()
             && (self.limits.network != NetworkGrant::Proxy
                 || matches!(
@@ -919,7 +1060,7 @@ pub struct ToolLimits {
     pub build_cpu_cores: u32,
     pub scratch_bytes: u64,
     pub project_bytes: u64,
-    pub cache_requested_bytes: u64,
+    pub cache_requested_bytes: BuildCacheSize,
     pub cache_bytes: u64,
     pub cache_candidate_bytes: u64,
     pub network: NetworkGrant,
@@ -949,7 +1090,70 @@ pub struct ToolResourceSettings {
     #[serde(default = "one_setting", skip_serializing_if = "is_one_setting")]
     pub build_cpu_cores: Option<u32>,
     pub build_project_bytes: u64,
-    pub build_cache_bytes: u64,
+    pub build_cache_bytes: BuildCacheSize,
+    pub editor_change_files: u32,
+    pub editor_change_bytes: u64,
+}
+
+// Stored as a whole-MiB byte count (zero disables the cache) or the string "unlimited".
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(from = "BuildCacheSizeRecord", into = "BuildCacheSizeRecord")]
+pub enum BuildCacheSize {
+    Bytes(u64),
+    Unlimited,
+}
+
+impl BuildCacheSize {
+    pub const DISABLED: Self = Self::Bytes(0);
+
+    pub fn enabled(self) -> bool {
+        self != Self::DISABLED
+    }
+
+    fn valid(self) -> bool {
+        match self {
+            Self::Bytes(bytes) => bytes.is_multiple_of(BYTES_PER_MEBIBYTE),
+            Self::Unlimited => true,
+        }
+    }
+
+    pub(crate) fn admits(self, bytes: u64) -> bool {
+        match self {
+            Self::Bytes(limit) => bytes <= limit,
+            Self::Unlimited => true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum BuildCacheSizeRecord {
+    Bytes(u64),
+    Keyword(BuildCacheKeyword),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BuildCacheKeyword {
+    Unlimited,
+}
+
+impl From<BuildCacheSizeRecord> for BuildCacheSize {
+    fn from(record: BuildCacheSizeRecord) -> Self {
+        match record {
+            BuildCacheSizeRecord::Bytes(bytes) => Self::Bytes(bytes),
+            BuildCacheSizeRecord::Keyword(BuildCacheKeyword::Unlimited) => Self::Unlimited,
+        }
+    }
+}
+
+impl From<BuildCacheSize> for BuildCacheSizeRecord {
+    fn from(size: BuildCacheSize) -> Self {
+        match size {
+            BuildCacheSize::Bytes(bytes) => Self::Bytes(bytes),
+            BuildCacheSize::Unlimited => Self::Keyword(BuildCacheKeyword::Unlimited),
+        }
+    }
 }
 
 impl Default for ToolResourceSettings {
@@ -962,7 +1166,9 @@ impl Default for ToolResourceSettings {
             build_jobs: one_setting(),
             build_cpu_cores: one_setting(),
             build_project_bytes: MAX_BUILD_PROJECT_BYTES,
-            build_cache_bytes: MAX_BUILD_CACHE_BYTES,
+            build_cache_bytes: BuildCacheSize::Unlimited,
+            editor_change_files: crate::session::worker::DEFAULT_EDITOR_CHANGE_FILES,
+            editor_change_bytes: crate::session::worker::DEFAULT_EDITOR_CHANGE_BYTES,
         }
     }
 }
@@ -979,9 +1185,12 @@ impl ToolResourceSettings {
             && self.build_cpu_cores != Some(0)
             && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
             && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
-            && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
-            && (self.build_cache_bytes == 0
-                || self.build_cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
+            && self.build_cache_bytes.valid()
+            && (1..=crate::session::worker::MAX_EDITOR_CHANGE_FILES)
+                .contains(&self.editor_change_files)
+            && (BYTES_PER_MEBIBYTE..=crate::session::worker::MAX_EDITOR_CHANGE_BYTES)
+                .contains(&self.editor_change_bytes)
+            && self.editor_change_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
     }
 }
 
@@ -1024,9 +1233,9 @@ impl Default for ToolLimits {
             build_cpu_cores: one_job(),
             scratch_bytes: SCRATCH_BYTES,
             project_bytes: SCRATCH_BYTES,
-            cache_requested_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
-            cache_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
-            cache_candidate_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
+            cache_requested_bytes: BuildCacheSize::Unlimited,
+            cache_bytes: crate::store::BUILD_CACHE_DEFAULT_VIEW_BYTES,
+            cache_candidate_bytes: crate::store::BUILD_CACHE_DEFAULT_VIEW_BYTES,
             network: NetworkGrant::None,
             resource_class: ToolResourceClass::Default,
             resource_profile: if cfg!(target_os = "macos") {
@@ -1056,6 +1265,16 @@ impl ToolLimits {
             && (self.resource_class == ToolResourceClass::Build
                 || self.build_jobs == one_job() && self.build_cpu_cores == one_job())
             && self.scratch_bytes == SCRATCH_BYTES
+            && self.cache_requested_bytes.valid()
+            && self
+                .cache_requested_bytes
+                .admits(self.cache_candidate_bytes)
+            && (self.cache_requested_bytes.enabled() || self.cache_bytes == 0)
+            && self.cache_candidate_bytes <= self.cache_bytes
+            && self.cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
+            && self
+                .cache_candidate_bytes
+                .is_multiple_of(BYTES_PER_MEBIBYTE)
             && match self.resource_class {
                 ToolResourceClass::Default => {
                     self.memory_bytes == MEMORY_BYTES
@@ -1064,13 +1283,6 @@ impl ToolLimits {
                             self.project_bytes,
                             SCRATCH_BYTES | DEFAULT_COMMAND_PROJECT_BYTES
                         )
-                        && self.cache_requested_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
-                        && self.cache_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
-                        && self.cache_bytes <= self.cache_requested_bytes
-                        && self.cache_candidate_bytes <= self.cache_bytes
-                        && self
-                            .cache_candidate_bytes
-                            .is_multiple_of(BYTES_PER_MEBIBYTE)
                         && (self.cache_transfer_ms == 0
                             || self.cache_transfer_ms == self.runtime_ms)
                         && (self.cache_bytes != 0 || self.cache_transfer_ms == 0)
@@ -1081,19 +1293,6 @@ impl ToolLimits {
                         && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES)
                             .contains(&self.project_bytes)
                         && self.project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
-                        && self.cache_requested_bytes <= MAX_BUILD_CACHE_BYTES
-                        && (self.cache_requested_bytes == 0
-                            || self
-                                .cache_requested_bytes
-                                .is_multiple_of(BYTES_PER_MEBIBYTE))
-                        && self.cache_bytes <= MAX_BUILD_CACHE_BYTES
-                        && self.cache_bytes <= self.cache_requested_bytes
-                        && self.cache_candidate_bytes <= self.cache_bytes
-                        && (self.cache_bytes == 0
-                            || self.cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
-                        && self
-                            .cache_candidate_bytes
-                            .is_multiple_of(BYTES_PER_MEBIBYTE)
                         && self.cache_transfer_ms
                             == if self.cache_bytes == 0 {
                                 0
@@ -1170,6 +1369,54 @@ impl UnguardedReceipt {
     }
 }
 
+// HEAD (a ref name or `detached`), its commit and the operation's target ref, read through Git.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHead {
+    pub head: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub oid: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub target: Option<GitRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRef {
+    pub name: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub oid: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRefs {
+    pub before: GitHead,
+    pub after: GitHead,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitReceipt {
+    pub contract_version: u32,
+    pub intent_digest: [u8; 32],
+    pub executable_sha256: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub exit_code: Option<i32>,
+    // Boxed to keep every observation small; most Git receipts are reads without refs.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub refs: Option<Box<GitRefs>>,
+}
+
+impl GitReceipt {
+    pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
+        self.contract_version == 1
+            && self.intent_digest == intent.digest()
+            && valid_digest(&self.executable_sha256)
+            && self.refs.is_some() == intent.call.mutates()
+    }
+}
+
 /// Who executed an operation: the Engine in process, the Guard with its receipt, or an approved host run.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1184,6 +1431,7 @@ pub enum Attestation {
     Guard(GuardReceipt),
     Unguarded(UnguardedReceipt),
     Host(UnguardedReceipt),
+    Git(GitReceipt),
 }
 
 impl Attestation {
@@ -1195,10 +1443,9 @@ impl Attestation {
                 workspace_device,
                 workspace_inode,
             } => {
-                intent.target == EffectTarget::Workspace
-                    && intent.call.facts().site == Site::InProcess
+                (intent.call.facts().site == Site::InProcess
+                    || matches!(intent.call, ToolCall::ParseAgentDefinition { .. }))
                     && (!intent.call.facts().mutates || super::fs::in_process_mutation(intent))
-                    && !matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
                     && receipt.as_ref().is_none_or(|receipt| {
                         intent.call.facts().mutates && receipt.intent_digest == intent.digest()
                     })
@@ -1207,12 +1454,10 @@ impl Attestation {
                     && *workspace_inode == intent.workspace_inode
             }
             Self::Guard(receipt) => {
-                intent.target == EffectTarget::Workspace
-                    && (intent.call.facts().site == Site::Guard
-                        || super::discovery::possible(&intent.call)
-                        || intent.call.facts().family == super::catalog::Family::File
-                            && intent.call.facts().mutates
-                            && !super::fs::in_process_mutation(intent))
+                (intent.call.facts().site == Site::Guard
+                    || intent.call.facts().family == super::catalog::Family::File
+                        && intent.call.facts().mutates
+                        && !super::fs::in_process_mutation(intent))
                     && receipt.valid_for(intent)
             }
             Self::Host(receipt) => {
@@ -1221,9 +1466,13 @@ impl Attestation {
                     && intent.host.is_some()
                     && receipt.valid_for(intent)
             }
-            Self::Unguarded(receipt) => {
+            Self::Git(receipt) => {
                 intent.target == EffectTarget::Workspace
-                    && intent.call.facts().site == Site::Unguarded
+                    && intent.call.facts().site == Site::Git
+                    && receipt.valid_for(intent)
+            }
+            Self::Unguarded(receipt) => {
+                intent.call.facts().site == Site::Unguarded
                     && intent
                         .host_command
                         .as_ref()
@@ -1265,6 +1514,23 @@ impl Attestation {
                 exit_code: Some(0),
                 descendants_confirmed_stopped: true,
             }),
+            Site::Git => Self::Git(GitReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: "0".repeat(64),
+                exit_code: Some(0),
+                refs: intent.call.mutates().then(|| {
+                    let head = GitHead {
+                        head: "refs/heads/main".into(),
+                        oid: None,
+                        target: None,
+                    };
+                    Box::new(GitRefs {
+                        before: head.clone(),
+                        after: head,
+                    })
+                }),
+            }),
             Site::Unguarded => Self::Unguarded(UnguardedReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -1282,7 +1548,7 @@ impl Attestation {
     pub fn guard(&self) -> Option<&GuardReceipt> {
         match self {
             Self::Guard(receipt) => Some(receipt),
-            Self::InProcess { .. } | Self::Unguarded(_) | Self::Host(_) => None,
+            Self::InProcess { .. } | Self::Unguarded(_) | Self::Host(_) | Self::Git(_) => None,
         }
     }
 }
@@ -1525,8 +1791,7 @@ impl ToolObservation {
     }
 
     pub(super) fn cache_publication_eligible(&self) -> bool {
-        self.intent.target == EffectTarget::Workspace
-            && self.intent.call.is_process()
+        self.intent.call.is_process()
             && self.attestation.is_some()
             && (self.disposition == ToolDisposition::Succeeded
                 || self.disposition == ToolDisposition::Limit
@@ -1560,6 +1825,21 @@ impl ToolObservation {
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
         self.intent == *intent && self.valid() && self.attestation.is_some()
     }
+    // Only `unstarted_observation` pins a Guard stage, so a failed or limited Guard-site result carrying one dispatched nothing.
+    pub(crate) fn guard_failed_before_dispatch(&self) -> bool {
+        matches!(
+            self.disposition,
+            ToolDisposition::Failed | ToolDisposition::Limit
+        ) && self.attestation.is_none()
+            && self.guard_stage.is_some()
+            && self.cache_update != CacheUpdate::Uncertain
+    }
+
+    // A Tool result returns a proven pre-dispatch Guard failure to the model like a denial; hook outcomes keep `stops_run`.
+    pub(crate) fn stops_tool_step(&self) -> bool {
+        self.stops_run() && !self.guard_failed_before_dispatch()
+    }
+
     pub(crate) fn stops_run(&self) -> bool {
         matches!(
             self.disposition,
@@ -1567,7 +1847,6 @@ impl ToolObservation {
         ) || (self.disposition == ToolDisposition::Limit
             && self.limit_cause == Some(LimitCause::Resource)
             && self.attestation.is_none()
-            && self.intent.target == EffectTarget::Workspace
             && matches!(&self.intent.call, ToolCall::Command { .. }))
             || (self.disposition == ToolDisposition::Failed
                 && self.attestation.is_none()
@@ -1616,70 +1895,12 @@ impl ToolObservation {
                 || self.disposition != ToolDisposition::Succeeded
                 || matches!(&self.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. })
                     if super::fs::file_receipt(&self.intent, &self.output).is_ok_and(|expected| expected == *receipt)))
-            && match self.enforcement_cause {
-                None => true,
-                Some(EnforcementCause::FilesystemDenied) => {
-                    self.disposition == ToolDisposition::Denied && self.attestation.is_some()
-                }
-                Some(EnforcementCause::GuardBootstrap) => {
-                    self.disposition == ToolDisposition::Failed
-                        && self.attestation.is_none()
-                        && !super::fs::in_process_mutation(&self.intent)
-                        && (self.intent.call.facts().site == super::catalog::Site::Guard
-                            || super::discovery::possible(&self.intent.call)
-                            || self.intent.call.facts().family == super::catalog::Family::File
-                                && self.intent.call.facts().mutates)
-                }
-            }
-            && (!self.intent.call.is_host()
-                || self.cache_update == CacheUpdate::NotApplicable
-                    && self.enforcement_cause.is_none()
-                    && match &self.attestation {
-                        Some(Attestation::Host(receipt)) => {
-                            receipt.pid > 0
-                                && (self.disposition == ToolDisposition::Uncertain
-                                    || self.disposition == ToolDisposition::Failed
-                                        && self.intent.call.is_host_pr_read()
-                                        && receipt.descendants_confirmed_stopped
-                                        && valid_host_pr_read_failure(self, receipt)
-                                    || self.disposition == ToolDisposition::Failed
-                                        && matches!(self.intent.call, ToolCall::GitPush { .. })
-                                        && receipt.exit_code == Some(1)
-                                        && receipt.descendants_confirmed_stopped
-                                        && self.output == super::git::host::NON_FAST_FORWARD
-                                    || self.disposition == ToolDisposition::Succeeded
-                                        && receipt.exit_code == Some(0)
-                                        && receipt.descendants_confirmed_stopped
-                                        && match self.intent.call {
-                                            ToolCall::GhPrList { limit, .. } => {
-                                                super::git::host::valid_pr_list_output(
-                                                    &self.output,
-                                                    limit,
-                                                )
-                                            }
-                                            ToolCall::GhPrView {
-                                                ref repository,
-                                                number,
-                                            } => super::git::host::valid_pr_view_output(
-                                                &self.output,
-                                                super::git::host::PrViewIdentity {
-                                                    repository: repository.clone(),
-                                                    number,
-                                                },
-                                            ),
-                                            _ => true,
-                                        })
-                        }
-                        None => {
-                            self.disposition != ToolDisposition::Succeeded
-                                && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
-                                    && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
-                        }
-                        _ => false,
-                    })
+            && self.valid_enforcement()
+            && self.valid_host()
             && (!self.intent.call.is_unguarded()
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
+            && self.valid_git()
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
@@ -1687,6 +1908,88 @@ impl ToolObservation {
                     self.cache_publication_eligible()
                 }
             }
+    }
+
+    fn valid_enforcement(&self) -> bool {
+        match self.enforcement_cause {
+            None => true,
+            Some(EnforcementCause::FilesystemDenied) => {
+                self.disposition == ToolDisposition::Denied && self.attestation.is_some()
+            }
+            Some(EnforcementCause::GuardBootstrap) => {
+                self.disposition == ToolDisposition::Failed
+                    && self.attestation.is_none()
+                    && !super::fs::in_process_mutation(&self.intent)
+                    && (self.intent.call.facts().site == super::catalog::Site::Guard
+                        || self.intent.call.facts().family == super::catalog::Family::File
+                            && self.intent.call.facts().mutates)
+            }
+        }
+    }
+
+    fn valid_host(&self) -> bool {
+        !self.intent.call.is_host()
+            || self.cache_update == CacheUpdate::NotApplicable
+                && self.enforcement_cause.is_none()
+                && match &self.attestation {
+                    Some(Attestation::Host(receipt)) => {
+                        receipt.pid > 0
+                            && (self.disposition == ToolDisposition::Uncertain
+                                || self.disposition == ToolDisposition::Failed
+                                    && self.intent.call.is_host_pr_read()
+                                    && receipt.descendants_confirmed_stopped
+                                    && valid_host_pr_read_failure(self, receipt)
+                                || self.disposition == ToolDisposition::Failed
+                                    && matches!(self.intent.call, ToolCall::GitPush { .. })
+                                    && receipt.exit_code == Some(1)
+                                    && receipt.descendants_confirmed_stopped
+                                    && self.output == super::git::host::NON_FAST_FORWARD
+                                || self.disposition == ToolDisposition::Succeeded
+                                    && receipt.exit_code == Some(0)
+                                    && receipt.descendants_confirmed_stopped
+                                    && match self.intent.call {
+                                        ToolCall::GhPrList { limit, .. } => {
+                                            super::git::host::valid_pr_list_output(
+                                                &self.output,
+                                                limit,
+                                            )
+                                        }
+                                        ToolCall::GhPrView {
+                                            ref repository,
+                                            number,
+                                        } => super::git::host::valid_pr_view_output(
+                                            &self.output,
+                                            super::git::host::PrViewIdentity {
+                                                repository: repository.clone(),
+                                                number,
+                                            },
+                                        ),
+                                        _ => true,
+                                    })
+                    }
+                    None => {
+                        self.disposition != ToolDisposition::Succeeded
+                            && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
+                                && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                    }
+                    _ => false,
+                }
+    }
+
+    fn valid_git(&self) -> bool {
+        self.intent.call.facts().site != Site::Git
+            || self.cache_update == CacheUpdate::NotApplicable
+                && self.enforcement_cause.is_none()
+                && match &self.attestation {
+                    Some(Attestation::Git(receipt)) => {
+                        self.disposition != ToolDisposition::Uncertain
+                            && (self.disposition != ToolDisposition::Succeeded
+                                || !self.intent.call.mutates()
+                                || receipt.exit_code == Some(0))
+                    }
+                    None => self.disposition != ToolDisposition::Succeeded,
+                    _ => false,
+                }
     }
 }
 
@@ -1765,6 +2068,9 @@ impl ToolStep {
 pub(crate) const UNDISPATCHED_STEP_OUTPUT: &str =
     "not_dispatched: step stopped before this call; no operation was dispatched";
 pub(crate) const MAX_TOOL_REFUSAL_BYTES: usize = 2048;
+pub(crate) const CARGO_PARALLELISM_ERROR: &str =
+    "failed to determine the amount of parallelism available";
+pub(crate) const COMMAND_CARGO_JOBS_HINT: &str = "Cargo cannot read the CPU count in the Guard; set CARGO_BUILD_JOBS or retry with resource_class build.";
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
 fn skill_context_bytes(skill: &ToolObservation) -> usize {
@@ -1795,9 +2101,25 @@ impl ToolContext {
             && super::catalog::has_git_reads(&super::catalog::catalog_call_schemas(catalog));
     }
 
-    fn command_git_hint(&self, call: &ToolCall) -> Option<String> {
-        (self.git_reads && matches!(call, ToolCall::Command { .. }))
+    fn command_hint(&self, stderr: &str) -> Option<String> {
+        if self.git_reads && stderr.contains("not a git repository") {
+            Some(super::catalog::COMMAND_GIT_HINT.concat())
+        } else {
+            stderr
+                .contains(CARGO_PARALLELISM_ERROR)
+                .then(|| COMMAND_CARGO_JOBS_HINT.to_owned())
+        }
+    }
+
+    fn reserved_command_hint(&self) -> String {
+        let cargo = COMMAND_CARGO_JOBS_HINT.to_owned();
+        match self
+            .git_reads
             .then(|| super::catalog::COMMAND_GIT_HINT.concat())
+        {
+            Some(git) if json!(git).to_string().len() > json!(cargo).to_string().len() => git,
+            _ => cargo,
+        }
     }
 
     pub(crate) fn model_result(&self, step: &ToolStep, index: usize) -> Value {
@@ -1806,13 +2128,13 @@ impl ToolContext {
             cleared_model_result(observation)
         } else {
             let mut value = model_result(observation, step.feedback(index));
-            if let Some(hint) = self.command_git_hint(&observation.intent.call)
+            if matches!(observation.intent.call, ToolCall::Command { .. })
                 && value["output"]["exit_code"]
                     .as_i64()
                     .is_some_and(|code| code != 0)
-                && value["output"]["stderr"]
+                && let Some(hint) = value["output"]["stderr"]
                     .as_str()
-                    .is_some_and(|stderr| stderr.contains("not a git repository"))
+                    .and_then(|stderr| self.command_hint(stderr))
             {
                 value["hint"] = json!(hint);
                 if value.to_string().len() > MAX_TOOL_RESULT_BYTES {
@@ -1934,8 +2256,8 @@ impl ToolContext {
                         effect,
                         CacheUpdate::NotApplicable,
                     );
-                    if let Some(hint) = self.command_git_hint(call) {
-                        value["hint"] = json!(hint);
+                    if matches!(call, ToolCall::Command { .. }) {
+                        value["hint"] = json!(self.reserved_command_hint());
                     }
                     value.to_string().len() + RESULT_ENVELOPE_BYTES
                 })
@@ -1990,9 +2312,11 @@ pub(crate) fn cleared_model_result(observation: &ToolObservation) -> Value {
         "operation": "Result cleared to save context; call the Tool again for current content",
         "call": model_call(&observation.intent.call),
         "disposition": observation.disposition,
-        "effect": original["workspace_effect"],
         "cleared": true,
     });
+    if let Some(effect) = original.get("workspace_effect") {
+        value["effect"] = effect.clone();
+    }
     if observation.disposition == ToolDisposition::Uncertain
         || original["workspace_effect"] == "uncertain"
     {
@@ -2095,8 +2419,15 @@ fn model_projection(
     effect: &str,
     cache_update: CacheUpdate,
 ) -> Value {
-    let call = model_call(call);
-    json!({"call":call,"disposition":disposition,"output":output,"workspace_effect":effect,"cache_update":cache_update})
+    let mut value = json!({"call":model_call(call),"disposition":disposition,"output":output});
+    // Constant inspection fields cost tokens on every read; their absence means none.
+    if effect != "none" {
+        value["workspace_effect"] = json!(effect);
+    }
+    if cache_update != CacheUpdate::NotApplicable {
+        value["cache_update"] = json!(cache_update);
+    }
+    value
 }
 
 #[cfg(test)]
@@ -2134,13 +2465,13 @@ mod model_call_tests {
             },
             ToolCall::Edit {
                 path: "file".into(),
-                expected_digest: hex_digest(b"old"),
+                expected_digest: Some(hex_digest(b"old")),
                 old: "old".into(),
                 new: "new".into(),
             },
             ToolCall::MultiEdit {
                 file_path: "file".into(),
-                expected_digest: hex_digest(b"old"),
+                expected_digest: Some(hex_digest(b"old")),
                 edits: vec![LiteralEdit {
                     old_string: "old".into(),
                     new_string: "new".into(),
@@ -2218,6 +2549,7 @@ mod unguarded_vocabulary_tests {
             cwd: cwd.into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         }
     }
 
@@ -2293,6 +2625,7 @@ mod unguarded_vocabulary_tests {
             output: serde_json::to_string(&CommandResult {
                 selection: Some(Default::default()),
                 network_refusals: Vec::new(),
+                hidden_grants: Vec::new(),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),

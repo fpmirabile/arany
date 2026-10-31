@@ -1,16 +1,13 @@
 use super::*;
-use crate::provider::{DEFAULT_OUTPUT_TOKEN_CAP, MAX_RESPONSE_BYTES};
+use crate::provider::{DEFAULT_OUTPUT_TOKEN_CAP, MAX_RESPONSE_BYTES, SMALL_OUTPUT_CAP};
 use crate::{
     provider::{
-        AgentPhase, CompactionItem, HistoryTurn, ProviderFailureClass, ProviderOutcome,
-        UnansweredStatus,
+        AgentPhase, CompactionItem, HistoryTurn, PromptRole, ProviderFailureClass, ProviderOutcome,
+        RunInput, UnansweredStatus,
     },
     session::{AgentRunId, RunId, SessionId},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
+use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 const TOKEN: &str = "synthetic-subscription-token";
 
@@ -18,7 +15,7 @@ const TOKEN: &str = "synthetic-subscription-token";
 fn checked_provider_declares_local_bound_and_exact_account_provenance() {
     let provenance = ChatGptProvenance {
         account_id: uuid::Uuid::now_v7(),
-        evidence_fingerprint: [7; 32],
+        admission_fingerprint: [7; 32],
         admission: crate::provider::ChatGptAdmission::AccountConsent,
     };
     let provider = ChatGptProvider::from_checked_account(
@@ -56,7 +53,7 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
             Effort::High,
             TOKEN.into(),
             ChatGptProvenance {
-                evidence_fingerprint: [0; 32],
+                admission_fingerprint: [0; 32],
                 ..provenance
             },
         )
@@ -73,7 +70,7 @@ async fn requests_above_the_declared_cap_are_rejected_before_dispatch() {
         TOKEN.into(),
         ChatGptProvenance {
             account_id: uuid::Uuid::now_v7(),
-            evidence_fingerprint: [7; 32],
+            admission_fingerprint: [7; 32],
             admission: crate::provider::ChatGptAdmission::AccountConsent,
         },
     )
@@ -110,7 +107,7 @@ async fn requests_above_the_declared_cap_are_rejected_before_dispatch() {
         }
     }
     let request = ProviderRequest {
-        max_output_tokens: PROBE_OUTPUT_CAP + 1,
+        max_output_tokens: SMALL_OUTPUT_CAP + 1,
         ..request()
     };
     let (endpoint, server) = serve(event_reply(completed(Some(12)))).await;
@@ -210,6 +207,7 @@ fn compaction_request() -> CompactionRequest {
             },
         ],
         max_output_tokens: 64,
+        prompts: Default::default(),
     }
 }
 
@@ -513,12 +511,15 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 .feed(stream.as_bytes())
                 .unwrap()
                 .unwrap();
-            assert!(
-                wire::decode_streamed_run(&body, &scope_for(&request())).is_err(),
+            let accepted = label == "commentary only";
+            assert_eq!(
+                wire::decode_streamed_run(&body, &scope_for(&request())).is_ok(),
+                accepted,
                 "{label}"
             );
-            assert!(
-                wire::decode_streamed_compaction(&body, "model-a").is_err(),
+            assert_eq!(
+                wire::decode_streamed_compaction(&body, "model-a").is_ok(),
+                accepted,
                 "{label}"
             );
         }
@@ -769,56 +770,9 @@ async fn serve(reply: Vec<u8>) -> (Url, tokio::task::JoinHandle<String>) {
     .expect("test endpoint");
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("request");
-        let request = read_request(&mut socket).await;
+        let request = crate::provider::test_support::read_loopback_request(&mut socket).await;
         socket.write_all(&reply).await.expect("reply");
         request
-    });
-    (endpoint, server)
-}
-
-async fn read_request(socket: &mut TcpStream) -> String {
-    let mut request = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let count = socket.read(&mut buffer).await.expect("read");
-        if count == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..count]);
-        if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let length = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .expect("body length");
-            if request.len() >= header_end + 4 + length {
-                break;
-            }
-        }
-        assert!(request.len() <= 512 * 1024 + 8192);
-    }
-    String::from_utf8(request).expect("request text")
-}
-
-async fn serve_sequence(replies: Vec<Vec<u8>>) -> (Url, tokio::task::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-    let endpoint = Url::parse(&format!(
-        "http://{}/v1/responses",
-        listener.local_addr().unwrap()
-    ))
-    .expect("test endpoint");
-    let server = tokio::spawn(async move {
-        let mut requests = Vec::new();
-        for reply in replies {
-            let (mut socket, _) = listener.accept().await.expect("request");
-            requests.push(read_request(&mut socket).await);
-            socket.write_all(&reply).await.expect("reply");
-        }
-        requests
     });
     (endpoint, server)
 }
@@ -1507,160 +1461,6 @@ async fn direct_route_429_honors_retry_after_and_never_retries_a_quota_body() {
     }
 }
 
-#[tokio::test]
-// Skipped in the Guard: local test IPC capability is missing.
-#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
-async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes() {
-    let direct = event_reply(completed_with_id("resp_direct", Some(12), r#"done"#));
-    let delegate = event_reply(completed_with_id(
-        "resp_delegate",
-        Some(12),
-        r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
-    ));
-    let compact = event_reply(completed_with_id("resp_compact", Some(12), r#"Condensed"#));
-    let (endpoint, server) =
-        serve_sequence(vec![direct.clone(), delegate.clone(), compact.clone()]).await;
-    let (_temp, mut journal) = probe_check(crate::RunCancellation::new()).await;
-    probe_model_at(
-        &client(),
-        endpoint,
-        TOKEN,
-        ("model-a", Effort::Medium),
-        &mut journal,
-    )
-    .await
-    .expect("three strict synthetic calls");
-    let view = journal.close().await.unwrap();
-    assert_eq!(view.completed_calls, 4);
-    assert!(view.pending.is_none());
-    let requests = server.await.expect("server");
-    assert_eq!(requests.len(), 3);
-    for (index, request) in requests.iter().enumerate() {
-        assert!(request.contains("authorization: Bearer synthetic-subscription-token\r\n"));
-        let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap())
-            .expect("request document");
-        assert_eq!(body["model"], "model-a");
-        assert_eq!(body["reasoning"]["effort"], "medium");
-        assert_eq!(body["store"], false);
-        assert_eq!(body["stream"], true);
-        assert!(body.get("max_output_tokens").is_none());
-        assert!(!request.contains("private-workspace-canary"));
-        assert!(body.get("text").is_none());
-        if index == 2 {
-            for field in ["tools", "tool_choice", "parallel_tool_calls"] {
-                assert!(body.get(field).is_none());
-            }
-        }
-    }
-
-    let wrong_direct = event_reply(completed_with_id(
-        "resp_direct",
-        Some(12),
-        r#"{"outcome":{"type":"delegate","children":[{"objective":"Wrong phase","profile":null}]}}"#,
-    ));
-    let repeated_delegate = event_reply(completed_with_id(
-        "resp_direct",
-        Some(12),
-        r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
-    ));
-    let wrong_delegate = event_reply(completed_with_id("resp_delegate", Some(12), r#"done"#));
-    let blank_compact = event_reply(completed_with_id("resp_compact", Some(12), r#""#));
-    let repeated_compact = event_reply(completed_with_id("resp_direct", Some(12), r#"Condensed"#));
-    let over_cap = event_reply(completed_with_id(
-        "resp_direct",
-        Some(PROBE_OUTPUT_CAP + 1),
-        r#"done"#,
-    ));
-    for (label, replies) in [
-        ("wrong direct", vec![wrong_direct]),
-        (
-            "repeated response ID",
-            vec![direct.clone(), repeated_delegate],
-        ),
-        ("wrong delegate", vec![direct.clone(), wrong_delegate]),
-        (
-            "blank compaction",
-            vec![direct.clone(), delegate.clone(), blank_compact],
-        ),
-        (
-            "repeated compaction ID",
-            vec![direct.clone(), delegate, repeated_compact],
-        ),
-        ("local output cap", vec![over_cap]),
-    ] {
-        let expected_calls = replies.len();
-        let (endpoint, server) = serve_sequence(replies).await;
-        let error = probe_model_at(
-            &client(),
-            endpoint,
-            TOKEN,
-            ("model-a", Effort::Medium),
-            &mut probe_check(crate::RunCancellation::new()).await.1,
-        )
-        .await
-        .expect_err(label);
-        assert!(
-            if label == "local output cap" {
-                matches!(
-                    error,
-                    crate::ChatGptCheckError::Provider(ProviderError::LocalOutputLimit)
-                )
-            } else {
-                matches!(
-                    error,
-                    crate::ChatGptCheckError::Provider(
-                        ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract
-                    )
-                )
-            },
-            "{label}"
-        );
-        assert_eq!(
-            server.await.expect("server").len(),
-            expected_calls,
-            "{label}"
-        );
-    }
-
-    let endpoint = Url::parse("http://127.0.0.1:9/v1/responses").unwrap();
-    for (token, model) in [("", "model-a"), (TOKEN, "bad model")] {
-        assert!(matches!(
-            probe_model_at(
-                &client(),
-                endpoint.clone(),
-                token,
-                (model, Effort::Medium),
-                &mut probe_check(crate::RunCancellation::new()).await.1
-            )
-            .await,
-            Err(crate::ChatGptCheckError::Provider(ProviderError::Rejected))
-        ));
-    }
-    let (_temp, mut journal) = probe_check(crate::RunCancellation::new()).await;
-    journal
-        .finish(crate::CheckDisposition::Failed)
-        .await
-        .unwrap();
-    let dispatched = std::cell::Cell::new(false);
-    assert!(matches!(
-        journal_probe(&mut journal, crate::CheckCallKind::Answer, async {
-            dispatched.set(true);
-            Ok((
-                (),
-                Usage {
-                    input_tokens: Some(12),
-                    output_tokens: Some(8),
-                    cache_read_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                },
-            ))
-        })
-        .await,
-        Err(crate::ChatGptCheckError::Journal(_))
-    ));
-    assert!(!dispatched.get(), "refused append polled the transport");
-}
-
 #[test]
 fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
     let outcome = r#"hello
@@ -2343,7 +2143,7 @@ fn token_sized_write_deltas_cover_the_content_ceiling_at_the_real_cap() {
 
 #[test]
 fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
-    for cap in [PROBE_OUTPUT_CAP, crate::provider::MAX_OUTPUT_TOKEN_CAP] {
+    for cap in [SMALL_OUTPUT_CAP, crate::provider::MAX_OUTPUT_TOKEN_CAP] {
         let mut decoder = StreamDecoder::new(TOKEN, cap);
         let frame = b"data: {\"type\":\"response.queued\"}\n\n";
         for _ in 0..crate::provider::max_stream_events(cap) {
@@ -2375,144 +2175,6 @@ fn declared_stream_bounds_fail_closed_at_the_stream_limit_stage() {
             Some(crate::ProviderFailureReason::StreamProtocol)
         );
         assert!(error.retry_cause().is_none());
-    }
-}
-
-async fn probe_check(
-    cancellation: crate::RunCancellation,
-) -> (tempfile::TempDir, crate::ChatGptCheck) {
-    let temp = tempfile::tempdir().unwrap();
-    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
-    let mut check = crate::ChatGptCheck::start(
-        state,
-        crate::ChatGptCheckRequest {
-            account: uuid::Uuid::now_v7(),
-            model: "model-a".into(),
-            effort: Effort::Medium,
-            fingerprint: [1; 32],
-        },
-        |_| Ok(Vec::new()),
-        cancellation,
-    )
-    .await
-    .unwrap();
-    check.evidence_cleared().await.unwrap();
-    let token = check.begin_catalog().await.unwrap();
-    check
-        .record_catalog(token, crate::CheckDisposition::Succeeded)
-        .await
-        .unwrap();
-    (temp, check)
-}
-
-#[tokio::test]
-async fn probe_stops_leave_intent_and_result_acknowledgments_confirmed() {
-    #[derive(Clone, Copy)]
-    enum Acknowledgment {
-        Intent,
-        Result,
-    }
-    #[derive(Clone, Copy)]
-    enum Stop {
-        Cancellation,
-        Deadline,
-    }
-    for acknowledgment in [Acknowledgment::Intent, Acknowledgment::Result] {
-        for stop in [Stop::Cancellation, Stop::Deadline] {
-            let cancellation = crate::RunCancellation::new();
-            let (temp, mut check) = probe_check(cancellation.clone()).await;
-            let id = check.id();
-            let admits: fn(&crate::CheckView) -> bool = match acknowledgment {
-                Acknowledgment::Intent => {
-                    |view| view.pending == Some((1, crate::CheckCallKind::Answer))
-                }
-                Acknowledgment::Result => |view| view.completed_calls == 2,
-            };
-            let (entered, release) = crate::FaultPlan::gate_check_acknowledgment(id, admits);
-            let dispatched = std::cell::Cell::new(false);
-            let execute = async {
-                let result = journal_probe(&mut check, crate::CheckCallKind::Answer, async {
-                    dispatched.set(true);
-                    Ok((
-                        (),
-                        Usage {
-                            input_tokens: Some(12),
-                            output_tokens: Some(8),
-                            cache_read_input_tokens: None,
-                            cache_creation_input_tokens: None,
-                        },
-                    ))
-                })
-                .await;
-                let stopped = match acknowledgment {
-                    Acknowledgment::Intent => result,
-                    Acknowledgment::Result => {
-                        result.expect("confirmed response");
-                        journal_probe::<()>(&mut check, crate::CheckCallKind::Delegate, async {
-                            panic!("stopped check dispatched another probe");
-                        })
-                        .await
-                    }
-                };
-                assert!(matches!(
-                    (stop, stopped),
-                    (Stop::Cancellation, Err(crate::ChatGptCheckError::Cancelled))
-                        | (Stop::Deadline, Err(crate::ChatGptCheckError::Deadline))
-                ));
-                assert!(matches!(
-                    (stop, check.begin_catalog().await),
-                    (Stop::Cancellation, Err(crate::ChatGptCheckError::Cancelled))
-                        | (Stop::Deadline, Err(crate::ChatGptCheckError::Deadline))
-                ));
-                if matches!(stop, Stop::Cancellation) {
-                    assert!(matches!(
-                        check.evidence_started([1; 32]).await,
-                        Err(crate::ChatGptCheckError::Cancelled)
-                    ));
-                    assert!(matches!(
-                        check.evidence_published([1; 32]).await,
-                        Err(crate::ChatGptCheckError::Cancelled)
-                    ));
-                }
-                check.finish(crate::CheckDisposition::Failed).await.unwrap();
-                let receipt = check.receipt();
-                (receipt, check.close().await.unwrap())
-            };
-            let request_stop = async {
-                entered.await.unwrap();
-                match stop {
-                    Stop::Cancellation => {
-                        cancellation.cancel();
-                    }
-                    Stop::Deadline => {
-                        tokio::time::pause();
-                        tokio::time::advance(crate::provider::PROBE_TOTAL_DEADLINE).await;
-                        tokio::time::resume();
-                    }
-                }
-                release.send(()).unwrap();
-            };
-            let ((receipt, view), ()) = tokio::join!(execute, request_stop);
-            let disposition = match (acknowledgment, stop) {
-                (Acknowledgment::Intent, _) => crate::CheckDisposition::Uncertain,
-                (Acknowledgment::Result, Stop::Cancellation) => crate::CheckDisposition::Cancelled,
-                (Acknowledgment::Result, Stop::Deadline) => crate::CheckDisposition::Failed,
-            };
-            assert_eq!(receipt.disposition, Some(disposition));
-            assert_eq!(view.disposition, Some(disposition));
-            assert!(view.pending.is_none());
-            assert_eq!(view.completed_calls, 2);
-            assert_eq!(
-                dispatched.get(),
-                matches!(acknowledgment, Acknowledgment::Result)
-            );
-            let store = crate::Store::open_read_only(
-                crate::StateRoot::open_existing(&temp.path().join("state")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(store.load_check(id).await.unwrap(), Some(view));
-            store.close().await.unwrap();
-        }
     }
 }
 
@@ -2645,4 +2307,33 @@ fn openai_routes_pin_cached_function_selection_bytes() {
         rendered,
         include_str!("../../snapshots/openai_selection.json")
     );
+}
+
+#[test]
+fn commentary_without_a_call_or_final_message_previews_as_the_answer() {
+    let commentary = json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Hecho."}]});
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_1","model":"model-a"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","phase":"commentary","status":"in_progress","content":[]}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":commentary}),
+        json!({"type":"response.completed","response":{"id":"resp_1","model":"model-a","status":"completed","output":[commentary],"usage":{"input_tokens":8,"output_tokens":4}}}),
+    ];
+    let (publisher, observed) = ResponsePreview::new();
+    let mut decoder =
+        StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher), DEFAULT_OUTPUT_TOKEN_CAP);
+    let mut accepted = None;
+    for event in &events {
+        accepted = decoder
+            .feed(format!("data: {event}\n\n").as_bytes())
+            .unwrap()
+            .or(accepted);
+    }
+    assert_eq!(observed.borrow().answer, "Hecho.");
+    assert!(observed.borrow().commentary.is_empty());
+    assert!(matches!(
+        wire::decode_streamed_run(&accepted.unwrap(), &scope_for(&request()))
+            .unwrap()
+            .outcome,
+        ProviderOutcome::Answer(ref answer) if answer.text == "Hecho."
+    ));
 }

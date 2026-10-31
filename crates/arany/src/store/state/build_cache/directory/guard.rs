@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{Read, Write};
 
 pub(in crate::store::state::build_cache) const GUARD_BYTES: u64 =
     uuid::fmt::Hyphenated::LENGTH as u64;

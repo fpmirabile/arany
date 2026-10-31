@@ -115,7 +115,7 @@ fn classic_dialogs_fill_their_content_sized_viewport() {
             ("rewind review", 12),
         ] {
             let mut terminal = Terminal::new(TestBackend::new(80, screen_height)).unwrap();
-            // As in Codex, the viewport is min(screen, the dialog's content height).
+            // The viewport is min(screen, the dialog's content height).
             let rows = height.min(screen_height);
             let full = Rect::new(0, screen_height - rows, 80, rows);
             let area = crate::terminal::dialog_area(full, height, true);
@@ -145,54 +145,64 @@ fn classic_dialogs_fill_their_content_sized_viewport() {
                     "secret" => draw_setup_frame(
                         frame,
                         area,
-                        3,
-                        "API key",
-                        "Hidden input",
-                        0,
-                        Some("Enter confirms"),
-                        palette,
+                        SetupFrame {
+                            step: 3,
+                            title: "API key",
+                            instruction: "Hidden input",
+                            input_chars: 0,
+                            notice: Some("Enter confirms"),
+                            palette,
+                        },
                     ),
                     "text" => draw_setup_text_frame(
                         frame,
                         area,
-                        "Workspace",
-                        "Enter ID",
-                        &Composer::default(),
-                        None,
-                        palette,
+                        SetupTextFrame {
+                            title: "Workspace",
+                            instruction: "Enter ID",
+                            draft: &Composer::default(),
+                            notice: None,
+                            palette,
+                        },
                     ),
                     "choices" => draw_setup_choices_frame(
                         frame,
                         area,
-                        "Account",
-                        "Choose one",
-                        &[(1, "Saved"), (2, "New")],
-                        0,
-                        None,
-                        palette,
+                        SetupChoicesFrame {
+                            title: "Account",
+                            instruction: "Choose one",
+                            choices: &[(1, "Saved"), (2, "New")],
+                            selected: 0,
+                            notice: None,
+                            palette,
+                        },
                     ),
                     "warning" => {
                         draw_setup_warning_frame(
                             frame,
                             area,
-                            "Consent",
-                            "Review this change",
-                            0,
-                            false,
-                            None,
-                            palette,
+                            SetupWarningFrame {
+                                title: "Consent",
+                                warning: "Review this change",
+                                page: 0,
+                                accept_selected: false,
+                                notice: None,
+                                palette,
+                            },
                         );
                     }
                     "rewind" | "rewind review" => {
                         crate::terminal::rewind::draw_rewind_frame(
                             frame,
                             area,
-                            "Checkpoints",
-                            if panel == "rewind" { &[] } else { &lines },
-                            &["Cancel".into(), "Restore".into()],
-                            0,
-                            0,
-                            palette,
+                            crate::terminal::rewind::RewindFrame {
+                                title: "Checkpoints",
+                                lines: if panel == "rewind" { &[] } else { &lines },
+                                choices: &["Cancel".into(), "Restore".into()],
+                                selected: 0,
+                                page: 0,
+                                palette,
+                            },
                         );
                     }
                     _ => unreachable!(),
@@ -268,20 +278,22 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
             .draw(|frame| {
                 draw_frame_with_history(
                     frame,
-                    &model,
-                    &Composer::default(),
-                    None,
-                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                    &[HistoryRow {
-                        spans: Vec::new(),
-                        slash_cells: 0,
-                        text: "You:".into(),
-                        speaker: MessageKind::User,
-                        heading: true,
-                        matched: false,
-                        selected: None,
-                    }],
-                    None,
+                    FrameContent {
+                        model: &model,
+                        composer: &Composer::default(),
+                        notice: None,
+                        hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                        history_rows: &[HistoryRow {
+                            spans: Vec::new(),
+                            slash_cells: 0,
+                            text: "You:".into(),
+                            speaker: MessageKind::User,
+                            heading: true,
+                            matched: false,
+                            selected: None,
+                        }],
+                        history_status: None,
+                    },
                 );
             })
             .expect("history frame");
@@ -388,6 +400,31 @@ fn classic_content_height_keeps_bottom_controls_and_completion_visible() {
             assert_eq!(classic_height(&active, &composer, screen, 100), height);
         }
     }
+}
+
+#[test]
+fn classic_height_sizes_the_completion_menu_from_the_rows_the_draft_leaves() {
+    let screen = ratatui::layout::Rect::new(0, 0, 80, 5);
+    let model = PresentationModel {
+        status_line: "idle".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+        agent_switch: false,
+    };
+    let mut composer = Composer::default();
+    composer.insert_paste("/").unwrap();
+    let draft = composer_height(&composer, screen);
+    assert_eq!(completion_height(&composer, screen.height - 1 - draft), 0);
+
+    let height = classic_height(&model, &composer, screen, 0);
+
+    assert_eq!(
+        height,
+        draft + 1,
+        "no row is reserved for a menu the draw cannot show"
+    );
 }
 
 #[test]
@@ -640,12 +677,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         .draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
-                &rows,
-                Some("History · Ctrl+L live"),
+                FrameContent {
+                    model: &model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: false }, "\\ then Enter"),
+                    history_rows: &rows,
+                    history_status: Some("History · Ctrl+L live"),
+                },
             );
         })
         .expect("history frame");
@@ -702,12 +741,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         wide.draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &wide_model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color }, "\\ then Enter"),
-                &rows,
-                Some("History · Ctrl+L live"),
+                FrameContent {
+                    model: &wide_model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                    history_rows: &rows,
+                    history_status: Some("History · Ctrl+L live"),
+                },
             );
         })
         .expect("wide history frame");
@@ -722,12 +763,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         wide.draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &wide_model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color }, "\\ then Enter"),
-                &feedback_rows,
-                Some("History · Ctrl+L live"),
+                FrameContent {
+                    model: &wide_model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                    history_rows: &feedback_rows,
+                    history_status: Some("History · Ctrl+L live"),
+                },
             );
         })
         .expect("wide error frame");
@@ -754,12 +797,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         .draw(|frame| {
             draw_frame_with_history(
                 frame,
-                &model,
-                &Composer::default(),
-                None,
-                ComposerHints::new(Palette { color: true }, "\\ then Enter"),
-                &rows,
-                None,
+                FrameContent {
+                    model: &model,
+                    composer: &Composer::default(),
+                    notice: None,
+                    hints: ComposerHints::new(Palette { color: true }, "\\ then Enter"),
+                    history_rows: &rows,
+                    history_status: None,
+                },
             );
         })
         .expect("colored history frame");
@@ -776,12 +821,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .expect("narrow history frame");
@@ -842,12 +889,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &conversation,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &conversation,
+                            history_status: None,
+                        },
                     );
                 })
                 .expect("conversation frame");
@@ -1076,7 +1125,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
     let settings = vec![
         "Slash menu: tabs".to_owned(),
         "Chat view: classic".to_owned(),
-        "Goal tokens: unlimited".to_owned(),
+        "Tokens per task: unlimited".to_owned(),
         "Build cache: 8.0 GB".to_owned(),
     ];
     let agents = inspector_model(
@@ -1118,19 +1167,52 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                             let palette = Palette { color: false };
                             match name {
                                 "quick actions" => {
-                                    draw_quick_actions_frame(frame, area, 1, armed, false, palette);
+                                    draw_quick_actions_frame(
+                                        frame,
+                                        area,
+                                        QuickActionsFrame {
+                                            selected: 1,
+                                            armed,
+                                            has_draft: false,
+                                            palette,
+                                        },
+                                    );
                                 }
                                 "resume" => {
                                     draw_session_picker_frame(
-                                        frame, area, &items, 0, armed, palette,
+                                        frame,
+                                        area,
+                                        SessionPickerFrame {
+                                            items: &items,
+                                            selected: 0,
+                                            armed,
+                                            palette,
+                                        },
                                     );
                                 }
                                 "help" => draw_help_frame(frame, area, 0, armed, palette),
                                 "settings" => draw_settings_frame(
-                                    frame, area, &settings, 3, armed, None, palette,
+                                    frame,
+                                    area,
+                                    SettingsFrame {
+                                        title: "Settings",
+                                        rows: &settings,
+                                        selected: 3,
+                                        armed,
+                                        notice: None,
+                                        palette,
+                                    },
                                 ),
                                 _ => draw_agent_inspector_frame(
-                                    frame, area, &agents, 0, armed, None, palette,
+                                    frame,
+                                    area,
+                                    AgentInspectorFrame {
+                                        model: &agents,
+                                        scroll: 0,
+                                        armed,
+                                        notice: None,
+                                        palette,
+                                    },
                                 ),
                             }
                             if name == "settings" && width == 80 && height == 24 && armed {
@@ -1295,22 +1377,25 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                             );
                             draw_model_catalog_frame(
                                 frame,
-                                &crate::terminal::ModelPicker {
-                                    items: &items,
-                                    efforts: &efforts,
-                                    selected: 4095,
-                                    exact_custom: false,
-                                    filter,
-                                    invalid: false,
-                                    catalog_state,
+                                ModelCatalogFrame {
+                                    picker: &crate::terminal::ModelPicker {
+                                        items: &items,
+                                        efforts: &efforts,
+                                        selected: 4095,
+                                        exact_custom: false,
+                                        filter,
+                                        invalid: false,
+                                        catalog_state,
+                                        refresh_error: Some("Provider unavailable"),
+                                    },
+                                    armed: true,
+                                    composer: &composer,
+                                    model: &model,
+                                    hints: ComposerHints::new(
+                                        Palette { color },
+                                        composer.newline_hint(KeyboardSupport::Legacy),
+                                    ),
                                 },
-                                true,
-                                &composer,
-                                &model,
-                                ComposerHints::new(
-                                    Palette { color },
-                                    composer.newline_hint(KeyboardSupport::Legacy),
-                                ),
                             );
                         })
                         .expect("chat model panel");
@@ -1332,9 +1417,20 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                     let status = match catalog_state {
                         crate::terminal::ModelCatalogState::Current => None,
                         crate::terminal::ModelCatalogState::Refreshing => Some("Refreshing"),
+                        crate::terminal::ModelCatalogState::Updated if width >= 50 => {
+                            Some("Model list refreshed")
+                        }
                         crate::terminal::ModelCatalogState::Updated => Some("Refreshed"),
+                        crate::terminal::ModelCatalogState::RefreshFailed if width >= 50 => {
+                            Some("Refresh failed: Provider unavailable")
+                        }
                         crate::terminal::ModelCatalogState::RefreshFailed => Some("Refresh failed"),
                     };
+                    assert_eq!(
+                        rows.iter().any(|row| row.contains("Ctrl+R refresh")),
+                        width >= 60,
+                        "{width}x{height}: {rows:?}"
+                    );
                     if let Some(status) = status {
                         assert!(
                             rows.last().unwrap().contains(status),
@@ -1462,12 +1558,14 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                 .draw(|frame| {
                     draw_frame_with_history(
                         frame,
-                        &model,
-                        &Composer::default(),
-                        None,
-                        ComposerHints::new(Palette { color }, "\\ then Enter"),
-                        &rows,
-                        None,
+                        FrameContent {
+                            model: &model,
+                            composer: &Composer::default(),
+                            notice: None,
+                            hints: ComposerHints::new(Palette { color }, "\\ then Enter"),
+                            history_rows: &rows,
+                            history_status: None,
+                        },
                     );
                 })
                 .unwrap();
@@ -1489,11 +1587,13 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                         draw_agent_inspector_frame(
                             frame,
                             bottom_area(frame.area(), 14),
-                            &inspector,
-                            scroll,
-                            true,
-                            None,
-                            Palette { color },
+                            AgentInspectorFrame {
+                                model: &inspector,
+                                scroll,
+                                armed: true,
+                                notice: None,
+                                palette: Palette { color },
+                            },
                         )
                     })
                     .unwrap();
@@ -1549,11 +1649,15 @@ fn agent_chat_frames_label_a_read_only_child_and_hint_keys_only_once_armed() {
                         draw_agent_chat_frame(
                             frame,
                             area,
-                            transcript.label.as_str().into(),
-                            armed,
-                            None,
-                            fullscreen,
-                            palette,
+                            AgentChatFrame {
+                                label: transcript.label.as_str(),
+                                draft: None,
+                                editable: false,
+                                armed,
+                                notice: None,
+                                fullscreen,
+                                palette,
+                            },
                         );
                     })
                     .unwrap();
@@ -1605,5 +1709,23 @@ fn agent_chat_frames_label_a_read_only_child_and_hint_keys_only_once_armed() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn windows_keep_the_focused_row_last_once_it_passes_the_first_window() {
+    for (selected, visible, start) in [
+        (None, 10, 0),
+        (Some(0), 10, 0),
+        (Some(9), 10, 0),
+        (Some(10), 10, 1),
+        (Some(143), 10, 134),
+        (Some(3), 0, 3),
+    ] {
+        assert_eq!(
+            window_start(selected, visible),
+            start,
+            "{selected:?} of {visible}"
+        );
     }
 }

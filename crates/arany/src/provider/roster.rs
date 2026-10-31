@@ -151,8 +151,7 @@ mod tests {
                                 format!("model-{route}"),
                                 Provenance::Custom(CustomProfileProvenance {
                                     endpoint: "https://example.com/responses".into(),
-                                    evidence_digest: [255; 32],
-                                    capability_evidence_version: 2,
+                                    profile_digest: [255; 32],
                                 }),
                             )
                         })
@@ -221,7 +220,7 @@ mod tests {
         let Provenance::Custom(provenance) = &mut fresh.profiles[0].routes[0].provenance else {
             unreachable!()
         };
-        provenance.evidence_digest = [1; 32];
+        provenance.profile_digest = [1; 32];
         assert_eq!(fresh.digest(), original.digest());
         assert!(fresh.valid());
         fresh.profiles[0].routes[0].effort = Some(super::super::Effort::Low);

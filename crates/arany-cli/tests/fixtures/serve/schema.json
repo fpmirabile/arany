@@ -305,11 +305,6 @@
           "format": "int64",
           "type": "integer"
         },
-        "event_version": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
         "kind": {
           "enum": [
             "HostEnvironmentCapture",
@@ -382,7 +377,6 @@
         "sequence",
         "session_id",
         "kind",
-        "event_version",
         "payload",
         "created_at_ms"
       ],
@@ -1319,6 +1313,7 @@
         "cancellationDrainTimeout",
         "coordinatorFailed",
         "cancelledBeforeStart",
+        "promptOverride",
         "store",
         "tool",
         "providerUnavailable",
@@ -1731,6 +1726,7 @@
     "RewindEffect": {
       "enum": [
         "host",
+        "git",
         "unguardedCommand",
         "mcp",
         "cache",

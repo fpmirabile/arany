@@ -423,7 +423,7 @@ impl RunLoop<'_> {
         intents: &[EffectIntent],
     ) -> Result<Result<(), StopCause>, EngineError> {
         for intent in intents {
-            let permission = self.permission(grant, runtime, &intent.call);
+            let permission = self.permission(grant, runtime, intent);
             let hooks = self.hook_admission(runtime, &intent.call, &intent.call).0;
             if let Err(refusal) = self
                 .admit_tool(
@@ -506,7 +506,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
     ) -> Result<ToolObservation, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, &intent);
         let mode = effective_permission_mode(runtime.permissions(), grant);
         let records_permission = mode.is_some()
             || intent.call.is_unguarded()
@@ -622,7 +622,7 @@ impl RunLoop<'_> {
                 Ok(changeset) => changeset,
                 Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
-            let stop = (observation.stops_run()
+            let stop = (observation.stops_tool_step()
                 || step.requests.len() > 1 && observation.disposition == ToolDisposition::Limit
                 || self.controls.cancellation.is_cancelled())
             .then(|| {
@@ -878,8 +878,7 @@ impl RunLoop<'_> {
             && intent.call.is_host_pr_read()
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::TypedPrefixRule;
-        let host_prefix_allow = phase.site == DispatchSite::Primary
-            && intent.call.is_unguarded()
+        let host_prefix_allow = intent.call.is_unguarded()
             && phase.permission.decision == Decision::Allow
             && phase.permission.basis == PermissionSource::HostPrefixRule;
         Ok(DispatchFacts {
@@ -900,7 +899,7 @@ impl RunLoop<'_> {
                         )
                     })),
             unguarded: match grant {
-                Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
+                _ if intent.call.is_unguarded() => Some(Unguarded {
                     gate: unguarded_gate(runtime, intent).await.map(|mut prompt| {
                         prompt.remember = phase.host_permission.remember;
                         prompt.prefix =
@@ -908,7 +907,7 @@ impl RunLoop<'_> {
                         prompt
                     }),
                 }),
-                Grant::Primary { .. } | Grant::Researcher { .. } => None,
+                _ => None,
             },
             goal_allows: phase.goal_allows,
             runtime_allows: runtime.allows(&intent.call),
@@ -938,18 +937,39 @@ impl RunLoop<'_> {
             .ask()
             .filter(|_| !interrupted.is_some_and(RunCancellation::is_cancelled))
         {
-            Some(mode) => Box::pin(self.ask(
-                grant,
-                &phase.intent,
-                mode,
-                AskOptions {
-                    unguarded_prompt: facts.unguarded_prompt(),
-                    allow_auto_edits: phase.allow_auto_edits
-                        && phase.hooks.restriction != Some(Decision::Ask),
-                    remember_prefix,
-                    interrupted: interrupted.cloned(),
-                },
-            ))
+            Some(mode) => Box::pin(
+                self.ask(
+                    grant,
+                    &phase.intent,
+                    mode,
+                    AskOptions {
+                        unguarded_prompt: facts.unguarded_prompt(),
+                        allow_auto_edits: phase.allow_auto_edits
+                            && phase.hooks.restriction != Some(Decision::Ask),
+                        remember_prefix,
+                        // Only auto mode reviews pushes to a pinned repository, so only it offers the pin.
+                        pin_repository: matches!(grant, Grant::Primary { .. })
+                            && matches!(phase.intent.call, crate::tools::ToolCall::GitPush { .. })
+                            && runtime.permissions().is_some_and(|config| {
+                                config.mode() == crate::tools::permissions::PermissionMode::Auto
+                            })
+                            && self
+                                .controls
+                                .approvals
+                                .is_some_and(|approvals| approvals.admits_prefix_rules())
+                            && !runtime.same_repository(&phase.intent),
+                        save_reads: matches!(grant, Grant::Primary { .. })
+                            && self
+                                .controls
+                                .approvals
+                                .is_some_and(|approvals| approvals.admits_prefix_rules())
+                            && runtime
+                                .reads_need_approval(&phase.intent.call)
+                                .unwrap_or(false),
+                        interrupted: interrupted.cloned(),
+                    },
+                ),
+            )
             .await?
             .map(Some),
             None => Admission::Reserved(None),
@@ -1157,15 +1177,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         queue_pause: Option<ActivePause>,
         cancellation: &RunCancellation,
-    ) -> Result<
-        (
-            ToolObservation,
-            Option<ActiveSegment>,
-            bool,
-            Option<crate::session::Checkpoint>,
-        ),
-        EngineError,
-    > {
+    ) -> Result<Dispatched, EngineError> {
         let mut queue_pause = queue_pause;
         let mut active_time_exhausted = false;
         let (active_sender, mut active_receiver) =
@@ -1181,18 +1193,10 @@ impl RunLoop<'_> {
         let mut _active_work = None;
         let worker_cancellation = RunCancellation::new();
         let mut run_cancellation = cancellation.clone();
-        let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
-            .saturating_add(crate::tools::transfer_time(&intent));
-        let action_bound = tool_action_bound(&runtime, &intent);
-        let runtime_ms = if intent.call.facts().site == crate::tools::catalog::Site::InProcess {
-            0
-        } else {
-            intent.limits.runtime_ms
-        };
-        let actor = intent.agent_run_id;
+        let bound = ActionBound::new(&runtime, &intent);
         let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
         let mut active_segment = None;
-        let mut observation = loop {
+        let observation = loop {
             tokio::select! {
                 biased;
                 () = run_cancellation.cancelled() => {
@@ -1206,9 +1210,9 @@ impl RunLoop<'_> {
                         if let Some(pause) = queue_pause.take() {
                             self.settle_active_pause(pause, Some(admitted_at))?;
                         }
-                        match self.reserve_active_segment(action_bound, crate::session::BudgetAction::Tool, actor) {
+                        match self.reserve_active_segment(bound.action_bound, crate::session::BudgetAction::Tool, bound.actor) {
                             Ok(Admission::Reserved(segment)) => {
-                                let window = active_window(&segment, cache_transfer, runtime_ms);
+                                let window = active_window(&segment, bound.cache_transfer, bound.runtime_ms);
                                 active_segment = Some(segment);
                                 _active_work = Some(self.ledger().active_work());
                                 let _ = reply.send(window);
@@ -1226,15 +1230,7 @@ impl RunLoop<'_> {
                 request = checkpoint_receiver.recv() => {
                     if let Some(crate::tools::CheckpointRequest { reply, go_deadline }) = request {
                         if crate::session::checkpoint::publication(&checkpoint_intent) {
-                            let deadline = [
-                                active_segment.as_ref().map(|s| s.deadline()),
-                                go_deadline.checked_sub(CHECKPOINT_GO_MARGIN),
-                                Instant::now().checked_add(CHECKPOINT_WAIT),
-                            ]
-                            .into_iter()
-                            .map(|bound| bound.unwrap_or_else(Instant::now))
-                            .min()
-                            .unwrap_or_else(Instant::now);
+                            let deadline = checkpoint_deadline(active_segment.as_ref(), go_deadline);
                             checkpoint = Some(self.capture_checkpoint(&runtime, &checkpoint_intent, deadline).await?);
                         }
                         let _ = reply.send(());
@@ -1246,30 +1242,8 @@ impl RunLoop<'_> {
         if let Some(pause) = queue_pause.take() {
             self.settle_active_pause(pause, None)?;
         }
-        observation = match GuardCompletion::decide(
-            observation.disposition,
-            observation.attestation.is_some(),
-            active_time_exhausted,
-        ) {
-            GuardCompletion::Observed => observation,
-            GuardCompletion::ActiveTime => {
-                not_dispatched(observation.intent, &NotDispatched::ActiveTime)
-            }
-        };
-        let reached_go = observation.attestation.is_some()
-            || matches!(observation.disposition, ToolDisposition::Uncertain);
-        if !reached_go {
-            checkpoint = None;
-        }
-        if let Some(capture) = &mut checkpoint
-            && !matches!(
-                observation.disposition,
-                ToolDisposition::Succeeded | ToolDisposition::Uncertain
-            )
-        {
-            capture.status = crate::session::CheckpointStatus::NotNeeded;
-            capture.reason = None;
-        }
+        let (observation, checkpoint) =
+            settle_dispatch(observation, active_time_exhausted, checkpoint);
         Ok((
             observation,
             active_segment,
@@ -1320,6 +1294,10 @@ impl RunLoop<'_> {
                                     .as_ref()
                                     .filter(|prompt| prompt.prefix)
                                     .map(|_| RuleSave::HostPrefix)
+                                    .or_else(|| options.save_reads.then_some(RuleSave::Reads))
+                                    .or_else(|| {
+                                        options.pin_repository.then_some(RuleSave::Repository)
+                                    })
                             })
                         }
                         ApprovalReply::Deny
@@ -1348,7 +1326,6 @@ impl RunLoop<'_> {
 
     async fn resolve_review(
         &self,
-        objective: &str,
         intent: &EffectIntent,
         site: &AskSite,
         initial_mode: Option<ApprovalMode>,
@@ -1357,13 +1334,10 @@ impl RunLoop<'_> {
             Some(cause) => ReviewOutcome::Stopped(cause),
             None => {
                 let review = match site {
-                    AskSite::Primary(_) => self.review_tool(objective, intent, None).await?,
+                    AskSite::Primary(_) => self.review_tool(intent, None).await?,
                     AskSite::Delegated {
                         active_deadline, ..
-                    } => {
-                        self.review_tool(objective, intent, active_deadline.as_ref())
-                            .await?
-                    }
+                    } => self.review_tool(intent, active_deadline.as_ref()).await?,
                 };
                 match self.review_exhaustion_cause(site) {
                     Some(cause) => ReviewOutcome::Stopped(cause),
@@ -1413,11 +1387,19 @@ impl RunLoop<'_> {
     async fn delegated_human_reply(
         &self,
         intent: &EffectIntent,
-        deadline: Option<&crate::engine::ledger::ActiveDeadline>,
         approvals: &crate::tools::ToolApprovals,
-        interrupted: Option<&RunCancellation>,
+        site: &AskSite,
     ) -> Result<(ApprovalReply, Option<ApprovalWithdrawal>), EngineError> {
         use crate::tools::ApprovalWaitReply;
+        let AskSite::Delegated {
+            active_deadline: deadline,
+            interrupted,
+            unguarded_prompt,
+        } = site
+        else {
+            return Ok((ApprovalReply::Unavailable, None));
+        };
+        let (deadline, interrupted) = (deadline.as_ref(), interrupted.as_ref());
 
         let mut cancellation = self.controls.cancellation.clone();
         let activity_started = self.ledger().active_elapsed();
@@ -1426,7 +1408,7 @@ impl RunLoop<'_> {
             biased;
             () = ask::interrupted(interrupted) => return Ok((ApprovalReply::Unavailable, None)),
             () = cancellation.cancelled() => return Ok((ApprovalReply::Unavailable, None)),
-            pending = approvals.begin_local(intent, false, None) => pending,
+            pending = approvals.begin(intent, unguarded_prompt.clone(), crate::tools::ApprovalOffers::default()) => pending,
         };
         let (reply, interrupted) = tokio::select! {
             biased;
@@ -1467,6 +1449,81 @@ pub(super) enum HookDenial {
     Requested,
     Narrowed(String),
     Denied(String),
+}
+
+type Dispatched = (
+    ToolObservation,
+    Option<ActiveSegment>,
+    bool,
+    Option<crate::session::Checkpoint>,
+);
+
+struct ActionBound {
+    action_bound: Duration,
+    cache_transfer: Duration,
+    runtime_ms: u32,
+    actor: crate::session::AgentRunId,
+}
+
+impl ActionBound {
+    // An in-process call has no process runtime to bound.
+    fn new(runtime: &ToolRuntime, intent: &EffectIntent) -> Self {
+        Self {
+            action_bound: tool_action_bound(runtime, intent),
+            cache_transfer: Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
+                .saturating_add(crate::tools::transfer_time(intent)),
+            runtime_ms: if intent.call.facts().site == crate::tools::catalog::Site::InProcess {
+                0
+            } else {
+                intent.limits.runtime_ms
+            },
+            actor: intent.agent_run_id,
+        }
+    }
+}
+
+fn checkpoint_deadline(active_segment: Option<&ActiveSegment>, go_deadline: Instant) -> Instant {
+    [
+        active_segment.map(|s| s.deadline()),
+        go_deadline.checked_sub(CHECKPOINT_GO_MARGIN),
+        Instant::now().checked_add(CHECKPOINT_WAIT),
+    ]
+    .into_iter()
+    .map(|bound| bound.unwrap_or_else(Instant::now))
+    .min()
+    .unwrap_or_else(Instant::now)
+}
+
+fn settle_dispatch(
+    observation: ToolObservation,
+    active_time_exhausted: bool,
+    mut checkpoint: Option<crate::session::Checkpoint>,
+) -> (ToolObservation, Option<crate::session::Checkpoint>) {
+    let observation = match GuardCompletion::decide(
+        observation.disposition,
+        observation.attestation.is_some(),
+        active_time_exhausted,
+    ) {
+        GuardCompletion::Observed => observation,
+        GuardCompletion::ActiveTime => {
+            not_dispatched(observation.intent, &NotDispatched::ActiveTime)
+        }
+    };
+    let reached_go = observation.attestation.is_some()
+        || matches!(observation.disposition, ToolDisposition::Uncertain);
+    if !reached_go {
+        checkpoint = None;
+    }
+    if let Some(capture) = &mut checkpoint
+        && !matches!(
+            observation.disposition,
+            ToolDisposition::Succeeded | ToolDisposition::Uncertain
+        )
+    {
+        capture.status = crate::session::CheckpointStatus::NotNeeded;
+        capture.reason = None;
+    }
+    (observation, checkpoint)
 }
 
 #[cfg(test)]

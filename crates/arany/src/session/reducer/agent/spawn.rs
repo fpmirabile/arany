@@ -29,16 +29,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
     if !valid_profile {
         return Err(ReplayError::InvalidTransition);
     }
-    if grant.is_some_and(|grant| grant.unguarded() != crate::tools::UnguardedGrant::Denied) {
+    if !host_grant_fits(config, *grant, assignment.is_some()) {
         return Err(ReplayError::InvalidTransition);
     }
-    let child_grant = if config.tool_policy.is_some() {
-        ChildGrant::ReadOnly {
-            unguarded: grant.map_or(crate::tools::UnguardedGrant::Denied, ChildGrant::unguarded),
-        }
-    } else {
-        ChildGrant::NoTools
-    };
+    let child_grant = researcher_grant(config, *grant);
     match role {
         AgentRole::Primary if run.agents.is_empty() && *ordinal == 0 => {}
         AgentRole::Child
@@ -83,6 +77,28 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
         status: AgentStatus::Active,
     });
     Ok(())
+}
+
+// Only an editor of a Run admitted without a sandbox may run host commands, each per call.
+fn host_grant_fits(config: &RunConfig, grant: Option<ChildGrant>, editor: bool) -> bool {
+    let host_editor = editor
+        && config.tool_policy.as_ref().is_some_and(|policy| {
+            policy.child_unguarded == crate::tools::UnguardedGrant::HumanOnly
+        });
+    !grant.is_some_and(|grant| {
+        grant.unguarded() != crate::tools::UnguardedGrant::Denied
+            && !(host_editor && matches!(grant, ChildGrant::EditOnly { .. }))
+    })
+}
+
+fn researcher_grant(config: &RunConfig, grant: Option<ChildGrant>) -> ChildGrant {
+    if config.tool_policy.is_some() {
+        ChildGrant::ReadOnly {
+            unguarded: grant.map_or(crate::tools::UnguardedGrant::Denied, ChildGrant::unguarded),
+        }
+    } else {
+        ChildGrant::NoTools
+    }
 }
 
 fn validate_child_budget(

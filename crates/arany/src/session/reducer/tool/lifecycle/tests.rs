@@ -686,14 +686,7 @@ fn enforcement_causes_round_trip_and_reject_unsupported_claims() {
         serde_json::from_str::<serde_json::Value>(&payload).unwrap()["enforcement_cause"],
         "filesystem_denied"
     );
-    let decoded = Event::decode(
-        "ToolFinished",
-        crate::session::events::payload_version("ToolFinished").unwrap(),
-        &payload,
-        Some(run),
-        Some(agent),
-    )
-    .unwrap();
+    let decoded = Event::decode("ToolFinished", &payload, Some(run), Some(agent)).unwrap();
     assert_eq!(decoded, event);
     apply(&mut view, decoded).unwrap();
     assert_eq!(
@@ -936,14 +929,7 @@ fn an_in_process_attestation_cannot_finish_a_write() {
     ));
     let finished = tool_finished(run, agent, &write, b"after");
     let bytes = finished.payload().unwrap();
-    let decoded = Event::decode(
-        finished.kind(),
-        finished.version(),
-        &bytes,
-        Some(run),
-        Some(agent),
-    )
-    .unwrap();
+    let decoded = Event::decode(finished.kind(), &bytes, Some(run), Some(agent)).unwrap();
     apply(&mut view, decoded).expect("historical Guard receipt");
     assert_eq!(finished.payload().unwrap(), bytes);
 }
@@ -1034,8 +1020,8 @@ fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
     assert!(matches!(observed.attestation, Some(Attestation::Guard(_))));
     let finished = finish(observed);
     let bytes = finished.payload().unwrap();
-    let (kind, version) = (finished.kind(), finished.version());
-    let decoded = Event::decode(kind, version, &bytes, Some(run), Some(agent)).unwrap();
+    let kind = finished.kind();
+    let decoded = Event::decode(kind, &bytes, Some(run), Some(agent)).unwrap();
     assert_eq!(decoded.payload().unwrap(), bytes);
     apply(&mut historical, decoded).expect("historical Guard Mkdir receipt");
     intent.enforcement_digest = FileReceipt::enforcement_digest();
@@ -1081,15 +1067,16 @@ fn file_receipts_preserve_guard_history_and_require_the_new_execution_site() {
 }
 
 #[test]
-fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts() {
+fn discovery_replays_in_process_observations_and_rejects_guard_receipts() {
     let cases = [
         (
             ToolCall::Glob {
                 pattern: "**/*.rs".into(),
                 path: "src".into(),
+                offset: 0,
                 limit: 100,
             },
-            r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false}"#,
+            r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false,"next_offset":null}"#,
         ),
         (
             ToolCall::List { path: "src".into() },
@@ -1102,8 +1089,21 @@ fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts
         apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
         apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
         apply(&mut view, tool_started(run, agent, &intent)).expect("discovery starts");
-        let mut guarded = observation_for(intent.clone(), b"");
-        guarded.output = output.into();
+        let mut in_process = observation_for(intent.clone(), b"");
+        in_process.output = output.into();
+        in_process.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
+            policy_digest: intent.policy_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+        });
+        let finished = |observation| Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        let mut guarded = in_process.clone();
         guarded.attestation = Some(crate::tools::Attestation::Guard(
             crate::tools::GuardReceipt {
                 contract_version: 1,
@@ -1112,29 +1112,18 @@ fn discovery_replays_recorded_guard_observations_and_rejects_in_process_receipts
                 limits: intent.limits.clone(),
             },
         ));
-        let finished = |observation| Event::ToolFinished {
-            checkpoint: None,
-            run_id: run,
-            agent_run_id: agent,
-            observation,
-        };
-        let mut in_process = guarded.clone();
-        in_process.attestation = Some(crate::tools::Attestation::InProcess {
-            receipt: None,
-            policy_digest: intent.policy_digest,
-            workspace_device: intent.workspace_device,
-            workspace_inode: intent.workspace_inode,
-        });
-        assert!(rejected(&view, finished(in_process)));
-        let mut invalid = guarded.clone();
-        if let Some(crate::tools::Attestation::Guard(receipt)) = &mut invalid.attestation {
-            receipt.intent_digest = [0; 32];
+        assert!(rejected(&view, finished(guarded)));
+        let mut invalid = in_process.clone();
+        if let Some(crate::tools::Attestation::InProcess { policy_digest, .. }) =
+            &mut invalid.attestation
+        {
+            *policy_digest = [0; 32];
         }
         assert!(rejected(&view, finished(invalid)));
-        apply(&mut view, finished(guarded.clone())).expect("Guard attestation");
+        apply(&mut view, finished(in_process.clone())).expect("in-process attestation");
         assert_eq!(
             view.runs[0].tools.last().unwrap().observation.as_ref(),
-            Some(&guarded)
+            Some(&in_process)
         );
     }
 }
@@ -1216,6 +1205,7 @@ fn continuation_requires_all_requested_observed() {
 
 fn definition_preparation(
     model: Option<&str>,
+    sandbox: bool,
 ) -> (SessionView, GoalId, EffectIntent, ToolObservation) {
     let (session, goal, run, actor) = (
         SessionId::new(),
@@ -1229,6 +1219,7 @@ fn definition_preparation(
         digest: [3; 32],
     }];
     let mut configured = config(CollaborationPolicy::Single, true);
+    configured.tool_policy.as_mut().unwrap().guard.sandbox = sandbox;
     configured.agent_definitions = Some(crate::tools::DefinitionRegistryPin {
         digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
         files,
@@ -1246,7 +1237,7 @@ fn definition_preparation(
             raw_digest: [3; 32],
         },
     );
-    let output = serde_json::json!({"Definition":{"definition":{"version":1,"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"},"notes":[]}}).to_string();
+    let output = serde_json::json!({"Definition":{"definition":{"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"},"notes":[]}}).to_string();
     let observation = ToolObservation {
         spill: None,
         intent: intent.clone(),
@@ -1271,7 +1262,7 @@ fn definition_preparation(
 
 #[test]
 fn agent_definition_initialization_replay_requires_pinned_guard_observations() {
-    let (mut view, goal, intent, observation) = definition_preparation(None);
+    let (mut view, goal, intent, observation) = definition_preparation(None, true);
     let reserve = || reserve_child_call(goal, intent.run_id, intent.agent_run_id);
     assert!(
         rejected(&view, reserve()),
@@ -1351,9 +1342,50 @@ fn agent_definition_initialization_replay_requires_pinned_guard_observations() {
 }
 
 #[test]
+fn agent_definitions_parse_in_process_only_in_a_run_without_a_sandbox() {
+    for sandbox in [true, false] {
+        let (mut view, goal, intent, mut observation) = definition_preparation(None, sandbox);
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                verdict: None,
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                intent: intent.clone().into(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .unwrap();
+        observation.attestation = Some(crate::tools::Attestation::InProcess {
+            receipt: None,
+            policy_digest: intent.policy_digest,
+            workspace_device: intent.workspace_device,
+            workspace_inode: intent.workspace_inode,
+        });
+        let finished = apply(
+            &mut view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                observation,
+            },
+        );
+        assert_eq!(finished.is_ok(), !sandbox, "sandbox {sandbox}");
+        if !sandbox {
+            apply(
+                &mut view,
+                reserve_child_call(goal, intent.run_id, intent.agent_run_id),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn agent_definition_replay_rejects_noncurrent_normalization() {
     for case in ["missing-field", "unknown-field", "failed"] {
-        let (mut view, goal, intent, mut observation) = definition_preparation(None);
+        let (mut view, goal, intent, mut observation) = definition_preparation(None, true);
         let mut output: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
         match case {
             "missing-field" => {
@@ -1419,7 +1451,7 @@ fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps
                 if multiedit {
                     ToolCall::MultiEdit {
                         file_path: "src/lib.rs".into(),
-                        expected_digest: crate::validate::hex_digest(before.as_bytes()),
+                        expected_digest: Some(crate::validate::hex_digest(before.as_bytes())),
                         edits: vec![crate::LiteralEdit {
                             old_string: before.into(),
                             new_string: after.into(),
@@ -1518,7 +1550,6 @@ fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps
             assert_eq!(
                 Event::decode(
                     event.kind(),
-                    crate::session::payload_version(event.kind()).unwrap(),
                     &event.payload().unwrap(),
                     Some(run),
                     Some(agent)

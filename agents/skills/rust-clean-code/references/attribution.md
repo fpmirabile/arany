@@ -1,6 +1,6 @@
 # Attribution and source policy
 
-This is Arany's independently maintained, condensed adaptation of **Rust Best Practices** by **Apollo GraphQL / Apollo Graph, Inc. and contributors**, from [`apollographql/skills`](https://github.com/apollographql/skills/tree/322da824b2845f42e21b30465c5ea71f3196b849/skills/rust-best-practices), which is based on the [Apollo Rust Best Practices Handbook](https://github.com/apollographql/rust-best-practices).
+This skill is an independently maintained, condensed adaptation of **Rust Best Practices** by **Apollo GraphQL / Apollo Graph, Inc. and contributors**, from [`apollographql/skills`](https://github.com/apollographql/skills/tree/322da824b2845f42e21b30465c5ea71f3196b849/skills/rust-best-practices), which is based on the [Apollo Rust Best Practices Handbook](https://github.com/apollographql/rust-best-practices).
 
 The adaptation started from upstream `SKILL.md` and the nine chapters under `references/` at commit `322da824b2845f42e21b30465c5ea71f3196b849` (skill metadata version `1.1.2`), retrieved on 2026-09-29. The upstream MIT copyright and permission notice is preserved verbatim in [LICENSE](../LICENSE). This skill and its local adaptations are distributed under that license; it does not change the license of the surrounding repository. No Apollo endorsement is implied.
 

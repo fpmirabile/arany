@@ -24,7 +24,45 @@ pub(super) fn headers(
 }
 
 pub(super) fn headers_at(headers: &HeaderMap, slot: &RateLimitSlot, clock: impl FnOnce() -> i64) {
+    let Some((fields, failures)) = header_fields(headers) else {
+        return;
+    };
     let mut sample = RateLimits::default();
+    let at = clock();
+    for (index, target) in [&mut sample.primary, &mut sample.secondary]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(reason) = failures[index] {
+            sample.unavailable = Some(LimitFailure {
+                reason,
+                source: LimitSource::Headers,
+                observed_at: at,
+            });
+            continue;
+        }
+        let [percent, minutes, reset] = fields[index];
+        if percent.is_none() && minutes.is_none() && reset.is_none() {
+            continue;
+        }
+        match header_window(fields[index], at) {
+            Some(window) => *target = Some(window),
+            None => {
+                sample.unavailable = Some(LimitFailure {
+                    reason: LimitUnavailable::Invalid,
+                    source: LimitSource::Headers,
+                    observed_at: at,
+                })
+            }
+        }
+    }
+    slot.record(sample);
+}
+
+type HeaderFields<'a> = [[Option<&'a str>; 3]; 2];
+
+// The primary and secondary window headers and why either is unusable; None when none was sent.
+fn header_fields(headers: &HeaderMap) -> Option<(HeaderFields<'_>, [Option<LimitUnavailable>; 2])> {
     let mut fields = [[None; 3]; 2];
     let mut failures = [None; 2];
     let mut count = 0;
@@ -56,54 +94,24 @@ pub(super) fn headers_at(headers: &HeaderMap, slot: &RateLimitSlot, clock: impl 
             }
         }
     }
-    if count == 0 {
-        return;
-    }
-    let at = clock();
-    for (index, target) in [&mut sample.primary, &mut sample.secondary]
-        .into_iter()
-        .enumerate()
-    {
-        if let Some(reason) = failures[index] {
-            sample.unavailable = Some(LimitFailure {
-                reason,
-                source: LimitSource::Headers,
-                observed_at: at,
-            });
-            continue;
-        }
-        let [percent, minutes, reset] = fields[index];
-        if percent.is_none() && minutes.is_none() && reset.is_none() {
-            continue;
-        }
-        let parsed = (|| {
-            let window = PlanWindow {
-                source: LimitSource::Headers,
-                observed_at: at,
-                used_percent: percent
-                    .map(str::parse::<f64>)
-                    .transpose()
-                    .ok()?
-                    .map(UsedPercent::try_from)
-                    .transpose()
-                    .ok()?,
-                window_minutes: minutes.map(str::parse).transpose().ok()?,
-                reset_at: reset.map(str::parse).transpose().ok()?,
-            };
-            window.valid().then_some(window)
-        })();
-        match parsed {
-            Some(window) => *target = Some(window),
-            None => {
-                sample.unavailable = Some(LimitFailure {
-                    reason: LimitUnavailable::Invalid,
-                    source: LimitSource::Headers,
-                    observed_at: at,
-                })
-            }
-        }
-    }
-    slot.record(sample);
+    (count > 0).then_some((fields, failures))
+}
+
+fn header_window([percent, minutes, reset]: [Option<&str>; 3], at: i64) -> Option<PlanWindow> {
+    let window = PlanWindow {
+        source: LimitSource::Headers,
+        observed_at: at,
+        used_percent: percent
+            .map(str::parse::<f64>)
+            .transpose()
+            .ok()?
+            .map(UsedPercent::try_from)
+            .transpose()
+            .ok()?,
+        window_minutes: minutes.map(str::parse).transpose().ok()?,
+        reset_at: reset.map(str::parse).transpose().ok()?,
+    };
+    window.valid().then_some(window)
 }
 
 pub(super) fn event(value: &Value, slot: &RateLimitSlot) {

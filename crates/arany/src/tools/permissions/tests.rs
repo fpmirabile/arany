@@ -20,6 +20,7 @@ fn glob(path: &str) -> ToolCall {
     ToolCall::Glob {
         pattern: "**/*.rs".into(),
         path: path.into(),
+        offset: 0,
         limit: 100,
     }
 }
@@ -35,7 +36,7 @@ fn write(path: &str) -> ToolCall {
 fn multiedit(path: &str) -> ToolCall {
     ToolCall::MultiEdit {
         file_path: path.into(),
-        expected_digest: "0".repeat(64),
+        expected_digest: Some("0".repeat(64)),
         edits: vec![crate::LiteralEdit {
             old_string: "a".into(),
             new_string: "b".into(),
@@ -51,6 +52,7 @@ fn command(program: &str, args: &[&str]) -> ToolCall {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     }
 }
 
@@ -74,11 +76,11 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
     };
     use Decision::{Allow, Ask, Deny};
     for (mode, decisions) in [
-        ("default", [Allow, Ask, Ask, Ask]),
-        ("acceptEdits", [Allow, Allow, Ask, Ask]),
-        ("auto", [Allow, Ask, Ask, Ask]),
+        ("default", [Allow, Ask, Allow, Ask]),
+        ("acceptEdits", [Allow, Allow, Allow, Ask]),
+        ("auto", [Allow, Allow, Allow, Ask]),
         ("plan", [Allow, Deny, Deny, Deny]),
-        ("dontAsk", [Allow, Deny, Deny, Deny]),
+        ("dontAsk", [Allow, Deny, Allow, Deny]),
     ] {
         let parsed = config(json!({"defaultMode": mode}));
         assert_eq!(
@@ -98,10 +100,13 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
         config(json!({"allow": ["git_commit"]})).decision(&git_write),
         Allow
     );
-    assert_eq!(
-        config(json!({"defaultMode": "acceptEdits", "allow": ["git_commit"]})).decision(&git_write),
-        Ask
-    );
+    for mode in ["acceptEdits", "auto"] {
+        assert_eq!(
+            config(json!({"defaultMode": mode, "allow": ["git_commit"]})).decision(&git_write),
+            Allow,
+            "{mode}"
+        );
+    }
     assert_eq!(
         config(json!({"deny": ["Read(./src/**)"]})).decision(&git_write),
         Deny
@@ -223,6 +228,14 @@ fn explicit_ask_uses_humans_and_decision_composition_only_narrows() {
     }
     assert_eq!(
         config(json!({"defaultMode":"auto"})).approval_mode(&command("git", &["diff"])),
+        None
+    );
+    assert_eq!(
+        config(json!({"defaultMode":"auto"})).approval_mode(&ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![".".into()],
+            staged: false,
+        }),
         Some(ApprovalMode::Auto)
     );
     assert_eq!(
@@ -276,7 +289,7 @@ fn dont_ask_preserves_explicit_rule_provenance() {
 }
 
 #[test]
-fn bash_globs_follow_peer_word_boundaries_and_trailing_star() {
+fn bash_globs_follow_word_boundaries_and_trailing_star() {
     for (pattern, program, args, matched) in [
         ("git diff *", "git", vec!["diff"], true),
         ("git diff *", "git", vec!["diff", "--stat", "main"], true),
@@ -297,12 +310,8 @@ fn bash_globs_follow_peer_word_boundaries_and_trailing_star() {
     ] {
         let parsed = config(json!({"allow": [format!("Bash({pattern})")]}));
         assert_eq!(
-            parsed.decision(&command(program, &args)),
-            if matched {
-                Decision::Allow
-            } else {
-                Decision::Ask
-            },
+            parsed.evaluate(&command(program, &args)).1 == PermissionSource::Rule,
+            matched,
             "{pattern} {program} {args:?}"
         );
     }
@@ -319,11 +328,15 @@ fn opaque_argv_never_auto_allows_and_conservatively_matches_restrictions() {
         vec!["diff\nrm x"],
     ] {
         let call = command("sh", &args);
-        for (list, expected) in [
-            ("allow", Decision::Ask),
-            ("ask", Decision::Ask),
-            ("deny", Decision::Deny),
-        ] {
+        // The sandbox needs no approval, but an allow rule never claims opaque argv.
+        assert_eq!(
+            config(json!({"allow":["Bash(git diff *)"]}))
+                .evaluate(&call)
+                .1,
+            PermissionSource::Mode,
+            "{args:?}"
+        );
+        for (list, expected) in [("ask", Decision::Ask), ("deny", Decision::Deny)] {
             assert_eq!(
                 config(json!({list:["Bash(git diff *)"]})).decision(&call),
                 expected,
@@ -343,6 +356,7 @@ fn opaque_argv_never_auto_allows_and_conservatively_matches_restrictions() {
         cwd: ".".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     assert_eq!(
         config(json!({"allow":["Bash(*)"]})).decision(&large),
@@ -355,7 +369,7 @@ fn opaque_argv_never_auto_allows_and_conservatively_matches_restrictions() {
 }
 
 #[test]
-fn file_globs_follow_segment_depth_anchors_and_peer_directory_rules() {
+fn file_globs_follow_segment_depth_anchors_and_directory_rules() {
     for (pattern, path, matched) in [
         ("./src/**", "src/lib.rs", true),
         ("./src/**", "vendor/src/lib.rs", false),
@@ -482,7 +496,7 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
             "{rule}"
         );
     }
-    // The native name selects only its own operation; the peer Glob also keeps List.
+    // The native name selects only its own operation; the rule Glob also keeps List.
     assert_eq!(
         config(json!({"deny":["glob"]})).decision(&ToolCall::List { path: "src".into() }),
         Decision::Allow
@@ -535,12 +549,16 @@ fn changeset_rules_require_all_paths_for_allow_and_any_path_for_deny_or_ask() {
             },
         },
     };
+    let allow = config(json!({"allow":["Edit(src/**)"]}));
+    assert_eq!(
+        allow.evaluate(&batch(&["docs/a", "src/a"])).1,
+        PermissionSource::Mode
+    );
+    assert_eq!(
+        allow.evaluate(&batch(&["src/a", "src/b"])).1,
+        PermissionSource::Rule
+    );
     for (settings, paths, expected) in [
-        (
-            json!({"allow":["Edit(src/**)"]}),
-            vec!["docs/a", "src/a"],
-            Decision::Ask,
-        ),
         (
             json!({"deny":["Edit(src/**)"]}),
             vec!["docs/a", "src/a"],
@@ -684,7 +702,7 @@ fn permission_limits_accept_boundaries_and_reject_overflow() {
 }
 
 #[test]
-fn hook_schema_accepts_peer_events_defaults_exec_form_and_inert_commands() {
+fn hook_schema_accepts_lifecycle_events_defaults_exec_form_and_inert_commands() {
     let command = "do-not-execute $(exit 9)";
     let settings = json!({"hooks":{
         "PreToolUse":[{"matcher":"Bash", "hooks":[{"type":"command", "command":command}]}],
@@ -935,7 +953,7 @@ fn mcp_call(server: &str, tool: &str) -> ToolCall {
 }
 
 #[test]
-fn auto_allow_rules_never_bypass_execution_review() {
+fn auto_resolves_user_rules_first_and_never_reviews_sandboxed_work() {
     for (rule, call) in [
         ("Bash", command("python", &["script.py"])),
         ("Bash(*)", command("python", &["script.py"])),
@@ -960,12 +978,8 @@ fn auto_allow_rules_never_bypass_execution_review() {
         ("Edit", write("src/a")),
     ] {
         let parsed = config(json!({"defaultMode":"auto", "allow":[rule]}));
-        assert_eq!(parsed.decision(&call), Decision::Ask, "{rule}");
-        assert_eq!(
-            parsed.approval_mode(&call),
-            Some(ApprovalMode::Auto),
-            "{rule}"
-        );
+        assert_eq!(parsed.decision(&call), Decision::Allow, "{rule}");
+        assert_eq!(parsed.approval_mode(&call), None, "{rule}");
         let human = config(json!({"defaultMode":"auto", "allow":[rule], "ask":[rule]}));
         assert_eq!(
             human.approval_mode(&call),
@@ -978,27 +992,22 @@ fn auto_allow_rules_never_bypass_execution_review() {
 }
 
 #[test]
-fn default_allows_are_explicit_preapprovals_and_accept_edits_keeps_command_approval() {
+fn sandboxed_work_needs_no_approval_and_allows_stay_explicit_preapprovals() {
     for (rule, call) in [
         ("Bash", command("sh", &["-c", "echo x"])),
         ("Bash(*)", command("sh", &["-c", "echo x"])),
         ("Bash(git diff *)", command("git", &["diff"])),
         ("mcp_call", mcp_call("memory", "read")),
     ] {
-        assert_eq!(
-            config(json!({})).approval_mode(&call),
-            Some(ApprovalMode::Request)
-        );
-        let parsed = config(json!({"defaultMode":"default", "allow":[rule]}));
-        assert_eq!(parsed.decision(&call), Decision::Allow, "{rule}");
-        assert_eq!(parsed.approval_mode(&call), None, "{rule}");
-        let edits = config(json!({"defaultMode":"acceptEdits", "allow":[rule]}));
-        assert_eq!(edits.decision(&call), Decision::Ask, "{rule}");
-        assert_eq!(
-            edits.approval_mode(&call),
-            Some(ApprovalMode::Request),
-            "{rule}"
-        );
+        assert_eq!(config(json!({})).approval_mode(&call), None);
+        for mode in ["default", "acceptEdits"] {
+            let parsed = config(json!({"defaultMode":mode, "allow":[rule]}));
+            assert_eq!(
+                parsed.evaluate(&call),
+                (Decision::Allow, PermissionSource::Rule, None),
+                "{mode} {rule}"
+            );
+        }
     }
 }
 
@@ -1041,7 +1050,7 @@ fn restrictive_paths_cover_case_and_normalization_aliases_without_widening_allow
 }
 
 #[test]
-fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
+fn mcp_rule_names_match_real_servers_tools_and_hook_subjects() {
     for (rule, server, tool, matched) in [
         ("mcp__*", "memory", "read", true),
         ("mcp__memory", "memory", "read", true),
@@ -1059,7 +1068,7 @@ fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
             if matched {
                 Decision::Deny
             } else {
-                Decision::Ask
+                Decision::Allow
             },
             "{rule} {server} {tool}"
         );
@@ -1113,8 +1122,10 @@ fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
         ("mcp__a__b__c", "a__b", "c"),
     ] {
         assert_eq!(
-            config(json!({"allow":[rule]})).decision(&mcp_call(server, tool)),
-            Decision::Ask,
+            config(json!({"allow":[rule]}))
+                .evaluate(&mcp_call(server, tool))
+                .1,
+            PermissionSource::Mode,
             "allow {rule} {server} {tool}"
         );
     }
@@ -1267,13 +1278,13 @@ fn bash_restrictions_cover_word_boundary_suffixes_without_expanding_allows() {
             Some(ApprovalMode::Request)
         );
         assert_eq!(
-            config(json!({"allow":["Bash(rm *)"]})).decision(&call),
-            Decision::Ask
+            config(json!({"allow":["Bash(rm *)"]})).evaluate(&call).1,
+            PermissionSource::Mode
         );
     }
     assert_eq!(
-        config(json!({"deny":["Bash(rm *)"]})).decision(&command("echo", &["confirm"])),
-        Decision::Ask
+        config(json!({"deny":["Bash(rm *)"]})).evaluate(&command("echo", &["confirm"])),
+        (Decision::Allow, PermissionSource::Mode, None)
     );
 }
 
@@ -1315,11 +1326,11 @@ fn unguarded_commands_match_bash_deny_and_ask_but_never_allow() {
         Decision::Deny
     );
     assert_eq!(unguarded.label(), "command_unguarded");
-    assert_eq!(peer_name(&unguarded), "Bash");
+    assert_eq!(rule_name(&unguarded), "Bash");
 }
 
 #[test]
-fn auto_mode_never_routes_an_unguarded_command_to_ai_review() {
+fn auto_mode_reviews_no_sandboxed_command_and_leaves_host_commands_to_the_engine() {
     let unguarded = ToolCall::CommandUnguarded {
         program: "sh".into(),
         args: vec!["-c".into(), "cargo test".into()],
@@ -1330,8 +1341,8 @@ fn auto_mode_never_routes_an_unguarded_command_to_ai_review() {
     let guarded = command("sh", &["-c", "cargo test"]);
     let parsed = config(json!({"defaultMode": "auto"}));
     assert_eq!(
-        parsed.evaluate(&guarded).2,
-        Some(crate::tools::ApprovalMode::Auto)
+        parsed.evaluate(&guarded),
+        (Decision::Allow, PermissionSource::Mode, None)
     );
     let evaluated = parsed.evaluate(&unguarded);
     assert_eq!(evaluated.0, Decision::Ask);
@@ -1350,7 +1361,7 @@ fn ignored(why: HookIgnoreReason) -> HookResult {
 }
 
 #[test]
-fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
+fn hook_output_parsing_maps_exit_codes_and_json_precedence() {
     let specific = |fields: Value| {
         let mut output = json!({"hookEventName": "PreToolUse"});
         output
@@ -1561,8 +1572,15 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
         content: "x".repeat(MAX_HOOK_INPUT_BYTES / 2),
     };
     let id = uuid::Uuid::now_v7();
-    let input =
-        pre_tool_use_input("session", PermissionMode::AcceptEdits, &call, id).expect("fits");
+    let input = pre_tool_use_input(
+        HookHeader {
+            session_id: "session",
+            mode: PermissionMode::AcceptEdits,
+        },
+        &call,
+        id,
+    )
+    .expect("fits");
     let value: Value = serde_json::from_str(&input).unwrap();
     let mut fields: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
     fields.sort();
@@ -1594,13 +1612,22 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
     };
     assert!(large.valid());
     assert!(matches!(
-        pre_tool_use_input("session", PermissionMode::AcceptEdits, &large, id),
+        pre_tool_use_input(
+            HookHeader {
+                session_id: "session",
+                mode: PermissionMode::AcceptEdits
+            },
+            &large,
+            id
+        ),
         Err(ConfigError::Limit(_))
     ));
     assert!(matches!(
         super::hooks::post_tool_use_input(
-            "session",
-            PermissionMode::AcceptEdits,
+            HookHeader {
+                session_id: "session",
+                mode: PermissionMode::AcceptEdits
+            },
             &large,
             id,
             json!(""),
@@ -1722,8 +1749,10 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     let mode = PermissionMode::Default;
     let id = uuid::Uuid::now_v7();
     let small = post_tool_use_input(
-        "s",
-        mode,
+        HookHeader {
+            session_id: "s",
+            mode,
+        },
         &call,
         id,
         json!({"output": "ok"}),
@@ -1732,12 +1761,31 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     .unwrap();
     assert!(small.contains("\"hook_event_name\":\"PostToolUse\"") && !small.contains("truncated"));
     let huge = json!({"output": "\"\n\\".repeat(MAX_HOOK_INPUT_BYTES)});
-    let cut =
-        post_tool_use_input("s", mode, &call, id, huge.clone(), MAX_HOOK_INPUT_BYTES).unwrap();
+    let cut = post_tool_use_input(
+        HookHeader {
+            session_id: "s",
+            mode,
+        },
+        &call,
+        id,
+        huge.clone(),
+        MAX_HOOK_INPUT_BYTES,
+    )
+    .unwrap();
     assert!(cut.len() <= MAX_HOOK_INPUT_BYTES);
     let parsed: serde_json::Value = serde_json::from_str(&cut).unwrap();
     assert_eq!(parsed["tool_response"]["truncated"], true);
-    let bare = post_tool_use_input("s", mode, &call, id, huge, 0).unwrap();
+    let bare = post_tool_use_input(
+        HookHeader {
+            session_id: "s",
+            mode,
+        },
+        &call,
+        id,
+        huge,
+        0,
+    )
+    .unwrap();
     assert!(bare.len() < cut.len() && bare.contains("\"text\":\"\""));
 }
 
@@ -1788,6 +1836,7 @@ fn updated_input_accepts_only_provable_narrowing() {
     let glob_call = |pattern: &str, path: &str, limit| ToolCall::Glob {
         pattern: pattern.into(),
         path: path.into(),
+        offset: 0,
         limit,
     };
     let status = |path: &str| ToolCall::GitStatus { path: path.into() };
@@ -2022,12 +2071,16 @@ fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
         HookEvent::PreCompact,
     ] {
         let input = lifecycle_input(
-            "session",
-            PermissionMode::Default,
-            event,
-            true,
-            &"\"é".repeat(32 * 1024),
-            "auto",
+            HookHeader {
+                session_id: "session",
+                mode: PermissionMode::Default,
+            },
+            LifecycleSubject {
+                event,
+                active: true,
+                message: &"\"é".repeat(32 * 1024),
+                trigger: "auto",
+            },
             MAX_HOOK_INPUT_BYTES,
         );
         assert!(input.len() <= MAX_HOOK_INPUT_BYTES);
@@ -2218,8 +2271,8 @@ fn typed_prefix_classification_ignores_raw_commands_and_branch_listing() {
     let parsed = typed_config("default", rules).unwrap();
     assert_eq!(parsed.decision(&commit_call()), Decision::Deny);
     assert_eq!(
-        parsed.decision(&command("git", &["commit", "-m", "m"])),
-        Decision::Ask
+        parsed.evaluate(&command("git", &["commit", "-m", "m"])),
+        (Decision::Allow, PermissionSource::Mode, None)
     );
     let rules = vec![typed(&["git", "branch"], "deny", Value::Null)];
     let parsed = typed_config("default", rules).unwrap();
@@ -2231,7 +2284,10 @@ fn typed_prefix_classification_ignores_raw_commands_and_branch_listing() {
     ];
     let parsed = typed_config("default", rules).unwrap();
     assert_eq!(parsed.decision(&commit_call()), Decision::Ask);
-    assert_eq!(parsed.decision(&command("git", &["push"])), Decision::Ask);
+    assert_eq!(
+        parsed.evaluate(&command("git", &["push"])),
+        (Decision::Allow, PermissionSource::Mode, None)
+    );
 }
 
 #[test]
@@ -2284,8 +2340,8 @@ fn typed_prefix_rules_obey_modes_and_restrictive_precedence() {
     // [no rule, allow, ask, deny] per mode.
     for (mode, expected) in [
         ("default", [Ask, Allow, Ask, Deny]),
-        ("acceptEdits", [Ask, Ask, Ask, Deny]),
-        ("auto", [Ask, Ask, Ask, Deny]),
+        ("acceptEdits", [Ask, Allow, Ask, Deny]),
+        ("auto", [Ask, Allow, Ask, Deny]),
         ("plan", [Deny, Deny, Deny, Deny]),
         ("dontAsk", [Deny, Allow, Deny, Deny]),
     ] {
@@ -2388,7 +2444,7 @@ fn a_typed_allow_keeps_its_provenance_when_an_ordinary_allow_also_matches() {
 }
 
 #[test]
-fn host_git_modes_and_prefixes_never_replace_human_approval() {
+fn host_git_typed_allows_reach_the_engine_and_ask_or_deny_still_narrow() {
     let calls = [
         ToolCall::GitPush {
             remote: "https://github.com/o/r.git".into(),
@@ -2410,10 +2466,13 @@ fn host_git_modes_and_prefixes_never_replace_human_approval() {
                 let config =
                     typed_config(mode, vec![typed(prefix.tokens(), decision, Value::Null)])
                         .unwrap();
-                let (verdict, _, approval) = config.evaluate(call);
-                if decision == "deny" || matches!(mode, "plan" | "dontAsk") {
+                let (verdict, source, approval) = config.evaluate(call);
+                if decision == "deny" || mode == "plan" || mode == "dontAsk" && decision == "ask" {
                     assert_eq!(verdict, Decision::Deny, "{mode} {decision}");
                     assert_eq!(approval, None);
+                } else if decision == "allow" {
+                    assert_eq!(verdict, Decision::Allow, "{mode} {decision}");
+                    assert_eq!(source, PermissionSource::TypedPrefixRule);
                 } else {
                     assert_eq!(verdict, Decision::Ask, "{mode} {decision}");
                     assert_eq!(approval, Some(ApprovalMode::Request));
@@ -2465,7 +2524,7 @@ fn remembered_host_prefix_revalidates_executable_bytes_before_saving() {
     let tools = state.path().join("tools.json");
     std::fs::write(
         &tools,
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .unwrap();
     std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2581,7 +2640,7 @@ fn host_prefix_records_enforce_literal_scope_closed_policy_and_settings_bounds()
         }
     }
     let mut record = serde_json::to_value(&rule).unwrap();
-    record["version"] = json!(crate::tools::unguarded::HOST_POLICY_VERSION + 1);
+    record["version"] = json!(1);
     assert!(
         PermissionConfig::parse(
             &serde_json::to_vec(&json!({"permissions":{"hostPrefixes":[record]}})).unwrap()
@@ -2622,7 +2681,10 @@ fn host_prefix_scope_normalizes_lexical_paths_without_admitting_directory_aliase
 fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
     let intent = host_intent();
     let rule = HostPrefixRule::from_intent(&intent, 2).unwrap();
-    let mut config: crate::tools::config::Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let mut config: crate::tools::config::Config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     assert!(rule.admitted_by(&config));
     for name in ["python3.14", "git", "gh"] {
         let program: crate::tools::config::Program = serde_json::from_value(json!({"name":name,"executable":format!("/opt/bin/{name}"),"sha256":"a".repeat(64),"interpreter":name == "python3.14","inputs":[]})).unwrap();
@@ -2639,12 +2701,12 @@ fn declared_interpreter_and_git_pins_exclude_renamed_host_programs() {
 fn delete_and_move_rules_cover_both_paths_without_partial_allows() {
     let delete = ToolCall::Delete {
         path: "src/source".into(),
-        expected_digest: "0".repeat(64),
+        expected_digest: Some("0".repeat(64)),
     };
     let move_call = ToolCall::Move {
         source: "src/source".into(),
         destination: "dest/target".into(),
-        expected_digest: "0".repeat(64),
+        expected_digest: Some("0".repeat(64)),
     };
     assert_eq!(
         config(json!({"allow":["Edit(./src/**)"]})).decision(&delete),
@@ -2737,8 +2799,8 @@ fn network_domain_rules_extend_a_grant_and_never_match_calls() {
     assert_eq!(allow, ["*.pypi.org", "example.com"]);
     assert_eq!(restrict, ["bad.pypi.org", "ask.example.com"]);
     assert_eq!(
-        rules.decision(&command("curl", &["https://example.com"])),
-        Decision::Ask
+        rules.evaluate(&command("curl", &["https://example.com"])).1,
+        PermissionSource::Mode
     );
     for rule in [
         "Network",
@@ -2808,4 +2870,63 @@ fn web_fetch_domain_rules_allow_ask_and_deny_by_host() {
         );
         assert!(parsed.is_err(), "{rule}");
     }
+}
+
+#[test]
+fn auto_approves_workspace_edits_except_protected_paths() {
+    let auto = config(json!({"defaultMode":"auto"}));
+    assert_eq!(
+        auto.evaluate(&write("src/a.rs")),
+        (Decision::Allow, PermissionSource::Mode, None)
+    );
+    for path in [
+        "AGENTS.md",
+        "docs/CLAUDE.md",
+        ".claude/agents/reader.md",
+        "web/.vscode/settings.json",
+        "home/.config/git/config",
+        ".husky/pre-commit",
+        "lefthook.yml",
+    ] {
+        assert_eq!(
+            auto.evaluate(&write(path)),
+            (
+                Decision::Ask,
+                PermissionSource::Mode,
+                Some(ApprovalMode::Auto)
+            ),
+            "{path}"
+        );
+    }
+    let moved = ToolCall::Move {
+        source: "src/a.rs".into(),
+        destination: ".cargo/config.toml".into(),
+        expected_digest: Some("a".repeat(64)),
+    };
+    assert_eq!(auto.evaluate(&moved).0, Decision::Ask);
+    let publication = |path: &str| ToolCall::ApplyChangeset {
+        source: crate::session::worker::ChangesetSource::CommandReceipt {
+            source_intent_digest: [1; 32],
+            changeset: CommandChangeset {
+                files: vec![FileChange {
+                    path: path.into(),
+                    before: None,
+                    after: Some(FileVersion::from_bytes(b"x", false)),
+                }],
+            },
+        },
+    };
+    assert_eq!(auto.evaluate(&publication("src/a.rs")).0, Decision::Allow);
+    assert_eq!(
+        auto.evaluate(&publication("AGENTS.md")),
+        (
+            Decision::Ask,
+            PermissionSource::Mode,
+            Some(ApprovalMode::Auto)
+        )
+    );
+    assert_eq!(
+        config(json!({})).evaluate(&publication("AGENTS.md")).0,
+        Decision::Allow
+    );
 }

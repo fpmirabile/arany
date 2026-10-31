@@ -32,11 +32,29 @@ pub(super) fn validate_finished(
     if declared_intents_pending(run, *agent_run_id, &observation.intent.call) {
         return Err(ReplayError::InvalidTransition);
     }
-    let configured = run
+    let policy = run
         .config
         .as_ref()
-        .and_then(|config| config.tool_policy.as_ref())
-        .is_some_and(|policy| policy.permissions_digest.is_some());
+        .and_then(|config| config.tool_policy.as_ref());
+    // A definition parses in process only in a Run admitted without a sandbox.
+    if matches!(
+        observation.attestation,
+        Some(crate::tools::Attestation::InProcess { .. })
+    ) && matches!(
+        observation.intent.call,
+        crate::tools::ToolCall::ParseAgentDefinition { .. }
+    ) && policy.is_none_or(|policy| policy.guard.sandbox)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if let Some(crate::tools::Attestation::Git(receipt)) = &observation.attestation
+        && policy
+            .and_then(|policy| policy.git.as_ref())
+            .is_none_or(|git| git.sha256 != receipt.executable_sha256)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let configured = policy.is_some_and(|policy| policy.permissions_digest.is_some());
     let definition_mode = super::definition_mode(run, *agent_run_id)?;
     let restrictions = super::super::mode_restrictions(run, *agent_run_id)?;
     let unguarded = observation.intent.call.is_unguarded();
@@ -426,8 +444,20 @@ fn valid_origin(
                 .tools
                 .iter()
                 .filter_map(|tool| tool.observation.as_ref())
-                .all(|observation| !observation.stops_run())
+                .all(|observation| !observation.stops_tool_step())
     }
+}
+
+fn needs_verdict(
+    run: &RunView,
+    agent_run_id: AgentRunId,
+    call: &crate::tools::ToolCall,
+) -> Result<bool, ReplayError> {
+    Ok(super::permissions_pinned(run)
+        || super::definition_mode(run, agent_run_id)?.is_some()
+        || call.is_host()
+        || call.is_unguarded()
+        || call.is_git() && call.facts().mutates)
 }
 
 pub(super) fn started(
@@ -485,16 +515,8 @@ pub(super) fn started(
     }
     if verdict.is_some() {
         super::permission::apply(current, event)?;
-    } else {
-        let run = active_run(current, *run_id)?;
-        if super::permissions_pinned(run)
-            || super::definition_mode(run, *agent_run_id)?.is_some()
-            || intent.call.is_host()
-            || intent.call.is_unguarded()
-            || intent.call.is_git() && intent.call.facts().mutates
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
+    } else if needs_verdict(active_run(current, *run_id)?, *agent_run_id, &intent.call)? {
+        return Err(ReplayError::InvalidTransition);
     }
     super::tool_by_digest(
         active_run(current, *run_id)?,

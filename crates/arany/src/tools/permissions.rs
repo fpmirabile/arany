@@ -1,6 +1,7 @@
 mod hooks;
 mod host;
 pub use host::HostPrefixRule;
+pub(crate) use host::fill_host_prefix;
 mod prefix;
 
 pub use hooks::{
@@ -10,8 +11,9 @@ pub use hooks::{
     MAX_STOP_FEEDBACK_BYTES,
 };
 pub(crate) use hooks::{
-    MAX_TIMEOUT_SECONDS, compact_subject, feedback_lines, lifecycle_input, post_tool_use_input,
-    pre_tool_use_input, stop_feedback, stop_subject,
+    HookHeader, LifecycleSubject, MAX_HOOK_GROUPS, MAX_HOOKS, MAX_TIMEOUT_SECONDS, compact_subject,
+    feedback_lines, lifecycle_input, post_tool_use_input, pre_tool_use_input, stop_feedback,
+    stop_subject,
 };
 pub use prefix::{
     HostPrefixEdit, NetworkDomainEdit, NetworkDomainEntry, PermissionSettings, SettingsError,
@@ -157,6 +159,11 @@ struct Permissions {
     #[serde(default)]
     host_prefixes: Vec<HostPrefixRule>,
 }
+
+pub(crate) const PERMISSION_SETTINGS: crate::store::RecordFormat = crate::store::RecordFormat {
+    kind: crate::store::RecordKind::Permissions,
+    accepts: |bytes| PermissionConfig::parse(bytes).is_ok(),
+};
 
 impl PermissionConfig {
     pub fn parse(bytes: &[u8]) -> Result<Self, ConfigError> {
@@ -417,28 +424,21 @@ impl PermissionConfig {
         {
             return (Decision::Deny, PermissionSource::Mode);
         }
+        // Only work outside the sandbox asks; auto reviews what no user rule decided.
+        let auto_edit = self.mode == PermissionMode::Auto && auto_approved_edit(call);
         let auto_review = self.mode == PermissionMode::Auto
-            && (facts.asks_approval
-                || facts.spawns_process
-                || matches!(facts.family, Family::Mcp | Family::Git));
-        let typed_host_read = call.is_host_pr_read();
-        let allow_skips_approval = typed_host_read
-            || !call.is_unguarded()
-                && !call.is_host()
-                && !auto_review
-                && !(self.mode == PermissionMode::AcceptEdits
-                    && facts.asks_approval
-                    && !facts.typed_edit());
+            && (facts.asks_approval && !auto_edit || protected_publication(call));
+        // User allow rules resolve before any mode or review, but never cover host work; its
+        // typed and remembered prefixes are the user's allows there.
+        let host = call.is_unguarded() || call.is_host();
         let matched = self.rules.iter().find_map(|(decision, rule)| {
-            if *decision == Decision::Allow && (!allow_skips_approval || typed_host_read) {
+            if *decision == Decision::Allow && host {
                 None
             } else {
                 rule.matches_call(call, *decision).then_some(*decision)
             }
         });
-        let typed = self
-            .typed_decision(call)
-            .filter(|decision| *decision != Decision::Allow || allow_skips_approval);
+        let typed = self.typed_decision(call);
         let (matched, typed_wins) = match (matched, typed) {
             (Some(rule), Some(typed)) => {
                 let narrowed = rule.narrow(typed);
@@ -455,6 +455,7 @@ impl PermissionConfig {
             if auto_review {
                 Decision::Ask
             } else if !facts.asks_approval
+                || auto_edit
                 || (self.mode == PermissionMode::AcceptEdits && facts.typed_edit())
             {
                 Decision::Allow
@@ -522,13 +523,6 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
     if !updated.valid() {
         return false;
     }
-    let within = |parent: &str, child: &str| {
-        matches!(parent, "" | ".")
-            || child == parent
-            || child
-                .strip_prefix(parent)
-                .is_some_and(|rest| rest.starts_with('/'))
-    };
     match (original, updated) {
         (
             Read {
@@ -542,64 +536,19 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
                 limit: new_limit,
             },
         ) => {
-            let offset = offset.unwrap_or(1);
-            let limit = limit.unwrap_or(super::types::MAX_READ_PAGE_LINES);
-            let new_offset = new_offset.unwrap_or(1);
-            let new_limit = new_limit.unwrap_or(super::types::MAX_READ_PAGE_LINES);
-            path == new_path
-                && new_offset >= offset
-                && u64::from(new_offset) + u64::from(new_limit)
-                    <= u64::from(offset) + u64::from(limit)
+            let page = |offset: &Option<u32>, limit: &Option<u32>| {
+                (
+                    offset.unwrap_or(1),
+                    limit.unwrap_or(super::types::MAX_READ_PAGE_LINES),
+                )
+            };
+            path == new_path && page_within(page(offset, limit), page(new_offset, new_limit))
         }
         (List { path }, List { path: new_path })
         | (GitStatus { path }, GitStatus { path: new_path }) => within(path, new_path),
-        (
-            Search {
-                path,
-                query,
-                regex,
-                include,
-                case_sensitive,
-                offset,
-                limit,
-            },
-            Search {
-                path: new_path,
-                query: new_query,
-                regex: new_regex,
-                include: new_include,
-                case_sensitive: new_case,
-                offset: new_offset,
-                limit: new_limit,
-            },
-        ) => {
-            // A filtered subtree renumbers its rows, so only an unpaged subtree narrows.
-            (query, regex, include, case_sensitive) == (new_query, new_regex, new_include, new_case)
-                && if path == new_path {
-                    new_offset >= offset
-                        && u64::from(*new_offset) + u64::from(*new_limit)
-                            <= u64::from(*offset) + u64::from(*limit)
-                } else {
-                    // An include matches paths relative to the searched path, so a new path rebases it.
-                    include.is_none()
-                        && within(path, new_path)
-                        && *offset == 0
-                        && *new_offset == 0
-                        && new_limit <= limit
-                }
+        (Search { .. }, Search { .. }) | (Glob { .. }, Glob { .. }) => {
+            narrows_listing(original, updated)
         }
-        (
-            Glob {
-                pattern,
-                path,
-                limit,
-            },
-            Glob {
-                pattern: new_pattern,
-                path: new_path,
-                limit: new_limit,
-            },
-        ) => pattern == new_pattern && new_limit <= limit && within(path, new_path),
         (
             GitDiff {
                 path,
@@ -627,6 +576,80 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
             },
         ) => (revision, max_count) == (new_revision, new_max) && within(path, new_path),
         _ => false,
+    }
+}
+
+fn narrows_listing(original: &ToolCall, updated: &ToolCall) -> bool {
+    use ToolCall::{Glob, Search};
+    match (original, updated) {
+        (
+            Search {
+                path,
+                query,
+                regex,
+                include,
+                case_sensitive,
+                offset,
+                limit,
+            },
+            Search {
+                path: new_path,
+                query: new_query,
+                regex: new_regex,
+                include: new_include,
+                case_sensitive: new_case,
+                offset: new_offset,
+                limit: new_limit,
+            },
+        ) => {
+            // An include matches paths relative to the searched path, so a new path rebases it.
+            (query, regex, include, case_sensitive) == (new_query, new_regex, new_include, new_case)
+                && (path == new_path || include.is_none())
+                && rescoped((path, *offset, *limit), (new_path, *new_offset, *new_limit))
+        }
+        (
+            Glob {
+                pattern,
+                path,
+                offset,
+                limit,
+            },
+            Glob {
+                pattern: new_pattern,
+                path: new_path,
+                offset: new_offset,
+                limit: new_limit,
+            },
+        ) => {
+            pattern == new_pattern
+                && rescoped((path, *offset, *limit), (new_path, *new_offset, *new_limit))
+        }
+        _ => false,
+    }
+}
+
+fn within(parent: &str, child: &str) -> bool {
+    matches!(parent, "" | ".")
+        || child == parent
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn page_within((offset, limit): (u32, u32), (new_offset, new_limit): (u32, u32)) -> bool {
+    new_offset >= offset
+        && u64::from(new_offset) + u64::from(new_limit) <= u64::from(offset) + u64::from(limit)
+}
+
+// A filtered subtree renumbers its rows, so only an unpaged subtree narrows.
+fn rescoped(
+    (path, offset, limit): (&str, u32, u32),
+    (new_path, new_offset, new_limit): (&str, u32, u32),
+) -> bool {
+    if path == new_path {
+        page_within((offset, limit), (new_offset, new_limit))
+    } else {
+        within(path, new_path) && offset == 0 && new_offset == 0 && new_limit <= limit
     }
 }
 
@@ -704,72 +727,29 @@ impl Rule {
                 "Tool name must contain only ASCII letters, digits, underscore, hyphen or wildcard",
             );
         }
+        if let Some(tool) = domain_tool(name, specifier)? {
+            return Ok(Self {
+                tool,
+                pattern: None,
+                commit_prefix: None,
+            });
+        }
         let tool = match name {
             "Bash" => Tool::Bash,
             "Read" => Tool::Read,
             "Edit" => Tool::Edit,
             "MultiEdit" => Tool::Native("multiedit"),
-            "WebFetch" => match specifier {
-                None => Tool::Native("web_fetch"),
-                Some(specifier) => {
-                    let domain = specifier
-                        .strip_prefix("domain:")
-                        .filter(|domain| super::network::valid_pattern(domain))
-                        .ok_or("WebFetch rules take a `domain:` host pattern")?;
-                    return Ok(Self {
-                        tool: Tool::WebFetch(domain.to_owned()),
-                        pattern: None,
-                        commit_prefix: None,
-                    });
-                }
-            },
+            "WebFetch" => Tool::Native("web_fetch"),
             "WebSearch" => Tool::Native("web_search"),
             "Write" => Tool::Write,
             "Glob" => Tool::Glob,
             "Grep" => Tool::Grep,
             "Skill" => Tool::Skill,
-            "Network" => {
-                let domain = specifier
-                    .and_then(|specifier| specifier.strip_prefix("domain:"))
-                    .filter(|domain| super::network::valid_pattern(domain))
-                    .ok_or("Network rules require a `domain:` host pattern")?;
-                return Ok(Self {
-                    tool: Tool::Network(domain.to_owned()),
-                    pattern: None,
-                    commit_prefix: None,
-                });
-            }
             name if name.starts_with("mcp__") => {
                 if specifier.is_some() {
                     return Err("MCP rules do not support specifiers");
                 }
-                let full_name = name;
-                let name = &name[5..];
-                let (server, tool) = name
-                    .split_once("__")
-                    .map_or((name, None), |(server, tool)| (server, Some(tool)));
-                if server.is_empty()
-                    || server.len() > 64
-                    || !server.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-*".contains(&byte)
-                    })
-                    || tool == Some("")
-                    || tool.is_some_and(|tool| tool.len() > 128)
-                    || (decision == Decision::Allow && server.contains('*'))
-                {
-                    return Err(
-                        "MCP server/Tool pattern is invalid or over-limit; allow requires a literal server",
-                    );
-                }
-                Tool::Mcp {
-                    server: compile(&format!("\\A{}\\z", command_glob(server)))?,
-                    tool: tool
-                        .map(|tool| compile(&format!("\\A{}\\z", command_glob(tool))))
-                        .transpose()?,
-                    restriction: (decision != Decision::Allow)
-                        .then(|| compile(&format!("\\A{}(?:__.*)?\\z", command_glob(full_name))))
-                        .transpose()?,
-                }
+                mcp_tool(name, decision)?
             }
             name if name.contains('*') => {
                 if specifier.is_some() || decision == Decision::Allow {
@@ -778,9 +758,9 @@ impl Rule {
                 let pattern = compile(&format!("\\A{}\\z", command_glob(name)))?;
                 if !super::catalog::ALL.iter().any(|facts| {
                     pattern.is_match(facts.name)
-                        || pattern.is_match(peer_operation_name(facts.name))
+                        || pattern.is_match(rule_operation_name(facts.name))
                 }) {
-                    return Err("Tool-name glob matches no known peer or native operation");
+                    return Err("Tool-name glob matches no known rule or native operation");
                 }
                 Tool::NameGlob(pattern)
             }
@@ -790,34 +770,7 @@ impl Rule {
                     .name,
             ),
         };
-        let mut commit_prefix = None;
-        let pattern = match specifier {
-            None => None,
-            Some("") => return Err("empty specifier"),
-            Some("*") if matches!(tool, Tool::Bash | Tool::Native("command")) => None,
-            Some(pattern) => Some(match tool {
-                Tool::Bash | Tool::Native("command") => command_pattern(pattern)?,
-                Tool::Read
-                | Tool::Edit
-                | Tool::Grep
-                | Tool::Native(
-                    "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "multiedit"
-                    | "git_status" | "git_diff" | "git_log",
-                ) => {
-                    let (pattern, prefix) = path_glob(pattern, decision)?;
-                    commit_prefix = prefix;
-                    pattern
-                }
-                Tool::Skill | Tool::Native("skill") => {
-                    compile(&format!("\\A{}\\z", command_glob(pattern)))?
-                }
-                _ => {
-                    return Err(
-                        "this Tool supports bare rules only; use Read/Edit for file patterns",
-                    );
-                }
-            }),
-        };
+        let (pattern, commit_prefix) = rule_pattern(&tool, specifier, decision)?;
         Ok(Self {
             tool,
             pattern,
@@ -851,7 +804,7 @@ impl Rule {
             }
             Tool::Native(name) => facts.name == *name,
             Tool::NameGlob(pattern) => {
-                pattern.is_match(&peer_name(call)) || pattern.is_match(facts.name)
+                pattern.is_match(&rule_name(call)) || pattern.is_match(facts.name)
             }
             Tool::Mcp {
                 server,
@@ -861,7 +814,7 @@ impl Rule {
                 facts.family == Family::Mcp
                     && restriction
                         .as_ref()
-                        .is_some_and(|pattern| pattern.is_match(&peer_name(call)))
+                        .is_some_and(|pattern| pattern.is_match(&rule_name(call)))
                     || match call {
                         ToolCall::McpCall {
                             server: actual_server,
@@ -877,6 +830,25 @@ impl Rule {
                         _ => false,
                     }
             }
+        }
+    }
+
+    fn commit_matches(&self, pattern: &Regex, paths: &[String], decision: Decision) -> bool {
+        if decision == Decision::Allow {
+            paths
+                .iter()
+                .all(|path| path_matches(pattern, path, decision))
+        } else {
+            paths.iter().any(|path| {
+                path_matches(pattern, path, decision)
+                    || self.commit_prefix.as_ref().is_some_and(|prefix| {
+                        prefix.is_empty()
+                            || prefix
+                                .split('/')
+                                .zip(path.split('/'))
+                                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+                    })
+            })
         }
     }
 
@@ -903,45 +875,13 @@ impl Rule {
             }
             ToolCall::Command { program, args, .. }
             | ToolCall::CommandUnguarded { program, args, .. } => {
-                if !std::iter::once(program).chain(args).all(|word| {
-                    !word.is_empty()
-                        && word.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric() || b"_./:@+=,%~-".contains(&byte)
-                        })
-                }) {
-                    return decision != Decision::Allow;
-                }
-                let mut text = program.clone();
-                for arg in args {
-                    text.push(' ');
-                    text.push_str(arg);
-                }
-                pattern.is_match(&text)
-                    || decision != Decision::Allow
-                        && text
-                            .match_indices(' ')
-                            .any(|(index, _)| pattern.is_match(&text[index + 1..]))
+                command_matches(pattern, program, args, decision)
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
             ToolCall::GitCommit { paths, .. }
                 if !paths.is_empty() && !paths.iter().any(|path| path == ".") =>
             {
-                if decision == Decision::Allow {
-                    paths
-                        .iter()
-                        .all(|path| path_matches(pattern, path, decision))
-                } else {
-                    paths.iter().any(|path| {
-                        path_matches(pattern, path, decision)
-                            || self.commit_prefix.as_ref().is_some_and(|prefix| {
-                                prefix.is_empty()
-                                    || prefix
-                                        .split('/')
-                                        .zip(path.split('/'))
-                                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
-                            })
-                    })
-                }
+                self.commit_matches(pattern, paths, decision)
             }
             // A staged or whole-repository commit and a switch publish paths unknown before dispatch.
             ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. } => decision != Decision::Allow,
@@ -949,24 +889,121 @@ impl Rule {
                 source: crate::session::worker::ChangesetSource::Rewind { .. },
             } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                    | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
             } => {
+                let paths = call.changeset_paths();
                 if decision == Decision::Allow {
-                    !changeset.files.is_empty()
-                        && changeset
-                            .files
+                    !paths.is_empty()
+                        && paths
                             .iter()
-                            .all(|file| path_matches(pattern, &file.path, decision))
+                            .all(|path| path_matches(pattern, path, decision))
                 } else {
-                    changeset
-                        .files
+                    paths
                         .iter()
-                        .any(|file| path_matches(pattern, &file.path, decision))
+                        .any(|path| path_matches(pattern, path, decision))
                 }
             }
             _ => path_of(call).is_some_and(|path| path_matches(pattern, path, decision)),
         }
     }
+}
+
+// Configuration and instruction paths agents and tools read: Auto approval never approves a write
+// there unreviewed.
+const PROTECTED_DIRECTORIES: [&str; 11] = [
+    ".git",
+    ".config/git",
+    ".vscode",
+    ".idea",
+    ".husky",
+    ".cargo",
+    ".devcontainer",
+    ".yarn",
+    ".mvn",
+    ".claude",
+    ".agents",
+];
+const PROTECTED_FILES: [&str; 37] = [
+    ".gitconfig",
+    ".gitmodules",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_aliases",
+    ".bash_logout",
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    ".zlogin",
+    ".zlogout",
+    ".profile",
+    ".envrc",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".pnp.cjs",
+    ".pnp.loader.mjs",
+    ".pnpmfile.cjs",
+    "bunfig.toml",
+    ".bunfig.toml",
+    ".bazelrc",
+    ".bazelversion",
+    ".bazeliskrc",
+    ".pre-commit-config.yaml",
+    "lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yml",
+    ".lefthook.yaml",
+    "gradle-wrapper.properties",
+    "maven-wrapper.properties",
+    ".devcontainer.json",
+    ".ripgreprc",
+    "pyrightconfig.json",
+    ".mcp.json",
+    ".claude.json",
+];
+const PROTECTED_INSTRUCTIONS: [&str; 3] = ["AGENTS.md", "AGENTS.override.md", "CLAUDE.md"];
+
+pub(crate) fn protected_path(path: &str) -> bool {
+    let components: Vec<&str> = path.split('/').collect();
+    components
+        .last()
+        .is_some_and(|name| PROTECTED_FILES.contains(name) || PROTECTED_INSTRUCTIONS.contains(name))
+        || PROTECTED_DIRECTORIES.iter().any(|directory| {
+            let parts: Vec<&str> = directory.split('/').collect();
+            components
+                .windows(parts.len())
+                .any(|window| window == parts.as_slice())
+        })
+}
+
+fn written_paths(call: &ToolCall) -> Option<Vec<&str>> {
+    match call {
+        ToolCall::Move {
+            source,
+            destination,
+            ..
+        } => Some(vec![source.as_str(), destination.as_str()]),
+        ToolCall::ApplyChangeset {
+            source:
+                crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
+        } => Some(call.changeset_paths()),
+        _ if call.facts().typed_edit() => path_of(call).map(|path| vec![path]),
+        _ => None,
+    }
+}
+
+pub(crate) fn auto_approved_edit(call: &ToolCall) -> bool {
+    written_paths(call)
+        .is_some_and(|paths| !paths.is_empty() && !paths.iter().any(|path| protected_path(path)))
+}
+
+pub(crate) fn protected_publication(call: &ToolCall) -> bool {
+    matches!(call, ToolCall::ApplyChangeset { .. })
+        && written_paths(call).is_some_and(|paths| paths.iter().any(|path| protected_path(path)))
 }
 
 fn path_of(call: &ToolCall) -> Option<&str> {
@@ -989,15 +1026,15 @@ fn path_of(call: &ToolCall) -> Option<&str> {
     }
 }
 
-pub(crate) fn peer_name(call: &ToolCall) -> Cow<'_, str> {
+pub(crate) fn rule_name(call: &ToolCall) -> Cow<'_, str> {
     match call {
         ToolCall::McpCall { server, tool, .. } => Cow::Owned(format!("mcp__{server}__{tool}")),
         ToolCall::McpList { server } => Cow::Owned(format!("mcp__{server}")),
-        _ => Cow::Borrowed(peer_operation_name(call.facts().name)),
+        _ => Cow::Borrowed(rule_operation_name(call.facts().name)),
     }
 }
 
-fn peer_operation_name(name: &str) -> &str {
+fn rule_operation_name(name: &str) -> &str {
     match name {
         "command" | "command_unguarded" => "Bash",
         "read" => "Read",
@@ -1015,6 +1052,116 @@ fn peer_operation_name(name: &str) -> &str {
 
 fn path_matches(pattern: &Regex, path: &str, decision: Decision) -> bool {
     decision != Decision::Allow && !path.is_ascii() || pattern.is_match(path)
+}
+
+// WebFetch with a specifier and Network name a host pattern instead of an argument pattern.
+fn domain_tool(name: &str, specifier: Option<&str>) -> Result<Option<Tool>, &'static str> {
+    match (name, specifier) {
+        ("WebFetch", Some(specifier)) => {
+            let domain = specifier
+                .strip_prefix("domain:")
+                .filter(|domain| super::network::valid_pattern(domain))
+                .ok_or("WebFetch rules take a `domain:` host pattern")?;
+            Ok(Some(Tool::WebFetch(domain.to_owned())))
+        }
+        ("Network", _) => {
+            let domain = specifier
+                .and_then(|specifier| specifier.strip_prefix("domain:"))
+                .filter(|domain| super::network::valid_pattern(domain))
+                .ok_or("Network rules require a `domain:` host pattern")?;
+            Ok(Some(Tool::Network(domain.to_owned())))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn mcp_tool(name: &str, decision: Decision) -> Result<Tool, &'static str> {
+    let full_name = name;
+    let name = &name[5..];
+    let (server, tool) = name
+        .split_once("__")
+        .map_or((name, None), |(server, tool)| (server, Some(tool)));
+    if server.is_empty()
+        || server.len() > 64
+        || !server.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-*".contains(&byte)
+        })
+        || tool == Some("")
+        || tool.is_some_and(|tool| tool.len() > 128)
+        || (decision == Decision::Allow && server.contains('*'))
+    {
+        return Err(
+            "MCP server/Tool pattern is invalid or over-limit; allow requires a literal server",
+        );
+    }
+    Ok(Tool::Mcp {
+        server: compile(&format!("\\A{}\\z", command_glob(server)))?,
+        tool: tool
+            .map(|tool| compile(&format!("\\A{}\\z", command_glob(tool))))
+            .transpose()?,
+        restriction: (decision != Decision::Allow)
+            .then(|| compile(&format!("\\A{}(?:__.*)?\\z", command_glob(full_name))))
+            .transpose()?,
+    })
+}
+
+fn rule_pattern(
+    tool: &Tool,
+    specifier: Option<&str>,
+    decision: Decision,
+) -> Result<(Option<Regex>, Option<String>), &'static str> {
+    let mut commit_prefix = None;
+    let pattern = match specifier {
+        None => None,
+        Some("") => return Err("empty specifier"),
+        Some("*") if matches!(tool, Tool::Bash | Tool::Native("command")) => None,
+        Some(pattern) => Some(match tool {
+            Tool::Bash | Tool::Native("command") => command_pattern(pattern)?,
+            Tool::Read
+            | Tool::Edit
+            | Tool::Grep
+            | Tool::Native(
+                "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "multiedit"
+                | "git_status" | "git_diff" | "git_log",
+            ) => {
+                let (pattern, prefix) = path_glob(pattern, decision)?;
+                commit_prefix = prefix;
+                pattern
+            }
+            Tool::Skill | Tool::Native("skill") => {
+                compile(&format!("\\A{}\\z", command_glob(pattern)))?
+            }
+            _ => {
+                return Err("this Tool supports bare rules only; use Read/Edit for file patterns");
+            }
+        }),
+    };
+    Ok((pattern, commit_prefix))
+}
+
+// A restriction also matches any suffix of the command line, and an unsafe word never allows.
+fn command_matches(pattern: &Regex, program: &str, args: &[String], decision: Decision) -> bool {
+    if !std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .all(|word| {
+            !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_./:@+=,%~-".contains(&byte))
+        })
+    {
+        return decision != Decision::Allow;
+    }
+    let mut text = program.to_owned();
+    for arg in args {
+        text.push(' ');
+        text.push_str(arg);
+    }
+    pattern.is_match(&text)
+        || decision != Decision::Allow
+            && text
+                .match_indices(' ')
+                .any(|(index, _)| pattern.is_match(&text[index + 1..]))
 }
 
 fn command_pattern(pattern: &str) -> Result<Regex, &'static str> {
@@ -1081,6 +1228,17 @@ fn path_glob(input: &str, decision: Decision) -> Result<(Regex, Option<String>),
                 .join("/")
         }
     });
+    let mut expression = glob_expression(pattern, anywhere)?;
+    expression.push_str("(?:/.*)?\\z");
+    let compiled = compile(&if decision == Decision::Allow {
+        expression
+    } else {
+        format!("(?i:{expression})")
+    })?;
+    Ok((compiled, commit_prefix))
+}
+
+fn glob_expression(pattern: &str, anywhere: bool) -> Result<String, &'static str> {
     let mut expression = String::from("\\A");
     if anywhere {
         expression.push_str("(?:.*/)?");
@@ -1109,20 +1267,8 @@ fn path_glob(input: &str, decision: Decision) -> Result<(Regex, Option<String>),
             '*' => expression.push_str("[^/]*"),
             '?' => expression.push_str("[^/]"),
             '[' => {
-                let mut class = String::new();
-                if chars.peek() == Some(&'!') {
-                    chars.next();
-                    class.push('^');
-                }
-                loop {
-                    match chars.next() {
-                        Some(']') if !class.is_empty() && class != "^" => break,
-                        Some(ch) if ch.is_ascii_alphanumeric() || ch == '-' => class.push(ch),
-                        _ => return Err("invalid or unsupported character class"),
-                    }
-                }
                 expression.push_str("[[");
-                expression.push_str(&class);
+                expression.push_str(&glob_class(&mut chars)?);
                 expression.push_str("]&&[^/]]");
             }
             '\\' => {
@@ -1137,13 +1283,25 @@ fn path_glob(input: &str, decision: Decision) -> Result<(Regex, Option<String>),
         }
         segment_start = ch == '/';
     }
-    expression.push_str("(?:/.*)?\\z");
-    let compiled = compile(&if decision == Decision::Allow {
-        expression
-    } else {
-        format!("(?i:{expression})")
-    })?;
-    Ok((compiled, commit_prefix))
+    Ok(expression)
+}
+
+fn glob_class(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Result<String, &'static str> {
+    let mut class = String::new();
+    if chars.peek() == Some(&'!') {
+        chars.next();
+        class.push('^');
+    }
+    loop {
+        match chars.next() {
+            Some(']') if !class.is_empty() && class != "^" => break,
+            Some(ch) if ch.is_ascii_alphanumeric() || ch == '-' => class.push(ch),
+            _ => return Err("invalid or unsupported character class"),
+        }
+    }
+    Ok(class)
 }
 
 fn compile(pattern: &str) -> Result<Regex, &'static str> {

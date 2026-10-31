@@ -89,6 +89,44 @@ fn subject_admitted(run: &RunView, hook: &crate::tools::permissions::HookInvocat
         && previous.is_none_or(|recorded| recorded.invocation.group < hook.group)
 }
 
+fn rewrite_hook<'a>(
+    run: &'a RunView,
+    intent: &EffectIntent,
+    index: usize,
+    id: uuid::Uuid,
+    previous: Option<u8>,
+) -> Option<&'a crate::session::reducer::HookView> {
+    let fact = &intent.rewrite[index];
+    if intent.rewrite[..index]
+        .iter()
+        .any(|prior| prior.hook_intent_id == Some(id))
+        || run
+            .tools
+            .iter()
+            .flat_map(|tool| &tool.intent.rewrite)
+            .any(|prior| prior.hook_intent_id == Some(id))
+    {
+        return None;
+    }
+    let hook = run
+        .lifecycle_hooks
+        .iter()
+        .find(|hook| hook.invocation.intent.id == id)?;
+    if hook.invocation.event != HookEvent::CommandRewrite
+        || hook.invocation.command_subject != Some(intent.id)
+        || hook.invocation.subject_digest != fact.original_sha256
+        || hook
+            .invocation
+            .command_tool
+            .as_ref()
+            .is_none_or(|tool| tool.sha256 != fact.tool_sha256)
+        || previous.is_some_and(|group| group >= hook.invocation.group)
+    {
+        return None;
+    }
+    Some(hook)
+}
+
 pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
     use crate::tools::RewriteStage;
     if intent
@@ -122,36 +160,9 @@ pub(super) fn valid(run: &RunView, intent: &EffectIntent) -> bool {
             }
             continue;
         };
-        if intent.rewrite[..index]
-            .iter()
-            .any(|prior| prior.hook_intent_id == Some(id))
-            || run
-                .tools
-                .iter()
-                .flat_map(|tool| &tool.intent.rewrite)
-                .any(|prior| prior.hook_intent_id == Some(id))
-        {
-            return false;
-        }
-        let Some(hook) = run
-            .lifecycle_hooks
-            .iter()
-            .find(|hook| hook.invocation.intent.id == id)
-        else {
+        let Some(hook) = rewrite_hook(run, intent, index, id, previous) else {
             return false;
         };
-        if hook.invocation.event != HookEvent::CommandRewrite
-            || hook.invocation.command_subject != Some(intent.id)
-            || hook.invocation.subject_digest != fact.original_sha256
-            || hook
-                .invocation
-                .command_tool
-                .as_ref()
-                .is_none_or(|tool| tool.sha256 != fact.tool_sha256)
-            || previous.is_some_and(|group| group >= hook.invocation.group)
-        {
-            return false;
-        }
         previous = Some(hook.invocation.group);
         let Some(outcome) = &hook.outcome else {
             return false;

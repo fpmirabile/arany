@@ -2,8 +2,9 @@ use super::{
     collect_nonblocking, kill_process, product_child_of, redacted_tail, transcript_field,
     tty_settings,
 };
-use crate::loopback::{ChildGuard, wait_product};
-use crate::session_picker::{pump, tail};
+use crate::loopback::wait_product;
+use crate::pty::Pty;
+use crate::session_picker::tail;
 use rustix::{
     fs::{OFlags, fcntl_getfl, fcntl_setfl},
     io::{FdFlags, fcntl_getfd},
@@ -16,7 +17,6 @@ use std::{
     io::Write,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
@@ -130,22 +130,16 @@ fn startup_case(case: &str, signal: Option<Signal>) {
     arany::StateRoot::admit(&state).unwrap();
     let seeded = state_entries(&state);
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+    .term("xterm")
+    .spawn();
     let mut input = attached
         .child()
         .stdin
@@ -305,22 +299,16 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
     fcntl_setfl(&stderr_master, flags | OFlags::NONBLOCK).expect("nonblocking stderr master");
 
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; exec 2>\"$ARANY_TEST_STDERR_PTY\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_STDERR_PTY", &slave_path)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_TEST_STDERR_PTY", &slave_path)
+    .term("xterm")
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
     let mut output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
@@ -468,43 +456,25 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         "stty rows 24 cols 80; printf 'PRODUCT_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --classic --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\""
     };
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            command,
+        )
+        .session(&state, &workspace)
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("SHELL", "/bin/sh")
-        .env("TERM", if screen_reader { "dumb" } else { "xterm" })
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"PRODUCT_PID:".len())
-        .position(|part| part == b"PRODUCT_PID:")
-        .is_some_and(|start| transcript[start..].contains(&b'\n'))
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "product PID marker missing: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    let product_pid = transcript_field(&String::from_utf8_lossy(&transcript), "PRODUCT_PID:")
+        .term(if screen_reader { "dumb" } else { "xterm" })
+        .spawn(),
+    );
+    pty.pump_until("product PID marker missing", |transcript| {
+        transcript
+            .windows(b"PRODUCT_PID:".len())
+            .position(|part| part == b"PRODUCT_PID:")
+            .is_some_and(|start| transcript[start..].contains(&b'\n'))
+    });
+    let product_pid = transcript_field(&String::from_utf8_lossy(&pty.transcript), "PRODUCT_PID:")
         .parse::<i32>()
         .ok()
         .and_then(rustix::process::Pid::from_raw)
@@ -516,20 +486,24 @@ fn lost_pty_case(screen_reader: bool) {
     } else {
         b"Provider setup"
     };
-    while !transcript.windows(prompt.len()).any(|part| part == prompt) {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+    while !pty
+        .transcript
+        .windows(prompt.len())
+        .any(|part| part == prompt)
+    {
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "setup prompt missing: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
     assert!(product.is_owned_and_running(), "test owns attached product");
-    attached.child().kill().expect("close PTY master");
-    attached.take().wait().expect("reap PTY owner");
-    drop(input);
-    drop(output);
+    pty.child.child().kill().expect("close PTY master");
+    pty.child.take().wait().expect("reap PTY owner");
+    drop(pty.input);
+    drop(pty.output);
     let deadline = Instant::now() + Duration::from_secs(5);
     while product.is_owned_and_running() {
         assert!(Instant::now() < deadline, "product survived PTY loss");

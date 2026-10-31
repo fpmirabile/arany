@@ -47,7 +47,6 @@ impl CellPixels {
             .then_some(Self { width, height })
     }
 
-    #[cfg(unix)]
     pub(in crate::terminal) fn from_terminal() -> Option<Self> {
         let size = rustix::termios::tcgetwinsize(std::io::stderr()).ok()?;
         Self::new(

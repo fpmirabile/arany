@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 
 mod hover;
 pub(super) mod sixel;
-pub(super) use hover::{SixelPreview, preview_interior};
+pub(super) use hover::{GraphicsHover, preview_interior};
 
 pub(super) const PREVIEW_COLUMNS: u16 = 32;
 pub(super) const PREVIEW_ROWS: u16 = 10;

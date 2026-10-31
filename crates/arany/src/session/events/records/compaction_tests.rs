@@ -10,8 +10,8 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
         recent_files: Vec::new(),
         provider: "openai".into(),
         model: "gpt-5.4".into(),
-        prompt_version: 1,
-        schema_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 4,
         source_tokens_estimate: 1,
@@ -28,6 +28,9 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
         cache_creation_input_tokens: None,
     };
     assert!(record.validate().is_ok());
+    let mut misfiled = record.clone();
+    misfiled.prompt.file = crate::provider::PromptFile::Primary;
+    assert!(misfiled.validate().is_err());
     let encoded = serde_json::to_value(&record).unwrap();
     assert!(encoded.get("recent_files").is_none());
     let mut legacy = encoded.clone();
@@ -47,14 +50,10 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
         missing.as_object_mut().unwrap().remove(field);
         assert!(serde_json::from_value::<CompactionRecord>(missing).is_err());
     }
-    for (field, current) in [
-        ("prompt_version", 1),
-        ("schema_version", 1),
-        (
-            "compiler_version",
-            crate::session::COMPACTION_COMPILER_VERSION,
-        ),
-    ] {
+    for (field, current) in [(
+        "compiler_version",
+        crate::session::COMPACTION_COMPILER_VERSION,
+    )] {
         assert_eq!(encoded[field], current);
         for version in (0..=crate::session::COMPACTION_COMPILER_VERSION + 1)
             .filter(|version| *version != current)
@@ -76,7 +75,7 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
     record.provider = "chatgpt".into();
     record.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
         account_id: Uuid::now_v7(),
-        evidence_fingerprint: [7; 32],
+        admission_fingerprint: [7; 32],
         admission: crate::provider::ChatGptAdmission::AccountConsent,
     });
     assert!(record.validate().is_err());
@@ -197,6 +196,6 @@ fn subscription_compaction_pins_account_and_weaker_bound() {
         .chatgpt_provenance
         .as_mut()
         .unwrap()
-        .evidence_fingerprint = [0; 32];
+        .admission_fingerprint = [0; 32];
     assert!(record.validate().is_err());
 }

@@ -7,24 +7,27 @@ fn editor_build_jobs_bind_selected_rust_before_guard_dispatch() {
     let mut runtime = crate::tools::tests::in_process_runtime(
         directory.path(),
         serde_json::json!({
-            "version":1,"workspace_paths":["."],"write":true,"skills":[],"mcp":[],
+            "workspace_paths":["."],"write":true,"skills":[],"mcp":[],
             "commands":[{"name":"sh","executable":"/unavailable","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],
             "runtime_grants":[{"kind":"rust","manager":"rustup","version":version,"path":directory.path().join(".rustup/toolchains").join(version),"device":1,"inode":1}]
         }),
     );
     runtime.process_enforcement_digest =
         enforcement_digest(&runtime.config.runtime_grants).unwrap();
-    let mut intent = runtime.intent(
-        crate::RunId::new(),
-        crate::AgentRunId::new(),
-        ToolCall::Command {
-            program: "sh".into(),
-            args: Vec::new(),
-            cwd: ".".into(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let mut intent = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
     intent.limits.build_jobs = 2;
     intent.limits.cache_bytes = 0;
@@ -54,21 +57,24 @@ async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_
     let mut runtime = crate::tools::tests::in_process_runtime(
         &workspace,
         serde_json::json!({
-            "version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]
+            "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]
         }),
     );
     runtime.cache_state = Some(Arc::new(state.try_clone().unwrap()));
-    let mut editor = runtime.intent(
-        crate::RunId::new(),
-        crate::AgentRunId::new(),
-        ToolCall::Command {
-            program: "build".into(),
-            args: vec![],
-            cwd: ".".into(),
-            resource_class: None,
-            timeout_ms: None,
-        },
-    );
+    let mut editor = runtime
+        .intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "build".into(),
+                args: vec![],
+                cwd: ".".into(),
+                resource_class: None,
+                timeout_ms: None,
+                additional_reads: None,
+            },
+        )
+        .unwrap();
     let (view_bytes, candidate_bytes) = runtime
         .effective_cache_bytes(editor.limits.cache_requested_bytes)
         .unwrap();
@@ -103,10 +109,10 @@ async fn editor_commands_exclude_other_cache_writers_and_clear_then_release_for_
         editor.limits.resource_class = class;
         editor.limits.cache_bytes = 0;
         editor.limits.cache_candidate_bytes = 0;
-        for requested in [0, crate::store::BUILD_CACHE_ARCHIVE_BYTES] {
+        for requested in [BuildCacheSize::DISABLED, BuildCacheSize::Unlimited] {
             editor.limits.cache_requested_bytes = requested;
             let admitted = cache_directory::session(&runtime, &editor, far_deadline()).await;
-            if requested == 0 {
+            if !requested.enabled() {
                 assert!(admitted.unwrap().is_none());
             } else {
                 assert!(matches!(admitted, Err(ToolError::Limit)));

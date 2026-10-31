@@ -89,10 +89,11 @@ pub(crate) fn digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 pub(crate) fn hex_digest(bytes: &[u8]) -> String {
-    digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&digest(bytes))
+}
+
+pub(crate) fn hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(crate) fn deserialize_value_bounded<'de, D: serde::Deserializer<'de>>(

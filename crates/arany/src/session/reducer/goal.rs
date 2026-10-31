@@ -228,35 +228,7 @@ impl SessionView {
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::PlanRecorded)
             && run.tools.iter().all(ToolView::settled_without_stop)
             && pending_tool_requests(run) == Some(0);
-        // Pre-plan inspections count: folding every Run's observations decides the criterion.
-        let mut success_state = contract.initial_success_state();
-        let invalidated_after = self
-            .rewinds
-            .operations
-            .iter()
-            .filter(|r| {
-                r.outcome() == crate::session::rewind::RewindOutcome::Restored
-                    && crate::session::rewind::invalidates(contract, &r.files)
-            })
-            .filter_map(|r| r.finished_sequence)
-            .max()
-            .unwrap_or(0);
-        for observation in self
-            .runs
-            .iter()
-            .filter(|run| {
-                self.goal(*goal_id)
-                    .is_some_and(|goal| goal.run_ids.contains(&run.id))
-            })
-            .flat_map(|run| run.tools.iter())
-            .filter(|tool| {
-                tool.finished_sequence
-                    .is_some_and(|s| s > invalidated_after)
-            })
-            .filter_map(|tool| tool.observation.as_ref())
-        {
-            contract.observe_success(&mut success_state, observation);
-        }
+        let success_state = self.folded_success_state(*goal_id, contract);
         let satisfied = contract.success_state_satisfied(&success_state);
         let goal = current_goal_mut(self, *goal_id)?;
         if goal.status != GoalStatus::Running
@@ -289,6 +261,43 @@ impl SessionView {
         goal.success_state = success_state;
         goal.awaiting_plan_contract = false;
         Ok(())
+    }
+
+    // Pre-plan inspections count: folding every Run's observations decides the criterion.
+    fn folded_success_state(
+        &self,
+        goal_id: GoalId,
+        contract: &GoalPlanContract,
+    ) -> crate::session::GoalSuccessState {
+        let mut success_state = contract.initial_success_state();
+        let invalidated_after = self
+            .rewinds
+            .operations
+            .iter()
+            .filter(|r| {
+                r.outcome() == crate::session::rewind::RewindOutcome::Restored
+                    && crate::session::rewind::invalidates(contract, &r.files)
+            })
+            .filter_map(|r| r.finished_sequence)
+            .max()
+            .unwrap_or(0);
+        for observation in self
+            .runs
+            .iter()
+            .filter(|run| {
+                self.goal(goal_id)
+                    .is_some_and(|goal| goal.run_ids.contains(&run.id))
+            })
+            .flat_map(|run| run.tools.iter())
+            .filter(|tool| {
+                tool.finished_sequence
+                    .is_some_and(|s| s > invalidated_after)
+            })
+            .filter_map(|tool| tool.observation.as_ref())
+        {
+            contract.observe_success(&mut success_state, observation);
+        }
+        success_state
     }
 
     pub(super) fn reserve_goal_provider_call(
@@ -602,8 +611,6 @@ impl SessionView {
         let goal = self.goal(goal_id).ok_or(ReplayError::InvalidTransition)?;
         let budget = goal.effective_budget();
         let usage = goal.resume_usage(self);
-        let conservative_active =
-            goal.uncertain_active_ms > 0 || goal.unsettled_active_charge_ms() > 0;
         if matches!(refusal.action, BudgetAction::Run | BudgetAction::Resume) {
             let expected = budget
                 .refusal(usage, refusal.action)
@@ -623,28 +630,27 @@ impl SessionView {
         {
             return Err(ReplayError::InvalidTransition);
         }
-        let (limit, final_used, floor) = match refusal.dimension {
-            GoalLimit::Calls => (
-                budget.limit_for(GoalLimit::Calls),
-                u64::from(usage.provider_calls),
-                u64::from(goal.run_start_usage.provider_calls),
-            ),
-            GoalLimit::Tokens => (
-                budget.max_tokens,
-                usage.known_tokens,
-                goal.run_start_usage.known_tokens,
-            ),
-            GoalLimit::ActiveTime => (
-                budget.max_active_ms,
-                final_active_ms,
-                goal.run_start_usage.active_ms,
-            ),
-            GoalLimit::Runs => (
-                Some(u64::from(budget.max_runs)),
-                usage.runs as u64,
-                goal.run_start_usage.runs as u64,
-            ),
-        };
+        let (limit, final_used, floor) =
+            refusal_bounds(goal, &budget, &usage, refusal.dimension, final_active_ms);
+        let valid_ids = self.valid_refusal_ids(goal, refusal);
+        if limit != Some(refusal.limit)
+            || refusal.used > final_used
+            || refusal.used < floor
+            || matches!(refusal.action, BudgetAction::Run | BudgetAction::Resume)
+                && refusal.used != final_used
+            || !valid_ids
+            || refusal.token_usage_unknown && !usage.token_usage_unknown
+            || goal.run_start_usage.token_usage_unknown && !refusal.token_usage_unknown
+            || (refusal.charge_basis == BudgetChargeBasis::Conservative)
+                != goal.charges_conservatively()
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        Ok(())
+    }
+
+    fn valid_refusal_ids(&self, goal: &GoalView, refusal: &crate::session::BudgetRefusal) -> bool {
+        use crate::session::BudgetAction;
         let run = refusal.run_id.and_then(|id| {
             self.runs
                 .iter()
@@ -652,7 +658,7 @@ impl SessionView {
                 .find(|run| goal.run_ids.contains(&run.id))
                 .filter(|run| run.id == id)
         });
-        let valid_ids = match refusal.action {
+        match refusal.action {
             BudgetAction::Run | BudgetAction::Resume => {
                 refusal.run_id.is_none() && refusal.agent_run_id.is_none()
             }
@@ -664,23 +670,7 @@ impl SessionView {
                     .agent_run_id
                     .is_some_and(|id| run.agents.iter().any(|agent| agent.id == id))
             }),
-        };
-        if limit != Some(refusal.limit)
-            || refusal.used > final_used
-            || refusal.used < floor
-            || matches!(refusal.action, BudgetAction::Run | BudgetAction::Resume)
-                && refusal.used != final_used
-            || !valid_ids
-            || refusal.token_usage_unknown && !usage.token_usage_unknown
-            || goal.run_start_usage.token_usage_unknown && !refusal.token_usage_unknown
-            || conservative_active && refusal.charge_basis != BudgetChargeBasis::Conservative
-            || refusal.charge_basis == BudgetChargeBasis::Conservative
-                && !conservative_active
-                && !usage.token_usage_unknown
-        {
-            return Err(ReplayError::InvalidTransition);
         }
-        Ok(())
     }
 
     fn close_exhausted_goal(
@@ -731,6 +721,38 @@ impl SessionView {
         self.runs = runs;
         *current_goal_mut(self, *goal_id)? = settled;
         Ok(())
+    }
+}
+
+fn refusal_bounds(
+    goal: &GoalView,
+    budget: &GoalBudget,
+    usage: &crate::session::GoalUsage,
+    dimension: crate::session::GoalLimit,
+    final_active_ms: u64,
+) -> (Option<u64>, u64, u64) {
+    use crate::session::GoalLimit;
+    match dimension {
+        GoalLimit::Calls => (
+            budget.limit_for(GoalLimit::Calls),
+            u64::from(usage.provider_calls),
+            u64::from(goal.run_start_usage.provider_calls),
+        ),
+        GoalLimit::Tokens => (
+            budget.max_tokens,
+            usage.known_tokens,
+            goal.run_start_usage.known_tokens,
+        ),
+        GoalLimit::ActiveTime => (
+            budget.max_active_ms,
+            final_active_ms,
+            goal.run_start_usage.active_ms,
+        ),
+        GoalLimit::Runs => (
+            Some(u64::from(budget.max_runs)),
+            usage.runs as u64,
+            goal.run_start_usage.runs as u64,
+        ),
     }
 }
 
@@ -841,170 +863,6 @@ pub(super) fn apply(
         } => {
             current.record_goal_plan_contract(goal_id, run_id, contract)?;
         }
-        Event::GoalProviderCallReserved {
-            goal_id,
-            run_id,
-            agent_run_id,
-            active_ceiling_ms,
-        } => {
-            if let Some(run) = current.runs.last().filter(|run| run.id == *run_id)
-                && run.primary().is_some_and(|primary| {
-                    primary.provider_calls.is_empty() && primary.id == *agent_run_id
-                })
-            {
-                super::definition_registry(run)?;
-                if run.skill.is_some()
-                    && !run.invoked_skill_read().is_some_and(|tool| {
-                        tool.observation.as_ref().is_some_and(|observation| {
-                            observation.disposition == crate::tools::ToolDisposition::Succeeded
-                                && observation.attestation.is_some()
-                        })
-                    })
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-            }
-            current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
-            record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
-        }
-        Event::GoalCompactionCallReserved {
-            goal_id,
-            run_id,
-            active_ceiling_ms,
-        } => {
-            current.reserve_goal_compaction_call(goal_id, run_id)?;
-            record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
-        }
-        Event::ToolResultsCleared {
-            run_id,
-            covered_tool_count,
-            cleared_bytes,
-        } => {
-            let run = current
-                .runs
-                .last()
-                .filter(|run| run.id == *run_id)
-                .ok_or(ReplayError::InvalidTransition)?;
-            let goal = current
-                .goals
-                .iter()
-                .find(|goal| goal.active_run == Some(*run_id))
-                .ok_or(ReplayError::InvalidTransition)?;
-            let count = *covered_tool_count as usize;
-            let start = run
-                .tool_results_cleared_count
-                .max(run.tool_compaction_covered_count) as usize;
-            let start = start.max(run.initial_tool_count());
-            if run.status != RunStatus::Active
-                || run
-                    .primary()
-                    .is_none_or(|primary| primary.status != AgentStatus::Active)
-                || goal.status != GoalStatus::Running
-                || run
-                    .primary()
-                    .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
-                || goal.compaction_call_reserved.is_some()
-                || !run.hooks_settled()
-                || pending_tool_requests(run) != Some(0)
-                || run.tools.iter().any(|tool| tool.observation.is_none())
-                || count <= start
-                || count > run.tools.len()
-                || run
-                    .live_tool_records()
-                    .filter(|(index, _)| *index >= count)
-                    .count()
-                    < 3
-                || !ends_whole_step(run, count)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let mut before = 0_usize;
-            let mut after = 0_usize;
-            for (_, tool) in run
-                .live_tool_records()
-                .filter(|(index, _)| (start..count).contains(index))
-            {
-                let observation = tool
-                    .observation
-                    .as_ref()
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let feedback = tool.hook_feedback();
-                before += crate::tools::types::model_result(observation, &feedback)
-                    .to_string()
-                    .len();
-                after += crate::tools::types::cleared_model_result(observation)
-                    .to_string()
-                    .len();
-            }
-            let savings = before.saturating_sub(after);
-            if savings != *cleared_bytes as usize {
-                return Err(ReplayError::InvalidTransition);
-            }
-            active_run(current, *run_id)?.tool_results_cleared_count = *covered_tool_count;
-        }
-        Event::GoalContextCompacted {
-            goal_id,
-            run_id,
-            covered_tool_count,
-            record,
-        } => {
-            let goal = current
-                .goal(*goal_id)
-                .ok_or(ReplayError::InvalidTransition)?;
-            let run = current
-                .runs
-                .last()
-                .filter(|run| run.id == *run_id)
-                .ok_or(ReplayError::InvalidTransition)?;
-            let covered_count =
-                usize::try_from(*covered_tool_count).map_err(|_| ReplayError::InvalidTransition)?;
-            let covered_tool = covered_count
-                .checked_sub(1)
-                .and_then(|index| run.tools.get(index))
-                .ok_or(ReplayError::InvalidTransition)?;
-            if goal.status != GoalStatus::Running
-                || goal.active_run != Some(*run_id)
-                || goal.run_ids.last() != Some(run_id)
-                || goal.compaction_call_reserved != Some(*run_id)
-                || run
-                    .primary()
-                    .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
-                || !run.compaction_matches(record)
-                || !crate::session::recent_files_match(std::slice::from_ref(run), record)
-                || record.covered_run_id != *run_id
-                || run.status != RunStatus::Active
-                || run.tools.iter().any(|tool| tool.observation.is_none())
-                || covered_count <= run.initial_tool_count()
-                || covered_count > run.tools.len()
-                || !ends_whole_step(run, covered_count)
-                || *covered_tool_count <= run.tool_compaction_covered_count
-                || covered_tool.finished_sequence != Some(record.covered_sequence)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            let tokens = u64::from(record.input_tokens.unwrap_or_default())
-                .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
-                .and_then(|tokens| goal.known_tokens.checked_add(tokens))
-                .ok_or(ReplayError::InvalidTransition)?;
-            let cached = goal
-                .known_cached_tokens
-                .checked_add(u64::from(
-                    record.cache_read_input_tokens.unwrap_or_default(),
-                ))
-                .ok_or(ReplayError::InvalidTransition)?;
-            let run = active_run(current, *run_id)?;
-            run.tool_compaction_recent_files = record.recent_files.clone();
-            if let CompactionStatus::Succeeded { summary, .. } = &record.status {
-                run.tool_compaction_summary = Some(summary.clone());
-                run.tool_compaction_covered_count = *covered_tool_count;
-            }
-            let goal = current_goal_mut(current, *goal_id)?;
-            goal.known_tokens = tokens;
-            goal.known_cached_tokens = cached;
-            goal.token_usage_unknown |=
-                record.input_tokens.is_none() || record.output_tokens.is_none();
-            goal.compaction_call_reserved = None;
-        }
         Event::GoalFinished {
             goal_id,
             status,
@@ -1023,6 +881,43 @@ pub(super) fn apply(
                 prior,
             )?;
         }
+        _ => return apply_accounting(current, event),
+    }
+    Ok(())
+}
+fn apply_accounting(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
+    match event {
+        Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms,
+        } => reserve_provider_call(
+            current,
+            *goal_id,
+            *run_id,
+            *agent_run_id,
+            *active_ceiling_ms,
+        )?,
+        Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms,
+        } => {
+            current.reserve_goal_compaction_call(goal_id, run_id)?;
+            record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
+        }
+        Event::ToolResultsCleared {
+            run_id,
+            covered_tool_count,
+            cleared_bytes,
+        } => clear_tool_results(current, *run_id, *covered_tool_count, *cleared_bytes)?,
+        Event::GoalContextCompacted {
+            goal_id,
+            run_id,
+            covered_tool_count,
+            record,
+        } => compact_goal_context(current, *goal_id, *run_id, *covered_tool_count, record)?,
         Event::AgentSteeringNoteRecorded {
             goal_id,
             run_id,
@@ -1040,6 +935,173 @@ pub(super) fn apply(
         }
         _ => return Err(ReplayError::InvalidTransition),
     }
+    Ok(())
+}
+
+fn reserve_provider_call(
+    current: &mut SessionView,
+    goal_id: GoalId,
+    run_id: RunId,
+    agent_run_id: crate::session::AgentRunId,
+    active_ceiling_ms: u64,
+) -> Result<(), ReplayError> {
+    if let Some(run) = current.runs.last().filter(|run| run.id == run_id)
+        && run
+            .primary()
+            .is_some_and(|primary| primary.provider_calls.is_empty() && primary.id == agent_run_id)
+    {
+        super::definition_registry(run)?;
+        if run.skill.is_some()
+            && !run.invoked_skill_read().is_some_and(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                        && observation.attestation.is_some()
+                })
+            })
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    current.reserve_goal_provider_call(&goal_id, &run_id, &agent_run_id)?;
+    record_active_ceiling(current_goal_mut(current, goal_id)?, active_ceiling_ms);
+
+    Ok(())
+}
+
+fn clear_tool_results(
+    current: &mut SessionView,
+    run_id: RunId,
+    covered_tool_count: u32,
+    cleared_bytes: u32,
+) -> Result<(), ReplayError> {
+    let run = current
+        .runs
+        .last()
+        .filter(|run| run.id == run_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let goal = current
+        .goals
+        .iter()
+        .find(|goal| goal.active_run == Some(run_id))
+        .ok_or(ReplayError::InvalidTransition)?;
+    let count = covered_tool_count as usize;
+    let start = run
+        .tool_results_cleared_count
+        .max(run.tool_compaction_covered_count) as usize;
+    let start = start.max(run.initial_tool_count());
+    if run.status != RunStatus::Active
+        || run
+            .primary()
+            .is_none_or(|primary| primary.status != AgentStatus::Active)
+        || goal.status != GoalStatus::Running
+        || run
+            .primary()
+            .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
+        || goal.compaction_call_reserved.is_some()
+        || !run.hooks_settled()
+        || pending_tool_requests(run) != Some(0)
+        || run.tools.iter().any(|tool| tool.observation.is_none())
+        || count <= start
+        || count > run.tools.len()
+        || run
+            .live_tool_records()
+            .filter(|(index, _)| *index >= count)
+            .count()
+            < 3
+        || !ends_whole_step(run, count)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let mut before = 0_usize;
+    let mut after = 0_usize;
+    for (_, tool) in run
+        .live_tool_records()
+        .filter(|(index, _)| (start..count).contains(index))
+    {
+        let observation = tool
+            .observation
+            .as_ref()
+            .ok_or(ReplayError::InvalidTransition)?;
+        let feedback = tool.hook_feedback();
+        before += crate::tools::types::model_result(observation, &feedback)
+            .to_string()
+            .len();
+        after += crate::tools::types::cleared_model_result(observation)
+            .to_string()
+            .len();
+    }
+    let savings = before.saturating_sub(after);
+    if savings != cleared_bytes as usize {
+        return Err(ReplayError::InvalidTransition);
+    }
+    active_run(current, run_id)?.tool_results_cleared_count = covered_tool_count;
+
+    Ok(())
+}
+
+fn compact_goal_context(
+    current: &mut SessionView,
+    goal_id: GoalId,
+    run_id: RunId,
+    covered_tool_count: u32,
+    record: &crate::session::CompactionRecord,
+) -> Result<(), ReplayError> {
+    let goal = current
+        .goal(goal_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let run = current
+        .runs
+        .last()
+        .filter(|run| run.id == run_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let covered_count =
+        usize::try_from(covered_tool_count).map_err(|_| ReplayError::InvalidTransition)?;
+    let covered_tool = covered_count
+        .checked_sub(1)
+        .and_then(|index| run.tools.get(index))
+        .ok_or(ReplayError::InvalidTransition)?;
+    if goal.status != GoalStatus::Running
+        || goal.active_run != Some(run_id)
+        || goal.run_ids.last() != Some(&run_id)
+        || goal.compaction_call_reserved != Some(run_id)
+        || run
+            .primary()
+            .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
+        || !run.compaction_matches(record)
+        || !crate::session::recent_files_match(std::slice::from_ref(run), record)
+        || record.covered_run_id != run_id
+        || run.status != RunStatus::Active
+        || run.tools.iter().any(|tool| tool.observation.is_none())
+        || covered_count <= run.initial_tool_count()
+        || covered_count > run.tools.len()
+        || !ends_whole_step(run, covered_count)
+        || covered_tool_count <= run.tool_compaction_covered_count
+        || covered_tool.finished_sequence != Some(record.covered_sequence)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let tokens = u64::from(record.input_tokens.unwrap_or_default())
+        .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
+        .and_then(|tokens| goal.known_tokens.checked_add(tokens))
+        .ok_or(ReplayError::InvalidTransition)?;
+    let cached = goal
+        .known_cached_tokens
+        .checked_add(u64::from(
+            record.cache_read_input_tokens.unwrap_or_default(),
+        ))
+        .ok_or(ReplayError::InvalidTransition)?;
+    let run = active_run(current, run_id)?;
+    run.tool_compaction_recent_files = record.recent_files.clone();
+    if let CompactionStatus::Succeeded { summary, .. } = &record.status {
+        run.tool_compaction_summary = Some(summary.clone());
+        run.tool_compaction_covered_count = covered_tool_count;
+    }
+    let goal = current_goal_mut(current, goal_id)?;
+    goal.known_tokens = tokens;
+    goal.known_cached_tokens = cached;
+    goal.token_usage_unknown |= record.input_tokens.is_none() || record.output_tokens.is_none();
+    goal.compaction_call_reserved = None;
+
     Ok(())
 }
 

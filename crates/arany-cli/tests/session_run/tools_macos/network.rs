@@ -60,7 +60,7 @@ async fn native_network_proxy_helper() {
         let state_path = root.join(format!("state-{listed}"));
         let state = StateRoot::admit(&state_path).unwrap();
         let config = json!({
-            "version":1,"workspace_paths":["src"],"write":true,
+            "workspace_paths":["src"],"write":true,
             "commands":[
                 {"name":"shell","executable":"/bin/sh","sha256":sh_digest,"interpreter":true,"inputs":[]},
                 {"name":"bash","executable":"/bin/bash","sha256":bash_digest,"interpreter":true,"inputs":[]}
@@ -83,6 +83,7 @@ async fn native_network_proxy_helper() {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }],
             linked_file: None,
         });

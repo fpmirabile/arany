@@ -32,6 +32,140 @@ pub(super) struct Channel {
     pub approval_channel: super::server::ApprovalChannel,
 }
 
+pub(super) struct ApprovalRun {
+    pub inbox: ApprovalInbox,
+    pub cancel: RunCancellation,
+    pub finished: RunCancellation,
+    pub thread_id: SessionId,
+}
+
+struct Worker<Lookup> {
+    inbox: ApprovalInbox,
+    cancel: RunCancellation,
+    finished: RunCancellation,
+    thread_id: SessionId,
+    outbound: mpsc::Sender<Message>,
+    next_id: Arc<AtomicI64>,
+    withdrawals: bool,
+    terminal: bool,
+    state: Arc<Mutex<State>>,
+    changed: Arc<Notify>,
+    started_at: Lookup,
+}
+
+enum Offer {
+    Stop,
+    Skip,
+    Sent(Box<ToolApproval>, oneshot::Receiver<ApprovalReply>),
+}
+
+impl<Lookup, Started> Worker<Lookup>
+where
+    Lookup: Fn(EffectIntent) -> Started + Send + 'static,
+    Started: Future<Output = Option<i64>> + Send + 'static,
+{
+    async fn run(mut self) {
+        let mut current: Option<ToolApproval> = None;
+        let mut answer: Option<oneshot::Receiver<ApprovalReply>> = None;
+        loop {
+            tokio::select! { biased;
+                () = self.cancel.cancelled() => break,
+                () = self.finished.cancelled() => break,
+                () = self.outbound.closed() => break,
+                () = self.changed.notified() => {
+                    if self.state.lock().expect("approval state").closed { break; }
+                }
+                allow = async { answer.as_mut().expect("answer").await }, if answer.is_some() => {
+                    if let Some(approval) = current.take() {
+                        approval.decide(allow.unwrap_or(ApprovalReply::Unavailable));
+                    }
+                    answer = None;
+                }
+                () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
+                    answer = None;
+                    let pending = self.state.lock().expect("approval state").pending.take();
+                    let _ = current.as_mut().expect("approval").withdrawal_committed().await;
+                    notify_withdrawal(pending, &self.outbound, self.withdrawals, self.terminal).await;
+                    current = None;
+                }
+                approval = self.inbox.next(), if !self.terminal || current.is_none() => {
+                    let Some(approval) = approval else { break };
+                    if current.is_some() {
+                        approval.decide(ApprovalReply::Unavailable);
+                        continue;
+                    }
+                    match self.offer(approval).await {
+                        Offer::Stop => break,
+                        Offer::Skip => continue,
+                        Offer::Sent(approval, decision) => {
+                            current = Some(*approval);
+                            answer = Some(decision);
+                        }
+                    }
+                }
+            }
+        }
+        let pending = {
+            let mut state = self.state.lock().expect("approval state");
+            state.closed = true;
+            state.pending.take()
+        };
+        notify_withdrawal(pending, &self.outbound, self.withdrawals, self.terminal).await;
+    }
+
+    async fn offer(&mut self, mut approval: ToolApproval) -> Offer {
+        let terminal = self.terminal;
+        let intent = approval.intent.clone();
+        let message = tokio::select! { biased;
+            () = self.cancel.cancelled() => return Offer::Stop,
+            () = self.finished.cancelled() => return Offer::Stop,
+            () = self.outbound.closed() => return Offer::Stop,
+            () = self.changed.notified(), if terminal => return Offer::Stop,
+            () = approval.abandoned() => None,
+            started = (self.started_at)(intent) => {
+                started.and_then(|started| request(self.thread_id, &approval, started, &self.next_id, terminal))
+            },
+        };
+        let Some(message) = message else {
+            approval.decide(ApprovalReply::Unavailable);
+            return Offer::Skip;
+        };
+        let permit = if terminal {
+            tokio::select! { biased;
+                () = self.cancel.cancelled() => return Offer::Stop,
+                () = self.finished.cancelled() => return Offer::Stop,
+                () = self.outbound.closed() => return Offer::Stop,
+                () = self.changed.notified() => return Offer::Stop,
+                () = approval.abandoned() => return Offer::Skip,
+                permit = self.outbound.reserve() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return Offer::Stop,
+                },
+            }
+        } else {
+            let Ok(permit) = self.outbound.try_reserve() else {
+                approval.decide(ApprovalReply::Unavailable);
+                return Offer::Skip;
+            };
+            permit
+        };
+        let (decide, decision) = oneshot::channel();
+        let mut state = self.state.lock().expect("approval state");
+        if state.closed {
+            approval.decide(ApprovalReply::Unavailable);
+            return Offer::Stop;
+        }
+        state.pending = Some(Pending {
+            id: message.id.clone(),
+            decisions: decisions(&approval, terminal),
+            decide,
+        });
+        permit.send(Message::Request(message));
+        drop(state);
+        Offer::Sent(Box::new(approval), decision)
+    }
+}
+
 pub(super) struct Approvals {
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
@@ -40,25 +174,22 @@ pub(super) struct Approvals {
 }
 
 impl Approvals {
-    pub fn start<Lookup, Started>(
-        mut inbox: ApprovalInbox,
-        mut cancel: RunCancellation,
-        thread_id: SessionId,
-        channel: Channel,
-        mut finished: RunCancellation,
-        started_at: Lookup,
-    ) -> Self
+    pub fn start<Lookup, Started>(run: ApprovalRun, channel: Channel, started_at: Lookup) -> Self
     where
         Lookup: Fn(EffectIntent) -> Started + Send + 'static,
-        Started: Future<Output = Option<i64>> + Send,
+        Started: Future<Output = Option<i64>> + Send + 'static,
     {
+        let ApprovalRun {
+            inbox,
+            cancel,
+            finished,
+            thread_id,
+        } = run;
         let Channel {
             outbound,
             next_id,
             approval_channel,
         } = channel;
-        let withdrawals = approval_channel != super::server::ApprovalChannel::Human;
-        let terminal = approval_channel == super::server::ApprovalChannel::Terminal;
         let state = Arc::new(Mutex::new(State::default()));
         let changed = Arc::new(Notify::new());
         let mut owner = Self {
@@ -67,88 +198,20 @@ impl Approvals {
             cancel: cancel.clone(),
             worker: None,
         };
-        owner.worker = Some(tokio::spawn(async move {
-            let mut current: Option<ToolApproval> = None;
-            let mut answer: Option<oneshot::Receiver<ApprovalReply>> = None;
-            loop {
-                tokio::select! { biased;
-                    () = cancel.cancelled() => break,
-                    () = finished.cancelled() => break,
-                    () = outbound.closed() => break,
-                    () = changed.notified() => {
-                        if state.lock().expect("approval state").closed { break; }
-                    }
-                    allow = async { answer.as_mut().expect("answer").await }, if answer.is_some() => {
-                        if let Some(approval) = current.take() {
-                            approval.decide(allow.unwrap_or(ApprovalReply::Unavailable));
-                        }
-                        answer = None;
-                    }
-                    () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
-                        answer = None;
-                        let pending = state.lock().expect("approval state").pending.take();
-                        let _ = current.as_mut().expect("approval").withdrawal_committed().await;
-                        notify_withdrawal(pending, &outbound, withdrawals, terminal).await;
-                        current = None;
-                    }
-                    approval = inbox.next(), if !terminal || current.is_none() => {
-                        let Some(mut approval) = approval else { break };
-                        if current.is_some() {
-                            approval.decide(ApprovalReply::Unavailable);
-                            continue;
-                        }
-                        let intent = approval.intent.clone();
-                        let message = tokio::select! { biased;
-                            () = cancel.cancelled() => break,
-                            () = finished.cancelled() => break,
-                            () = outbound.closed() => break,
-                            () = changed.notified(), if terminal => break,
-                            () = approval.abandoned() => None,
-                            started = started_at(intent) => {
-                                started.and_then(|started| request(thread_id, &approval, started, &next_id, terminal))
-                            },
-                        };
-                        let Some(message) = message else { approval.decide(ApprovalReply::Unavailable); continue; };
-                        let permit = if terminal {
-                            tokio::select! { biased;
-                                () = cancel.cancelled() => break,
-                                () = finished.cancelled() => break,
-                                () = outbound.closed() => break,
-                                () = changed.notified() => break,
-                                () = approval.abandoned() => continue,
-                                permit = outbound.reserve() => match permit {
-                                    Ok(permit) => permit,
-                                    Err(_) => break,
-                                },
-                            }
-                        } else {
-                            let Ok(permit) = outbound.try_reserve() else {
-                                approval.decide(ApprovalReply::Unavailable);
-                                continue;
-                            };
-                            permit
-                        };
-                        let (decide, decision) = oneshot::channel();
-                        let mut state = state.lock().expect("approval state");
-                        if state.closed { approval.decide(ApprovalReply::Unavailable); break; }
-                        state.pending = Some(Pending {
-                            id: message.id.clone(),
-                            decisions: decisions(&approval, terminal),
-                            decide,
-                        });
-                        current = Some(approval);
-                        answer = Some(decision);
-                        permit.send(Message::Request(message));
-                    }
-                }
-            }
-            let pending = {
-                let mut state = state.lock().expect("approval state");
-                state.closed = true;
-                state.pending.take()
-            };
-            notify_withdrawal(pending, &outbound, withdrawals, terminal).await;
-        }));
+        let worker = Worker {
+            inbox,
+            cancel,
+            finished,
+            thread_id,
+            outbound,
+            next_id,
+            withdrawals: approval_channel != super::server::ApprovalChannel::Human,
+            terminal: approval_channel == super::server::ApprovalChannel::Terminal,
+            state,
+            changed,
+            started_at,
+        };
+        owner.worker = Some(tokio::spawn(worker.run()));
         owner
     }
 
@@ -213,8 +276,10 @@ async fn notify_withdrawal(
 ) {
     if enabled && let Some(pending) = pending {
         let message = Message::Notification(super::items::notification(
-            "$/cancel_request",
-            serde_json::json!({"requestId": pending.id}),
+            CANCEL_REQUEST_METHOD,
+            CancelRequestParams {
+                request_id: pending.id,
+            },
         ));
         if reliable {
             let _ = output.send(message).await;
@@ -404,6 +469,7 @@ mod tests {
             attribution: None,
             remember: true,
             prefix: false,
+            sandbox_off: false,
         };
         let warning = lines(&intent, Some(&prompt));
         assert_eq!(warning[0], "Run outside the Guard? (unguarded)");
@@ -513,6 +579,7 @@ mod tests {
                             prefix: true,
                             sensitive: false,
                             inactive_rules: false,
+                            sandbox_off: false,
                         });
                     }
                     let request =
@@ -541,15 +608,17 @@ mod tests {
         let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
         let (outbound, mut output) = mpsc::channel(8);
         let _owner = Approvals::start(
-            inbox,
-            RunCancellation::new(),
-            SessionId::new(),
+            ApprovalRun {
+                inbox,
+                cancel: RunCancellation::new(),
+                finished: RunCancellation::new(),
+                thread_id: SessionId::new(),
+            },
             Channel {
                 outbound,
                 next_id: Arc::new(AtomicI64::new(1)),
                 approval_channel: super::super::server::ApprovalChannel::Human,
             },
-            RunCancellation::new(),
             |_| async { Some(1) },
         );
         let big = ToolCall::CommandUnguarded {
@@ -580,15 +649,17 @@ mod tests {
                     .unwrap();
             }
             let owner = Approvals::start(
-                inbox,
-                RunCancellation::new(),
-                SessionId::new(),
+                ApprovalRun {
+                    inbox,
+                    cancel: RunCancellation::new(),
+                    finished: RunCancellation::new(),
+                    thread_id: SessionId::new(),
+                },
                 Channel {
                     outbound,
                     next_id: Arc::new(AtomicI64::new(1)),
                     approval_channel: super::super::server::ApprovalChannel::Human,
                 },
-                RunCancellation::new(),
                 |_| async { Some(1) },
             );
             assert!(
@@ -644,15 +715,17 @@ mod tests {
             let cancel = RunCancellation::new();
             let finished = RunCancellation::new();
             let owner = Approvals::start(
-                inbox,
-                cancel.clone(),
-                SessionId::new(),
+                ApprovalRun {
+                    inbox,
+                    cancel: cancel.clone(),
+                    finished: finished.clone(),
+                    thread_id: SessionId::new(),
+                },
                 Channel {
                     outbound,
                     next_id: Arc::new(AtomicI64::new(1)),
                     approval_channel: super::super::server::ApprovalChannel::Terminal,
                 },
-                finished.clone(),
                 |_| async { Some(1) },
             );
             let asking = approvals.clone();
@@ -781,15 +854,17 @@ mod tests {
             let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
             let (outbound, mut output) = mpsc::channel(8);
             let owner = Approvals::start(
-                inbox,
-                RunCancellation::new(),
-                SessionId::new(),
+                ApprovalRun {
+                    inbox,
+                    cancel: RunCancellation::new(),
+                    finished: RunCancellation::new(),
+                    thread_id: SessionId::new(),
+                },
                 Channel {
                     outbound,
                     next_id: Arc::new(AtomicI64::new(1)),
                     approval_channel,
                 },
-                RunCancellation::new(),
                 |_| async { Some(1) },
             );
             let ask = |call| {
@@ -868,15 +943,17 @@ mod tests {
         let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
         let (outbound, mut output) = mpsc::channel(8);
         let owner = Approvals::start(
-            inbox,
-            RunCancellation::new(),
-            SessionId::new(),
+            ApprovalRun {
+                inbox,
+                cancel: RunCancellation::new(),
+                finished: RunCancellation::new(),
+                thread_id: SessionId::new(),
+            },
             Channel {
                 outbound,
                 next_id: Arc::new(AtomicI64::new(1)),
                 approval_channel: super::super::server::ApprovalChannel::Restricted,
             },
-            RunCancellation::new(),
             |_| async { Some(1) },
         );
         let (reject, rejected) = tokio::sync::oneshot::channel();

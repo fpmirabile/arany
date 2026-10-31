@@ -172,11 +172,13 @@ fn start_with_config(
     let (shutdown, _) = watch::channel(false);
     let reader_task = tokio::spawn(read_messages(
         input,
-        config,
-        shared.clone(),
-        inbound.clone(),
-        outbound.clone(),
-        shutdown.clone(),
+        AcpReader {
+            config,
+            shared: shared.clone(),
+            inbound: inbound.clone(),
+            outbound: outbound.clone(),
+            shutdown: shutdown.clone(),
+        },
     ));
     let writer_task = tokio::spawn(serve::write_messages(output, writer_rx));
     let translation_input = inbound.clone();
@@ -187,9 +189,11 @@ fn start_with_config(
             let server = run_server(
                 engine,
                 state_dir,
-                receiver,
-                events,
-                stopping.clone(),
+                serve::server::ServerIo {
+                    inbound: receiver,
+                    outbound: events,
+                    stopping: stopping.clone(),
+                },
                 serve::threads::Threads::with_provider(provider),
             );
             let translator = translate::output(
@@ -207,11 +211,13 @@ fn start_with_config(
         serve::serve_transport(
             serving,
             std::future::pending(),
-            inbound,
-            outbound,
-            reader_task,
-            writer_task,
-            shutdown,
+            serve::Transport {
+                inbound,
+                outbound,
+                reader: reader_task,
+                writer: writer_task,
+                shutdown,
+            },
         )
         .await
     });

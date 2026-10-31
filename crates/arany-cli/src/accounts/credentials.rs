@@ -2,7 +2,7 @@ use arany::{
     Effort, NativeApiCredentials, ProviderRecord, StateRoot, StoreError, resolve_native_effort,
     validate_native_model_id,
 };
-use arany::{RecordFormat, RecordKind, RecordStep};
+use arany::{RecordFormat, RecordKind};
 #[cfg(all(test, not(target_os = "macos")))]
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -81,70 +81,24 @@ pub(crate) struct InspectedAccount {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredAccountFile {
-    schema: u8,
     storage: AccountStorage,
     #[serde(deserialize_with = "Option::deserialize")]
     account: Option<SavedAccount>,
 }
 
-pub(crate) const SAVED_ACCOUNT_SCHEMA: u8 = 3;
-const STORED_ACCOUNT_SCHEMA: u8 = 2;
-
 pub(crate) const SAVED_ACCOUNT: RecordFormat = RecordFormat {
     kind: RecordKind::SavedAccount,
-    field: "schema",
-    floor: 1,
-    current: STORED_ACCOUNT_SCHEMA as u64,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_stored_account,
-    }],
     accepts: |bytes| StoredAccountFile::parse(bytes).is_ok(),
 };
-
-pub(crate) const NATIVE_ACCOUNT: RecordFormat = RecordFormat {
-    kind: RecordKind::SavedAccount,
-    field: "schema",
-    floor: 2,
-    current: SAVED_ACCOUNT_SCHEMA as u64,
-    steps: &[RecordStep {
-        from: 2,
-        transform: migrate_native_account,
-    }],
-    accepts: |bytes| {
-        serde_json::from_slice::<SavedAccount>(bytes)
-            .is_ok_and(|account| account.validate().is_ok())
-    },
-};
-
-fn migrate_native_account(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    if value.get("schema")?.as_u64()? != NATIVE_ACCOUNT.floor {
-        return None;
-    }
-    let provider = ProviderRecord::parse(value.get("provider")?.as_str()?)?;
-    value["provider"] = serde_json::to_value(provider).ok()?;
-    value["schema"] = SAVED_ACCOUNT_SCHEMA.into();
-    Some(value)
-}
-
-fn migrate_stored_account(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    if !value.get("account")?.is_null() {
-        value["account"] = migrate_native_account(value["account"].take())?;
-    }
-    value["schema"] = STORED_ACCOUNT_SCHEMA.into();
-    Some(value)
-}
 
 impl StoredAccountFile {
     fn parse(record: &[u8]) -> Result<Self, CredentialError> {
         let stored: Self =
             serde_json::from_slice(record).map_err(|_| CredentialError::InvalidAccount)?;
-        if stored.schema != STORED_ACCOUNT_SCHEMA
-            || matches!(
-                (&stored.storage, &stored.account),
-                (AccountStorage::Keyring, Some(_)) | (AccountStorage::PrivateFile, None)
-            )
-        {
+        if matches!(
+            (&stored.storage, &stored.account),
+            (AccountStorage::Keyring, Some(_)) | (AccountStorage::PrivateFile, None)
+        ) {
             return Err(CredentialError::InvalidAccount);
         }
         if let Some(account) = &stored.account {
@@ -203,7 +157,6 @@ impl CredentialError {
 pub(crate) enum SetupData {
     Native,
     ChatGpt,
-    Models,
 }
 
 pub(crate) struct SetupReset {
@@ -241,7 +194,6 @@ impl SetupReset {
         let record = match data {
             SetupData::Native => state.record(RecordKind::SavedAccount).read(),
             SetupData::ChatGpt => state.record(RecordKind::ChatgptAccounts).read(),
-            SetupData::Models => Ok(None),
         }
         .map_err(|_| CredentialError::StateUnavailable)?;
         let registration = if matches!(data, SetupData::ChatGpt) {
@@ -275,7 +227,6 @@ impl SetupReset {
                         (RecordKind::ChatgptRegistration, 1),
                         (RecordKind::ModelPreferences, 2),
                     ],
-                    SetupData::Models => &[(RecordKind::ModelPreferences, 2)],
                 };
                 let mut changed = false;
                 for &(kind, index) in records {
@@ -309,7 +260,8 @@ impl NativeRemoval {
         let records = state
             .with_account_replacement_lock(workspace, || {
                 let record = state
-                    .read_current(&SAVED_ACCOUNT)
+                    .record(SAVED_ACCOUNT.kind)
+                    .read()
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 let models = state
                     .record(RecordKind::ModelPreferences)
@@ -476,7 +428,6 @@ pub(crate) fn admit_transport() -> Result<(), CredentialError> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SavedAccount {
-    schema: u8,
     pub id: Uuid,
     pub provider: ProviderRecord,
     pub model: String,
@@ -495,7 +446,6 @@ impl SavedAccount {
         api_key: String,
     ) -> Result<Self, CredentialError> {
         let account = Self {
-            schema: SAVED_ACCOUNT_SCHEMA,
             id: Uuid::now_v7(),
             provider: ProviderRecord::parse(&provider).ok_or(CredentialError::InvalidAccount)?,
             model,
@@ -546,8 +496,7 @@ impl SavedAccount {
     }
 
     fn validate(&self) -> Result<(), CredentialError> {
-        if self.schema != SAVED_ACCOUNT_SCHEMA
-            || self.id.get_version() != Some(Version::SortRand)
+        if self.id.get_version() != Some(Version::SortRand)
             || !self.provider.kind().is_native_api()
             || (resolve_native_effort(&self.provider.profile(), &self.model, self.effort).is_err()
                 && (self.effort.is_none() || validate_native_model_id(&self.model).is_err()))
@@ -597,7 +546,8 @@ async fn save_at(
         state
             .with_account_replacement_lock(&workspace, || {
                 let existing = state
-                    .read_current(&SAVED_ACCOUNT)
+                    .record(SAVED_ACCOUNT.kind)
+                    .read()
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 if existing
                     .as_deref()
@@ -631,7 +581,6 @@ fn write_marked_keyring_account(
     write: impl FnOnce(&str, &str) -> Result<(), CredentialError>,
 ) -> Result<(), CredentialError> {
     let marker = StoredAccountFile {
-        schema: STORED_ACCOUNT_SCHEMA,
         storage: AccountStorage::Keyring,
         account: None,
     }
@@ -651,7 +600,6 @@ async fn save_file_at(
 ) -> Result<(), CredentialError> {
     account.validate()?;
     let record = StoredAccountFile {
-        schema: STORED_ACCOUNT_SCHEMA,
         storage: AccountStorage::PrivateFile,
         account: Some(account),
     }
@@ -664,7 +612,8 @@ async fn save_file_at(
         state
             .with_account_replacement_lock(&workspace, || {
                 let existing = state
-                    .read_current(&SAVED_ACCOUNT)
+                    .record(SAVED_ACCOUNT.kind)
+                    .read()
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 if existing
                     .as_deref()
@@ -759,12 +708,13 @@ fn load_file() -> Result<Option<StoredAccountFile>, CredentialError> {
 
 fn load_file_at(path: &Path) -> Result<Option<StoredAccountFile>, CredentialError> {
     let Some(state) =
-        crate::files::open_optional_state(path).map_err(|_| CredentialError::StateUnavailable)?
+        arany::StateRoot::open_optional(path).map_err(|_| CredentialError::StateUnavailable)?
     else {
         return Ok(None);
     };
     let Some(record) = state
-        .read_current(&SAVED_ACCOUNT)
+        .record(SAVED_ACCOUNT.kind)
+        .read()
         .map_err(|_| CredentialError::StateUnavailable)?
     else {
         return Ok(None);
@@ -792,9 +742,8 @@ fn decode_account(record: &[u8]) -> Result<SavedAccount, CredentialError> {
     if record.len() > RecordKind::SavedAccount.limit() {
         return Err(CredentialError::InvalidAccount);
     }
-    let upgraded = NATIVE_ACCOUNT.upgrade(record);
-    let account: SavedAccount = serde_json::from_slice(upgraded.as_deref().unwrap_or(record))
-        .map_err(|_| CredentialError::InvalidAccount)?;
+    let account: SavedAccount =
+        serde_json::from_slice(record).map_err(|_| CredentialError::InvalidAccount)?;
     account.validate()?;
     Ok(account)
 }
@@ -848,11 +797,6 @@ mod tests {
                 SetupData::ChatGpt,
                 RecordKind::ChatgptAccounts,
                 "chatgpt-accounts.json",
-            ),
-            (
-                SetupData::Models,
-                RecordKind::ModelPreferences,
-                "model-preferences.json",
             ),
         ] {
             let temp = tempfile::tempdir().unwrap();
@@ -963,7 +907,7 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         state
             .record(RecordKind::SavedAccount)
-            .replace(br#"{"schema":2,"storage":"keyring","account":null}"#)
+            .replace(br#"{"storage":"keyring","account":null}"#)
             .unwrap();
         let probe_state = StateRoot::admit(state.path()).unwrap();
         let probe_workspace = workspace.clone();
@@ -1033,7 +977,7 @@ mod tests {
             let state = StateRoot::admit(&temp.path().join("state")).unwrap();
             let workspace = temp.path().join("workspace");
             std::fs::create_dir(&workspace).unwrap();
-            let record = br#"{"schema":2,"storage":"keyring","account":null}"#.to_vec();
+            let record = br#"{"storage":"keyring","account":null}"#.to_vec();
             state
                 .record(RecordKind::SavedAccount)
                 .replace(&record)
@@ -1432,18 +1376,15 @@ mod tests {
         )
         .expect("reviewed account");
         let mut record = serde_json::to_value(account).expect("serialize account");
-        assert_eq!(record["schema"], SAVED_ACCOUNT_SCHEMA);
         assert!(record["anthropic_workspace_id"].is_null());
         for field in ["effort", "anthropic_workspace_id"] {
             let mut missing = record.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<SavedAccount>(missing).is_err());
         }
-        record["schema"] = 1.into();
-        let malformed: SavedAccount = serde_json::from_value(record).expect("parse schema");
-        assert_eq!(malformed.validate(), Err(CredentialError::InvalidAccount));
+        record["schema"] = 3.into();
+        assert!(serde_json::from_value::<SavedAccount>(record).is_err());
         let mut scoped = serde_json::json!({
-            "schema": SAVED_ACCOUNT_SCHEMA,
             "id": Uuid::now_v7(),
             "provider": {"kind":"anthropic","custom_name":null},
             "model": "claude-sonnet-5",
@@ -1454,13 +1395,14 @@ mod tests {
         assert!(
             serde_json::from_value::<SavedAccount>(scoped.clone())
                 .is_ok_and(|account| account.validate().is_ok()),
-            "a valid versioned workspace account must be admitted"
+            "a valid workspace account must be admitted"
         );
-        let mut legacy = scoped.clone();
-        legacy["schema"] = NATIVE_ACCOUNT.floor.into();
-        legacy["provider"] = "anthropic".into();
-        let migrated = decode_account(&serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert_eq!(serde_json::to_value(migrated).unwrap(), scoped);
+        let mut previous = scoped.clone();
+        previous["provider"] = "anthropic".into();
+        assert!(matches!(
+            decode_account(&serde_json::to_vec(&previous).unwrap()),
+            Err(CredentialError::InvalidAccount)
+        ));
         for (field, value) in [
             (
                 "provider",
@@ -1474,8 +1416,6 @@ mod tests {
                 "provider",
                 serde_json::json!({"kind":"custom","custom_name":"other"}),
             ),
-            ("schema", serde_json::json!(1)),
-            ("schema", serde_json::json!(4)),
             ("anthropic_workspace_id", serde_json::json!("")),
             ("anthropic_workspace_id", serde_json::json!("wrkspc_")),
             (
@@ -1494,7 +1434,7 @@ mod tests {
             assert!(
                 !serde_json::from_value::<SavedAccount>(scoped.clone())
                     .is_ok_and(|account| account.validate().is_ok()),
-                "invalid workspace/version/provider combination was admitted"
+                "invalid workspace/provider combination was admitted"
             );
             scoped[field] = original;
         }
@@ -1507,7 +1447,6 @@ mod tests {
                     })
                     .expect("bounded fields");
             let encoded = StoredAccountFile {
-                schema: STORED_ACCOUNT_SCHEMA,
                 storage: AccountStorage::PrivateFile,
                 account: Some(account),
             }
@@ -1653,7 +1592,6 @@ mod tests {
 
         let state = StateRoot::open_existing(&account_root).expect("private account root");
         let marker = StoredAccountFile {
-            schema: STORED_ACCOUNT_SCHEMA,
             storage: AccountStorage::Keyring,
             account: None,
         }
@@ -1680,7 +1618,7 @@ mod tests {
         assert_eq!(stored.storage, AccountStorage::Keyring);
         assert!(stored.account.is_none());
 
-        for data in [SetupData::Native, SetupData::ChatGpt, SetupData::Models] {
+        for data in [SetupData::Native, SetupData::ChatGpt] {
             state
                 .record(RecordKind::SavedAccount)
                 .replace(b"unsupported-api-record")

@@ -1,14 +1,12 @@
 use crate::provider::compaction_input;
 use crate::provider::conversation::{Block, Conversation, Role};
 use crate::provider::decode::{argument_limit, review_outcome, tool_function};
-use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
     ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -135,261 +133,273 @@ impl<'a> MessageStream<'a> {
         if self.stopped {
             return Err(ProviderError::InvalidStream);
         }
-        let invalid = || ProviderError::InvalidStream;
         match event
             .get("type")
             .and_then(Value::as_str)
-            .ok_or_else(invalid)?
+            .ok_or(ProviderError::InvalidStream)?
         {
             "ping" => {}
             "error" => {
                 self.stage = crate::provider::diagnostics::SubscriptionFailureStage::RemoteFailure;
                 return Err(ProviderError::Unavailable);
             }
-            "message_start" => {
-                self.stage =
-                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseMessage;
-                let message = event.get("message").ok_or_else(invalid)?;
-                if self.response.is_some()
-                    || message.get("type").and_then(Value::as_str) != Some("message")
-                    || message.get("role").and_then(Value::as_str) != Some("assistant")
-                    || message.get("model").and_then(Value::as_str) != Some(self.model)
-                    || message
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .is_none_or(|content| !content.is_empty())
-                    || message
-                        .get("stop_reason")
-                        .is_none_or(|reason| !reason.is_null())
-                {
-                    return Err(ProviderError::InvalidStream);
-                }
-                self.response = Some(message.clone());
-            }
-            "content_block_start" => {
-                self.stage =
-                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
-                let index = event
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .and_then(|index| usize::try_from(index).ok())
-                    .ok_or_else(invalid)?;
-                if index != self.closed.len()
-                    || index >= MAX_CONTENT_BLOCKS
-                    || self.closed.iter().any(|closed| !closed)
-                    || self.delta_seen
-                {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let block = event.get("content_block").ok_or_else(invalid)?;
-                let content = self
-                    .response
-                    .as_mut()
-                    .and_then(|message| message.get_mut("content"))
-                    .and_then(Value::as_array_mut)
-                    .ok_or_else(invalid)?;
-                if block.get("type").and_then(Value::as_str) == Some("tool_use")
-                    && block.get("input").is_some_and(|input| {
-                        input.as_object().is_none_or(|fields| !fields.is_empty())
-                    })
-                {
-                    return Err(ProviderError::InvalidStream);
-                }
-                content.push(block.clone());
-                self.closed.push(false);
-                self.tool_input.clear();
-                if block.get("type").and_then(Value::as_str) == Some("text") {
-                    let initial = block
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?;
-                    self.publish_preview(initial);
-                }
-            }
-            "content_block_delta" => {
-                self.stage =
-                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
-                let index = event
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .and_then(|index| usize::try_from(index).ok())
-                    .ok_or_else(invalid)?;
-                if index.checked_add(1) != Some(self.closed.len())
-                    || self.closed.get(index) != Some(&false)
-                    || self.delta_seen
-                {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let delta = event.get("delta").ok_or_else(invalid)?;
-                let kind = delta
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .ok_or_else(invalid)?;
-                let block = self
-                    .response
-                    .as_mut()
-                    .and_then(|message| message.get_mut("content"))
-                    .and_then(Value::as_array_mut)
-                    .and_then(|content| content.get_mut(index))
-                    .ok_or_else(invalid)?;
-                if kind == "input_json_delta" {
-                    let fragment = delta
-                        .get("partial_json")
-                        .and_then(Value::as_str)
-                        .ok_or_else(invalid)?;
-                    if block.get("type").and_then(Value::as_str) != Some("tool_use")
-                        || self.tool_input.len() + fragment.len() > tool_argument_limit(block)
-                    {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    self.tool_input.push_str(fragment);
-                    return Ok(None);
-                }
-                let (field, expected) = match kind {
-                    "text_delta" => ("text", "text"),
-                    "thinking_delta" => ("thinking", "thinking"),
-                    "signature_delta" => ("signature", "thinking"),
-                    _ => return Err(ProviderError::InvalidStream),
-                };
-                if block.get("type").and_then(Value::as_str) != Some(expected) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let fragment = delta
-                    .get(field)
-                    .and_then(Value::as_str)
-                    .ok_or_else(invalid)?;
-                if field == "signature" && block.get(field).is_none() {
-                    block[field] = Value::String(String::new());
-                }
-                let Some(Value::String(current)) = block.get_mut(field) else {
-                    return Err(ProviderError::InvalidStream);
-                };
-                if current.len() + fragment.len() > MAX_RESPONSE_BYTES {
-                    return Err(ProviderError::InvalidStream);
-                }
-                current.push_str(fragment);
-                if kind == "text_delta" {
-                    self.publish_preview(fragment);
-                }
-            }
-            "content_block_stop" => {
-                self.stage =
-                    crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
-                let index = event
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .and_then(|index| usize::try_from(index).ok())
-                    .ok_or_else(invalid)?;
-                let count = self.closed.len();
-                let closed = self.closed.get_mut(index).ok_or_else(invalid)?;
-                if *closed || index.checked_add(1) != Some(count) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                *closed = true;
-                let block = self
-                    .response
-                    .as_mut()
-                    .and_then(|message| message.get_mut("content"))
-                    .and_then(Value::as_array_mut)
-                    .and_then(|content| content.get_mut(index))
-                    .ok_or_else(invalid)?;
-                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let input = if self.tool_input.is_empty() {
-                        json!({})
-                    } else {
-                        crate::tools::parse_json(
-                            self.tool_input.as_bytes(),
-                            tool_argument_limit(block),
-                        )
-                        .map_err(|_| ProviderError::InvalidStream)?
-                    };
-                    if !input.is_object() {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    block["input"] = input;
-                    self.tool_input.clear();
-                }
-            }
-            "message_delta" => {
-                self.stage = crate::provider::diagnostics::SubscriptionFailureStage::UsageContract;
-                if self.closed.is_empty() || self.closed.iter().any(|closed| !closed) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let message = self.response.as_mut().ok_or_else(invalid)?;
-                let delta = event
-                    .get("delta")
-                    .and_then(Value::as_object)
-                    .ok_or_else(invalid)?;
-                for (key, value) in delta {
-                    if matches!(
-                        key.as_str(),
-                        "stop_reason" | "stop_sequence" | "stop_details"
-                    ) {
-                        message[key] = value.clone();
-                    } else if matches!(key.as_str(), "id" | "model" | "role" | "type" | "content") {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                }
-                let usage = event
-                    .get("usage")
-                    .and_then(Value::as_object)
-                    .ok_or_else(invalid)?;
-                let target = message
-                    .get_mut("usage")
-                    .and_then(Value::as_object_mut)
-                    .ok_or_else(invalid)?;
-                for (key, value) in usage {
-                    if key == "output_tokens"
-                        && target
-                            .get(key)
-                            .and_then(Value::as_u64)
-                            .zip(value.as_u64())
-                            .is_some_and(|(before, after)| after < before)
-                    {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    target.insert(key.clone(), value.clone());
-                }
-                if !self.preview_failed {
-                    let text = self.result.feed("", self.secret)?.to_owned();
-                    let preview = if message["stop_reason"] == "tool_use" {
-                        crate::provider::PreviewText {
-                            commentary: if text.is_empty() { vec![] } else { vec![text] },
-                            ..Default::default()
-                        }
-                    } else {
-                        crate::provider::PreviewText {
-                            answer: text,
-                            ..Default::default()
-                        }
-                    };
-                    self.preview.publish(preview)?;
-                }
-                self.delta_seen = true;
-            }
-            "message_stop" => {
-                self.stage =
-                    crate::provider::diagnostics::SubscriptionFailureStage::CompletedResponse;
-                if !self.delta_seen || self.closed.iter().any(|closed| !closed) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let response = self.response.take().ok_or_else(invalid)?;
-                if crate::provider::streaming::reflects_secret(&response, self.secret) {
-                    self.stage = crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection;
-                    return Err(ProviderError::InvalidOutcome);
-                }
-                let response =
-                    serde_json::to_vec(&response).map_err(|_| ProviderError::InvalidStream)?;
-                if response.len() > MAX_RESPONSE_BYTES {
-                    return Err(ProviderError::InvalidStream);
-                }
-                self.stopped = true;
-                return Ok(Some(response));
-            }
+            "message_start" => self.message_start(&event)?,
+            "content_block_start" => self.block_start(&event)?,
+            "content_block_delta" => self.block_delta(&event)?,
+            "content_block_stop" => self.block_stop(&event)?,
+            "message_delta" => self.message_delta(&event)?,
+            "message_stop" => return self.message_stop().map(Some),
             _ => {}
         }
         Ok(None)
     }
+
+    fn message_start(&mut self, event: &Value) -> Result<(), ProviderError> {
+        let invalid = || ProviderError::InvalidStream;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseMessage;
+        let message = event.get("message").ok_or_else(invalid)?;
+        if self.response.is_some()
+            || message.get("type").and_then(Value::as_str) != Some("message")
+            || message.get("role").and_then(Value::as_str) != Some("assistant")
+            || message.get("model").and_then(Value::as_str) != Some(self.model)
+            || message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_none_or(|content| !content.is_empty())
+            || message
+                .get("stop_reason")
+                .is_none_or(|reason| !reason.is_null())
+        {
+            return Err(ProviderError::InvalidStream);
+        }
+        self.response = Some(message.clone());
+
+        Ok(())
+    }
+
+    fn block_start(&mut self, event: &Value) -> Result<(), ProviderError> {
+        let invalid = || ProviderError::InvalidStream;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
+        let index = event_index(event)?;
+        if index != self.closed.len()
+            || index >= MAX_CONTENT_BLOCKS
+            || self.closed.iter().any(|closed| !closed)
+            || self.delta_seen
+        {
+            return Err(ProviderError::InvalidStream);
+        }
+        let block = event.get("content_block").ok_or_else(invalid)?;
+        let content = self
+            .response
+            .as_mut()
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(invalid)?;
+        if block.get("type").and_then(Value::as_str) == Some("tool_use")
+            && block
+                .get("input")
+                .is_some_and(|input| input.as_object().is_none_or(|fields| !fields.is_empty()))
+        {
+            return Err(ProviderError::InvalidStream);
+        }
+        content.push(block.clone());
+        self.closed.push(false);
+        self.tool_input.clear();
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            let initial = block
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            self.publish_preview(initial);
+        }
+
+        Ok(())
+    }
+
+    fn block_delta(&mut self, event: &Value) -> Result<(), ProviderError> {
+        let invalid = || ProviderError::InvalidStream;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
+        let index = event_index(event)?;
+        if index.checked_add(1) != Some(self.closed.len())
+            || self.closed.get(index) != Some(&false)
+            || self.delta_seen
+        {
+            return Err(ProviderError::InvalidStream);
+        }
+        let delta = event.get("delta").ok_or_else(invalid)?;
+        let kind = delta
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
+        let block = content_block(&mut self.response, index)?;
+        if kind == "input_json_delta" {
+            let fragment = delta
+                .get("partial_json")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            if block.get("type").and_then(Value::as_str) != Some("tool_use")
+                || self.tool_input.len() + fragment.len() > tool_argument_limit(block)
+            {
+                return Err(ProviderError::InvalidStream);
+            }
+            self.tool_input.push_str(fragment);
+            return Ok(());
+        }
+        let (field, expected) = match kind {
+            "text_delta" => ("text", "text"),
+            "thinking_delta" => ("thinking", "thinking"),
+            "signature_delta" => ("signature", "thinking"),
+            _ => return Err(ProviderError::InvalidStream),
+        };
+        if block.get("type").and_then(Value::as_str) != Some(expected) {
+            return Err(ProviderError::InvalidStream);
+        }
+        let fragment = delta
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
+        if field == "signature" && block.get(field).is_none() {
+            block[field] = Value::String(String::new());
+        }
+        let Some(Value::String(current)) = block.get_mut(field) else {
+            return Err(ProviderError::InvalidStream);
+        };
+        if current.len() + fragment.len() > MAX_RESPONSE_BYTES {
+            return Err(ProviderError::InvalidStream);
+        }
+        current.push_str(fragment);
+        if kind == "text_delta" {
+            self.publish_preview(fragment);
+        }
+
+        Ok(())
+    }
+
+    fn block_stop(&mut self, event: &Value) -> Result<(), ProviderError> {
+        let invalid = || ProviderError::InvalidStream;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;
+        let index = event_index(event)?;
+        let count = self.closed.len();
+        let closed = self.closed.get_mut(index).ok_or_else(invalid)?;
+        if *closed || index.checked_add(1) != Some(count) {
+            return Err(ProviderError::InvalidStream);
+        }
+        *closed = true;
+        let block = content_block(&mut self.response, index)?;
+        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+            let input = if self.tool_input.is_empty() {
+                json!({})
+            } else {
+                crate::tools::parse_json(self.tool_input.as_bytes(), tool_argument_limit(block))
+                    .map_err(|_| ProviderError::InvalidStream)?
+            };
+            if !input.is_object() {
+                return Err(ProviderError::InvalidStream);
+            }
+            block["input"] = input;
+            self.tool_input.clear();
+        }
+
+        Ok(())
+    }
+
+    fn message_delta(&mut self, event: &Value) -> Result<(), ProviderError> {
+        let invalid = || ProviderError::InvalidStream;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::UsageContract;
+        if self.closed.is_empty() || self.closed.iter().any(|closed| !closed) {
+            return Err(ProviderError::InvalidStream);
+        }
+        let message = self.response.as_mut().ok_or_else(invalid)?;
+        let delta = event
+            .get("delta")
+            .and_then(Value::as_object)
+            .ok_or_else(invalid)?;
+        for (key, value) in delta {
+            if matches!(
+                key.as_str(),
+                "stop_reason" | "stop_sequence" | "stop_details"
+            ) {
+                message[key] = value.clone();
+            } else if matches!(key.as_str(), "id" | "model" | "role" | "type" | "content") {
+                return Err(ProviderError::InvalidStream);
+            }
+        }
+        let usage = event
+            .get("usage")
+            .and_then(Value::as_object)
+            .ok_or_else(invalid)?;
+        let target = message
+            .get_mut("usage")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(invalid)?;
+        for (key, value) in usage {
+            if key == "output_tokens"
+                && target
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .zip(value.as_u64())
+                    .is_some_and(|(before, after)| after < before)
+            {
+                return Err(ProviderError::InvalidStream);
+            }
+            target.insert(key.clone(), value.clone());
+        }
+        if !self.preview_failed {
+            let text = self.result.feed("", self.secret)?.to_owned();
+            let preview = if message["stop_reason"] == "tool_use" {
+                crate::provider::PreviewText {
+                    commentary: if text.is_empty() { vec![] } else { vec![text] },
+                    ..Default::default()
+                }
+            } else {
+                crate::provider::PreviewText {
+                    answer: text,
+                    ..Default::default()
+                }
+            };
+            self.preview.publish(preview)?;
+        }
+        self.delta_seen = true;
+
+        Ok(())
+    }
+
+    fn message_stop(&mut self) -> Result<Vec<u8>, ProviderError> {
+        let invalid = || ProviderError::InvalidStream;
+        self.stage = crate::provider::diagnostics::SubscriptionFailureStage::CompletedResponse;
+        if !self.delta_seen || self.closed.iter().any(|closed| !closed) {
+            return Err(ProviderError::InvalidStream);
+        }
+        let response = self.response.take().ok_or_else(invalid)?;
+        if crate::provider::streaming::reflects_secret(&response, self.secret) {
+            self.stage =
+                crate::provider::diagnostics::SubscriptionFailureStage::CredentialReflection;
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let response = serde_json::to_vec(&response).map_err(|_| ProviderError::InvalidStream)?;
+        if response.len() > MAX_RESPONSE_BYTES {
+            return Err(ProviderError::InvalidStream);
+        }
+        self.stopped = true;
+        Ok(response)
+    }
+}
+
+fn content_block(response: &mut Option<Value>, index: usize) -> Result<&mut Value, ProviderError> {
+    response
+        .as_mut()
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|content| content.get_mut(index))
+        .ok_or(ProviderError::InvalidStream)
+}
+
+fn event_index(event: &Value) -> Result<usize, ProviderError> {
+    event
+        .get("index")
+        .and_then(Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+        .ok_or(ProviderError::InvalidStream)
 }
 
 fn framing_stage(
@@ -660,11 +670,7 @@ pub(in crate::provider) fn run_body_with_optional_effort(
         }
     }
     // Plan-contract unions exceed strict Tool-schema limits; the Engine validates calls instead.
-    let exhausted = request
-        .input
-        .tools
-        .as_ref()
-        .is_some_and(ToolContext::answer_only);
+    let exhausted = request.input.answer_only();
     if request.input.role != crate::provider::PromptRole::ToolReview {
         let tools = conversation.tools.as_deref().unwrap_or_default();
         let specs: Vec<Value> = tools.iter().cloned().chain(outcome_specs(&conversation.outcome))
@@ -757,6 +763,9 @@ fn user_blocks(block: &Block) -> Result<Vec<Value>, ProviderError> {
     Ok(match block {
         Block::Text(text) if text.is_empty() => Vec::new(),
         Block::Text(text) => vec![json!({"type": "text", "text": text})],
+        Block::Harness { scope, data } => {
+            vec![json!({"type": "text", "text": crate::provider::render::data_text(scope, data)})]
+        }
         Block::Image { label, image } => vec![
             json!({"type": "text", "text": label}),
             json!({
@@ -789,7 +798,7 @@ pub(in crate::provider) fn compaction_body_with_optional_effort(
     let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_output_tokens,
-        "system": [{"type": "text", "text": COMPACTION_INSTRUCTIONS}],
+        "system": [{"type": "text", "text": request.prompts.compaction_instructions()}],
         "messages": [{"role": "user", "content": [{"type": "text", "text": compaction_input(request).to_string()}]}],
         "stream": false,
     });
@@ -967,10 +976,7 @@ impl<'a> WireResponse<'a> {
             return Err(ProviderError::InvalidOutcome);
         }
         *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseIdentifier;
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
-        {
+        if !crate::provider::valid_wire_id(&self.id) {
             return Err(ProviderError::InvalidOutcome);
         }
         *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;

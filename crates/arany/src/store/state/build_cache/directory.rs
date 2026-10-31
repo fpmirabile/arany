@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 pub(super) mod guard;
 pub(crate) use guard::CacheGuardRecovery;
 #[cfg(test)]
@@ -12,91 +13,27 @@ pub(crate) enum CacheChange {
 
 impl BuildCacheLease {
     pub(crate) fn prepare_directory(&mut self) -> Result<Dir, StoreError> {
-        let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
         directory_available(&self.dir, &self.token)?;
-        if self.candidate_limit == 0 {
-            return Err(StoreError::StorageFull);
-        }
-        let lower_bytes = own_tree_bytes(&self.dir, &self.token)?.max(
-            self.archive
-                .as_ref()
-                .map(|archive| archive.metadata().map(|metadata| metadata.len()))
-                .transpose()?
-                .unwrap_or_default(),
-        );
-        self.reserve_directory(lower_bytes)?;
         let name = tree_name(&self.token);
-        let stamp = stamp_name(&self.token);
-        let migrate = file_exists(&self.dir, &stamp)?;
-        if migrate
-            && open_regular(&self.dir, &stamp, GENERATION_BYTES as u64)?
-                .metadata()?
-                .len()
-                != GENERATION_BYTES as u64
-        {
-            return Err(StoreError::InvalidBuildCache);
+        if !file_exists(&self.dir, &name)? {
+            let mut builder = cap_std::fs::DirBuilder::new();
+            cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            self.dir.create_dir_with(&name, &builder)?;
+            sync_directory(&self.dir)?;
         }
-        if file_exists(&self.dir, &name)? && !migrate {
-            let tree = self.dir.open_dir_nofollow(&name)?;
-            measure(&tree, self.archive_limit)?;
-            return Ok(tree);
-        }
-        mark_unavailable(&self.dir, &self.token)?;
-        if file_exists(&self.dir, &name)? {
-            self.dir.remove_dir_all(&name)?;
-        }
-        let mut builder = DirBuilder::new();
-        cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        self.dir.create_dir_with(&name, &builder)?;
-        let tree = self.dir.open_dir_nofollow(&name)?;
-        if let Some((mut archive, _)) = self.archive()? {
-            restore_archive_with_limit(
-                &mut archive,
-                &tree,
-                &self.identity,
-                &[],
-                self.archive_limit,
-            )?;
-        }
-        let lower_bytes = measure(&tree, self.archive_limit)?;
-        sync_tree(&tree, &self.token)?;
-        self.archive = None;
-        remove_if_present(&self.dir, &archive_name(&self.token))?;
-        self.reserve_directory(lower_bytes)?;
-        self.finish_directory()?;
-        Ok(tree)
+        Ok(self.dir.open_dir_nofollow(&name)?)
     }
 
-    fn reserve_directory(&self, lower_bytes: u64) -> Result<(), StoreError> {
-        let reserved = self
-            .archive_limit
-            .checked_add(self.candidate_limit)
-            .and_then(|headroom| headroom.checked_add(lower_bytes))
-            .ok_or(StoreError::StorageFull)?;
-        let reservation = open_regular(&self.dir, &reservation_name(&self.token), 96)?;
-        let previous = validate_reservation(&reservation, &self.token)?;
-        if inventory(&self.dir)?
-            .checked_sub(previous)
-            .and_then(|bytes| bytes.checked_add(reserved))
-            .ok_or(StoreError::StorageFull)?
-            > AGGREGATE_BYTES
-        {
-            return Err(StoreError::StorageFull);
-        }
-        set_reservation(&self.dir, &self.token, reserved)?;
-        sync_directory(&self.dir)
-    }
-
+    // Applies in place only while the result fits the candidate limit and the StateRoot volume keeps
+    // `reserve` free, after evicting least-recently-used unleased caches.
     pub(crate) fn publish_directory(
         &mut self,
         lower: &Dir,
         upper: &Dir,
         changes: &[CacheChange],
         exclusions: &[String],
+        reserve: u64,
     ) -> Result<(), StoreError> {
-        if changes.len() > MAX_ARCHIVE_ENTRIES * 2 {
-            return Err(StoreError::StorageFull);
-        }
         let current = self.dir.open_dir_nofollow(tree_name(&self.token))?;
         let pinned = lower.dir_metadata()?;
         let now = current.dir_metadata()?;
@@ -115,22 +52,21 @@ impl BuildCacheLease {
                 return Err(StoreError::InvalidBuildCache);
             }
         }
-        self.preflight_directory(lower, upper, changes)?;
+        let growth = self.preflight_directory(lower, upper, changes)?;
+        let floor = reserve.saturating_add(growth);
+        if evict_until_free(&self.dir, floor)? < floor {
+            return Err(StoreError::StorageFull);
+        }
         mark_unavailable(&self.dir, &self.token)?;
-        self.defer_recovery = true;
+        self.uncertain = true;
         apply(lower, upper, changes)?;
-        measure(lower, self.candidate_limit)?;
-        sync_tree(lower, &self.token)?;
-        self.archive = None;
+        sync_changes(lower, changes, &self.token)?;
         self.finish_directory()?;
-        self.defer_recovery = false;
+        self.uncertain = false;
         Ok(())
     }
 
     fn finish_directory(&self) -> Result<(), StoreError> {
-        remove_if_present(&self.dir, &archive_name(&self.token))?;
-        remove_if_present(&self.dir, &stamp_name(&self.token))?;
-        sync_directory(&self.dir)?;
         self.dir.remove_file(dirty_name(&self.token))?;
         if let Err(error) = sync_directory(&self.dir) {
             let _ = mark_unavailable(&self.dir, &self.token);
@@ -139,60 +75,40 @@ impl BuildCacheLease {
         Ok(())
     }
 
+    // Returns how many bytes the applied changes add to the committed cache.
     fn preflight_directory(
         &self,
         lower: &Dir,
         upper: &Dir,
         changes: &[CacheChange],
-    ) -> Result<(), StoreError> {
-        let mut paths = cache_paths(lower, &[])?
-            .into_iter()
-            .map(|path| {
-                let metadata = metadata_relative(lower, &path)?;
-                Ok((
-                    path,
-                    if metadata.is_file() {
-                        metadata.len()
-                    } else {
-                        0
-                    },
-                ))
-            })
-            .collect::<Result<std::collections::BTreeMap<_, _>, StoreError>>()?;
+    ) -> Result<u64, StoreError> {
+        let before = measure(lower)?;
+        let mut after = before;
         for change in changes {
             match change {
-                CacheChange::Remove(path) => {
-                    paths.remove(path);
-                }
-                CacheChange::Directory(path) => {
-                    paths.insert(path.clone(), 0);
-                }
+                CacheChange::Remove(path) => after = after.saturating_sub(file_bytes(lower, path)?),
+                CacheChange::Directory(_) => {}
                 CacheChange::File(path) => {
-                    paths.insert(path.clone(), metadata_relative(upper, path)?.len());
+                    after = after
+                        .saturating_sub(file_bytes(lower, path)?)
+                        .checked_add(metadata_relative(upper, path)?.len())
+                        .ok_or(StoreError::StorageFull)?;
                 }
             }
         }
-        if paths.len() > MAX_ARCHIVE_ENTRIES {
+        if after > self.candidate_limit {
             return Err(StoreError::StorageFull);
         }
-        let mut bytes = header_size(&self.identity)?;
-        for (path, size) in paths {
-            bytes = account_entry(bytes, &path, size, self.candidate_limit)?;
-        }
-        Ok(())
+        Ok(after.saturating_sub(before))
     }
 }
 
-pub(super) fn committed_bytes(
-    dir: &Dir,
-    token: &str,
-    archive_bytes: u64,
-) -> Result<u64, StoreError> {
-    let name = tree_name(token);
-    if file_exists(dir, &name)? {
-        Ok(archive_bytes.max(measure(&dir.open_dir_nofollow(name)?, MAX_ARCHIVE_BYTES)?))
-    } else {
-        Ok(archive_bytes)
+fn file_bytes(tree: &Dir, path: &str) -> Result<u64, StoreError> {
+    match metadata_relative(tree, path) {
+        Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+        Ok(_) => Ok(0),
+        Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => Ok(0),
+        Err(error) => Err(error),
     }
 }
 
@@ -212,7 +128,7 @@ fn apply(lower: &Dir, upper: &Dir, changes: &[CacheChange]) -> Result<(), StoreE
             CacheChange::Directory(path) => {
                 let (parent, leaf) = create_parent(lower, path)?;
                 if !file_exists(&parent, &leaf)? {
-                    let mut builder = DirBuilder::new();
+                    let mut builder = cap_std::fs::DirBuilder::new();
                     cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
                     parent.create_dir_with(&leaf, &builder)?;
                 }
@@ -223,12 +139,7 @@ fn apply(lower: &Dir, upper: &Dir, changes: &[CacheChange]) -> Result<(), StoreE
                 check_source_file(&metadata)?;
                 let (parent, leaf) = create_parent(lower, path)?;
                 remove_if_present(&parent, &leaf)?;
-                let mut target = create_private_file(&parent, &leaf)?;
-                if io::copy(&mut (&mut source).take(metadata.len() + 1), &mut target)?
-                    != metadata.len()
-                {
-                    return Err(StoreError::InvalidBuildCache);
-                }
+                let target = publish_file(&mut source, metadata.len(), &parent, &leaf)?;
                 use std::os::unix::fs::PermissionsExt;
                 target.set_permissions(cap_std::fs::Permissions::from_std(
                     std::fs::Permissions::from_mode(if metadata.mode() & 0o111 == 0 {
@@ -237,11 +148,53 @@ fn apply(lower: &Dir, upper: &Dir, changes: &[CacheChange]) -> Result<(), StoreE
                         0o700
                     }),
                 ))?;
-                target.sync_all()?;
+                // Cargo compares fingerprint mtimes, so a copy must keep the payload's times.
+                rustix::fs::futimens(
+                    &target,
+                    &rustix::fs::Timestamps {
+                        last_access: timespec(metadata.atime(), metadata.atime_nsec()),
+                        last_modification: timespec(metadata.mtime(), metadata.mtime_nsec()),
+                    },
+                )
+                .map_err(|error| StoreError::Io(error.into()))?;
+                rustix::fs::fsync(&target).map_err(|error| StoreError::Io(error.into()))?;
             }
         }
     }
     Ok(())
+}
+
+fn timespec(seconds: i64, nanoseconds: i64) -> rustix::fs::Timespec {
+    rustix::fs::Timespec {
+        tv_sec: seconds,
+        tv_nsec: nanoseconds,
+    }
+}
+
+// A macOS view shares the Store's volume, so a clone publishes without a second copy on disk.
+fn publish_file(source: &mut File, len: u64, parent: &Dir, leaf: &str) -> Result<File, StoreError> {
+    #[cfg(target_os = "macos")]
+    if crate::private_fs::clone_at(source, parent, leaf).is_ok() {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        nonblocking(&mut options);
+        let target = parent.open_with(leaf, &options)?;
+        // A clone keeps the payload's mode; restrict it before the private-file check.
+        use std::os::unix::fs::PermissionsExt;
+        target.set_permissions(cap_std::fs::Permissions::from_std(
+            std::fs::Permissions::from_mode(0o600),
+        ))?;
+        check_private(&target, len)?;
+        if target.metadata()?.len() != len {
+            return Err(StoreError::InvalidBuildCache);
+        }
+        return Ok(target);
+    }
+    let mut target = create_private_file(parent, leaf)?;
+    if io::copy(&mut io::Read::take(source, len + 1), &mut target)? != len {
+        return Err(StoreError::InvalidBuildCache);
+    }
+    Ok(target)
 }
 
 pub(super) fn directory_available(dir: &Dir, token: &str) -> Result<(), StoreError> {
@@ -256,63 +209,50 @@ fn mark_unavailable(dir: &Dir, token: &str) -> Result<(), StoreError> {
     sync_directory(dir)
 }
 
-pub(super) fn measure(tree: &Dir, limit: u64) -> Result<u64, StoreError> {
+// Logical bytes of the regular files under the cache roots.
+pub(super) fn measure(tree: &Dir) -> Result<u64, StoreError> {
     let mut bytes = 0u64;
-    for path in cache_paths(tree, &[])? {
-        bytes = bytes
-            .checked_add(entry_header_size(&path)?)
-            .ok_or(StoreError::StorageFull)?;
-        let metadata = metadata_relative(tree, &path)?;
-        if !metadata.is_dir() {
-            check_source_file(&metadata)?;
-            bytes = bytes
-                .checked_add(metadata.len())
-                .ok_or(StoreError::StorageFull)?;
+    walk(tree, &mut |metadata| {
+        if metadata.is_file() {
+            bytes = bytes.saturating_add(metadata.len());
         }
-        if bytes > limit {
-            return Err(StoreError::StorageFull);
-        }
-    }
+        Ok(())
+    })?;
     Ok(bytes)
 }
 
-fn sync_tree(tree: &Dir, token: &str) -> Result<(), StoreError> {
-    let paths = cache_paths(tree, &[])?;
-    for path in paths.iter().rev() {
-        if metadata_relative(tree, path)?.is_dir() {
-            sync_cache_directory(tree, path, token)?;
-        } else {
-            open_nofollow(tree, path)?.sync_all()?;
-        }
+// `apply` fsyncs each file and this each changed directory, deepest first; the root's full sync then
+// flushes the device cache once for all of them (per-entry F_FULLFSYNC costs milliseconds on macOS).
+fn sync_changes(tree: &Dir, changes: &[CacheChange], token: &str) -> Result<(), StoreError> {
+    let mut directories = BTreeSet::new();
+    for change in changes {
+        let (path, own) = match change {
+            CacheChange::Directory(path) => (path, true),
+            CacheChange::Remove(path) | CacheChange::File(path) => (path, false),
+        };
+        let path = Path::new(path);
+        directories.extend(
+            path.ancestors()
+                .skip(usize::from(!own))
+                .filter(|path| !path.as_os_str().is_empty()),
+        );
     }
-    let ancestors = CACHE_ROOTS
-        .iter()
-        .flat_map(|root| Path::new(root).ancestors().skip(1))
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect::<BTreeSet<_>>();
-    let mut ancestors = ancestors.into_iter().collect::<Vec<_>>();
-    ancestors.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for path in ancestors {
-        match sync_cache_directory(
-            tree,
-            path.to_str().ok_or(StoreError::InvalidBuildCache)?,
-            token,
-        ) {
-            Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => {}
-            result => result?,
-        }
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for path in directories {
+        let path = path.to_str().ok_or(StoreError::InvalidBuildCache)?;
+        let parts = path.split('/').collect::<Vec<_>>();
+        let directory = match open_relative_dir(tree, &parts) {
+            Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => continue,
+            directory => directory?,
+        };
+        crate::fault::record_sync(Path::new(token), path)?;
+        // A Linux `Dir` handle is `O_PATH`, which cannot be synced.
+        let readable = directory.open_with(".", cap_std::fs::OpenOptions::new().read(true))?;
+        rustix::fs::fsync(&readable).map_err(|error| StoreError::Io(error.into()))?;
     }
-    sync_cache_directory(tree, "", token)
-}
-
-fn sync_cache_directory(tree: &Dir, path: &str, token: &str) -> Result<(), StoreError> {
-    let parts = path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    let directory = open_relative_dir(tree, &parts)?;
-    crate::fault::record_sync(Path::new(token), path)?;
-    sync_directory(&directory)
+    crate::fault::record_sync(Path::new(token), "")?;
+    sync_directory(tree)
 }
 
 pub(super) fn tree_name(token: &str) -> String {
@@ -320,7 +260,4 @@ pub(super) fn tree_name(token: &str) -> String {
 }
 fn dirty_name(token: &str) -> String {
     format!("{DIRTY_PREFIX}{token}.pending")
-}
-fn stamp_name(token: &str) -> String {
-    format!("{STAMP_PREFIX}{token}.generation")
 }

@@ -396,6 +396,10 @@ pub(super) async fn capture(
     ),
     (observation, candidate): (&mut ToolObservation, &mut super::super::CacheCandidate),
 ) -> Result<(), ToolError> {
+    // An editor command relays only its cache view; there is no project to capture.
+    if !selected(intent, &runtime.config) {
+        return Ok(());
+    }
     let truncation = if runtime.hook_stdin.is_some() {
         crate::tools::process::Truncation::Refuse
     } else {
@@ -495,9 +499,11 @@ fn merge(
     let stderr = crate::tools::output::Window::from_recorded(&result.stderr, result.stderr_total)
         .ok_or(CaptureFailure::Rejected)?;
     crate::tools::process::fit_selected_command(
-        result.exit_code,
-        &stdout,
-        &stderr,
+        crate::tools::process::CommandRun {
+            exit_code: result.exit_code,
+            stdout: &stdout,
+            stderr: &stderr,
+        },
         changeset,
         observation.intent.limits.command_result_budget(),
         truncation,

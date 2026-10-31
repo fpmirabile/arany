@@ -1,10 +1,8 @@
-use crate::loopback::ChildGuard;
-use crate::{PtyResponses, pump};
+use crate::PtyResponses;
+use crate::pty::Pty;
 use arany_cli::terminal::{AttachedTerminal, Composer, TerminalInput, TerminalMode};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::Write,
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -128,57 +126,46 @@ fn keyboard_negotiation_retains_input_and_restores_each_screen() {
     }
 }
 
-fn keyboard_command(root: &std::path::Path, mode: TerminalMode, unwind: bool) -> Command {
+fn keyboard_command(
+    root: &std::path::Path,
+    mode: TerminalMode,
+    unwind: bool,
+) -> crate::product::PtyLaunch {
     let script = "stty rows 24 cols 80; \"$ARANY_TEST_HELPER\" --ignored --exact \"$ARANY_TEST_FILTER\" --nocapture; result=$?; printf 'KEYBOARD_EXIT:%s\n' \"$result\"; exit \"$result\"";
-    let mut command = Command::new("/usr/bin/script");
-    #[cfg(target_os = "linux")]
-    command.args(["-q", "-e", "-c", script, "/dev/null"]);
-    #[cfg(target_os = "macos")]
-    command.args(["-q", "/dev/null", "/bin/sh", "-c", script]);
-    command
-        .env_clear()
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
+    let command = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, script)
+        .term("xterm")
         .env("ARANY_TEST_HELPER", std::env::current_exe().unwrap())
         .env("ARANY_TEST_FILTER", HELPER)
         .env("ARANY_TEST_KEYBOARD_MODE", mode.label())
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .current_dir(root);
     if unwind {
-        command.env("ARANY_TEST_KEYBOARD_PANIC", "1");
+        return command.env("ARANY_TEST_KEYBOARD_PANIC", "1");
     }
     command
 }
 
 fn keyboard_case(mode: TerminalMode, reply: Reply, unwind: bool) {
     let root = tempfile::tempdir().unwrap();
-    let mut process = ChildGuard::new(keyboard_command(root.path(), mode, unwind).spawn().unwrap());
-    let mut input = process.child().stdin.take().unwrap();
-    let mut output = process.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut responses = PtyResponses::manual_consent();
+    let mut pty = Pty::with_responses(
+        keyboard_command(root.path(), mode, unwind).spawn(),
+        PtyResponses::manual_consent(),
+    );
     let mut queries = 0;
     let mut typed = false;
     let deadline = Instant::now() + DEADLINE;
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut responses);
-        answer_queries(&mut input, &transcript, &mut queries, reply);
-        if !typed && contains(&transcript, b"KEYBOARD_ACQUIRED") {
+        pty.pump();
+        answer_queries(&mut pty.input, &pty.transcript, &mut queries, reply);
+        if !typed && contains(&pty.transcript, b"KEYBOARD_ACQUIRED") {
             if matches!(reply, Reply::Late) {
-                input.write_all(b"\x1b[?1u").unwrap();
+                pty.send(b"\x1b[?1u");
             }
-            input
-                .write_all(b"\x1bOMgamma\x1b[13;2udelta\\\romega\r")
-                .unwrap();
+            pty.send(b"\x1bOMgamma\x1b[13;2udelta\\\romega\r");
             typed = true;
         }
-        if let Some(status) = process.child().try_wait().unwrap() {
+        if let Some(status) = pty.child.child().try_wait().unwrap() {
             assert!(status.success() || unwind, "{mode:?} {reply:?}");
-            pump(&mut output, &mut input, &mut transcript, &mut responses);
+            pty.pump();
             break;
         }
         assert!(
@@ -187,7 +174,7 @@ fn keyboard_case(mode: TerminalMode, reply: Reply, unwind: bool) {
         );
         thread::yield_now();
     }
-    verify_restoration(&transcript, reply, unwind);
+    verify_restoration(&pty.transcript, reply, unwind);
     assert_eq!(
         queries, ACQUISITIONS,
         "fresh probe for release and view change"

@@ -6,11 +6,11 @@ use crate::accounts::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
     write_chatgpt_keyring_record,
 };
-use arany::{CheckId, RecordFormat, RecordKind, RecordStep};
 use arany::{Effort, StateRoot, validate_native_model_id};
+use arany::{RecordFormat, RecordKind};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -18,67 +18,24 @@ use std::{
 };
 use uuid::{Uuid, Variant, Version};
 
-pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 2;
-const LEGACY_TOKEN_RECORD_SCHEMA: u8 = 1;
-
 const MAX_ACCOUNTS: usize = 8;
-const MAX_MODEL_CHECKS: usize = 64;
-const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
-const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-journal-v41";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v40";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
-fn slot_name(digest: impl AsRef<[u8]>) -> String {
+fn account_keyring_slot(client_id: &str, id: Uuid) -> String {
+    let digest = Sha256::new()
+        .chain_update(client_id.as_bytes())
+        .chain_update([0])
+        .chain_update(id.as_bytes())
+        .finalize();
     format!("chatgpt-{}", URL_SAFE_NO_PAD.encode(digest))
 }
 
-fn legacy_keyring_slot(client_id: &str) -> String {
-    slot_name(Sha256::digest(client_id.as_bytes()))
-}
-
-fn account_keyring_slot(client_id: &str, id: Uuid) -> String {
-    slot_name(
-        Sha256::new()
-            .chain_update(client_id.as_bytes())
-            .chain_update([0])
-            .chain_update(id.as_bytes())
-            .finalize(),
-    )
-}
-
-#[derive(Deserialize)]
-struct SchemaProbe {
-    schema: u8,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyTokenRecord {
-    schema: u8,
-    credentials: VerifiedCredentials,
-    consent: ConsentReceipt,
-}
-
-// A version-1 record has no slot; it upgrades in memory to the client-derived slot it sits at.
-// Typed decoding keeps duplicate-key rejection for both supported versions.
 fn decode_keyring_record(bytes: &[u8]) -> Option<TokenRecord> {
     if bytes.len() > MAX_TOKEN_RECORD_BYTES {
         return None;
     }
-    match serde_json::from_slice::<SchemaProbe>(bytes).ok()?.schema {
-        LEGACY_TOKEN_RECORD_SCHEMA => {
-            let legacy: LegacyTokenRecord = serde_json::from_slice(bytes).ok()?;
-            (legacy.schema == LEGACY_TOKEN_RECORD_SCHEMA).then(|| TokenRecord {
-                schema: TOKEN_RECORD_SCHEMA,
-                slot: Some(legacy_keyring_slot(&legacy.credentials.client_id)),
-                credentials: legacy.credentials,
-                consent: legacy.consent,
-            })
-        }
-        TOKEN_RECORD_SCHEMA => serde_json::from_slice(bytes).ok(),
-        _ => None,
-    }
+    serde_json::from_slice::<TokenRecord>(bytes).ok()
 }
 
 pub(crate) fn valid_keyring_record(slot: &str, bytes: &[u8]) -> bool {
@@ -87,17 +44,9 @@ pub(crate) fn valid_keyring_record(slot: &str, bytes: &[u8]) -> bool {
     })
 }
 
-pub(crate) fn valid_written_keyring_record(slot: &str, bytes: &[u8]) -> bool {
-    bytes.len() <= MAX_TOKEN_RECORD_BYTES
-        && serde_json::from_slice::<TokenRecord>(bytes).is_ok_and(|record| {
-            record.valid_for(AccountStorage::Keyring) && record.slot.as_deref() == Some(slot)
-        })
-}
-
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TokenRecord {
-    schema: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     slot: Option<String>,
     credentials: VerifiedCredentials,
@@ -117,7 +66,7 @@ struct SignedIn<'a> {
     client_id: &'a str,
     subject: &'a str,
     host_id: Uuid,
-    account_id: Option<&'a str>,
+    account_id: &'a str,
 }
 
 impl SignedIn<'_> {
@@ -125,10 +74,7 @@ impl SignedIn<'_> {
         entry.subject == self.subject
             && entry.host_id == self.host_id
             && entry.storage == storage
-            && entry
-                .chatgpt_account_id
-                .as_deref()
-                .is_none_or(|id| Some(id) == self.account_id)
+            && entry.chatgpt_account_id == self.account_id
     }
 }
 
@@ -138,7 +84,7 @@ pub(crate) struct ReauthorizationTarget {
     pub(crate) client_id: String,
     pub(crate) subject: String,
     pub(crate) storage: AccountStorage,
-    pub(crate) chatgpt_account_id: Option<String>,
+    pub(crate) chatgpt_account_id: String,
 }
 
 pub(crate) struct AccountInspection {
@@ -184,9 +130,7 @@ impl SelectedAccount {
 
 impl TokenRecord {
     fn content_valid(&self, storage: AccountStorage) -> bool {
-        self.schema == TOKEN_RECORD_SCHEMA
-            && self.credentials.valid_saved()
-            && self.consent.matches(&self.credentials, storage)
+        self.credentials.valid_saved() && self.consent.matches(&self.credentials, storage)
     }
 
     fn valid_for(&self, storage: AccountStorage) -> bool {
@@ -201,47 +145,15 @@ struct AccountEntry {
     host_id: Uuid,
     client_id: String,
     subject: String,
-    #[serde(deserialize_with = "Option::deserialize")]
-    chatgpt_account_id: Option<String>,
+    chatgpt_account_id: String,
     #[serde(deserialize_with = "Option::deserialize")]
     keyring_slot: Option<String>,
-    #[serde(deserialize_with = "Option::deserialize")]
-    slot_client_id: Option<String>,
     storage: AccountStorage,
     renewal_pending: bool,
     signout_pending: bool,
     disconnected: bool,
     #[serde(deserialize_with = "Option::deserialize")]
     token: Option<TokenRecord>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ModelCheck {
-    check_id: CheckId,
-    account_id: Uuid,
-    fingerprint: [u8; 32],
-    checked_at_sec: u64,
-    expires_at_sec: u64,
-    // Optional in the current format: absent or null means no window.
-    #[serde(default)]
-    context_window_tokens: Option<u32>,
-}
-
-impl ModelCheck {
-    fn current_at(&self, now: u64) -> bool {
-        self.checked_at_sec <= now && now < self.expires_at_sec
-    }
-
-    fn valid(&self) -> bool {
-        self.account_id.get_version() == Some(Version::SortRand)
-            && self.check_id.to_string().parse::<CheckId>().is_ok()
-            && self.checked_at_sec != 0
-            && self.checked_at_sec.checked_add(MODEL_CHECK_AGE_SECONDS) == Some(self.expires_at_sec)
-            && self
-                .context_window_tokens
-                .is_none_or(|tokens| arany::admitted_context_window(u64::from(tokens)).is_some())
-    }
 }
 
 impl AccountEntry {
@@ -265,12 +177,11 @@ impl AccountEntry {
     }
 
     fn slot_valid(&self) -> bool {
-        match (self.storage, &self.keyring_slot, &self.slot_client_id) {
-            (AccountStorage::Keyring, Some(slot), Some(client)) if valid_client_id(client) => {
-                *slot == legacy_keyring_slot(client)
-                    || *slot == account_keyring_slot(client, self.id)
+        match (self.storage, &self.keyring_slot) {
+            (AccountStorage::Keyring, Some(slot)) => {
+                *slot == account_keyring_slot(&self.client_id, self.id)
             }
-            (AccountStorage::PrivateFile, None, None) => true,
+            (AccountStorage::PrivateFile, None) => true,
             _ => false,
         }
     }
@@ -283,21 +194,18 @@ impl AccountEntry {
             && !self.subject.is_empty()
             && self.subject.len() <= 512
             && self.subject.bytes().all(|byte| byte.is_ascii_graphic())
-            && self
-                .chatgpt_account_id
-                .as_deref()
-                .is_none_or(|id| super::bounded_graphic(id, super::MAX_ACCOUNT_ID_BYTES))
+            && super::bounded_graphic(&self.chatgpt_account_id, super::MAX_ACCOUNT_ID_BYTES)
             && self.slot_valid()
             && !(self.signout_pending && self.renewal_pending)
             && match (&self.storage, &self.token) {
                 (AccountStorage::PrivateFile, Some(token)) => {
-                    token.schema == TOKEN_RECORD_SCHEMA
-                        && token.slot.is_none()
+                    token.slot.is_none()
                         && token.credentials.valid_saved()
                         && token.credentials.client_id == self.client_id
                         && token.credentials.host_id == self.host_id
                         && token.credentials.subject == self.subject
-                        && token.credentials.chatgpt_account_id == self.chatgpt_account_id
+                        && token.credentials.chatgpt_account_id.as_ref()
+                            == Some(&self.chatgpt_account_id)
                 }
                 (AccountStorage::PrivateFile, None) => self.disconnected,
                 (AccountStorage::Keyring, None) => true,
@@ -309,158 +217,15 @@ impl AccountEntry {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AccountIndex {
-    schema: u8,
     #[serde(deserialize_with = "Option::deserialize")]
     selected: Option<Uuid>,
     accounts: Vec<AccountEntry>,
-    #[serde(deserialize_with = "bounded_model_checks")]
-    model_checks: Vec<ModelCheck>,
-}
-
-fn bounded_model_checks<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<ModelCheck>, D::Error> {
-    crate::files::bounded_list::<D, ModelCheck, MAX_MODEL_CHECKS>(
-        deserializer,
-        "too many model checks",
-    )
 }
 
 pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptAccounts,
-    field: "schema",
-    floor: 1,
-    current: 4,
-    steps: &[
-        RecordStep {
-            from: 1,
-            transform: migrate_account_index,
-        },
-        RecordStep {
-            from: 2,
-            transform: migrate_account_slots,
-        },
-        RecordStep {
-            from: 3,
-            transform: migrate_public_client,
-        },
-    ],
     accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
 };
-
-fn migrate_account_index(mut record: serde_json::Value) -> Option<serde_json::Value> {
-    let checks = record.get_mut("model_checks")?.as_array_mut()?;
-    if checks.len() > MAX_MODEL_CHECKS {
-        return None;
-    }
-    for check in checks.iter_mut() {
-        let object = check.as_object_mut()?;
-        if object.contains_key("check_id") {
-            return None;
-        }
-        object.insert(
-            "check_id".into(),
-            "01a15ecf-a92a-7707-8af6-ce3d36320b67".into(),
-        );
-    }
-    // Validate the complete source index before discarding checks that cannot prove a journal link.
-    let mut candidate = record.clone();
-    candidate.as_object_mut()?.insert("schema".into(), 2.into());
-    let candidate = migrate_public_client(migrate_account_slots(candidate)?)?;
-    AccountIndex::decode(&serde_json::to_vec(&candidate).ok()?).ok()?;
-    record.get_mut("model_checks")?.as_array_mut()?.clear();
-    record.as_object_mut()?.insert("schema".into(), 2.into());
-    Some(record)
-}
-
-// Existing keyring entries keep the client-derived slot their token was written at.
-fn migrate_account_slots(mut record: serde_json::Value) -> Option<serde_json::Value> {
-    let mut clients = Vec::new();
-    for entry in record.get_mut("accounts")?.as_array_mut()? {
-        let object = entry.as_object_mut()?;
-        // Source schemas allow one account per client; only schema 3 admits several.
-        let client = object.get("client_id")?.as_str()?.to_owned();
-        if clients.contains(&client) {
-            return None;
-        }
-        clients.push(client);
-        if object.contains_key("keyring_slot") || object.contains_key("chatgpt_account_id") {
-            return None;
-        }
-        let slot = match object.get("storage")?.as_str()? {
-            "keyring" => Some(legacy_keyring_slot(object.get("client_id")?.as_str()?)),
-            "private_file" => None,
-            _ => return None,
-        };
-        object.insert("keyring_slot".into(), slot.into());
-        object.insert("chatgpt_account_id".into(), serde_json::Value::Null);
-        if let Some(token) = object
-            .get_mut("token")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            let legacy = u64::from(LEGACY_TOKEN_RECORD_SCHEMA);
-            if token.get("schema")?.as_u64()? != legacy || token.contains_key("slot") {
-                return None;
-            }
-            token.insert("schema".into(), TOKEN_RECORD_SCHEMA.into());
-            token.insert("slot".into(), serde_json::Value::Null);
-        }
-    }
-    record.as_object_mut()?.insert("schema".into(), 3.into());
-    Some(record)
-}
-
-fn migrate_public_client(mut record: serde_json::Value) -> Option<serde_json::Value> {
-    for entry in record.get_mut("accounts")?.as_array_mut()? {
-        let object = entry.as_object_mut()?;
-        let disabled = object.remove("plan_permission_missing")?.as_bool()?;
-        if object.contains_key("slot_client_id")
-            || (disabled
-                && (!object.get("disconnected")?.as_bool()? || !object.get("token")?.is_null()))
-            || (object.get("disconnected")?.as_bool()? && !object.get("token")?.is_null())
-            || (object.get("signout_pending")?.as_bool()?
-                && object.get("disconnected")?.as_bool()?)
-        {
-            return None;
-        }
-        let client = match object.get("storage")?.as_str()? {
-            "keyring" => object.get("client_id")?.clone(),
-            "private_file" => serde_json::Value::Null,
-            _ => return None,
-        };
-        object.insert("slot_client_id".into(), client);
-    }
-    record.as_object_mut()?.insert("schema".into(), 4.into());
-    AccountIndex::decode(&serde_json::to_vec(&record).ok()?).ok()?;
-    for entry in record.get_mut("accounts")?.as_array_mut()? {
-        if entry.get("client_id")?.as_str()? != super::CLIENT_ID {
-            entry["disconnected"] = true.into();
-        }
-    }
-    record.get_mut("model_checks")?.as_array_mut()?.clear();
-    Some(record)
-}
-
-pub(super) fn retained_checks(state: &StateRoot) -> Result<Vec<CheckId>, arany::StoreError> {
-    AccountIndex::read(state)
-        .map(|index| {
-            index
-                .model_checks
-                .into_iter()
-                .map(|check| check.check_id)
-                .collect()
-        })
-        .map_err(|_| arany::StoreError::InvalidHistory)
-}
-
-impl ModelCheck {
-    pub(super) fn digest(&self) -> Result<[u8; 32], AuthorizationError> {
-        Ok(Sha256::digest(
-            serde_json::to_vec(self).map_err(|_| AuthorizationError::EvidenceUnavailable)?,
-        )
-        .into())
-    }
-}
 
 impl AccountIndex {
     fn account_position(&self, id: Uuid) -> Result<usize, AuthorizationError> {
@@ -482,12 +247,7 @@ impl AccountIndex {
                     return Err(AuthorizationError::SelectedAccountChanged);
                 }
                 let position = self.account_position(id)?;
-                let entry = &self.accounts[position];
-                if entry.client_id != who.client_id
-                    && !(entry.disconnected
-                        && entry.chatgpt_account_id.is_none()
-                        && who.client_id == super::CLIENT_ID)
-                {
+                if self.accounts[position].client_id != who.client_id {
                     return Err(AuthorizationError::SelectedAccountChanged);
                 }
                 Some(position)
@@ -495,7 +255,7 @@ impl AccountIndex {
             None => self.accounts.iter().position(|entry| {
                 entry.client_id == who.client_id
                     && entry.subject == who.subject
-                    && entry.chatgpt_account_id.as_deref() == who.account_id
+                    && entry.chatgpt_account_id == who.account_id
             }),
         };
         let Some(position) = position else {
@@ -507,7 +267,7 @@ impl AccountIndex {
                 other.id != entry.id
                     && other.client_id == who.client_id
                     && other.subject == who.subject
-                    && other.chatgpt_account_id.as_deref() == who.account_id
+                    && other.chatgpt_account_id == who.account_id
             })
         {
             return Err(AuthorizationError::RegistrationConflict);
@@ -529,35 +289,22 @@ impl AccountIndex {
     }
 
     fn select_account(&mut self, id: Uuid) {
-        self.model_checks.retain(|check| check.account_id != id);
         self.selected = Some(id);
     }
 
     fn empty() -> Self {
         Self {
-            schema: CHATGPT_ACCOUNTS.current as u8,
             selected: None,
             accounts: Vec::new(),
-            model_checks: Vec::new(),
         }
     }
 
     fn validate(&self) -> Result<(), AuthorizationError> {
-        if u64::from(self.schema) != CHATGPT_ACCOUNTS.current
-            || self.accounts.len() > MAX_ACCOUNTS
-            || self.model_checks.len() > MAX_MODEL_CHECKS
+        if self.accounts.len() > MAX_ACCOUNTS
             || self
                 .selected
                 .is_some_and(|id| !self.accounts.iter().any(|entry| entry.id == id))
             || self.accounts.iter().any(|entry| !entry.valid())
-            || self.model_checks.iter().any(|check| {
-                !check.valid()
-                    || !self.accounts.iter().any(|account| {
-                        account.id == check.account_id
-                            && !account.disconnected
-                            && !account.signout_pending
-                    })
-            })
             || self
                 .accounts
                 .iter()
@@ -574,20 +321,13 @@ impl AccountIndex {
                 return Err(AuthorizationError::InvalidIdentity);
             }
         }
-        for (index, check) in self.model_checks.iter().enumerate() {
-            if self.model_checks[..index]
-                .iter()
-                .any(|prior| prior.fingerprint == check.fingerprint)
-            {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
-        }
         Ok(())
     }
 
     fn read(state: &StateRoot) -> Result<Self, AuthorizationError> {
         let Some(bytes) = state
-            .read_current_with_notice(&CHATGPT_ACCOUNTS, super::record_migration_notice)
+            .record(CHATGPT_ACCOUNTS.kind)
+            .read()
             .map_err(|_| AuthorizationError::Unavailable)?
         else {
             return Ok(Self::empty());
@@ -614,26 +354,10 @@ impl AccountIndex {
     }
 }
 
-pub(super) fn model_check_fingerprint(
-    selected: &SelectedAccount,
-    model: &str,
-    effort: Effort,
-) -> Result<[u8; 32], AuthorizationError> {
-    account_fingerprint(
-        selected,
-        model,
-        effort,
-        MODEL_CHECK_VERSION,
-        "three-probes-1024-local-output-tokens",
-    )
-}
-
 fn account_fingerprint(
     selected: &SelectedAccount,
     model: &str,
     effort: Effort,
-    version: &str,
-    contract: &str,
 ) -> Result<[u8; 32], AuthorizationError> {
     validate_native_model_id(model).map_err(|_| AuthorizationError::InvalidSelection)?;
     if !selected
@@ -644,11 +368,7 @@ fn account_fingerprint(
     }
     let mut message = Vec::with_capacity(256);
     for field in [
-        version,
-        env!("CARGO_PKG_VERSION"),
         "https://api.openai.com/v1/responses;store=false;stream=true",
-        contract,
-        "sequential-concurrency-one",
         &selected.credentials.client_id,
         &selected.credentials.subject,
         model,
@@ -666,7 +386,7 @@ fn account_fingerprint(
     let tag = hmac::sign(&key, &message);
     tag.as_ref()
         .try_into()
-        .map_err(|_| AuthorizationError::EvidenceUnavailable)
+        .map_err(|_| AuthorizationError::Unavailable)
 }
 
 fn load_selected_snapshot(
@@ -685,7 +405,7 @@ fn load_selected_snapshot(
     if entry.storage != selected.storage
         || entry.host_id != selected.credentials.host_id
         || entry.client_id != selected.credentials.client_id
-        || entry.chatgpt_account_id != selected.credentials.chatgpt_account_id
+        || selected.credentials.chatgpt_account_id.as_ref() != Some(&entry.chatgpt_account_id)
         || entry.subject != selected.credentials.subject
     {
         return Err(AuthorizationError::InvalidIdentity);
@@ -715,174 +435,9 @@ fn verify_selected_snapshot(
     load_selected_snapshot(index, selected).map(|_| ())
 }
 
-fn verify_check_snapshot(
-    state: &StateRoot,
-    index: &AccountIndex,
-    selected: &SelectedAccount,
-) -> Result<(), AuthorizationError> {
-    let token = load_selected_snapshot(index, selected)?;
-    registration::verify_host_at(state, selected.credentials.host_id)?;
-    if token.credentials.access_token != selected.credentials.access_token
-        || token.credentials.refresh_token != selected.credentials.refresh_token
-        || token.credentials.access_expires_at_unix != selected.credentials.access_expires_at_unix
-    {
-        return Err(AuthorizationError::SelectedAccountChanged);
-    }
-    Ok(())
-}
-
-pub(super) async fn clear_model_check(
-    workspace: PathBuf,
-    selected: SelectedAccount,
-    model: String,
-    effort: Effort,
-) -> Result<(), AuthorizationError> {
-    tokio::task::spawn_blocking(move || {
-        let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-        let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        clear_model_check_at(&state, &workspace, &selected, &model, effort)
-    })
-    .await
-    .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-fn clear_model_check_at(
-    state: &StateRoot,
-    workspace: &Path,
-    selected: &SelectedAccount,
-    model: &str,
-    effort: Effort,
-) -> Result<(), AuthorizationError> {
-    let fingerprint = model_check_fingerprint(selected, model, effort)?;
-    state
-        .with_account_replacement_lock(workspace, || {
-            let mut index = AccountIndex::read(state)?;
-            verify_selected_snapshot(&index, selected)?;
-            let previous = index.model_checks.len();
-            index
-                .model_checks
-                .retain(|check| check.fingerprint != fingerprint);
-            if index.model_checks.len() != previous {
-                index.write(state)?;
-            }
-            Ok(())
-        })
-        .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-pub(super) async fn prepare_model_check(
-    workspace: PathBuf,
-    selected: SelectedAccount,
-    selection: (String, Effort),
-    context_window_tokens: Option<u32>,
-    check_id: CheckId,
-) -> Result<ModelCheck, AuthorizationError> {
-    tokio::task::spawn_blocking(move || {
-        let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-        let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        state
-            .with_account_replacement_lock(&workspace, || {
-                verify_check_snapshot(&state, &AccountIndex::read(&state)?, &selected)
-            })
-            .map_err(|_| AuthorizationError::Unavailable)??;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| AuthorizationError::EvidenceUnavailable)?
-            .as_secs();
-        new_model_check(
-            &selected,
-            (&selection.0, selection.1),
-            context_window_tokens,
-            check_id,
-            now,
-        )
-    })
-    .await
-    .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-fn new_model_check(
-    selected: &SelectedAccount,
-    selection: (&str, Effort),
-    context_window_tokens: Option<u32>,
-    check_id: CheckId,
-    now: u64,
-) -> Result<ModelCheck, AuthorizationError> {
-    Ok(ModelCheck {
-        check_id,
-        account_id: selected.id,
-        fingerprint: model_check_fingerprint(selected, selection.0, selection.1)?,
-        checked_at_sec: now,
-        expires_at_sec: now
-            .checked_add(MODEL_CHECK_AGE_SECONDS)
-            .ok_or(AuthorizationError::EvidenceUnavailable)?,
-        context_window_tokens,
-    })
-}
-
-pub(super) async fn record_model_check(
-    workspace: PathBuf,
-    selected: SelectedAccount,
-    record: ModelCheck,
-) -> Result<(), AuthorizationError> {
-    tokio::task::spawn_blocking(move || {
-        let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-        let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        publish_model_check_at(&state, &workspace, &selected, record)
-    })
-    .await
-    .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-fn publish_model_check_at(
-    state: &StateRoot,
-    workspace: &Path,
-    selected: &SelectedAccount,
-    record: ModelCheck,
-) -> Result<(), AuthorizationError> {
-    let fingerprint = record.fingerprint;
-    let now = record.checked_at_sec;
-    let digest = record.digest()?;
-    state
-        .with_account_replacement_lock(workspace, || {
-            let mut index = AccountIndex::read(state)?;
-            verify_check_snapshot(state, &index, selected)?;
-            if !state
-                .check_publication_pending(record.check_id, fingerprint, digest)
-                .map_err(|_| AuthorizationError::EvidenceUnavailable)?
-            {
-                return Err(AuthorizationError::EvidenceUnavailable);
-            }
-            index
-                .model_checks
-                .retain(|check| check.expires_at_sec > now && check.fingerprint != fingerprint);
-            if index.model_checks.len() == MAX_MODEL_CHECKS {
-                return Err(AuthorizationError::EvidenceUnavailable);
-            }
-            index.model_checks.push(record);
-            index.write(state)?;
-            let saved = AccountIndex::read(state)?;
-            verify_check_snapshot(state, &saved, selected)?;
-            if !saved.model_checks.iter().any(|check| {
-                check.fingerprint == fingerprint && check.digest().ok() == Some(digest)
-            }) {
-                return Err(AuthorizationError::EvidenceUnavailable);
-            }
-            Ok(())
-        })
-        .map_err(|_| AuthorizationError::Unavailable)?
-}
-
 pub(super) struct AdmittedModel {
     pub(super) selected: SelectedAccount,
     pub(super) fingerprint: [u8; 32],
-    pub(super) context_window_tokens: Option<u32>,
-}
-
-struct RunModel<'a> {
-    slug: &'a str,
-    effort: Effort,
-    now: u64,
 }
 
 pub(super) async fn admitted_selected_for_run(
@@ -892,38 +447,17 @@ pub(super) async fn admitted_selected_for_run(
     effort: Effort,
 ) -> Result<AdmittedModel, AuthorizationError> {
     let selected = selected_for_use(workspace.clone(), expected_account_id).await?;
-    let models = super::catalog::read_for_run(super::catalog::list_models(
-        &selected.credentials,
-        &selected.consent,
-        selected.storage,
-    ))
-    .await;
     let admitted = selected.clone();
-    let (fingerprint, context_window_tokens) = tokio::task::spawn_blocking(move || {
+    let fingerprint = tokio::task::spawn_blocking(move || {
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| AuthorizationError::EvidenceUnavailable)?
-            .as_secs();
-        admitted_model_at(
-            &state,
-            &workspace,
-            &admitted,
-            RunModel {
-                slug: &model,
-                effort,
-                now,
-            },
-            models.as_deref(),
-        )
+        admitted_model_at(&state, &workspace, &admitted, (&model, effort))
     })
     .await
     .map_err(|_| AuthorizationError::Unavailable)??;
     Ok(AdmittedModel {
         selected,
         fingerprint,
-        context_window_tokens,
     })
 }
 
@@ -931,59 +465,16 @@ fn admitted_model_at(
     state: &StateRoot,
     workspace: &Path,
     selected: &SelectedAccount,
-    selection: RunModel<'_>,
-    catalog: Result<&[super::ChatGptModel], &AuthorizationError>,
-) -> Result<([u8; 32], Option<u32>), AuthorizationError> {
-    let fingerprint = account_fingerprint(
-        selected,
-        selection.slug,
-        selection.effort,
-        ACCOUNT_ADMISSION_VERSION,
-        "no-preflight-inference;strict-stream-outcomes;local-output-bound",
-    )?;
+    (slug, effort): (&str, Effort),
+) -> Result<[u8; 32], AuthorizationError> {
+    let fingerprint = account_fingerprint(selected, slug, effort)?;
     state
         .with_account_replacement_lock(workspace, || {
             let index = AccountIndex::read(state)?;
             verify_selected_snapshot(&index, selected)?;
-            let window = match catalog {
-                Ok(models) => super::catalog::model_window(models, selection.slug)
-                    .ok()
-                    .flatten(),
-                Err(_) => {
-                    checked_model_window(state, &index, selected, selection.slug, selection.now)?
-                }
-            };
-            Ok((fingerprint, window))
+            Ok(fingerprint)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-fn checked_model_window(
-    state: &StateRoot,
-    index: &AccountIndex,
-    selected: &SelectedAccount,
-    slug: &str,
-    now: u64,
-) -> Result<Option<u32>, AuthorizationError> {
-    let fingerprints = Effort::ALL
-        .into_iter()
-        .map(|effort| model_check_fingerprint(selected, slug, effort))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(index
-        .model_checks
-        .iter()
-        .filter(|check| {
-            check.account_id == selected.id
-                && fingerprints.contains(&check.fingerprint)
-                && check.current_at(now)
-                && check.digest().is_ok_and(|digest| {
-                    state
-                        .check_evidence_valid(check.check_id, check.fingerprint, digest)
-                        .unwrap_or(false)
-                })
-        })
-        .max_by_key(|check| check.checked_at_sec)
-        .and_then(|check| check.context_window_tokens))
 }
 
 pub(super) fn saved_host_at(state: &StateRoot) -> Result<Option<Uuid>, AuthorizationError> {
@@ -1032,7 +523,6 @@ pub(super) fn save_private_file_at(
     expected_selected: Option<Uuid>,
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: None,
         credentials,
         consent,
@@ -1041,6 +531,11 @@ pub(super) fn save_private_file_at(
         return Err(AuthorizationError::ConsentRequired);
     }
     let host_id = token.credentials.host_id;
+    let account_id = token
+        .credentials
+        .chatgpt_account_id
+        .clone()
+        .ok_or(AuthorizationError::InvalidIdentity)?;
     state
         .with_account_replacement_lock(workspace, || {
             let mut index = AccountIndex::read(state)?;
@@ -1059,15 +554,13 @@ pub(super) fn save_private_file_at(
                     client_id,
                     subject,
                     host_id,
-                    account_id: token.credentials.chatgpt_account_id.as_deref(),
+                    account_id: &account_id,
                 },
                 AccountStorage::PrivateFile,
                 expected_selected,
             )?;
             let id = if let Some(position) = position {
                 let entry = &mut index.accounts[position];
-                entry.client_id = token.credentials.client_id.clone();
-                entry.chatgpt_account_id = token.credentials.chatgpt_account_id.clone();
                 entry.token = Some(token);
                 entry.renewal_pending = false;
                 entry.signout_pending = false;
@@ -1080,9 +573,8 @@ pub(super) fn save_private_file_at(
                     host_id,
                     client_id: client_id.clone(),
                     subject: subject.clone(),
-                    chatgpt_account_id: token.credentials.chatgpt_account_id.clone(),
+                    chatgpt_account_id: account_id.clone(),
                     keyring_slot: None,
-                    slot_client_id: None,
                     storage: AccountStorage::PrivateFile,
                     renewal_pending: false,
                     signout_pending: false,
@@ -1125,7 +617,6 @@ fn save_keyring_at_with(
     write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
 ) -> Result<Uuid, AuthorizationError> {
     let mut token = TokenRecord {
-        schema: TOKEN_RECORD_SCHEMA,
         slot: None,
         credentials,
         consent,
@@ -1133,75 +624,86 @@ fn save_keyring_at_with(
     if !token.content_valid(AccountStorage::Keyring) {
         return Err(AuthorizationError::ConsentRequired);
     }
-    let host_id = token.credentials.host_id;
+    let account_id = token
+        .credentials
+        .chatgpt_account_id
+        .clone()
+        .ok_or(AuthorizationError::InvalidIdentity)?;
     state
         .with_account_replacement_lock(workspace, || {
-            let mut index = AccountIndex::read(state)?;
-            registration::verify_host_at(state, host_id)?;
-            if index
-                .accounts
-                .first()
-                .is_some_and(|entry| entry.host_id != host_id)
-            {
-                return Err(AuthorizationError::RegistrationConflict);
-            }
-            let client_id = token.credentials.client_id.clone();
-            let subject = token.credentials.subject.clone();
-            let position = index.signed_in_position(
-                SignedIn {
-                    client_id: &client_id,
-                    subject: &subject,
-                    host_id,
-                    account_id: token.credentials.chatgpt_account_id.as_deref(),
-                },
-                AccountStorage::Keyring,
-                expected_selected,
-            )?;
-            let (id, slot, record) = prepare_keyring_record(&index, position, &mut token)?;
-            if let Some(position) = position {
-                index.accounts[position].signout_pending = false;
-                index.accounts[position].renewal_pending = true;
-                index.write(state)?;
-            } else {
-                index.push_account(AccountEntry {
-                    id,
-                    host_id,
-                    client_id,
-                    subject,
-                    chatgpt_account_id: token.credentials.chatgpt_account_id.clone(),
-                    keyring_slot: Some(slot.clone()),
-                    slot_client_id: Some(token.credentials.client_id.clone()),
-                    storage: AccountStorage::Keyring,
-                    renewal_pending: false,
-                    signout_pending: false,
-                    disconnected: false,
-                    token: None,
-                });
-            }
-            write(&slot, &record).map_err(|error| {
-                if position.is_some() {
-                    uncertain_account_publication(error)
-                } else {
-                    error
-                }
-            })?;
-            let entry = index
-                .accounts
-                .iter_mut()
-                .find(|entry| entry.id == id)
-                .ok_or_else(|| {
-                    uncertain_account_publication(AuthorizationError::InvalidIdentity)
-                })?;
-            entry.renewal_pending = false;
-            entry.signout_pending = false;
-            entry.disconnected = false;
-            entry.client_id = token.credentials.client_id.clone();
-            entry.chatgpt_account_id = token.credentials.chatgpt_account_id.clone();
-            index.select_account(id);
-            index.write(state).map_err(uncertain_account_publication)?;
-            Ok(id)
+            publish_keyring_account(state, &mut token, &account_id, expected_selected, write)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+// Runs under the account replacement lock.
+fn publish_keyring_account(
+    state: &StateRoot,
+    token: &mut TokenRecord,
+    account_id: &str,
+    expected_selected: Option<Uuid>,
+    write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
+) -> Result<Uuid, AuthorizationError> {
+    let host_id = token.credentials.host_id;
+    let mut index = AccountIndex::read(state)?;
+    registration::verify_host_at(state, host_id)?;
+    if index
+        .accounts
+        .first()
+        .is_some_and(|entry| entry.host_id != host_id)
+    {
+        return Err(AuthorizationError::RegistrationConflict);
+    }
+    let client_id = token.credentials.client_id.clone();
+    let subject = token.credentials.subject.clone();
+    let position = index.signed_in_position(
+        SignedIn {
+            client_id: &client_id,
+            subject: &subject,
+            host_id,
+            account_id,
+        },
+        AccountStorage::Keyring,
+        expected_selected,
+    )?;
+    let (id, slot, record) = prepare_keyring_record(&index, position, token)?;
+    if let Some(position) = position {
+        index.accounts[position].signout_pending = false;
+        index.accounts[position].renewal_pending = true;
+        index.write(state)?;
+    } else {
+        index.push_account(AccountEntry {
+            id,
+            host_id,
+            client_id,
+            subject,
+            chatgpt_account_id: account_id.to_owned(),
+            keyring_slot: Some(slot.clone()),
+            storage: AccountStorage::Keyring,
+            renewal_pending: false,
+            signout_pending: false,
+            disconnected: false,
+            token: None,
+        });
+    }
+    write(&slot, &record).map_err(|error| {
+        if position.is_some() {
+            uncertain_account_publication(error)
+        } else {
+            error
+        }
+    })?;
+    let entry = index
+        .accounts
+        .iter_mut()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| uncertain_account_publication(AuthorizationError::InvalidIdentity))?;
+    entry.renewal_pending = false;
+    entry.signout_pending = false;
+    entry.disconnected = false;
+    index.select_account(id);
+    index.write(state).map_err(uncertain_account_publication)?;
+    Ok(id)
 }
 
 fn prepare_keyring_record(
@@ -1302,7 +804,7 @@ fn admit_keyring_record(
         || token.slot != entry.keyring_slot
         || !token.credentials.valid_saved()
         || token.credentials.client_id != entry.client_id
-        || token.credentials.chatgpt_account_id != entry.chatgpt_account_id
+        || token.credentials.chatgpt_account_id.as_ref() != Some(&entry.chatgpt_account_id)
         || token.credentials.subject != entry.subject
         || token.credentials.host_id != entry.host_id
     {
@@ -1439,7 +941,8 @@ pub(super) fn saved_account_index(
     state
         .with_account_replacement_lock(workspace, || {
             let bytes = state
-                .read_current(&CHATGPT_ACCOUNTS)
+                .record(CHATGPT_ACCOUNTS.kind)
+                .read()
                 .map_err(|_| AuthorizationError::InvalidSavedState)?
                 .ok_or(AuthorizationError::NoSelectedAccount)?;
             let index = AccountIndex::decode(&bytes)?;
@@ -1614,7 +1117,6 @@ fn sign_out_target_at_with(
             if !entry.signout_pending {
                 index.accounts[position].renewal_pending = false;
                 index.accounts[position].signout_pending = true;
-                index.model_checks.retain(|check| check.account_id != id);
                 index.write(state)?;
             }
             let entry = &index.accounts[position];
@@ -1666,7 +1168,6 @@ fn forget_removed_account(
         return Ok(());
     };
     index.accounts.retain(|entry| entry.id != id);
-    index.model_checks.retain(|check| check.account_id != id);
     if index.selected == Some(id) {
         index.selected = index
             .accounts
@@ -1765,7 +1266,7 @@ fn selected_id_at(state: &StateRoot) -> Result<Uuid, AuthorizationError> {
 
 fn open_account_state() -> Result<StateRoot, AuthorizationError> {
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-    crate::files::open_optional_state(&path)
+    arany::StateRoot::open_optional(&path)
         .map_err(|_| AuthorizationError::Unavailable)?
         .ok_or(AuthorizationError::NoSelectedAccount)
 }
@@ -1799,32 +1300,7 @@ fn refresh_selected_with(
     state
         .with_account_replacement_lock(workspace, || {
             let mut index = AccountIndex::read(state)?;
-            if index.selected != Some(id) {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
-            let position = index.account_position(id)?;
-            let entry = &index.accounts[position];
-            entry.ensure_usable()?;
-            let client_id = entry.client_id.clone();
-            let subject = entry.subject.clone();
-            let storage = entry.storage;
-            let token = match storage {
-                AccountStorage::Keyring => read_keyring_token(entry)?,
-                AccountStorage::PrivateFile => entry
-                    .token
-                    .as_ref()
-                    .cloned()
-                    .ok_or(AuthorizationError::InvalidIdentity)?,
-            };
-            if token.credentials.client_id != client_id
-                || token.credentials.host_id != entry.host_id
-                || token.credentials.subject != subject
-            {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
-            if !token.valid_for(storage) {
-                return Err(AuthorizationError::ConsentRequired);
-            }
+            let (position, storage, token) = selected_token(&index, id)?;
             if token.credentials.access_expires_at_unix > now.saturating_add(REFRESH_EARLY_SECONDS)
             {
                 return Ok(SelectedAccount::from_token(id, storage, token));
@@ -1834,33 +1310,12 @@ fn refresh_selected_with(
             let replacement = match refresh(&token.credentials) {
                 Ok(replacement) => replacement,
                 Err(error) => {
-                    if matches!(&error, AuthorizationError::Unavailable) {
-                        index.accounts[position].renewal_pending = false;
-                        index
-                            .write(state)
-                            .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    } else if matches!(&error, AuthorizationError::RefreshTokenUnusable) {
-                        disconnect_unusable_refresh_with(state, &mut index, position, |slot| {
-                            delete_chatgpt_keyring_record(slot)
-                                .map_err(|_| AuthorizationError::Unavailable)
-                        })?;
-                    }
+                    settle_failed_refresh(state, &mut index, position, &error)?;
                     return Err(error);
                 }
             };
-            if !replacement.valid_saved()
-                || replacement.client_id != client_id
-                || replacement.subject != subject
-                || replacement.host_id != token.credentials.host_id
-                || replacement.id_token != token.credentials.id_token
-                || replacement.access_token == token.credentials.access_token
-                || replacement.refresh_token == token.credentials.refresh_token
-                || replacement.access_expires_at_unix <= now
-            {
-                return Err(AuthorizationError::InvalidIdentity);
-            }
+            check_replacement(&replacement, &token.credentials, now)?;
             let updated = TokenRecord {
-                schema: TOKEN_RECORD_SCHEMA,
                 slot: token.slot.clone(),
                 credentials: replacement,
                 consent: token.consent,
@@ -1868,40 +1323,121 @@ fn refresh_selected_with(
             if !updated.valid_for(storage) {
                 return Err(AuthorizationError::InvalidIdentity);
             }
-            match storage {
-                AccountStorage::Keyring => {
-                    let record = serde_json::to_string(&updated)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    let slot = index.accounts[position]
-                        .keyring_slot
-                        .as_deref()
-                        .ok_or(AuthorizationError::RenewalStorageUncertain)?;
-                    write_chatgpt_keyring_record(slot, &record)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    index.accounts[position].renewal_pending = false;
-                    index
-                        .write(state)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    Ok(SelectedAccount::from_token(id, storage, updated))
-                }
-                AccountStorage::PrivateFile => {
-                    index.accounts[position].token = Some(updated);
-                    index.accounts[position].renewal_pending = false;
-                    index
-                        .write(state)
-                        .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
-                    Ok(SelectedAccount::from_token(
-                        id,
-                        storage,
-                        index.accounts[position]
-                            .token
-                            .take()
-                            .ok_or(AuthorizationError::RenewalStorageUncertain)?,
-                    ))
-                }
-            }
+            store_refreshed(state, &mut index, position, id, updated)
         })
         .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn selected_token(
+    index: &AccountIndex,
+    id: Uuid,
+) -> Result<(usize, AccountStorage, TokenRecord), AuthorizationError> {
+    if index.selected != Some(id) {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    let position = index.account_position(id)?;
+    let entry = &index.accounts[position];
+    entry.ensure_usable()?;
+    let storage = entry.storage;
+    let token = match storage {
+        AccountStorage::Keyring => read_keyring_token(entry)?,
+        AccountStorage::PrivateFile => entry
+            .token
+            .as_ref()
+            .cloned()
+            .ok_or(AuthorizationError::InvalidIdentity)?,
+    };
+    if token.credentials.client_id != entry.client_id
+        || token.credentials.host_id != entry.host_id
+        || token.credentials.subject != entry.subject
+    {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    if !token.valid_for(storage) {
+        return Err(AuthorizationError::ConsentRequired);
+    }
+    Ok((position, storage, token))
+}
+
+// An unavailable refresh clears the pending mark; an unusable refresh token disconnects the account.
+fn settle_failed_refresh(
+    state: &StateRoot,
+    index: &mut AccountIndex,
+    position: usize,
+    error: &AuthorizationError,
+) -> Result<(), AuthorizationError> {
+    if matches!(error, AuthorizationError::Unavailable) {
+        index.accounts[position].renewal_pending = false;
+        index
+            .write(state)
+            .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+    } else if matches!(error, AuthorizationError::RefreshTokenUnusable) {
+        disconnect_unusable_refresh_with(state, index, position, |slot| {
+            delete_chatgpt_keyring_record(slot).map_err(|_| AuthorizationError::Unavailable)
+        })?;
+    }
+    Ok(())
+}
+
+fn check_replacement(
+    replacement: &VerifiedCredentials,
+    current: &VerifiedCredentials,
+    now: u64,
+) -> Result<(), AuthorizationError> {
+    if !replacement.valid_saved()
+        || replacement.client_id != current.client_id
+        || replacement.subject != current.subject
+        || replacement.host_id != current.host_id
+        || replacement.id_token != current.id_token
+        || replacement.access_token == current.access_token
+        || replacement.refresh_token == current.refresh_token
+        || replacement.access_expires_at_unix <= now
+    {
+        return Err(AuthorizationError::InvalidIdentity);
+    }
+    Ok(())
+}
+
+fn store_refreshed(
+    state: &StateRoot,
+    index: &mut AccountIndex,
+    position: usize,
+    id: Uuid,
+    updated: TokenRecord,
+) -> Result<SelectedAccount, AuthorizationError> {
+    let storage = index.accounts[position].storage;
+    match storage {
+        AccountStorage::Keyring => {
+            let record = serde_json::to_string(&updated)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            let slot = index.accounts[position]
+                .keyring_slot
+                .as_deref()
+                .ok_or(AuthorizationError::RenewalStorageUncertain)?;
+            write_chatgpt_keyring_record(slot, &record)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            index.accounts[position].renewal_pending = false;
+            index
+                .write(state)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            Ok(SelectedAccount::from_token(id, storage, updated))
+        }
+        AccountStorage::PrivateFile => {
+            index.accounts[position].token = Some(updated);
+            index.accounts[position].renewal_pending = false;
+            index
+                .write(state)
+                .map_err(|_| AuthorizationError::RenewalStorageUncertain)?;
+            Ok(SelectedAccount::from_token(
+                id,
+                storage,
+                index.accounts[position]
+                    .token
+                    .take()
+                    .ok_or(AuthorizationError::RenewalStorageUncertain)?,
+            ))
+        }
+    }
 }
 
 fn disconnect_unusable_refresh_with(
@@ -1911,12 +1447,10 @@ fn disconnect_unusable_refresh_with(
     delete_keyring: impl FnOnce(&str) -> Result<(), AuthorizationError>,
 ) -> Result<(), AuthorizationError> {
     let entry = &mut index.accounts[position];
-    let id = entry.id;
     let slot = entry.keyring_slot.clone();
     entry.token = None;
     entry.renewal_pending = false;
     entry.disconnected = true;
-    index.model_checks.retain(|check| check.account_id != id);
     index
         .write(state)
         .map_err(|_| AuthorizationError::RefreshCleanupUncertain)?;

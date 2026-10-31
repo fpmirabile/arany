@@ -340,73 +340,82 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
                 && profile.is_none()
                 && matches!(grant, Some(ChildGrant::EditOnly { .. })) =>
         {
-            let goal = active_run_goal(view, run_id).ok_or(ReplayError::InvalidTransition)?;
-            let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
-            let policy = config
-                .worker_policy
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            let receipt = config
-                .tool_policy
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            validate_request(view, run, &p.request, Some(id))
-                .map_err(|_| ReplayError::InvalidTransition)?;
-            let plan = goal
-                .plan_contract
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            let registry = super::definition_registry(run)?;
-            let def = registry
-                .get(&p.request.definition)
-                .ok_or(ReplayError::InvalidTransition)?;
-            if run.workers.stop.is_some()
-                || !p.grant.within(&policy.parent_grant)
-                || p.grant.write_paths != p.request.lease
-                || p.grant.commands != p.request.commands
-                || !p.grant.read_paths.iter().all(|l| within(l, &plan.paths))
-                || p.policy_digest != receipt.config_digest
-                || p.permissions_digest != receipt.permissions_digest
-                || run
-                    .agents
-                    .iter()
-                    .filter(|a| a.assignment.as_ref().is_some_and(|w| w.released.is_none()))
-                    .count()
-                    >= usize::from(policy.concurrency)
-                || run
-                    .agents
-                    .iter()
-                    .filter_map(|a| a.assignment.as_ref())
-                    .filter(|w| w.released.is_none())
-                    .any(|w| {
-                        w.pins
-                            .request
-                            .lease
-                            .iter()
-                            .any(|a| p.request.lease.iter().any(|b| overlaps(a, b)))
-                    })
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-            for op in &p.grant.tools {
-                if !def.allows_worker_tool(*op) {
-                    return Err(ReplayError::InvalidTransition);
-                }
-            }
-            let wave = run
-                .primary()
-                .into_iter()
-                .flat_map(|a| a.provider_calls.iter())
-                .filter(|r| r.delegation.is_some())
-                .count();
-            if usize::from(p.request.wave) != wave {
-                return Err(ReplayError::InvalidTransition);
-            }
-            Ok(())
+            validate_editor_spawn(view, run, id, p)
         }
         _ => Err(ReplayError::InvalidTransition),
     }
 }
+fn validate_editor_spawn(
+    view: &SessionView,
+    run: &RunView,
+    id: AgentRunId,
+    p: &WorkerAssignment,
+) -> Result<(), ReplayError> {
+    let goal = active_run_goal(view, run.id).ok_or(ReplayError::InvalidTransition)?;
+    let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+    let policy = config
+        .worker_policy
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let receipt = config
+        .tool_policy
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    validate_request(view, run, &p.request, Some(id))
+        .map_err(|_| ReplayError::InvalidTransition)?;
+    let plan = goal
+        .plan_contract
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let registry = super::definition_registry(run)?;
+    let def = registry
+        .get(&p.request.definition)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if run.workers.stop.is_some()
+        || !p.grant.within(&policy.parent_grant)
+        || p.grant.write_paths != p.request.lease
+        || p.grant.commands != p.request.commands
+        || !p.grant.read_paths.iter().all(|l| within(l, &plan.paths))
+        || p.policy_digest != receipt.config_digest
+        || p.permissions_digest != receipt.permissions_digest
+        || run
+            .agents
+            .iter()
+            .filter(|a| a.assignment.as_ref().is_some_and(|w| w.released.is_none()))
+            .count()
+            >= usize::from(policy.concurrency)
+        || run
+            .agents
+            .iter()
+            .filter_map(|a| a.assignment.as_ref())
+            .filter(|w| w.released.is_none())
+            .any(|w| {
+                w.pins
+                    .request
+                    .lease
+                    .iter()
+                    .any(|a| p.request.lease.iter().any(|b| overlaps(a, b)))
+            })
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    for op in &p.grant.tools {
+        if !def.allows_worker_tool(*op) {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    let wave = run
+        .primary()
+        .into_iter()
+        .flat_map(|a| a.provider_calls.iter())
+        .filter(|r| r.delegation.is_some())
+        .count();
+    if usize::from(p.request.wave) != wave {
+        return Err(ReplayError::InvalidTransition);
+    }
+    Ok(())
+}
+
 pub(super) fn child_tool_admissible(
     run: &RunView,
     id: AgentRunId,
@@ -418,8 +427,23 @@ pub(super) fn child_tool_admissible(
     let Some(a) = run.agents.iter().find(|a| a.id == id) else {
         return false;
     };
-    intent.target == EffectTarget::Workspace
-        && w.outcome.is_none()
+    // The one integration follows the editor's accepted answer and publishes to the Workspace.
+    let integration = editor_integration(&intent.call);
+    let last_call = a
+        .provider_calls
+        .iter()
+        .rev()
+        .find(|record| record.phase != AgentPhase::ToolReview);
+    (if integration {
+        intent.target == EffectTarget::Workspace
+            && last_call.is_some_and(|r| {
+                r.disposition == ProviderCallDisposition::Finished && r.failure_reason.is_none()
+            })
+            && !a.tools.iter().any(|t| editor_integration(&t.intent.call))
+    } else {
+        editor_target(a, intent.target)
+            && last_call.is_some_and(|r| r.disposition == ProviderCallDisposition::ToolRequested)
+    }) && w.outcome.is_none()
         && run.workers.stop.is_none()
         && quiescent(run)
         && intent.policy_digest == w.pins.policy_digest
@@ -428,13 +452,58 @@ pub(super) fn child_tool_admissible(
             .tools
             .iter()
             .any(|t| t.intent.id == intent.id || editor_tool_failed(t))
-        && a.provider_calls
-            .iter()
-            .rev()
-            .find(|record| record.phase != AgentPhase::ToolReview)
-            .is_some_and(|r| r.disposition == ProviderCallDisposition::ToolRequested)
         && command::admissible(run, a, intent)
         && super::tool::validate_tool_lease(run, id, &intent.call).is_ok()
+}
+
+pub(crate) fn editor_integration(call: &ToolCall) -> bool {
+    matches!(
+        call,
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { .. }
+        }
+    )
+}
+
+// Within the bounds the Goal pinned for one editor integration.
+pub(crate) fn editor_changes_fit(
+    call: &ToolCall,
+    settings: &crate::tools::ToolResourceSettings,
+) -> bool {
+    let ToolCall::ApplyChangeset {
+        source: ChangesetSource::EditorWorkspace { files },
+    } = call
+    else {
+        return true;
+    };
+    files.len() <= settings.editor_change_files as usize
+        && files
+            .iter()
+            .filter_map(|file| file.after.as_ref())
+            .map(|after| u64::from(after.bytes))
+            .sum::<u64>()
+            <= settings.editor_change_bytes
+}
+
+// An editor's effects target only its own workspace, under the identity its first effect pinned.
+pub(super) fn editor_target(agent: &AgentView, target: EffectTarget) -> bool {
+    let EffectTarget::EditorWorkspace {
+        assignment_id,
+        device,
+        inode,
+    } = target
+    else {
+        return false;
+    };
+    assignment_id == agent.id
+        && agent.tools.iter().all(|tool| match tool.intent.target {
+            EffectTarget::EditorWorkspace {
+                device: pinned,
+                inode: pinned_inode,
+                ..
+            } => (pinned, pinned_inode) == (device, inode),
+            EffectTarget::Workspace => true,
+        })
 }
 
 pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), ReplayError> {
@@ -721,7 +790,9 @@ pub(crate) fn editor_criterion_evidence(
                 ]);
             }
         }
-        if o.intent.call.mutates() || o.intent.call.is_process() {
+        if (o.intent.call.mutates() || o.intent.call.is_process())
+            && !editor_integration(&o.intent.call)
+        {
             break;
         }
     }

@@ -10,7 +10,10 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("file");
-    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let config: Config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     let edit = |old: &str, new: &str, replace_all| LiteralEdit {
         old_string: old.into(),
         new_string: new.into(),
@@ -18,7 +21,7 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
     };
     let call = |bytes: &[u8], edits| ToolCall::MultiEdit {
         file_path: "file".into(),
-        expected_digest: hex_digest(bytes),
+        expected_digest: Some(hex_digest(bytes)),
         edits,
     };
     for (name, original, edits, expected) in [
@@ -177,7 +180,6 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn checked_tool_files_reject_links_traversal_and_special_objects() {
     use nix::{sys::stat::Mode, unistd::mkfifo};
@@ -219,7 +221,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
             .is_dir()
     );
     let config: Config = serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":true,
+        "workspace_paths":["."],"write":true,
         "commands":[],"skills":[],"mcp":[]
     }))
     .unwrap();
@@ -234,10 +236,35 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         json!({"sha256":hex_digest(b"created"),"bytes":7,"executable":false,"before":null})
     );
     assert!(super::fs::native(&root_path, &write, &config).is_err());
+    let deep = ToolCall::Write {
+        path: "fresh/deeper/created".into(),
+        expected_digest: None,
+        content: "deep".into(),
+    };
+    let result = super::fs::native(&root_path, &deep, &config).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap(),
+        json!({"sha256":hex_digest(b"deep"),"bytes":4,"executable":false,"before":null})
+    );
+    assert_eq!(
+        std::fs::read(root_path.join("fresh/deeper/created")).unwrap(),
+        b"deep"
+    );
+    for path in ["linked/fresh/created", "nested/file/created"] {
+        let refused = ToolCall::Write {
+            path: path.into(),
+            expected_digest: None,
+            content: "not admitted".into(),
+        };
+        assert!(
+            super::fs::native(&root_path, &refused, &config).is_err(),
+            "missing parent beneath {path}"
+        );
+    }
     let original = super::fs::open_file(&root, "nested/file").unwrap();
     let edit = ToolCall::Edit {
         path: "nested/file".into(),
-        expected_digest: hex_digest(b"admitted"),
+        expected_digest: Some(hex_digest(b"admitted")),
         old: "admitted".into(),
         new: "replaced".into(),
     };
@@ -323,7 +350,6 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         inputs: Vec::new(),
     };
     let snapshot_config = Config {
-        version: 1,
         workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
         write: true,
         child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -333,7 +359,6 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
-        git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
         network: None,
@@ -432,7 +457,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
     let modified = std::fs::File::open(workspace.join("modified")).unwrap();
     let original_inode = modified.metadata().unwrap().ino();
     let removed = std::fs::File::open(workspace.join("removed")).unwrap();
-    let before = super::fs::command_snapshot(&command).unwrap();
+    let before = super::fs::test_baseline(&command).unwrap();
     std::fs::write(command.join("binary"), b"\xff\0\x02").unwrap();
     std::fs::write(command.join("modified"), b"formatted").unwrap();
     std::fs::remove_file(command.join("removed")).unwrap();
@@ -614,7 +639,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         .unwrap();
         let sibling_inode = std::fs::metadata(workspace.join("a-good")).unwrap().ino();
         let mut config: Config = serde_json::from_value(json!({
-            "version":1,"workspace_paths":["."],"write":true,
+            "workspace_paths":["."],"write":true,
             "commands":[],"skills":[],"mcp":[]
         }))
         .unwrap();
@@ -816,7 +841,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         "the fixture must retain read-only parent permissions"
     );
     let config: Config = serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":true,
+        "workspace_paths":["."],"write":true,
         "commands":[],"skills":[],"mcp":[]
     }))
     .unwrap();
@@ -891,8 +916,6 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         "directory-to-file",
         "replaced-root",
         "file-overflow",
-        "snapshot-bytes-overflow",
-        "snapshot-count-overflow",
         "changeset-count-limit",
         "changeset-count-overflow",
         "changeset-byte-limit",
@@ -905,28 +928,28 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         std::fs::create_dir(&command).unwrap();
         std::fs::write(command.join("unchanged"), b"seed").unwrap();
         if case == "file-to-directory" {
-            std::fs::write(command.join("target"), b"old").unwrap();
+            std::fs::write(command.join("output"), b"old").unwrap();
         }
         if case == "directory-to-file" {
-            std::fs::create_dir(command.join("target")).unwrap();
+            std::fs::create_dir(command.join("output")).unwrap();
         }
-        let before = super::fs::command_snapshot(&command).unwrap();
+        let before = super::fs::test_baseline(&command).unwrap();
         match case {
-            "symlink" => std::os::unix::fs::symlink("unchanged", command.join("target")).unwrap(),
+            "symlink" => std::os::unix::fs::symlink("unchanged", command.join("output")).unwrap(),
             "symlink-parent" => {
                 std::fs::create_dir(command.join("directory")).unwrap();
                 std::fs::write(command.join("directory/file"), b"child").unwrap();
-                std::os::unix::fs::symlink("directory", command.join("target")).unwrap();
+                std::os::unix::fs::symlink("directory", command.join("output")).unwrap();
             }
             "hardlink" => {
-                std::fs::hard_link(command.join("unchanged"), command.join("target")).unwrap()
+                std::fs::hard_link(command.join("unchanged"), command.join("output")).unwrap()
             }
-            "fifo" => mkfifo(&command.join("target"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap(),
+            "fifo" => mkfifo(&command.join("output"), Mode::S_IRUSR | Mode::S_IWUSR).unwrap(),
             "set-id-file" | "set-id-directory" | "set-id-root" => {
                 let target = if case == "set-id-root" {
                     command.clone()
                 } else {
-                    command.join("target")
+                    command.join("output")
                 };
                 if case == "set-id-file" {
                     std::fs::write(&target, b"child").unwrap();
@@ -938,7 +961,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 let target = if case == "set-id-root" {
                     &command
                 } else {
-                    &command.join("target")
+                    &command.join("output")
                 };
                 assert_ne!(
                     std::fs::metadata(target).unwrap().mode() & 0o6000,
@@ -952,12 +975,12 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
             }
             "invalid-name" => std::fs::write(command.join("line\nbreak"), b"invalid").unwrap(),
             "file-to-directory" => {
-                std::fs::remove_file(command.join("target")).unwrap();
-                std::fs::create_dir(command.join("target")).unwrap();
+                std::fs::remove_file(command.join("output")).unwrap();
+                std::fs::create_dir(command.join("output")).unwrap();
             }
             "directory-to-file" => {
-                std::fs::remove_dir(command.join("target")).unwrap();
-                std::fs::write(command.join("target"), b"new").unwrap();
+                std::fs::remove_dir(command.join("output")).unwrap();
+                std::fs::write(command.join("output"), b"new").unwrap();
             }
             "replaced-root" => {
                 std::fs::rename(&command, temp.path().join("replaced")).unwrap();
@@ -965,20 +988,10 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 std::fs::write(command.join("unchanged"), b"seed").unwrap();
             }
             "file-overflow" => {
-                std::fs::write(command.join("target"), vec![0; MAX_FILE_BYTES + 1]).unwrap()
+                std::fs::write(command.join("large"), vec![0; MAX_FILE_BYTES + 1]).unwrap()
             }
-            "snapshot-bytes-overflow" => {
-                for index in 0..=COMMAND_SNAPSHOT_BYTES / MAX_FILE_BYTES {
-                    std::fs::write(
-                        command.join(format!("file-{index:02}")),
-                        vec![0; MAX_FILE_BYTES],
-                    )
-                    .unwrap();
-                }
-            }
-            "snapshot-count-overflow" | "changeset-count-limit" | "changeset-count-overflow" => {
+            "changeset-count-limit" | "changeset-count-overflow" => {
                 let count = match case {
-                    "snapshot-count-overflow" => COMMAND_SNAPSHOT_FILES + 1,
                     "changeset-count-limit" => MAX_CHANGESET_FILES,
                     _ => MAX_CHANGESET_FILES + 1,
                 };
@@ -988,7 +1001,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
             }
             "changeset-byte-limit" | "changeset-byte-overflow" => {
                 let count = MAX_CHANGESET_BYTES + usize::from(case == "changeset-byte-overflow");
-                std::fs::write(command.join("target"), vec![0; count]).unwrap();
+                std::fs::write(command.join("output"), vec![0; count]).unwrap();
             }
             "depth-limit" | "depth-overflow" => {
                 let path = vec![
@@ -1001,7 +1014,7 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 ]
                 .join("/");
                 std::fs::create_dir_all(command.join(&path)).unwrap();
-                std::fs::write(command.join(path).join("target"), b"child").unwrap();
+                std::fs::write(command.join(path).join("output"), b"child").unwrap();
             }
             _ => unreachable!(),
         }
@@ -1014,8 +1027,6 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 assert_eq!(result.unwrap().files.len(), 1, "{case}")
             }
             "file-overflow"
-            | "snapshot-bytes-overflow"
-            | "snapshot-count-overflow"
             | "changeset-count-overflow"
             | "changeset-byte-overflow"
             | "depth-overflow" => assert!(
@@ -1042,7 +1053,10 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
 fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
-    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let config: Config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     let content = b"binary\0\xff\r\n";
     let source = temp.path().join("source");
     let destination = temp.path().join("nested/destination");
@@ -1051,11 +1065,11 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     let move_call = ToolCall::Move {
         source: "source".into(),
         destination: "nested/destination".into(),
-        expected_digest: hex_digest(content),
+        expected_digest: Some(hex_digest(content)),
     };
     let stale = ToolCall::Delete {
         path: "source".into(),
-        expected_digest: hex_digest(b"stale"),
+        expected_digest: Some(hex_digest(b"stale")),
     };
     assert!(matches!(
         super::fs::native(temp.path(), &stale, &config),
@@ -1080,7 +1094,7 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     let occupied = ToolCall::Move {
         source: "source".into(),
         destination: "nested/destination".into(),
-        expected_digest: hex_digest(b"replacement"),
+        expected_digest: Some(hex_digest(b"replacement")),
     };
     assert!(matches!(
         super::fs::native(temp.path(), &occupied, &config),
@@ -1090,7 +1104,7 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
     assert_eq!(std::fs::read(&destination).unwrap(), content);
     let delete = ToolCall::Delete {
         path: "nested/destination".into(),
-        expected_digest: hex_digest(content),
+        expected_digest: Some(hex_digest(content)),
     };
     assert_eq!(
         super::fs::native(temp.path(), &delete, &config).unwrap(),
@@ -1107,7 +1121,10 @@ fn delete_and_move_preserve_bytes_and_refuse_stale_or_existing_targets() {
 fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
-    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["owned"],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let config: Config = serde_json::from_value(
+        json!({"workspace_paths":["owned"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .unwrap();
     std::fs::create_dir(temp.path().join("owned")).unwrap();
     std::fs::write(temp.path().join("owned/source"), b"source").unwrap();
     symlink("source", temp.path().join("owned/link")).unwrap();
@@ -1120,12 +1137,12 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         for call in [
             ToolCall::Delete {
                 path: path.into(),
-                expected_digest: hex_digest(b"source"),
+                expected_digest: Some(hex_digest(b"source")),
             },
             ToolCall::Move {
                 source: path.into(),
                 destination: "owned/new".into(),
-                expected_digest: hex_digest(b"source"),
+                expected_digest: Some(hex_digest(b"source")),
             },
         ] {
             assert!(
@@ -1141,7 +1158,7 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         let call = ToolCall::Move {
             source: "owned/source".into(),
             destination: destination.into(),
-            expected_digest: hex_digest(b"source"),
+            expected_digest: Some(hex_digest(b"source")),
         };
         assert!(super::fs::native(temp.path(), &call, &config).is_err());
     }
@@ -1157,7 +1174,7 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         let call = ToolCall::Move {
             source: source.into(),
             destination: destination.into(),
-            expected_digest: hex_digest(b"source"),
+            expected_digest: Some(hex_digest(b"source")),
         };
         assert!(!config.allows(&call), "{call:?}");
     }
@@ -1165,7 +1182,7 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
         assert!(
             !ToolCall::Delete {
                 path: path.into(),
-                expected_digest: hex_digest(b"source")
+                expected_digest: Some(hex_digest(b"source"))
             }
             .valid()
         );
@@ -1175,12 +1192,12 @@ fn delete_and_move_enforce_path_grants_links_and_file_bounds() {
     for call in [
         ToolCall::Delete {
             path: "owned/large".into(),
-            expected_digest: hex_digest(b""),
+            expected_digest: Some(hex_digest(b"")),
         },
         ToolCall::Move {
             source: "owned/large".into(),
             destination: "owned/new".into(),
-            expected_digest: hex_digest(b""),
+            expected_digest: Some(hex_digest(b"")),
         },
     ] {
         assert!(matches!(
@@ -1197,7 +1214,7 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
     );
     let call = ToolCall::Mkdir {
         path: "directory".into(),
@@ -1216,7 +1233,9 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
     let call = ToolCall::Mkdir {
         path: "cancelled".into(),
     };
-    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+    let intent = runtime
+        .intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone())
+        .unwrap();
     let cancelled = super::Cancellation::new();
     cancelled.cancel();
     assert_eq!(
@@ -1224,7 +1243,9 @@ async fn workspace_mutations_publish_in_process_with_intent_bound_receipts() {
         ToolDisposition::Cancelled
     );
     assert!(!temp.path().join("cancelled").exists());
-    let intent = runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call);
+    let intent = runtime
+        .intent(crate::RunId::new(), crate::AgentRunId::new(), call)
+        .unwrap();
     crate::FaultPlan::fail_file_parent_sync(intent.id);
     let observed = runtime.execute(intent, super::Cancellation::new()).await;
     assert_eq!(observed.disposition, ToolDisposition::Uncertain);
@@ -1249,7 +1270,7 @@ async fn workspace_file_versions_publish_in_process_with_intent_bound_receipts()
     std::fs::create_dir(temp.path().join("src")).unwrap();
     let runtime = in_process_runtime(
         temp.path(),
-        json!({"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
     );
     let path = "src/file";
     let source_digest = [1; 32];

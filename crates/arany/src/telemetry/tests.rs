@@ -601,34 +601,10 @@ fn child_routes() -> ProviderRoutes {
 
 fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
     crate::session::RunConfig {
-        supervisor: None,
-        worker_policy: None,
-        agent_definitions: None,
-        roster: None,
         providers,
-        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
         model: "model-1".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
-        policy: CollaborationPolicy::Single,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
         workspace_inode: 1,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        launch_directory: String::new(),
-        include_digests: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
-        tool_policy: None,
+        ..crate::test_support::run_config()
     }
 }
 
@@ -638,19 +614,11 @@ fn provider_record(
     usage: (Option<u32>, Option<u32>),
 ) -> ProviderCallRecord {
     ProviderCallRecord {
-        rate_limits: None,
-        delegation: None,
         phase,
         disposition,
-        requested_tools: 0,
-        response_id: None,
         input_tokens: usage.0,
         output_tokens: usage.1,
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
+        ..crate::test_support::provider_call_record()
     }
 }
 
@@ -1452,8 +1420,8 @@ fn compaction_record(status: CompactionStatus) -> crate::session::CompactionReco
         recent_files: Vec::new(),
         provider: "other".into(),
         model: "model-1".into(),
-        prompt_version: 1,
-        schema_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         compiler_version: 3,
         source_bytes: 1,
         source_tokens_estimate: 1,
@@ -2183,7 +2151,6 @@ fn endpoint_precedence_and_loopback_admission_are_closed() {
             .0,
         "http://[::1]:4318/exact"
     );
-    #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
         assert!(

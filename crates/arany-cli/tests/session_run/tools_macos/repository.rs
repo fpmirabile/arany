@@ -58,6 +58,7 @@ async fn run_case(root: &Path, workspace: &Path, phase: RepositoryPhase) {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut requested = request(workspace, "Run repository library tests");
     requested.include_paths.clear();

@@ -1,14 +1,17 @@
 mod command_tools;
 pub(super) use command_tools::manage_command_tools;
+mod git_hooks;
+pub(super) use git_hooks::ask as ask_git_hooks;
 
 use super::setup::SetupError;
-use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput};
+use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput, TrustDialog};
 use arany::permissions::{
-    Decision, NetworkDomainEdit, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
+    Decision, NetworkDomainEdit, PermissionSettings, SettingsError, TypedGitPrefix,
+    TypedPrefixEdit, TypedPrefixEntry,
 };
 use arany::{
     ApprovalMode, CommandEnvironment, CommandEnvironmentError, ProviderKind, StateRoot,
-    WorkspacePermissions, native_protection_supported,
+    WorkspacePermissions,
 };
 use std::path::Path;
 mod capture;
@@ -21,14 +24,10 @@ pub(super) enum PermissionChoice {
     Exit,
 }
 
-pub(in crate::cli) const UNAVAILABLE_NOTICE: &str =
-    "Native Tool protection is unavailable on this OS; chat is read only.";
-
 pub(in crate::cli) fn supports_tools(profile: Option<&str>) -> bool {
-    native_protection_supported()
-        && profile
-            .and_then(ProviderKind::parse)
-            .is_some_and(ProviderKind::is_native)
+    profile
+        .and_then(ProviderKind::parse)
+        .is_some_and(ProviderKind::is_native)
 }
 
 pub(super) fn refresh_mode(
@@ -63,7 +62,7 @@ pub(super) async fn admit(
         TrustAdmission::Exit => return Ok(PermissionChoice::Exit),
     };
     if access.is_trusted() {
-        composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
+        composer.set_approval_mode(Some(access.mode()));
         Ok(PermissionChoice::Selected(access))
     } else {
         choose(
@@ -82,7 +81,7 @@ const ENTRY_BASE: u8 = 2;
 const CAPTURE: u8 = u8::MAX;
 const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
-const HOST_NOTE: &str = "host; human approval required";
+const HOST_NOTE: &str = "host; allow covers every destination";
 const HOST_READ_DISCLOSURE: &str =
     "This host read can send private pull request data to the current Provider.";
 
@@ -93,6 +92,7 @@ pub(super) enum PermissionArea {
     CommandEnvironment,
     CommandTools,
     NetworkDomains,
+    GitHooks,
 }
 
 pub(super) async fn choose_area(
@@ -111,6 +111,7 @@ pub(super) async fn choose_area(
                 (b'4', "Command environment"),
                 (b'5', "Command tools"),
                 (b'6', "Network domains"),
+                (b'7', "Git hooks"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -123,6 +124,7 @@ pub(super) async fn choose_area(
             Some(b'4') => Some(PermissionArea::CommandEnvironment),
             Some(b'5') => Some(PermissionArea::CommandTools),
             Some(b'6') => Some(PermissionArea::NetworkDomains),
+            Some(b'7') => Some(PermissionArea::GitHooks),
             _ => None,
         },
     )
@@ -197,20 +199,6 @@ pub(super) async fn manage_rules(
             Err(error) => return Ok(format!("Error: {error}; permissions unchanged")),
         };
         let entries = settings.typed_prefixes();
-        let mut rows = vec![(ADD, "Add a rule".to_owned())];
-        rows.extend(entries.iter().enumerate().map(|(index, entry)| {
-            let index = u8::try_from(index).expect("typed rules are capped at 128");
-            (
-                ENTRY_BASE + index,
-                format!(
-                    "{} {} · {}",
-                    decision_label(entry.decision),
-                    verb_label(entry.prefix),
-                    scope_label(entry.folder.as_deref(), workspace)
-                ),
-            )
-        }));
-        rows.push((BACK, "Back".to_owned()));
         let instruction = [
             notice.take().unwrap_or_else(|| "Typed Git rules.".into()),
             if settings.exists() {
@@ -221,19 +209,8 @@ pub(super) async fn manage_rules(
             "Rules apply from the next Run.".into(),
         ]
         .join(" ");
-        let labels = rows
-            .iter()
-            .map(|(value, label)| (*value, label.as_str()))
-            .collect::<Vec<_>>();
-        let choice = super::setup::choose_focused(
-            terminal,
-            2,
-            "Typed Git rules",
-            &instruction,
-            &labels,
-            None,
-        )
-        .await?;
+        let rows = typed_rule_rows(&entries, workspace);
+        let choice = choose_rule(terminal, "Typed Git rules", &instruction, rows).await?;
         let edit = match choice {
             Some(ADD) => add_edit(terminal).await?,
             Some(value) if value >= ENTRY_BASE => {
@@ -278,6 +255,58 @@ pub(super) async fn manage_rules(
             }
         }
     }
+}
+
+fn typed_rule_rows(entries: &[TypedPrefixEntry], workspace: &Path) -> Vec<(u8, String)> {
+    let mut rows = vec![(ADD, "Add a rule".to_owned())];
+    rows.extend(entries.iter().enumerate().map(|(index, entry)| {
+        let index = u8::try_from(index).expect("typed rules are capped at 128");
+        (
+            ENTRY_BASE + index,
+            format!(
+                "{} {} · {}",
+                decision_label(entry.decision),
+                verb_label(entry.prefix),
+                scope_label(entry.folder.as_deref(), workspace)
+            ),
+        )
+    }));
+    rows
+}
+
+fn network_rule_rows(settings: &PermissionSettings) -> Vec<(u8, String)> {
+    let mut rows = vec![(ADD, "Add a domain refused in this conversation".to_owned())];
+    rows.extend(
+        settings
+            .network_domains()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    ENTRY_BASE + u8::try_from(index).expect("network rules are capped"),
+                    format!(
+                        "{} {}",
+                        decision_label(entry.decision),
+                        crate::presentation::escape_terminal(&entry.domain)
+                    ),
+                )
+            }),
+    );
+    rows
+}
+
+async fn choose_rule(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+    mut rows: Vec<(u8, String)>,
+) -> Result<Option<u8>, SetupError> {
+    rows.push((BACK, "Back".to_owned()));
+    let labels = rows
+        .iter()
+        .map(|(value, label)| (*value, label.as_str()))
+        .collect::<Vec<_>>();
+    super::setup::choose_focused(terminal, 2, title, instruction, &labels, None).await
 }
 
 pub(super) enum EnvironmentOutcome {
@@ -394,38 +423,9 @@ pub(super) async fn manage_network_rules(
             Ok(settings) => settings,
             Err(error) => return Ok(format!("Error: {error}; network rules unchanged")),
         };
-        let mut rows = vec![(ADD, "Add a domain refused in this conversation".to_owned())];
-        rows.extend(
-            settings
-                .network_domains()
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    (
-                        ENTRY_BASE + u8::try_from(index).expect("network rules are capped"),
-                        format!(
-                            "{} {}",
-                            decision_label(entry.decision),
-                            crate::presentation::escape_terminal(&entry.domain)
-                        ),
-                    )
-                }),
-        );
-        rows.push((BACK, "Back".to_owned()));
-        let labels = rows
-            .iter()
-            .map(|(value, label)| (*value, label.as_str()))
-            .collect::<Vec<_>>();
         let instruction = [if settings.exists() { "" } else { SETTINGS_NOTE }, &notice].join(" ");
-        let choice = super::setup::choose_focused(
-            terminal,
-            2,
-            "Network domains",
-            &instruction,
-            &labels,
-            None,
-        )
-        .await?;
+        let rows = network_rule_rows(&settings);
+        let choice = choose_rule(terminal, "Network domains", &instruction, rows).await?;
         let edit = match choice {
             Some(ADD) => add_network_edit(terminal, view).await?,
             Some(value) if value >= ENTRY_BASE => {
@@ -985,68 +985,28 @@ pub(super) enum TrustAdmission {
     Exit,
 }
 
-const RESET_WARNING: &str = "Reset deletes the remembered trust and runtime profile selections for every folder on this computer. Conversations, saved accounts and model choices are kept. Each folder asks for trust again. This cannot be undone.";
-
-fn recovery_choices(resettable: bool, exit: &'static str) -> Vec<(u8, &'static str)> {
-    let mut choices = vec![(b'1', "Retry")];
-    if resettable {
-        choices.push((b'2', "Reset folder trust"));
-    }
-    choices.push((b'0', exit));
-    choices
-}
-
-// The reset pins the bytes shown in the dialog; confirmation deletes only those bytes.
+// A refused trust record was archived at startup; what remains here is an unsafe or unavailable state.
 pub(super) async fn open_or_recover(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
     exit: &'static str,
 ) -> Result<TrustAdmission, SetupError> {
-    let mut notice = None;
     loop {
         let error = match WorkspacePermissions::open(workspace) {
             Ok(access) => return Ok(TrustAdmission::Loaded(access)),
             Err(error) => error,
         };
-        let reset = if error.is_resettable() {
-            WorkspacePermissions::prepare_reset(workspace).ok()
-        } else {
-            None
-        };
-        let reason = notice.take().unwrap_or_else(|| format!("{error}."));
-        let instruction = if reset.is_some() {
-            format!(
-                "{reason} Reset deletes only the remembered folder trust list; conversations, accounts and models are kept."
-            )
-        } else {
-            reason
-        };
-        let choices = recovery_choices(reset.is_some(), exit);
         match super::setup::choose_focused(
             terminal,
             1,
             "Folder trust recovery",
-            &instruction,
-            &choices,
+            &format!("{error}."),
+            &[(b'1', "Retry"), (b'0', exit)],
             None,
         )
         .await?
         {
             Some(b'1') => {}
-            Some(b'2') => {
-                if let Some(reset) = reset {
-                    let confirmed = super::setup::review_warning(
-                        terminal,
-                        "Reset folder trust?",
-                        RESET_WARNING,
-                        "Delete remembered folder trust?",
-                    )
-                    .await?;
-                    if confirmed && let Err(error) = reset.apply() {
-                        notice = Some(format!("Reset did not complete: {error}; retry."));
-                    }
-                }
-            }
             _ => return Ok(TrustAdmission::Exit),
         }
     }
@@ -1054,12 +1014,11 @@ pub(super) async fn open_or_recover(
 
 pub(super) async fn choose(
     terminal: &mut AttachedTerminal,
-    mut permissions: WorkspacePermissions,
+    permissions: WorkspacePermissions,
     composer: &mut Composer,
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
-    let mut selected = 0usize;
-    let mut page = 0usize;
+    let mut cursor = TrustCursor::default();
     let id = uuid::Uuid::now_v7();
     let mut answer = Composer::default();
     let options = permissions.runtime_profile_choices();
@@ -1067,115 +1026,52 @@ pub(super) async fn choose(
         .iter()
         .map(|option| option.selected)
         .collect::<Vec<_>>();
-    let mut focused_profile = None;
-    let mut explanation_pages_seen = false;
     loop {
-        let (more, visible_page) = terminal.draw_workspace_permissions(
+        let (more, visible_page) = terminal.draw_workspace_permissions(TrustDialog {
             id,
-            permissions.path(),
-            ProfileSelection {
+            workspace: permissions.path(),
+            profiles: ProfileSelection {
                 options: &options,
                 selected: &selected_profiles,
-                focused: focused_profile,
-                enabled: explanation_pages_seen,
+                focused: cursor.focused_profile,
+                enabled: cursor.explanation_pages_seen,
                 discovery_error: permissions.discovery_error(),
             },
-            page,
-            selected == 1,
+            page: cursor.page,
+            trust: cursor.selected == 1,
             configured,
-        )?;
-        page = visible_page;
-        if focused_profile.is_none() && !more {
-            explanation_pages_seen = true;
-        }
+        })?;
+        cursor.shown(visible_page, more);
         match terminal.next_input().await? {
-            TerminalInput::Up if explanation_pages_seen && focused_profile.is_some() => {
-                focused_profile = focused_profile.and_then(|index| index.checked_sub(1));
-            }
-            TerminalInput::Down if explanation_pages_seen && focused_profile.is_some() => {
-                let index = focused_profile.expect("matched selected profile");
-                focused_profile = Some((index + 1).min(options.len().saturating_sub(1)));
-            }
-            TerminalInput::Up if more || (selected == 0 && page > 0) => {
-                page = page.saturating_sub(1);
-            }
-            TerminalInput::Up if !more => selected = selected.saturating_sub(1),
-            TerminalInput::Down if !more => selected = (selected + 1).min(1),
-            TerminalInput::PageUp => {
-                page = page.saturating_sub(1);
-                selected = 0;
-                focused_profile = None;
-            }
-            TerminalInput::Down | TerminalInput::PageDown if more => page += 1,
-            TerminalInput::Tab if !explanation_pages_seen => {}
-            TerminalInput::Tab if explanation_pages_seen && focused_profile.is_some() => {
-                focused_profile = None;
-            }
-            TerminalInput::Tab if explanation_pages_seen && !options.is_empty() => {
-                focused_profile = Some(0)
-            }
-            TerminalInput::Tab if explanation_pages_seen && !more => selected = (selected + 1) % 2,
+            input @ (TerminalInput::Up
+            | TerminalInput::Down
+            | TerminalInput::PageUp
+            | TerminalInput::PageDown
+            | TerminalInput::Tab) => cursor.navigate(input, more, options.len()),
             TerminalInput::Character(' ') if !terminal.is_linear() => {
-                if let Some(index) = focused_profile {
-                    toggle_profile(&mut selected_profiles, &options, index);
-                    selected = 1;
-                }
+                cursor.toggle_focused(&mut selected_profiles, &options);
             }
-            TerminalInput::Character(character) if terminal.is_linear() => {
-                answer.apply(TerminalInput::Character(character));
+            input @ (TerminalInput::Character(_) | TerminalInput::Backspace)
+                if terminal.is_linear() =>
+            {
+                answer.apply(input);
             }
-            TerminalInput::Backspace if terminal.is_linear() => {
-                answer.apply(TerminalInput::Backspace);
+            TerminalInput::Resize => cursor = TrustCursor::default(),
+            TerminalInput::Submit
+                if cursor.explanation_pages_seen && cursor.focused_profile.is_some() =>
+            {
+                cursor.toggle_focused(&mut selected_profiles, &options);
             }
-            TerminalInput::Resize => {
-                page = 0;
-                selected = 0;
-                focused_profile = None;
-                explanation_pages_seen = false;
-            }
-            TerminalInput::Submit if explanation_pages_seen && focused_profile.is_some() => {
-                let index = focused_profile.expect("matched selected profile");
-                toggle_profile(&mut selected_profiles, &options, index);
-                selected = 1;
-            }
-            TerminalInput::Submit if more => page += 1,
+            TerminalInput::Submit if more => cursor.page += 1,
             TerminalInput::Submit => {
-                if terminal.is_linear() {
-                    let Some((choice, profiles)) =
-                        parse_linear_selection(answer.text(), &options, &selected_profiles)
-                    else {
-                        answer.clear();
-                        continue;
-                    };
-                    selected = choice;
-                    selected_profiles = profiles;
+                if terminal.is_linear()
+                    && !cursor.read_linear(&mut answer, &options, &mut selected_profiles)
+                {
+                    continue;
                 }
-                if selected == 0 {
-                    selected_profiles.fill(false);
-                }
-                let selected_tokens = options
-                    .iter()
-                    .zip(selected_profiles.iter().copied())
-                    .filter(|(_, selected)| *selected)
-                    .map(|(option, _)| option.token.clone())
-                    .collect::<Vec<_>>();
-                if let Err(error) = permissions.remember_profiles(
-                    selected == 1,
-                    ApprovalMode::AutoEdits,
-                    &selected_tokens,
-                ) {
-                    terminal.restore_draft_input(composer.input_capacity())?;
-                    return Ok(PermissionChoice::Rejected(
-                        permissions,
-                        format!("Could not remember folder trust: {error}"),
-                    ));
-                }
-                composer.set_approval_mode(
-                    (native_protection_supported() && permissions.is_trusted())
-                        .then_some(permissions.mode()),
-                );
-                terminal.restore_draft_input(composer.input_capacity())?;
-                return Ok(PermissionChoice::Selected(permissions));
+                let trusted = cursor.selected == 1;
+                let tokens = trusted_tokens(&options, &mut selected_profiles, cursor.selected);
+                return remember_trust(terminal, permissions, composer, trusted, &tokens);
             }
             TerminalInput::Escape => {
                 terminal.restore_draft_input(composer.input_capacity())?;
@@ -1186,17 +1082,127 @@ pub(super) async fn choose(
             }
             TerminalInput::Suspend => {
                 terminal.suspend_and_resume(composer.input_capacity())?;
-                page = 0;
-                selected = 0;
-                focused_profile = None;
-                explanation_pages_seen = false;
+                cursor = TrustCursor::default();
             }
-            TerminalInput::Shutdown(signal) => {
-                return Err(SetupError::Shutdown(signal));
-            }
+            TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
             _ => {}
         }
     }
+}
+
+#[derive(Default)]
+struct TrustCursor {
+    selected: usize,
+    page: usize,
+    focused_profile: Option<usize>,
+    explanation_pages_seen: bool,
+}
+
+impl TrustCursor {
+    // The explanation counts as seen once its last page shows without a focused profile.
+    fn shown(&mut self, page: usize, more: bool) {
+        self.page = page;
+        if self.focused_profile.is_none() && !more {
+            self.explanation_pages_seen = true;
+        }
+    }
+
+    fn read_linear(
+        &mut self,
+        answer: &mut Composer,
+        options: &[arany::RuntimeProfileOption],
+        selected_profiles: &mut Vec<bool>,
+    ) -> bool {
+        let Some((choice, profiles)) =
+            parse_linear_selection(answer.text(), options, selected_profiles)
+        else {
+            answer.clear();
+            return false;
+        };
+        self.selected = choice;
+        *selected_profiles = profiles;
+        true
+    }
+
+    // Choosing a profile implies trusting the folder.
+    fn toggle_focused(
+        &mut self,
+        selected_profiles: &mut [bool],
+        options: &[arany::RuntimeProfileOption],
+    ) {
+        if let Some(index) = self.focused_profile {
+            toggle_profile(selected_profiles, options, index);
+            self.selected = 1;
+        }
+    }
+
+    // Pages turn until the explanation was seen; then Tab moves between the answer and profiles.
+    fn navigate(&mut self, input: TerminalInput, more: bool, profiles: usize) {
+        let seen = self.explanation_pages_seen;
+        match input {
+            TerminalInput::Up if seen && self.focused_profile.is_some() => {
+                self.focused_profile = self.focused_profile.and_then(|index| index.checked_sub(1));
+            }
+            TerminalInput::Down if seen && self.focused_profile.is_some() => {
+                let index = self.focused_profile.expect("matched selected profile");
+                self.focused_profile = Some((index + 1).min(profiles.saturating_sub(1)));
+            }
+            TerminalInput::Up if more || (self.selected == 0 && self.page > 0) => {
+                self.page = self.page.saturating_sub(1);
+            }
+            TerminalInput::Up if !more => self.selected = self.selected.saturating_sub(1),
+            TerminalInput::Down if !more => self.selected = (self.selected + 1).min(1),
+            TerminalInput::PageUp => {
+                self.page = self.page.saturating_sub(1);
+                self.selected = 0;
+                self.focused_profile = None;
+            }
+            TerminalInput::Down | TerminalInput::PageDown if more => self.page += 1,
+            TerminalInput::Tab if !seen => {}
+            TerminalInput::Tab if self.focused_profile.is_some() => self.focused_profile = None,
+            TerminalInput::Tab if profiles > 0 => self.focused_profile = Some(0),
+            TerminalInput::Tab if !more => self.selected = (self.selected + 1) % 2,
+            _ => {}
+        }
+    }
+}
+
+// Declining trust clears every selected profile.
+fn trusted_tokens(
+    options: &[arany::RuntimeProfileOption],
+    selected_profiles: &mut [bool],
+    selected: usize,
+) -> Vec<String> {
+    if selected == 0 {
+        selected_profiles.fill(false);
+    }
+    options
+        .iter()
+        .zip(selected_profiles.iter().copied())
+        .filter(|(_, selected)| *selected)
+        .map(|(option, _)| option.token.clone())
+        .collect()
+}
+
+fn remember_trust(
+    terminal: &mut AttachedTerminal,
+    mut permissions: WorkspacePermissions,
+    composer: &mut Composer,
+    trusted: bool,
+    selected_tokens: &[String],
+) -> Result<PermissionChoice, SetupError> {
+    if let Err(error) =
+        permissions.remember_profiles(trusted, ApprovalMode::AutoEdits, selected_tokens)
+    {
+        terminal.restore_draft_input(composer.input_capacity())?;
+        return Ok(PermissionChoice::Rejected(
+            permissions,
+            format!("Could not remember folder trust: {error}"),
+        ));
+    }
+    composer.set_approval_mode(permissions.is_trusted().then_some(permissions.mode()));
+    terminal.restore_draft_input(composer.input_capacity())?;
+    Ok(PermissionChoice::Selected(permissions))
 }
 
 fn parse_linear_selection(
@@ -1258,9 +1264,6 @@ fn toggle_profile(selected: &mut [bool], options: &[arany::RuntimeProfileOption]
 }
 
 pub(super) fn cycle(composer: &mut Composer) -> String {
-    if !native_protection_supported() {
-        return UNAVAILABLE_NOTICE.into();
-    }
     let Some(mode) = composer.approval_mode() else {
         return "Read only · use /permissions to trust this folder".into();
     };
@@ -1424,7 +1427,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, debug_assertions))]
+    #[cfg(debug_assertions)]
     #[test]
     fn rejected_save_keeps_the_trust_record_and_reports_the_error() {
         use super::{PermissionChoice, choose};
@@ -1534,28 +1537,6 @@ mod tests {
                 "a rejected save must not write the trust record"
             );
         });
-    }
-
-    #[test]
-    fn trust_recovery_offers_reset_only_for_resettable_causes() {
-        use arany::TrustRecordError;
-
-        let labels = |choices: Vec<(u8, &str)>| {
-            choices
-                .into_iter()
-                .map(|(_, label)| label.to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            labels(super::recovery_choices(true, "Exit")),
-            ["Retry", "Reset folder trust", "Exit"]
-        );
-        assert_eq!(
-            labels(super::recovery_choices(false, "Cancel")),
-            ["Retry", "Cancel"]
-        );
-        assert!(!TrustRecordError::RecordNotPrivate.is_resettable());
-        assert!(TrustRecordError::UnsupportedVersion(1).is_resettable());
     }
 
     fn option(token: &str, group: &'static str) -> arany::RuntimeProfileOption {

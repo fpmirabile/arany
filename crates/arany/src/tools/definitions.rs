@@ -19,6 +19,68 @@ pub struct DefinitionRegistryPin {
     pub files: Vec<DefinitionFilePin>,
 }
 
+fn open_owned(
+    dir: &Dir,
+    name: &str,
+    private: bool,
+) -> Result<(std::fs::File, std::fs::Metadata), ToolError> {
+    let file = fs::open_file(dir, name)?;
+    let before = file.metadata().map_err(|_| ToolError::Path)?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || before.mode() & 0o6000 != 0
+        || before.uid() != rustix::process::geteuid().as_raw()
+    {
+        return Err(ToolError::Path);
+    }
+    if private {
+        if before.mode() & 0o077 != 0 {
+            return Err(ToolError::Path);
+        }
+        crate::private_fs::check_acl(&file, true).map_err(|_| ToolError::Path)?;
+    }
+    Ok((file, before))
+}
+
+fn read_unchanged(
+    dir: &Dir,
+    name: &str,
+    file: std::fs::File,
+    before: &std::fs::Metadata,
+    total: &mut usize,
+) -> Result<Vec<u8>, ToolError> {
+    let raw = fs::read_regular(file, 64 * 1024)?;
+    *total += raw.len();
+    if *total > MAX_RAW_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let after = dir
+        .symlink_metadata(name)
+        .map_err(|_| ToolError::ChangedInput)?;
+    if (
+        before.dev(),
+        before.ino(),
+        before.len(),
+        before.mtime(),
+        before.mtime_nsec(),
+        before.ctime(),
+        before.ctime_nsec(),
+    ) != (
+        after.dev(),
+        after.ino(),
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) || !after.is_file()
+        || after.nlink() != 1
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    Ok(raw)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefinitionFilePin {
@@ -176,21 +238,7 @@ fn scan(
         if !crate::validate::valid_relative(&name, false) {
             return Err(ToolError::Path);
         }
-        let file = fs::open_file(dir, &name)?;
-        let before = file.metadata().map_err(|_| ToolError::Path)?;
-        if !before.is_file()
-            || before.nlink() != 1
-            || before.mode() & 0o6000 != 0
-            || before.uid() != rustix::process::geteuid().as_raw()
-        {
-            return Err(ToolError::Path);
-        }
-        if private {
-            if before.mode() & 0o077 != 0 {
-                return Err(ToolError::Path);
-            }
-            crate::private_fs::check_acl(&file, true).map_err(|_| ToolError::Path)?;
-        }
+        let (file, before) = open_owned(dir, &name, private)?;
         if !name.ends_with(".md") {
             continue;
         }
@@ -201,35 +249,7 @@ fn scan(
         if accepted > MAX_DEFINITIONS {
             return Err(ToolError::Limit);
         }
-        let raw = fs::read_regular(file, 64 * 1024)?;
-        *total += raw.len();
-        if *total > MAX_RAW_BYTES {
-            return Err(ToolError::Limit);
-        }
-        let after = dir
-            .symlink_metadata(&name)
-            .map_err(|_| ToolError::ChangedInput)?;
-        if (
-            before.dev(),
-            before.ino(),
-            before.len(),
-            before.mtime(),
-            before.mtime_nsec(),
-            before.ctime(),
-            before.ctime_nsec(),
-        ) != (
-            after.dev(),
-            after.ino(),
-            after.len(),
-            after.mtime(),
-            after.mtime_nsec(),
-            after.ctime(),
-            after.ctime_nsec(),
-        ) || !after.is_file()
-            || after.nlink() != 1
-        {
-            return Err(ToolError::ChangedInput);
-        }
+        let raw = read_unchanged(dir, &name, file, &before, total)?;
         snapshots.files.push((
             DefinitionFilePin {
                 private,
@@ -261,7 +281,6 @@ fn scan(
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentDefinition {
-    pub(crate) version: u8,
     pub(crate) name: String,
     pub(crate) description: String,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -301,6 +320,14 @@ impl AgentDefinition {
         ) {
             return self.editor() && self.allows_worker_tool(crate::worker::WorkerTool::Command);
         }
+        if matches!(
+            call,
+            ToolCall::ApplyChangeset {
+                source: crate::worker::ChangesetSource::EditorWorkspace { .. }
+            }
+        ) {
+            return self.editor();
+        }
         crate::session::worker::WorkerTool::of(call)
             .is_some_and(|tool| self.allows_worker_tool(tool))
     }
@@ -338,8 +365,7 @@ impl AgentDefinition {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.version == 1
-            && valid_name(&self.name)
+        valid_name(&self.name)
             && self.name.len() <= 64
             && !self.description.trim().is_empty()
             && self.description.len() <= 2048
@@ -550,7 +576,6 @@ pub(super) fn strict(raw: &[u8]) -> Result<(AgentDefinition, Vec<String>), Rejec
             reason: "invalid",
         })?;
     let definition = AgentDefinition {
-        version: 1,
         name: front.name,
         description: front.description,
         tools: front
@@ -696,6 +721,7 @@ mod tests {
             cwd: ".".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         for name in ["Bash", "command"] {
             let (researcher, notes) =
@@ -728,7 +754,7 @@ mod tests {
     fn agent_definition_multiedit_requires_an_editor_and_never_expands_its_grant() {
         let call = ToolCall::MultiEdit {
             file_path: "owned/a".into(),
-            expected_digest: "0".repeat(64),
+            expected_digest: Some("0".repeat(64)),
             edits: vec![crate::LiteralEdit {
                 old_string: "a".into(),
                 new_string: "b".into(),
@@ -1221,6 +1247,7 @@ mod tests {
         let glob = ToolCall::Glob {
             pattern: "**".into(),
             path: ".".into(),
+            offset: 0,
             limit: 100,
         };
         assert!(definition("tools: Glob\n").allows(&glob));

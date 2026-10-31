@@ -52,7 +52,7 @@ impl RunLoop<'_> {
                         intent.call = command_tools::rewritten(&intent.call, command);
                         if intent.call.is_unguarded() {
                             intent.host_command = runtime
-                                .intent(intent.run_id, intent.agent_run_id, intent.call.clone())
+                                .intent(intent.run_id, intent.agent_run_id, intent.call.clone())?
                                 .host_command;
                         }
                     }
@@ -70,7 +70,9 @@ impl RunLoop<'_> {
             plan,
             digests: ([u8::MAX; 32], [u8::MAX; 32]),
         };
-        let intent = self.hook_intent(runtime, &occurrence, u32::MAX);
+        let Ok(intent) = self.hook_intent(runtime, &occurrence, u32::MAX) else {
+            return false;
+        };
         let hook = HookInvocation {
             command_subject: plan.command_subject,
             command_tool: plan.command_tool.clone(),

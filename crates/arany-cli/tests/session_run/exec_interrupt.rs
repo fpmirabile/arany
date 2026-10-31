@@ -36,27 +36,8 @@ fn interrupted_exec_leaves_its_goal_resumable(
     listener.set_nonblocking(true).expect("bounded accept");
     let (held_tx, held_rx) = mpsc::channel();
 
-    // Three conformance requests precede the Run; the Run request is held open until exec drops it.
+    // The Run request is held open until exec drops it.
     thread::spawn(move || {
-        for index in 0..3 {
-            let mut stream = crate::process::accept_with_deadline(
-                &listener,
-                Duration::from_secs(30),
-                "conformance request",
-            );
-            let body: serde_json::Value =
-                serde_json::from_slice(&super::loopback::read_request(&mut stream))
-                    .expect("request JSON");
-            let streaming = body["stream"] == true;
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                }
-                _ => serde_json::json!(r#"synthetic summary"#),
-            };
-            super::loopback::send_response_for(&mut stream, index, text, streaming);
-        }
         let mut stream =
             crate::process::accept_with_deadline(&listener, Duration::from_secs(30), "Run request");
         super::loopback::read_request(&mut stream);
@@ -68,11 +49,12 @@ fn interrupted_exec_leaves_its_goal_resumable(
         let _ = stream.read(&mut [0; 1]);
     });
 
-    super::loopback::check_profile(&workspace, &state);
-
     let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
     command
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -304,7 +286,7 @@ fn death_during_approval_leaves_no_started_effect_and_resume_reproposes() {
 fn write_approval_death_settings(state: &std::path::Path, ask: bool) {
     use std::os::unix::fs::PermissionsExt;
     for (name, bytes) in [
-        ("tools.json", br#"{"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
+        ("tools.json", br#"{"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
         ("permissions.json", if ask { br#"{"permissions":{"ask":["Read"]}}"#.as_slice() } else { b"{}".as_slice() }),
     ] {
         std::fs::write(state.join(name), bytes).unwrap();

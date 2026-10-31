@@ -33,7 +33,7 @@ pub(crate) struct AcpArgs {
     pub effort: Option<Effort>,
     #[arg(long)]
     pub profile: Option<String>,
-    #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
+    #[arg(long, value_enum, default_value_t = CollaborationArg::Single)]
     pub collaboration: CollaborationArg,
     #[arg(long)]
     pub max_active_children: Option<u8>,
@@ -115,30 +115,40 @@ pub(crate) async fn run(
     args: AcpArgs,
     telemetry: Telemetry,
 ) -> Result<super::CommandOutput, String> {
-    let state_dir = super::state_dir(args.state_dir).map_err(str::to_owned)?;
+    let state_dir = super::state_dir(args.state_dir.clone()).map_err(str::to_owned)?;
+    super::admit_headless_records(&state_dir)?;
     let state =
         StateRoot::admit(&state_dir).map_err(|_| "state directory unavailable or unsafe")?;
+    let config = acp_config(args, &state_dir)?;
+    super::admit_headless_history(&state)?;
+    arany::enable_development_diagnostics(&state);
+    let signals =
+        super::run_outcome::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+    let engine = Engine::open(
+        state,
+        EngineConfig {
+            worker_concurrency: None,
+            telemetry,
+            guard_executable: std::env::current_exe().ok(),
+        },
+    )
+    .map_err(|_| "state store unavailable")?;
+    serve_acp(engine, state_dir, config, signals).await?;
+    Ok(super::CommandOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        success: true,
+    })
+}
+
+fn acp_config(args: AcpArgs, state_dir: &std::path::Path) -> Result<Config, String> {
     let roster = args
         .profile
         .as_deref()
-        .map(|name| super::provider::roster::load_without_workspace(&state_dir, name))
+        .map(|name| super::provider::roster::load_without_workspace(state_dir, name))
         .transpose()?;
-    let (provider, model, effort) = if let Some(roster) = &roster {
-        roster.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
-        let primary = roster.primary();
-        use std::str::FromStr;
-        (
-            ProviderArg::from_str(&primary.provider.profile()).map_err(str::to_owned)?,
-            primary.model.clone(),
-            primary.effort,
-        )
-    } else {
-        (
-            args.provider.ok_or("--provider is required")?,
-            args.model.ok_or("--model is required")?,
-            args.effort,
-        )
-    };
+    let (provider, model, effort) =
+        acp_selection(roster.as_ref(), args.provider, args.model, args.effort)?;
     validate_headless_selection(&provider, &model, effort)?;
     if let Some(roster) = &roster {
         use std::io::Write;
@@ -146,8 +156,18 @@ pub(crate) async fn run(
             .write_all(roster.manifest()?.as_bytes())
             .map_err(|_| "roster manifest output failed")?;
     }
-    let config = Config {
-        state: state_dir.clone(),
+    if let Ok(workspace) = std::env::current_dir() {
+        let (profile, account_id) = match &roster {
+            Some(roster) => (
+                roster.primary().provider.profile(),
+                roster.primary().account_id,
+            ),
+            None => (provider.profile_label(), None),
+        };
+        super::attached::models::refresh_at_startup(workspace, profile, account_id);
+    }
+    Ok(Config {
+        state: state_dir.to_path_buf(),
         provider,
         model,
         effort,
@@ -162,42 +182,31 @@ pub(crate) async fn run(
         permission_mode: args.permission_mode,
         #[cfg(test)]
         authenticated: None,
-    };
-    super::admit_headless_history(&state)?;
-    arany::enable_development_diagnostics(&state);
-    let mut signals =
-        super::run_outcome::StopSignals::install().map_err(|_| "signal handling unavailable")?;
-    let engine = Engine::open(
-        state,
-        EngineConfig {
-            worker_concurrency: None,
-            telemetry,
-            guard_executable: std::env::current_exe().ok(),
-        },
-    )
-    .map_err(|_| "state store unavailable")?;
+    })
+}
+
+async fn serve_acp(
+    engine: Engine,
+    state_dir: PathBuf,
+    config: Config,
+    mut signals: super::run_outcome::StopSignals,
+) -> Result<(), String> {
+    let roster = config.roster.clone();
     let (inbound, receiver) = mpsc::channel(serve::INBOUND_CAPACITY);
     let (events, event_rx) = mpsc::channel(serve::OUTBOUND_CAPACITY);
     let (outbound, writer) = mpsc::channel(serve::OUTBOUND_CAPACITY);
     let shared = Arc::new(Mutex::new(translate::State::default()));
-    let input = std::fs::File::from(
-        std::os::fd::AsFd::as_fd(&std::io::stdin())
-            .try_clone_to_owned()
-            .map_err(|_| "protocol input unavailable")?,
-    );
-    let output = std::fs::File::from(
-        std::os::fd::AsFd::as_fd(&std::io::stdout())
-            .try_clone_to_owned()
-            .map_err(|_| "protocol output unavailable")?,
-    );
+    let (input, output) = serve::protocol_stdio()?;
     let (shutdown, _) = watch::channel(false);
     let reader_task = tokio::spawn(read_messages(
         tokio::fs::File::from_std(input),
-        config,
-        shared.clone(),
-        inbound.clone(),
-        outbound.clone(),
-        shutdown.clone(),
+        AcpReader {
+            config,
+            shared: shared.clone(),
+            inbound: inbound.clone(),
+            outbound: outbound.clone(),
+            shutdown: shutdown.clone(),
+        },
     ));
     let writer_task = tokio::spawn(serve::write_messages(
         tokio::fs::File::from_std(output),
@@ -211,9 +220,11 @@ pub(crate) async fn run(
         let server = run_server(
             engine,
             state_dir,
-            receiver,
-            events,
-            stopping.clone(),
+            serve::server::ServerIo {
+                inbound: receiver,
+                outbound: events,
+                stopping: stopping.clone(),
+            },
             serve::threads::Threads::with_roster(roster),
         );
         let translator = translate::output(
@@ -232,40 +243,67 @@ pub(crate) async fn run(
             signals.next().await;
             translate::cancel_active(&stop_state);
         },
-        inbound,
-        outbound,
-        reader_task,
-        writer_task,
-        shutdown,
+        serve::Transport {
+            inbound,
+            outbound,
+            reader: reader_task,
+            writer: writer_task,
+            shutdown,
+        },
     )
-    .await?;
-    Ok(super::CommandOutput {
-        stdout: String::new(),
-        stderr: String::new(),
-        success: true,
-    })
+    .await
+}
+
+// A roster's primary route wins over flags, which then must match it; otherwise the flags are required.
+fn acp_selection(
+    roster: Option<&super::provider::roster::SelectedRoster>,
+    provider: Option<ProviderArg>,
+    model: Option<String>,
+    effort: Option<arany::Effort>,
+) -> Result<(ProviderArg, String, Option<arany::Effort>), String> {
+    if let Some(roster) = roster {
+        roster.matches(provider.as_ref(), model.as_deref(), effort)?;
+        let primary = roster.primary();
+        use std::str::FromStr;
+        return Ok((
+            ProviderArg::from_str(&primary.provider.profile()).map_err(str::to_owned)?,
+            primary.model.clone(),
+            primary.effort,
+        ));
+    }
+    Ok((
+        provider.ok_or("--provider is required")?,
+        model.ok_or("--model is required")?,
+        effort,
+    ))
 }
 
 async fn run_server(
     engine: Engine,
     state: PathBuf,
-    inbound: mpsc::Receiver<serve::server::ClientMessage>,
-    outbound: mpsc::Sender<serve::server::ServerMessage>,
-    shutdown: watch::Sender<bool>,
+    io: serve::server::ServerIo,
     mut threads: serve::threads::Threads,
 ) -> Result<(), String> {
     threads.approval_channel = serve::server::ApprovalChannel::Restricted;
-    serve::server::run_configured(engine, state, inbound, outbound, threads, shutdown).await
+    serve::server::run_configured(engine, state, io, threads).await
 }
 
-async fn read_messages(
-    input: impl AsyncRead + Unpin,
+struct AcpReader {
     config: Config,
     shared: translate::Shared,
     inbound: mpsc::Sender<serve::server::ClientMessage>,
     outbound: mpsc::Sender<Value>,
     shutdown: watch::Sender<bool>,
-) -> Result<(), String> {
+}
+
+async fn read_messages(input: impl AsyncRead + Unpin, reader: AcpReader) -> Result<(), String> {
+    let AcpReader {
+        config,
+        shared,
+        inbound,
+        outbound,
+        shutdown,
+    } = reader;
     let mut input = BufReader::with_capacity(64 * 1024, input);
     let result = async {
         while let Some(line) = serve::read_bounded_line(&mut input)

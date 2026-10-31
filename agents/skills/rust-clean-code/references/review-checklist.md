@@ -64,5 +64,5 @@ Apply to the diff, not the whole file. Each line is a yes/no check; a "no" is a 
 
 - [ ] Clippy clean under the project's configuration; every suppression is `#[expect(..., reason = "...")]` with an intentional design behind it.
 - [ ] A function over Clippy's length or argument threshold is a declared state machine or was split.
-- [ ] No new comments that narrate code; at most one short `//` where the reason is non-obvious; no `///` or `//!` doc comments in internal code, per the repository rule. `// SAFETY:` is the one exception: a single line stating the obligations, spilling to a second `//` line only when a distinct obligation needs it.
+- [ ] No new comments that narrate code; a comment states a non-obvious reason, following the project's comment policy; every `unsafe` block has a `// SAFETY:` comment.
 - [ ] No `dbg!`, `todo!`, `unimplemented!`, `println!` debugging, or commented-out code.

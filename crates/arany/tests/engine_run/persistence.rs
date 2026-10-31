@@ -42,7 +42,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             if tools {
                 use std::os::unix::fs::PermissionsExt;
                 let config = path.join("tools.json");
-                std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+                std::fs::write(&config, br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
                 std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
             }
             let max_provider_calls = match &policy {
@@ -134,7 +134,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| row.get(0))
                 .unwrap();
             for sequence in first_padding_sequence..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed','{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string()]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -198,7 +198,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .unwrap();
             if let Some(prefix) = prefix {
                 for sequence in first_padding_sequence..=prefix {
-                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed','{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string()]).unwrap();
                 }
             }
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
@@ -261,7 +261,6 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     not(arany_ci),
     ignore = "file-backed 256 MiB database-capacity admission and recovery"
@@ -330,7 +329,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         {
             use std::os::unix::fs::PermissionsExt;
             let config = state_path.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+            std::fs::write(&config, br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         assert!(matches!(run_with(&engine, &provider, next(), RunControls { tools: ToolGrant::Configured, ..Default::default() }).await, Err(EngineError::Store(arany::StoreError::StorageFull))));

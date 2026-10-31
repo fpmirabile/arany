@@ -14,7 +14,7 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
     std::fs::write(workspace.join("src").join(&long_name), "quoted").unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for (call, result_bytes) in [
         (
@@ -31,11 +31,13 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
         ),
         (ToolCall::List { path: "src".into() }, 128),
     ] {
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            call.clone(),
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                call.clone(),
+            )
+            .unwrap();
         intent.limits.result_bytes = result_bytes;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(
@@ -59,11 +61,13 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
         },
     ] {
         std::fs::create_dir_all(workspace.join("empty")).unwrap();
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            call.clone(),
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                call.clone(),
+            )
+            .unwrap();
         intent.limits.result_bytes = 1024;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(
@@ -116,7 +120,7 @@ fn ignored_discovery_fixture(roots: Value) -> (tempfile::TempDir, super::ToolRun
     }
     let runtime = in_process_runtime(
         workspace,
-        json!({"version":1,"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     (temp, runtime)
 }
@@ -175,6 +179,39 @@ async fn typed_discovery_prunes_ignored_payloads_and_preserves_explicit_access()
     }
 }
 
+#[tokio::test]
+async fn parallel_discovery_in_one_step_shares_read_capacity_and_never_takes_guard_capacity() {
+    let (_temp, runtime) = ignored_discovery_fixture(json!(["."]));
+    let calls = [
+        ToolCall::List {
+            path: "notes".into(),
+        },
+        glob("**", "notes", 100),
+        search("notes", "hit"),
+    ];
+    let mut step = tokio::task::JoinSet::new();
+    for call in calls.iter().cycle().take(super::MAX_IN_PROCESS_READS) {
+        assert!(runtime.reservation_overhead(call).is_zero(), "{call:?}");
+        let (runtime, call) = (runtime.clone(), call.clone());
+        step.spawn(async move { run_in_process(&runtime, call).await });
+    }
+    // The fixture has no Guard launcher, so any Guard dispatch would fail instead of succeeding.
+    while let Some(observation) = step.join_next().await {
+        let observation = observation.unwrap();
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Succeeded,
+            "{}",
+            observation.output
+        );
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::InProcess { .. })
+        ));
+        assert!(observation.valid());
+    }
+}
+
 fn invalid_discovery_control(case: &str) -> (tempfile::TempDir, super::ToolRuntime) {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
@@ -202,7 +239,7 @@ fn invalid_discovery_control(case: &str) -> (tempfile::TempDir, super::ToolRunti
     };
     let mut runtime = in_process_runtime(
         workspace,
-        json!({"version":1,"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":roots,"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     if case == "permission" {
         let bytes = br#"{"permissions":{"deny":["Read(./.gitignore)"]}}"#;

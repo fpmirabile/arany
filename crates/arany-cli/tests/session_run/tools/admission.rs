@@ -32,6 +32,7 @@ impl Provider for OverTimeoutCommand {
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: (!self.planned).then_some(2_000),
+                additional_reads: None,
             };
             if self.planned && step == 0 {
                 let mut contract = proposal_plan_contract(&call).unwrap();
@@ -225,7 +226,7 @@ impl arany::Provider for ExactTokenTool {
             turn: arany::ProviderTurn::scripted(),
             outcome: crate::tool_outcome(ToolCall::Edit {
                 path: "src/current.txt".into(),
-                expected_digest: hash(b"current"),
+                expected_digest: Some(hash(b"current")),
                 old: "current".into(),
                 new: "after".into(),
             }),

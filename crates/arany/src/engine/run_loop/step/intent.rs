@@ -20,6 +20,8 @@ use crate::tools::{
     ToolResourceClass, ToolRuntime, ToolStep,
 };
 use std::time::Duration;
+
+const INTEGRATION_RESULT_BYTES: u32 = 128;
 use tokio::time::Instant;
 
 pub(super) const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
@@ -90,14 +92,15 @@ impl RunLoop<'_> {
         let timeout_limit = self.ledger().command_timeout_limit(&call)?;
         let (resource_class, requested_runtime_ms, resource_settings) =
             self.ledger().requested_command_resources(&call)?;
-        let mut intent = if call.is_unguarded() {
+        // Unguarded and host pins run blocking checks, such as Git resolving a push URL.
+        let mut intent = if call.is_unguarded() || call.is_host() {
             let runtime = runtime.clone();
             let run = self.run_id;
             tokio::task::spawn_blocking(move || runtime.intent(run, actor, call))
                 .await
-                .map_err(|_| ToolError::Operation)?
+                .map_err(|_| ToolError::Operation)??
         } else {
-            runtime.intent(self.run_id, actor, call)
+            runtime.intent(self.run_id, actor, call)?
         };
         if command {
             command_limits(
@@ -183,7 +186,7 @@ impl RunLoop<'_> {
         call: ToolCall,
         deadline: Instant,
     ) -> Result<Option<EffectIntent>, EngineError> {
-        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call)?;
         if intent.call.is_web() {
             runtime.bind_egress(&mut intent)?;
         }
@@ -410,34 +413,23 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         step: &ToolStep,
-        call: ToolCall,
+        mut call: ToolCall,
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
+        let actor = match grant {
+            Grant::Primary { .. } => self.primary_id,
+            Grant::Researcher { child, .. } => child.agent_run_id,
+        };
+        self.ledger().view(|view| {
+            crate::session::fill_expected_digest(view, self.run_id, actor, &mut call);
+        })?;
+        crate::tools::permissions::fill_host_prefix(&mut call);
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
-            Grant::Researcher {
-                child,
-                deadline,
-                active_deadline,
-            } => {
-                let deadline_refusal = sizing_deadline_refusal(
-                    active_deadline
-                        .as_ref()
-                        .filter(|deadline| deadline.reached())
-                        .map(|deadline| deadline.cause),
-                );
-                let deadline = grant.deadline().unwrap_or(*deadline);
-                let intent = if child.kind.is_editor() && matches!(call, ToolCall::Command { .. }) {
-                    self.editor_command_intent(runtime, child.agent_run_id, call, deadline)
-                        .await?
-                } else {
-                    self.researcher_intent(runtime, child, call, deadline)?
-                };
-                let Some(intent) = intent else {
-                    return Ok(Err(deadline_refusal));
-                };
-                Some(intent)
-            }
+            Grant::Researcher { .. } => match self.child_intent(grant, runtime, call).await? {
+                Ok(intent) => Some(intent),
+                Err(refusal) => return Ok(Err(refusal)),
+            },
         };
         let Some(mut intent) = intent else {
             return Ok(Err(SizingRefusal::ActiveTime));
@@ -469,24 +461,45 @@ impl RunLoop<'_> {
         let Some(capacity) = runtime.result_capacity(overhead, reserve) else {
             return Ok(Err(SizingRefusal::ContextFull));
         };
-        intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
-            128
-        } else if matches!(
-            intent.call,
-            ToolCall::Read { .. }
-                | ToolCall::List { .. }
-                | ToolCall::Search { .. }
-                | ToolCall::Glob { .. }
-                | ToolCall::Skill { .. }
-        ) || intent.call.is_git() && !intent.call.mutates()
-        {
-            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
-        } else if capacity >= MAX_TOOL_RESULT_BYTES {
-            MAX_TOOL_RESULT_BYTES as u32
-        } else {
+        let Some(result_bytes) = result_bytes(&intent.call, capacity) else {
             return Ok(Err(SizingRefusal::ContextFull));
         };
+        intent.limits.result_bytes = result_bytes;
         Ok(Ok(intent))
+    }
+
+    async fn child_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        call: ToolCall,
+    ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
+        let Grant::Researcher {
+            child,
+            deadline,
+            active_deadline,
+        } = grant
+        else {
+            return Ok(Err(SizingRefusal::ActiveTime));
+        };
+        let deadline_refusal = sizing_deadline_refusal(
+            active_deadline
+                .as_ref()
+                .filter(|deadline| deadline.reached())
+                .map(|deadline| deadline.cause),
+        );
+        let deadline = grant.deadline().unwrap_or(*deadline);
+        let intent = if child.kind.is_editor()
+            && matches!(
+                call,
+                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+            ) {
+            self.editor_command_intent(runtime, child.agent_run_id, call, deadline)
+                .await?
+        } else {
+            self.researcher_intent(runtime, child, call, deadline)?
+        };
+        Ok(intent.ok_or(deadline_refusal))
     }
 
     pub(super) async fn propose_tool(&self, intent: &EffectIntent) -> Result<(), EngineError> {
@@ -572,9 +585,9 @@ impl RunLoop<'_> {
         };
         let mut intents = Vec::with_capacity(calls.len());
         for call in calls {
-            let intent = runtime.intent(self.run_id, child.agent_run_id, call.clone());
+            let intent = runtime.intent(self.run_id, child.agent_run_id, call.clone())?;
             let permission = self
-                .permission(grant, runtime, &intent.call)
+                .permission(grant, runtime, &intent)
                 .narrow_terminal(self.terminal_mode(), &intent.call);
             if let Err(refusal) = self
                 .admit_tool(grant, runtime, &intent, permission, 0, false)
@@ -605,7 +618,7 @@ impl RunLoop<'_> {
     ) -> Result<(), EngineError> {
         let agent_run_id = intent.agent_run_id;
         let permission = self
-            .permission(grant, runtime, &intent.call)
+            .permission(grant, runtime, &intent)
             .narrow_terminal(self.terminal_mode(), &intent.call);
         let verdict =
             effective_permission_mode(runtime.permissions(), grant).map(|mode| PermissionVerdict {
@@ -681,7 +694,7 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
         narrowable: bool,
     ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, intent);
         let (hook_events, _, _) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
             .admit_tool(grant, runtime, intent, permission, hook_events, narrowable)
@@ -710,7 +723,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, &intent);
         let mut narrowed = None;
         let verdict = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable, None)
@@ -860,11 +873,7 @@ fn command_limits(
 ) -> Result<(), EngineError> {
     intent.limits.resource_class = resource_class;
     intent.limits.project_bytes = crate::tools::types::DEFAULT_COMMAND_PROJECT_BYTES;
-    let requested_cache_bytes = if resource_class == ToolResourceClass::Build {
-        resource_settings.build_cache_bytes
-    } else {
-        intent.limits.cache_requested_bytes
-    };
+    let requested_cache_bytes = resource_settings.build_cache_bytes;
     intent.limits.cache_requested_bytes = requested_cache_bytes;
     if timeout_refused {
         intent.limits.cache_bytes = 0;
@@ -887,6 +896,26 @@ fn command_limits(
         intent.limits.project_bytes = resource_settings.build_project_bytes;
     }
     Ok(())
+}
+
+fn result_bytes(call: &ToolCall, capacity: usize) -> Option<u32> {
+    if matches!(call, ToolCall::ApplyChangeset { .. }) {
+        Some(INTEGRATION_RESULT_BYTES)
+    } else if matches!(
+        call,
+        ToolCall::Read { .. }
+            | ToolCall::List { .. }
+            | ToolCall::Search { .. }
+            | ToolCall::Glob { .. }
+            | ToolCall::Skill { .. }
+    ) || call.is_git() && !call.mutates()
+    {
+        Some(capacity.min(MAX_TOOL_RESULT_BYTES) as u32)
+    } else if capacity >= MAX_TOOL_RESULT_BYTES {
+        Some(MAX_TOOL_RESULT_BYTES as u32)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

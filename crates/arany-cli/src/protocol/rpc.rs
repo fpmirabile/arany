@@ -40,6 +40,14 @@ pub struct Notification {
     pub params: Option<Value>,
 }
 
+pub const CANCEL_REQUEST_METHOD: &str = "$/cancel_request";
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelRequestParams {
+    pub request_id: RequestId,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Response {
@@ -128,6 +136,7 @@ pub enum Reason {
     CancellationDrainTimeout,
     CoordinatorFailed,
     CancelledBeforeStart,
+    PromptOverride,
     Store,
     Tool,
     ProviderUnavailable,
@@ -195,6 +204,7 @@ impl From<&arany::EngineError> for Reason {
             arany::EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,
             arany::EngineError::CoordinatorFailed => Reason::CoordinatorFailed,
             arany::EngineError::CancelledBeforeStart => Reason::CancelledBeforeStart,
+            arany::EngineError::PromptOverride(_) => Reason::PromptOverride,
             arany::EngineError::Store(_) => Reason::Store,
             arany::EngineError::Tool(_) => Reason::Tool,
         }

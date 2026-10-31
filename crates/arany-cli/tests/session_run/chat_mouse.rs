@@ -1,17 +1,13 @@
 use super::active_terminal::{ProductGuard, product_child_of_executable, wait_stopped};
-use super::loopback::{ChildGuard, read_request, send_response, wait_product, write_profile};
-use super::session_picker::{PtyResponses, pump, screen_rows, tail};
+use super::loopback::{read_request, send_response, wait_product, write_profile};
+use super::pty::Pty;
+use super::session_picker::{screen_rows, tail};
 use arany::{StateRoot, create_session};
-use rustix::{
-    fs::{OFlags, fcntl_getfl, fcntl_setfl},
-    process::{Pid, Signal, kill_process},
-};
+use rustix::process::{Pid, Signal, kill_process};
 use std::{
-    io::Write,
     net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{ChildStdin, ChildStdout, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -80,18 +76,26 @@ impl GraphicsPeer {
     }
 }
 
-// Fields drop in order: the product guard, then the PTY pipes, then the reaping child guard.
 struct Chat {
-    product: Option<(Pid, ProductGuard)>,
-    output: ChildStdout,
-    input: ChildStdin,
-    child: ChildGuard,
-    transcript: Vec<u8>,
-    answered: PtyResponses,
+    pty: Pty,
     // Modes folded from captures that `fresh` discarded.
     folded: Modes,
     graphics_peer: Option<GraphicsPeer>,
     graphics_reply_sent: bool,
+}
+
+impl std::ops::Deref for Chat {
+    type Target = Pty;
+
+    fn deref(&self) -> &Pty {
+        &self.pty
+    }
+}
+
+impl std::ops::DerefMut for Chat {
+    fn deref_mut(&mut self) -> &mut Pty {
+        &mut self.pty
+    }
 }
 
 impl Chat {
@@ -111,36 +115,20 @@ impl Chat {
         let command = format!(
             "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {arguments}; exit_code=$?; exit \"$exit_code\""
         );
-        let mut attached = if network {
-            crate::isolation::account_isolated_script(root)
+        let wrapper = if network {
+            crate::isolation::account_wrapper(root)
         } else {
-            crate::isolation::isolated_script(root)
+            crate::isolation::isolated_wrapper(root)
         };
-        attached
-            .env_clear()
-            .env("ARANY_TEST_EXE", "/arany")
-            .env("ARANY_TEST_STATE", state)
-            .env("ARANY_TEST_WORKSPACE", workspace)
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "xterm")
-            .envs(env.iter().copied())
-            .current_dir(workspace)
-            .args(["-q", "-e", "-c", &command, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = ChildGuard::new(attached.spawn().expect("chat process"));
-        let input = child.child().stdin.take().expect("PTY input");
-        let output = child.child().stdout.take().expect("PTY output");
-        let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
+        let child =
+            crate::product::PtyLaunch::new(crate::product::Isolation::Passwd(wrapper), &command)
+                .executable("/arany")
+                .session(state, workspace)
+                .term("xterm")
+                .envs(env.iter().copied())
+                .spawn();
         Self {
-            product: None,
-            output,
-            input,
-            child,
-            transcript: Vec::new(),
-            answered: PtyResponses::default(),
+            pty: Pty::new(child),
             folded: Modes::default(),
             graphics_peer: None,
             graphics_reply_sent: false,
@@ -148,12 +136,7 @@ impl Chat {
     }
 
     fn pump(&mut self) {
-        pump(
-            &mut self.output,
-            &mut self.input,
-            &mut self.transcript,
-            &mut self.answered,
-        );
+        self.pty.pump();
         if let Some(peer) = self.graphics_peer
             && !self.graphics_reply_sent
             && self
@@ -161,9 +144,7 @@ impl Chat {
                 .windows(b"\x1b_Gi=31,s=1,v=1,a=q".len())
                 .any(|part| part == b"\x1b_Gi=31,s=1,v=1,a=q")
         {
-            self.input
-                .write_all(peer.reply())
-                .expect("answer graphics probe");
+            self.pty.send(peer.reply());
             self.graphics_reply_sent = true;
         }
     }
@@ -220,22 +201,15 @@ impl Chat {
     }
 
     fn adopt_product(&mut self, state: &Path) -> Pid {
-        let shell_pid = String::from_utf8_lossy(&self.transcript)
-            .lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix("SHELL_PID:"))
-            .expect("shell PID")
-            .parse()
-            .expect("numeric shell PID");
-        let pid = product_child_of_executable(shell_pid, Path::new("/arany"));
-        self.product = Some((pid, ProductGuard::new(pid, state.to_owned())));
+        let pid = product_child_of_executable(self.shell_pid(), Path::new("/arany"));
+        self.pty
+            .guard_product(ProductGuard::new(pid, state.to_owned()));
         pid
     }
 
     fn send(&mut self, bytes: &[u8]) -> usize {
         assert!(bytes.len() <= 1024, "bounded PTY input write");
-        let from = self.transcript.len();
-        self.input.write_all(bytes).expect("chat input");
-        from
+        self.pty.send(bytes)
     }
 
     fn modes(&self) -> Modes {
@@ -260,8 +234,7 @@ impl Chat {
     // Starts a new capture so the 64 KiB pump bound covers the remaining steps.
     fn fresh(&mut self) {
         self.folded = self.modes();
-        self.transcript.clear();
-        self.answered = PtyResponses::default();
+        self.pty.fresh_capture();
     }
 
     fn exit(self) -> Modes {
@@ -280,7 +253,7 @@ impl Chat {
             );
             thread::yield_now();
         }
-        let result = wait_product(self.child.take());
+        let result = wait_product(self.pty.child.take());
         self.pump();
         assert!(
             result.status.success(),
@@ -625,19 +598,6 @@ fn active_hover_journey(graphics: GraphicsPeer) {
         let accept = |context| {
             crate::process::accept_with_deadline(&listener, Duration::from_secs(30), context)
         };
-        for index in 0..3 {
-            let mut stream = accept("provider conformance request");
-            read_request(&mut stream);
-            let text = match index {
-                0 => json!("ok"),
-                1 => {
-                    json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                _ => json!("synthetic summary"),
-            };
-            send_response(&mut stream, index, text);
-        }
-
         let mut run = accept("Run request");
         read_request(&mut run);
         run_ready_sender.send(()).expect("Run request observed");
@@ -658,7 +618,6 @@ fn active_hover_journey(graphics: GraphicsPeer) {
             .expect("release compaction response");
         send_response(&mut compact, 1, json!("synthetic summary"));
     });
-    crate::loopback::check_profile(&workspace, &state);
 
     let png = STANDARD
         .decode(arany::test_support::test_image().base64())
@@ -1178,7 +1137,6 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     let state = temp.path().join("state");
     let id = crate::seed_transcript_session(&state, &workspace);
     let provider = super::loopback::held_stream_provider(&state, ANSWER);
-    super::loopback::check_profile(&workspace, &state);
     let mut chat = Chat::launch(
         temp.path(),
         &state,

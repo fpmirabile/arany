@@ -19,34 +19,29 @@ fn spawn_linear_run(
     objective: &str,
     patterns: &[&[u8]],
 ) -> Attached {
-    let command = format!(
-        "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 {objective}; exit \"$?\""
-    );
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let command = "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1; exit \"$?\"";
+    // New conversations default to single; delegation needs an explicit opt-in.
+    let submission = format!("/agents auto\n{objective}\n").into_bytes();
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(state, workspace)
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .spawn();
     let input = Arc::new(Mutex::new(
         attached.child().stdin.take().expect("PTY input"),
     ));
     let reader_input = Arc::clone(&input);
-    let mut output = attached.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(attached.child().stdout.take().expect("PTY output"));
     let patterns: Vec<Vec<u8>> = patterns.iter().map(|pattern| pattern.to_vec()).collect();
     let (stage_sender, stages) = mpsc::channel();
     let reader = thread::spawn(move || {
         let mut declined = false;
+        let mut declined_at = None;
+        let mut submitted = false;
         let mut bytes = Vec::new();
         let mut next = 0;
         let mut search_from = 0;
@@ -63,6 +58,23 @@ fn spawn_linear_run(
                 &bytes,
                 &mut declined,
             );
+            if declined && declined_at.is_none() {
+                declined_at = Some(bytes.len());
+            }
+            if !submitted
+                && declined_at.is_some_and(|offset| {
+                    bytes[offset..]
+                        .windows(b"Input:".len())
+                        .any(|part| part == b"Input:")
+                })
+            {
+                reader_input
+                    .lock()
+                    .expect("fixture input")
+                    .write_all(&submission)
+                    .expect("opt into delegation and submit");
+                submitted = true;
+            }
             while next < patterns.len() {
                 let Some(offset) = bytes[search_from..]
                     .windows(patterns[next].len())
@@ -128,16 +140,6 @@ fn semantic_input(stream: &mut std::net::TcpStream) -> serde_json::Value {
     crate::semantic::input(&wire)
 }
 
-// The provider check consumes three requests: finish, delegate and summary.
-fn answer_provider_check(stream: &mut std::net::TcpStream, index: usize) {
-    let text = match index {
-        0 => serde_json::json!("ok"),
-        1 => serde_json::from_str(DELEGATE).expect("Delegate JSON"),
-        _ => serde_json::json!(r#"synthetic summary"#),
-    };
-    send_response_for(stream, index, text, index < 2);
-}
-
 fn fixture_root(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
@@ -180,15 +182,11 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
     );
     let (child_ready_sender, child_ready) = mpsc::channel();
     let (release_sender, release_child) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; then 3 primary Delegate, 4 held child, 5 synthesis.
+    // Call 3 is the primary Delegate, 4 the held child and 5 the synthesis.
     let server = thread::spawn(move || {
-        for index in 0..6 {
+        for index in 3..6 {
             let mut stream = accept_within(&listener);
             let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_provider_check(&mut stream, index);
-                continue;
-            }
             match index {
                 3 => {
                     assert_eq!(input["objective"], "steer");
@@ -222,7 +220,6 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
             }
         }
     });
-    check_profile(&workspace, &state);
 
     let mut attached = spawn_linear_run(
         &state,
@@ -302,27 +299,21 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
     let (primary_ready_sender, primary_ready) = mpsc::channel();
     let (release_sender, release_primary) = mpsc::channel::<()>();
     let (stop_sender, stop) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; call 3 is the held primary. Any later request is a violation.
+    // The one call is the held primary. Any later request is a violation.
     let server = thread::spawn(move || {
-        for index in 0..4 {
-            let mut stream = accept_within(&listener);
-            let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_provider_check(&mut stream, index);
-                continue;
-            }
-            assert_eq!(input["objective"], "pause");
-            primary_ready_sender.send(()).expect("held primary gate");
-            release_primary
-                .recv_timeout(Duration::from_secs(10))
-                .expect("release held primary call");
-            send_response_for(
-                &mut stream,
-                index,
-                serde_json::from_str(DELEGATE).expect("Delegate JSON"),
-                false,
-            );
-        }
+        let mut stream = accept_within(&listener);
+        let input = semantic_input(&mut stream);
+        assert_eq!(input["objective"], "pause");
+        primary_ready_sender.send(()).expect("held primary gate");
+        release_primary
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release held primary call");
+        send_response_for(
+            &mut stream,
+            0,
+            serde_json::from_str(DELEGATE).expect("Delegate JSON"),
+            false,
+        );
         stop.recv_timeout(Duration::from_secs(15))
             .expect("product exit observed");
         listener
@@ -330,7 +321,6 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
             .expect("bounded final accept");
         listener.accept().is_ok()
     });
-    check_profile(&workspace, &state);
 
     let mut attached = spawn_linear_run(
         &state,
@@ -342,7 +332,7 @@ fn pause_during_attached_run_waits_for_the_call_and_pauses_the_goal() {
             b"Notice: Steering note waits for the agent's next step\r\n",
             b"Pausing at the next step; Ctrl+C cancels now",
             b"Status: cancelled",
-            b"Goal paused; use /goal resume to continue.",
+            b"Interrupted. Send a message to continue.",
             b"Draft retained: 23 characters; Enter submits",
             b"Input:",
         ],
@@ -429,15 +419,11 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
     let (child_ready_sender, child_ready) = mpsc::channel();
     let (release_child_sender, release_child) = mpsc::channel::<()>();
     let (release_synthesis_sender, release_synthesis) = mpsc::channel::<()>();
-    // Calls 0-2 are the provider check; then 3 primary Delegate, 4 held child, 5 held synthesis.
+    // Call 3 is the primary Delegate, 4 the held child and 5 the held synthesis.
     let server = thread::spawn(move || {
-        for index in 0..6 {
+        for index in 3..6 {
             let mut stream = accept_within(&listener);
             let input = semantic_input(&mut stream);
-            if index < 3 {
-                answer_provider_check(&mut stream, index);
-                continue;
-            }
             match index {
                 3 => {
                     assert_eq!(input["objective"], "steer");
@@ -465,7 +451,6 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
             }
         }
     });
-    check_profile(&workspace, &state);
 
     let mut attached = spawn_linear_run(
         &state,

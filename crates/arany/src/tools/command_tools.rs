@@ -14,7 +14,6 @@ use std::path::Path;
 
 pub const MAX_COMMAND_TOOL_CANDIDATES: usize = 256;
 pub const MAX_COMMAND_TOOLS: usize = 8;
-const VERSION: u8 = 1;
 pub const PROBE_COMMAND: &str = "cargo test";
 pub(crate) const TOOL_NAME: &str = "command-tool";
 pub(crate) const TIMEOUT_MS: u32 = (super::permissions::MAX_TIMEOUT_SECONDS * 1000) as u32;
@@ -71,19 +70,14 @@ pub struct CommandToolProbe {
     pub outcome: Option<super::permissions::HookOutcome>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandTools {
-    version: u8,
     tools: Vec<CommandTool>,
 }
 
 pub(crate) const COMMAND_TOOLS: RecordFormat = RecordFormat {
     kind: RecordKind::CommandTools,
-    field: "version",
-    floor: 1,
-    current: 1,
-    steps: &[],
     accepts: |bytes| CommandTools::parse(bytes).is_ok(),
 };
 
@@ -112,19 +106,11 @@ impl RewriteStage {
     }
 }
 
-impl Default for CommandTools {
-    fn default() -> Self {
-        Self {
-            version: VERSION,
-            tools: Vec::new(),
-        }
-    }
-}
-
 impl CommandTools {
     pub fn load(state: &StateRoot) -> Result<Self, ToolError> {
         state
-            .read_current(&COMMAND_TOOLS)
+            .record(COMMAND_TOOLS.kind)
+            .read()
             .map_err(|_| ToolError::Configuration)?
             .map_or_else(|| Ok(Self::default()), |bytes| Self::parse(&bytes))
     }
@@ -202,8 +188,7 @@ impl CommandTools {
     fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
         let value = super::parse_json(bytes, RecordKind::CommandTools.limit())?;
         let record: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
-        if record.version != VERSION
-            || record.tools.len() > MAX_COMMAND_TOOLS
+        if record.tools.len() > MAX_COMMAND_TOOLS
             || record
                 .tools
                 .iter()
@@ -235,6 +220,7 @@ impl CommandTool {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             CommandToolRole::Prefix => prefix::probe_call(self),
         }
@@ -265,9 +251,9 @@ impl CommandTool {
         if !super::process::valid_command(TOOL_NAME, &args, "") {
             return Err(ToolError::Configuration);
         }
-        let permissions = selected_permissions(state, workspace)?;
+        let granted = granted_directories(state, workspace)?;
         let selected_path = executable.to_owned();
-        let (executable, device, inode, sha256) = pin_in(&permissions.runtime_grants, executable)?;
+        let (executable, device, inode, sha256) = pin_in(&granted, executable)?;
         let tool = Self {
             selected_path,
             executable,
@@ -286,8 +272,7 @@ impl CommandTool {
     }
 
     pub fn pin_status(&self, state: &StateRoot, workspace: &Path) -> bool {
-        selected_permissions(state, workspace)
-            .is_ok_and(|permissions| self.verify(&permissions.runtime_grants).is_ok())
+        granted_directories(state, workspace).is_ok_and(|granted| self.verify(&granted).is_ok())
     }
 
     pub(crate) fn verify(&self, grants: &[RuntimeGrant]) -> Result<(), ToolError> {
@@ -301,24 +286,32 @@ impl CommandTool {
     }
 }
 
-fn selected_permissions(
+fn granted_directories(
     state: &StateRoot,
     workspace: &Path,
-) -> Result<super::WorkspacePermissions, ToolError> {
+) -> Result<Vec<RuntimeGrant>, ToolError> {
     let permissions = super::WorkspacePermissions::load(workspace, state)
         .map_err(|_| ToolError::Configuration)?;
     if !permissions.is_trusted() {
         return Err(ToolError::Configuration);
     }
     let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
-    for grant in permissions
+    let protected = [workspace, state.path(), account.as_path()];
+    let saved = permissions
         .runtime_grants
         .iter()
         .filter(|grant| grant.kind.is_multi())
-    {
-        grant.reject_overlap(&[workspace, state.path(), &account])?;
+        .cloned()
+        .collect::<Vec<_>>();
+    for grant in &saved {
+        grant.reject_overlap(&protected)?;
     }
-    Ok(permissions)
+    let path = super::toolchains::path_grants(
+        &super::CommandEnvironment::load(state)?.path_string(),
+        &saved,
+        &protected,
+    )?;
+    Ok(saved.into_iter().chain(path).collect())
 }
 
 fn program_root(grant: &RuntimeGrant) -> (&Path, u64, u64) {
@@ -376,14 +369,10 @@ pub fn command_tool_candidates(
     workspace: &Path,
 ) -> Result<Vec<String>, ToolError> {
     use cap_std::fs::MetadataExt as _;
-    let permissions = selected_permissions(state, workspace)?;
+    let granted = granted_directories(state, workspace)?;
     let mut paths = Vec::new();
     let mut scanned = 0;
-    for grant in permissions
-        .runtime_grants
-        .iter()
-        .filter(|grant| grant.kind.is_multi())
-    {
+    for grant in granted.iter().filter(|grant| grant.kind.on_path()) {
         let (root, access) = pinned_root(grant)?;
         let relative = grant.path.strip_prefix(root).map_err(|_| ToolError::Path)?;
         let relative = if relative.as_os_str().is_empty() {
@@ -444,6 +433,7 @@ pub(crate) fn result(observation: &super::ToolObservation) -> super::permissions
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         },
         Ok(None) => HookResult::Passed,
@@ -512,6 +502,7 @@ pub(crate) fn rewritten(call: &ToolCall, command: String) -> ToolCall {
             cwd: cwd.clone(),
             resource_class: *resource_class,
             timeout_ms: *timeout_ms,
+            additional_reads: None,
         },
         ToolCall::CommandUnguarded {
             cwd, justification, ..

@@ -9,7 +9,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
         let source = temp.path().join("source");
         let root = StateRoot::admit(&source).unwrap();
         for (name, bytes) in [
-        ("tools.json", br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
+        ("tools.json", br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
         ("permissions.json", b"{}".as_slice()),
     ] {
         std::fs::write(source.join(name), bytes).unwrap();
@@ -71,6 +71,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             limits: arany::ToolLimits::default(),
             use_count: 1,
@@ -177,31 +178,6 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
             assert!(!format!("{:?}", requests[0]).contains(reason));
         }
         engine.close().await.unwrap();
-        let database = state.join("events.sqlite3");
-        let connection = rusqlite::Connection::open(&database).unwrap();
-        let version: i64 = connection
-            .query_row(
-                "SELECT event_version FROM events WHERE kind='HookFinished'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, outcome.version());
-        assert_eq!(
-            connection
-                .execute(
-                    "UPDATE events SET event_version=8 WHERE kind='HookFinished'",
-                    []
-                )
-                .unwrap(),
-            1
-        );
-        drop(connection);
-        let before = std::fs::read(&database).unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-        assert!(store.load_view(result.session_id).await.is_err());
-        store.close().await.unwrap();
-        assert_eq!(std::fs::read(&database).unwrap(), before);
     }
 }
 
@@ -213,7 +189,7 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
         let state = temp.path().join("state");
         let root = StateRoot::admit(&state).unwrap();
         for (name, bytes) in [
-            ("tools.json", br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.to_vec()),
+            ("tools.json", br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#.to_vec()),
             ("permissions.json", serde_json::to_vec(&serde_json::json!({"hooks":{event:[{"matcher":"Read","hooks":[{"type":"command","command":"unpinned","args":[]}]}]}})).unwrap()),
         ] {
             std::fs::write(state.join(name), bytes).unwrap();
@@ -280,7 +256,7 @@ async fn child_unguarded_inheritance_is_explicit_narrowing_and_pinned_on_replay(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let mut config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+    let mut config = serde_json::json!({"workspace_paths":["notes"],"write":false,
         "commands":[{"name":"sh","executable":shell,"sha256":sha256,"interpreter":true,"inputs":[]}],
         "skills":[],"mcp":[]});
     std::fs::write(

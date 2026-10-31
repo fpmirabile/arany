@@ -65,7 +65,7 @@ macro_rules! raw_select {
                 length(CAST(session_id AS BLOB)),
                 length(CAST(kind AS BLOB)),
                 length(CAST(payload AS BLOB)),
-                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+                session_id, run_id, agent_run_id, kind, payload, created_at_ms
          FROM events ",
             $tail
         )
@@ -73,8 +73,6 @@ macro_rules! raw_select {
 }
 pub(super) const HEAD_FIRST_SQL: &str =
     raw_select!("WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence ASC LIMIT 1");
-pub(super) const ROWS_AFTER_SQL: &str =
-    raw_select!("WHERE sequence > ?1 ORDER BY sequence ASC LIMIT 256");
 pub(super) const LANE_SQL: &str = raw_select!(
     "WHERE session_id = ?1 AND sequence > ?2 AND sequence <= ?3 ORDER BY sequence ASC LIMIT 256"
 );
@@ -85,7 +83,7 @@ pub(super) const SESSION_EVENTS_SQL: &str = "SELECT sequence,
             length(CAST(session_id AS BLOB)),
             length(CAST(kind AS BLOB)),
             length(CAST(payload AS BLOB)),
-            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+            session_id, run_id, agent_run_id, kind, payload, created_at_ms
      FROM events WHERE session_id=?1 ORDER BY sequence LIMIT ?2";
 
 struct SessionHead {
@@ -135,7 +133,7 @@ fn scan_inspected_events(
     session_id: SessionId,
 ) -> Result<(Vec<InspectedEvent>, Option<InspectionFailure>), StoreError> {
     let mut statement = connection.prepare(&format!(
-        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND {MAX_EVENT_KIND_BYTES} THEN kind ELSE '{INVALID_KIND_MARKER}' END, event_version, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
+        "SELECT sequence, length(CAST(session_id AS BLOB)), length(CAST(kind AS BLOB)), length(CAST(payload AS BLOB)), session_id, run_id, agent_run_id, CASE WHEN length(CAST(kind AS BLOB)) BETWEEN 1 AND {MAX_EVENT_KIND_BYTES} THEN kind ELSE '{INVALID_KIND_MARKER}' END, payload, created_at_ms, CAST(session_id AS BLOB) = CAST(?1 AS BLOB) FROM events ORDER BY sequence LIMIT {}",
         MAX_LIST_SCAN_EVENTS + 1
     ))?;
     let mut rows = statement.query([session_id.to_string()])?;
@@ -157,7 +155,7 @@ fn scan_inspected_events(
             });
         }
         expected = sequence.checked_add(1).ok_or(StoreError::InvalidHistory)?;
-        let selected: bool = row.get(11)?;
+        let selected: bool = row.get(10)?;
         let kind = inspected_kind(row);
         let raw = match raw_row(row) {
             Ok(raw) => raw,
@@ -245,8 +243,7 @@ fn project_inspected_prefix(
         &prefix,
         0,
         &mut total_events,
-        true,
-        None,
+        ReplayMode::Closed,
     ) {
         Ok(view) => Ok(view),
         Err(error) => inspection_rejection(error).map(|_| None),
@@ -306,8 +303,7 @@ fn canonical_replay_failure(
         events,
         0,
         &mut total_events,
-        true,
-        None,
+        ReplayMode::Closed,
     );
     let error = match replayed {
         Ok(_) => return Ok(None),
@@ -321,8 +317,7 @@ fn canonical_replay_failure(
         &events[..index],
         0,
         &mut total_events,
-        false,
-        None,
+        ReplayMode::Open,
     );
     let cause = match prefix_replay {
         Err(error) => inspection_rejection(error)?,
@@ -357,8 +352,7 @@ fn first_rejecting_prefix(
             &events[..middle],
             0,
             &mut total_events,
-            false,
-            None,
+            ReplayMode::Open,
         ) {
             inspection_rejection(error)?;
             high = middle;
@@ -519,13 +513,59 @@ fn retry_listing_read<T>(mut read: impl FnMut() -> Result<T, StoreError>) -> Res
     result
 }
 
+// Each Session's root: its Workspace when it started there, or the Session it forked from.
+type Roots = HashMap<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>;
+
+fn decode_heads(
+    batch: Vec<(String, i64, RawRow)>,
+    tails: &mut HashMap<SessionId, u64>,
+    roots: &mut Roots,
+) -> Result<(), StoreError> {
+    for (raw_id, tail, raw) in batch {
+        if tails.len() == MAX_DISCOVERED_SESSIONS {
+            return Err(StoreError::TooManySessions);
+        }
+        let id = SessionId::from_str(&raw_id).map_err(|_| StoreError::InvalidHistory)?;
+        tails.insert(
+            id,
+            u64::try_from(tail).map_err(|_| StoreError::InvalidHistory)?,
+        );
+        let envelope = raw.decode()?;
+        let root = match envelope.event {
+            Event::SessionStarted {
+                workspace_identity, ..
+            } => (Some(workspace_identity), None),
+            Event::SessionForked {
+                source_session_id, ..
+            } if source_session_id != id => (None, Some(source_session_id)),
+            _ => return Err(StoreError::InvalidHistory),
+        };
+        roots.insert(id, root);
+    }
+    Ok(())
+}
+
+fn lineage(roots: &Roots, id: SessionId) -> Result<Vec<SessionId>, StoreError> {
+    let mut chain = vec![id];
+    while let (_, Some(source)) = *roots
+        .get(chain.last().expect("lineage"))
+        .ok_or(StoreError::InvalidHistory)?
+    {
+        if chain.len() > MAX_FORK_DEPTH {
+            return Err(StoreError::ReplayLimit);
+        }
+        chain.push(source);
+    }
+    Ok(chain)
+}
+
 fn discover_session_heads_at(
     connection: &Connection,
     workspace_identity: WorkspaceIdentity,
     watermark: i64,
 ) -> Result<SessionListing, StoreError> {
     let mut tails = HashMap::<SessionId, u64>::new();
-    let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
+    let mut roots = Roots::new();
     let mut next_head = connection.prepare(NEXT_HEAD_SQL)?;
     let mut head_tail = connection.prepare(HEAD_TAIL_SQL)?;
     let mut head_first = connection.prepare(HEAD_FIRST_SQL)?;
@@ -555,44 +595,11 @@ fn discover_session_heads_at(
             batch.push((raw_id, tail, first));
         }
         before_decode();
-        for (raw_id, tail, raw) in batch {
-            if tails.len() == MAX_DISCOVERED_SESSIONS {
-                return Err(StoreError::TooManySessions);
-            }
-            let id = SessionId::from_str(&raw_id).map_err(|_| StoreError::InvalidHistory)?;
-            tails.insert(
-                id,
-                u64::try_from(tail).map_err(|_| StoreError::InvalidHistory)?,
-            );
-            let envelope = raw.decode()?;
-            let root = match envelope.event {
-                Event::SessionStarted {
-                    workspace_identity, ..
-                } => (Some(workspace_identity), None),
-                Event::SessionForked {
-                    source_session_id, ..
-                } if source_session_id != id => (None, Some(source_session_id)),
-                _ => return Err(StoreError::InvalidHistory),
-            };
-            roots.insert(id, root);
-        }
+        decode_heads(batch, &mut tails, &mut roots)?;
     }
-    let lineage = |id: SessionId| -> Result<Vec<SessionId>, StoreError> {
-        let mut chain = vec![id];
-        while let (_, Some(source)) = *roots
-            .get(chain.last().expect("lineage"))
-            .ok_or(StoreError::InvalidHistory)?
-        {
-            if chain.len() > MAX_FORK_DEPTH {
-                return Err(StoreError::ReplayLimit);
-            }
-            chain.push(source);
-        }
-        Ok(chain)
-    };
     let mut matching = Vec::new();
     for (&id, &tail) in &tails {
-        let chain = lineage(id)?;
+        let chain = lineage(&roots, id)?;
         let root = chain.last().expect("lineage");
         if roots.get(root).and_then(|(identity, _)| *identity) == Some(workspace_identity) {
             matching.push((tail, id, chain));
@@ -713,81 +720,87 @@ fn scan_session_heads(
     scan_events(connection, filter, |envelope| {
         let id = envelope.session_id;
         if let Some(head) = heads.get_mut(&id) {
-            if matches!(
-                envelope.event,
-                Event::SessionStarted { .. } | Event::SessionForked { .. }
-            ) {
-                return Err(StoreError::InvalidHistory);
-            }
-            if let Event::RunStarted { config, .. } = &envelope.event {
-                head.run_defaults = selection_from_run(config);
-                let identity = WorkspaceIdentity {
-                    device: config.workspace_device,
-                    inode: config.workspace_inode,
-                };
-                if head
-                    .direct_identity
-                    .is_some_and(|pinned| pinned != identity)
-                {
-                    return Err(StoreError::InvalidHistory);
-                }
-                head.direct_identity = Some(identity);
-            }
-            if let Event::SessionRenamed { title } = &envelope.event {
-                head.title.clone_from(title);
-                head.explicit_title = true;
-            }
-            match &envelope.event {
-                Event::SessionDefaultChanged { defaults } => head.defaults = defaults.clone(),
-                Event::MessageAccepted { text, .. } if head.fallback_title.is_none() => {
-                    head.fallback_title =
-                        Some((envelope.sequence, crate::session::title_preview(text)));
-                }
-                _ => {}
-            }
-            head.last_activity_at_ms = envelope.created_at_ms;
-            head.last_sequence = envelope.sequence;
+            advance_head(head, &envelope)
         } else {
             if heads.len() == MAX_DISCOVERED_SESSIONS {
                 return Err(StoreError::TooManySessions);
             }
-            let (title, direct_identity, source_session_id) = match &envelope.event {
-                Event::SessionStarted {
-                    title,
-                    workspace_identity,
-                } => (title.clone(), Some(*workspace_identity), None),
-                Event::SessionForked {
-                    title,
-                    source_session_id,
-                    ..
-                } if *source_session_id != id => (title.clone(), None, Some(*source_session_id)),
-                _ => return Err(StoreError::InvalidHistory),
-            };
-            heads.insert(
-                id,
-                SessionHead {
-                    explicit_title: !crate::session::placeholder_title(&title),
-                    title,
-                    created_at_ms: envelope.created_at_ms,
-                    last_activity_at_ms: envelope.created_at_ms,
-                    fallback_title: None,
-                    source_sequence: match &envelope.event {
-                        Event::SessionForked {
-                            source_sequence, ..
-                        } => Some(*source_sequence),
-                        _ => None,
-                    },
-                    defaults: SessionDefaults::default(),
-                    run_defaults: SessionDefaults::default(),
-                    direct_identity,
-                    source_session_id,
-                    last_sequence: envelope.sequence,
-                },
-            );
+            heads.insert(id, new_head(&envelope)?);
+            Ok(())
         }
-        Ok(())
     })?;
     Ok(heads)
+}
+
+fn advance_head(head: &mut SessionHead, envelope: &EventEnvelope) -> Result<(), StoreError> {
+    if matches!(
+        envelope.event,
+        Event::SessionStarted { .. } | Event::SessionForked { .. }
+    ) {
+        return Err(StoreError::InvalidHistory);
+    }
+    if let Event::RunStarted { config, .. } = &envelope.event {
+        head.run_defaults = selection_from_run(config);
+        let identity = WorkspaceIdentity {
+            device: config.workspace_device,
+            inode: config.workspace_inode,
+        };
+        if head
+            .direct_identity
+            .is_some_and(|pinned| pinned != identity)
+        {
+            return Err(StoreError::InvalidHistory);
+        }
+        head.direct_identity = Some(identity);
+    }
+    if let Event::SessionRenamed { title } = &envelope.event {
+        head.title.clone_from(title);
+        head.explicit_title = true;
+    }
+    match &envelope.event {
+        Event::SessionDefaultChanged { defaults } => head.defaults = defaults.clone(),
+        Event::MessageAccepted { text, .. } if head.fallback_title.is_none() => {
+            head.fallback_title = Some((envelope.sequence, crate::session::title_preview(text)));
+        }
+        _ => {}
+    }
+    head.last_activity_at_ms = envelope.created_at_ms;
+    head.last_sequence = envelope.sequence;
+    Ok(())
+}
+
+fn new_head(envelope: &EventEnvelope) -> Result<SessionHead, StoreError> {
+    let id = envelope.session_id;
+    let (title, direct_identity, source_session_id) = match &envelope.event {
+        Event::SessionStarted {
+            title,
+            workspace_identity,
+        } => (title.clone(), Some(*workspace_identity), None),
+        Event::SessionForked {
+            title,
+            source_session_id,
+            ..
+        } if *source_session_id != id => (title.clone(), None, Some(*source_session_id)),
+        _ => return Err(StoreError::InvalidHistory),
+    };
+    Ok(SessionHead {
+        explicit_title: !crate::session::placeholder_title(&title),
+        title,
+        created_at_ms: envelope.created_at_ms,
+        last_activity_at_ms: envelope.created_at_ms,
+        fallback_title: None,
+        source_sequence: match &envelope.event {
+            Event::SessionForked {
+                source_sequence, ..
+            } => Some(*source_sequence),
+            _ => None,
+        },
+        defaults: SessionDefaults::default(),
+        run_defaults: SessionDefaults::default(),
+        direct_identity,
+        source_session_id,
+        last_sequence: envelope.sequence,
+    })
 }
 
 fn selection_from_run(config: &RunConfig) -> SessionDefaults {
@@ -927,10 +940,25 @@ fn resolve_view_with_mode(
         &events,
         depth,
         total_events,
-        close_history,
-        None,
+        ReplayMode::history(close_history),
     )?;
     Ok((events, view))
+}
+
+pub(super) enum ReplayMode<'a> {
+    Open,
+    Closed,
+    Corpus(&'a mut crate::supervisor::corpus::Corpus),
+}
+
+impl ReplayMode<'_> {
+    fn history(close_history: bool) -> Self {
+        if close_history {
+            Self::Closed
+        } else {
+            Self::Open
+        }
+    }
 }
 
 pub(super) fn replay_through(
@@ -939,8 +967,7 @@ pub(super) fn replay_through(
     events: &[EventEnvelope],
     depth: usize,
     total_events: &mut usize,
-    close_history: bool,
-    corpus: Option<&mut crate::supervisor::corpus::Corpus>,
+    mode: ReplayMode<'_>,
 ) -> Result<Option<SessionView>, StoreError> {
     let lineage = match events.first().map(|envelope| &envelope.event) {
         Some(Event::SessionForked {
@@ -956,12 +983,12 @@ pub(super) fn replay_through(
             prefix_digest: *prefix_digest,
         },
         _ => {
-            let view = if let Some(corpus) = corpus {
-                SessionView::replay_for_corpus(session_id, events, None, corpus)?
-            } else if close_history {
-                SessionView::replay(session_id, events)?
-            } else {
-                SessionView::replay_open(session_id, events)?
+            let view = match mode {
+                ReplayMode::Corpus(corpus) => {
+                    SessionView::replay_for_corpus(session_id, events, None, corpus)?
+                }
+                ReplayMode::Closed => SessionView::replay(session_id, events)?,
+                ReplayMode::Open => SessionView::replay_open(session_id, events)?,
             };
             if let Some(view) = &view {
                 validate_compaction_references(view)?;
@@ -970,10 +997,12 @@ pub(super) fn replay_through(
         }
     };
     let (inherited, source) = fork_projection(connection, lineage, depth, total_events)?;
-    let mut view = if let Some(corpus) = corpus {
-        SessionView::replay_for_corpus(session_id, events, Some(&inherited), corpus)?
-    } else {
-        SessionView::replay_forked(session_id, events, close_history, &inherited)?
+    let mut view = match mode {
+        ReplayMode::Corpus(corpus) => {
+            SessionView::replay_for_corpus(session_id, events, Some(&inherited), corpus)?
+        }
+        ReplayMode::Closed => SessionView::replay_forked(session_id, events, true, &inherited)?,
+        ReplayMode::Open => SessionView::replay_forked(session_id, events, false, &inherited)?,
     }
     .ok_or(StoreError::InvalidHistory)?;
     if view
@@ -1026,8 +1055,7 @@ fn fork_projection(
         &source_events,
         depth + 1,
         total_events,
-        false,
-        None,
+        ReplayMode::Open,
     )?
     .ok_or(StoreError::InvalidHistory)?;
     let inherited = ForkInheritance {
@@ -1096,7 +1124,7 @@ fn load_session_events_through(
             length(CAST(session_id AS BLOB)),
             length(CAST(kind AS BLOB)),
             length(CAST(payload AS BLOB)),
-            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+            session_id, run_id, agent_run_id, kind, payload, created_at_ms
          FROM events WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence LIMIT ?3",
     )?;
     let mut rows = statement.query(rusqlite::params![
@@ -1118,7 +1146,6 @@ fn load_session_events_through(
 }
 
 pub(super) fn validate_history(connection: &Connection) -> Result<(), StoreError> {
-    super::check::validate(connection)?;
     scan_all_events(connection, |_| Ok(()))
 }
 
@@ -1138,7 +1165,7 @@ fn scan_events(
                 length(CAST(session_id AS BLOB)),
                 length(CAST(kind AS BLOB)),
                 length(CAST(payload AS BLOB)),
-                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+                session_id, run_id, agent_run_id, kind, payload, created_at_ms
          FROM events";
     if filter.is_empty() {
         // Cold or invalidated writes validate globally; unchanged cache hits defer detection and keep reads indexed.
@@ -1213,7 +1240,6 @@ pub(super) struct RawRow {
     pub(super) run_id: Option<String>,
     pub(super) agent_run_id: Option<String>,
     pub(super) kind: String,
-    pub(super) version: i64,
     pub(super) payload: String,
     pub(super) created_at_ms: i64,
 }
@@ -1236,9 +1262,8 @@ pub(super) fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
         run_id: optional(5)?,
         agent_run_id: optional(6)?,
         kind: text(7)?,
-        version: row.get(8)?,
-        payload: text(9)?,
-        created_at_ms: row.get(10)?,
+        payload: text(8)?,
+        created_at_ms: row.get(9)?,
     })
 }
 
@@ -1272,17 +1297,10 @@ impl RawRow {
             .map(AgentRunId::from_str)
             .transpose()
             .map_err(|_| crate::session::ReplayError::InvalidPayload)?;
-        if !(1..=event_payload_limit(&self.kind, self.version) as i64).contains(&self.payload_bytes)
-        {
+        if !(1..=event_payload_limit(&self.kind) as i64).contains(&self.payload_bytes) {
             return Err(crate::session::ReplayError::InvalidPayload);
         }
-        let event = Event::decode(
-            &self.kind,
-            self.version,
-            &self.payload,
-            run_id,
-            agent_run_id,
-        )?;
+        let event = Event::decode(&self.kind, &self.payload, run_id, agent_run_id)?;
         Ok(EventEnvelope {
             sequence: u64::try_from(self.sequence)
                 .map_err(|_| crate::session::ReplayError::InvalidPayload)?,
@@ -1334,8 +1352,7 @@ pub(super) fn supervisor_corpus(
         &events,
         0,
         &mut total,
-        true,
-        Some(&mut corpus),
+        ReplayMode::Corpus(&mut corpus),
     )?
     .ok_or(crate::supervisor::CorpusError::NotFound)?;
     corpus.finish(&view)
@@ -1362,8 +1379,8 @@ mod tests {
         ] {
             let result = connection
                 .query_row(
-                    "SELECT 1, 36, length(CAST(?1 AS BLOB)), length(CAST(?2 AS BLOB)), ?3, NULL, NULL, ?1, ?4, ?2, 0",
-                    rusqlite::params![kind, event.payload().unwrap(), session.to_string(), event.version()],
+                    "SELECT 1, 36, length(CAST(?1 AS BLOB)), length(CAST(?2 AS BLOB)), ?3, NULL, NULL, ?1, ?2, 0",
+                    rusqlite::params![kind, event.payload().unwrap(), session.to_string()],
                     |row| Ok(decode_event(row)),
                 )
                 .unwrap();
@@ -1401,7 +1418,6 @@ mod tests {
             run_id: Some(run_id.to_string()),
             agent_run_id: Some(agent_run_id.to_string()),
             kind: event.kind().into(),
-            version: event.version(),
             payload: payload.clone(),
             created_at_ms: 0,
         };
@@ -1416,7 +1432,6 @@ mod tests {
                 run_id: Some(run_id.to_string()),
                 agent_run_id: Some(agent_run_id.to_string()),
                 kind: event.kind().into(),
-                version: event.version(),
                 payload: payload.clone(),
                 created_at_ms: 0,
             };

@@ -2,7 +2,7 @@ use super::routing::{Route, RoutingError, admit};
 use super::select::{ProviderArg, Selection};
 use arany::{
     AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, ProviderKind,
-    Providers, RecordFormat, RecordKind, RecordStep, RosterSnapshot, StateRoot, valid_profile_name,
+    Providers, RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
@@ -65,7 +65,6 @@ impl Preset {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    version: u8,
     profiles: Vec<Profile>,
     presets: Vec<Preset>,
 }
@@ -116,13 +115,6 @@ fn bounded(bytes: &[u8]) -> bool {
 
 pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
     kind: RecordKind::ProviderRoster,
-    field: "version",
-    floor: 1,
-    current: 2,
-    steps: &[RecordStep {
-        from: 1,
-        transform: migrate_roster,
-    }],
     accepts: |bytes| presets(bytes).is_ok(),
 };
 
@@ -135,7 +127,8 @@ pub(crate) struct RosterDraft {
 impl RosterDraft {
     pub(crate) fn load(state: &StateRoot) -> Result<Self, String> {
         let expected = state
-            .read_current(&PROVIDER_ROSTER)
+            .record(PROVIDER_ROSTER.kind)
+            .read()
             .map_err(|_| "Provider roster unavailable or unsafe")?;
         let config = match &expected {
             Some(bytes) => {
@@ -143,7 +136,6 @@ impl RosterDraft {
                 serde_json::from_slice::<Config>(bytes).map_err(|_| INVALID)?
             }
             None => Config {
-                version: u8::try_from(PROVIDER_ROSTER.current).map_err(|_| INVALID)?,
                 profiles: vec![],
                 presets: vec![],
             },
@@ -203,7 +195,6 @@ impl RosterDraft {
             }
         }
         let bytes = serde_json::to_vec(&Config {
-            version: u8::try_from(PROVIDER_ROSTER.current).map_err(|_| INVALID)?,
             profiles,
             presets: self.presets.clone(),
         })
@@ -283,20 +274,11 @@ impl RosterDraft {
     }
 }
 
-fn migrate_roster(mut value: serde_json::Value) -> Option<serde_json::Value> {
-    for profile in value.get_mut("profiles")?.as_array_mut()? {
-        for route in profile.get_mut("routes")?.as_array_mut()? {
-            super::routing::migrate_route(route)?;
-        }
-    }
-    value["version"] = PROVIDER_ROSTER.current.into();
-    Some(value)
-}
-
 pub(crate) fn references_custom_profile(state_dir: &Path, name: &str) -> Result<bool, String> {
     let state = StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable")?;
     let Some(bytes) = state
-        .read_current(&PROVIDER_ROSTER)
+        .record(PROVIDER_ROSTER.kind)
+        .read()
         .map_err(|_| "Provider roster unavailable or unsafe")?
     else {
         return Ok(false);
@@ -326,41 +308,14 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         return Err(INVALID.into());
     }
     let mut config: Config = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
-    if u64::from(config.version) != PROVIDER_ROSTER.current
-        || config.profiles.is_empty()
+    if config.profiles.is_empty()
         || config.profiles.len() > MAX_PROFILES
         || config.presets.is_empty()
         || config.presets.len() > MAX_PRESETS
     {
         return Err(INVALID.into());
     }
-    let mut names = BTreeSet::new();
-    for profile in &mut config.profiles {
-        if !valid_profile_name(&profile.name)
-            || !names.insert(profile.name.clone())
-            || profile.routes.is_empty()
-            || profile.routes.len() > arany::MAX_PROVIDER_FALLBACKS + 1
-        {
-            return Err(INVALID.into());
-        }
-        for index in 0..profile.routes.len() {
-            let route = &mut profile.routes[index];
-            route.validate().map_err(|_| INVALID)?;
-            if route.provider.kind().is_native_api() {
-                route.effort = Some(
-                    arany::resolve_native_effort_for_run(
-                        &route.provider.profile(),
-                        &route.model,
-                        route.effort,
-                    )
-                    .map_err(|_| INVALID)?,
-                );
-            }
-            if profile.routes[..index].contains(&profile.routes[index]) {
-                return Err(INVALID.into());
-            }
-        }
-    }
+    let names = validate_profiles(&mut config.profiles)?;
     let mut preset_names = BTreeSet::new();
     let mut result = Vec::with_capacity(config.presets.len());
     for preset in config.presets {
@@ -414,6 +369,39 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
     Ok(result)
 }
 
+// Profile names are unique, and each route chain is bounded, valid and free of repeats; a native
+// route pins its resolved effort.
+fn validate_profiles(profiles: &mut [Profile]) -> Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for profile in profiles {
+        if !valid_profile_name(&profile.name)
+            || !names.insert(profile.name.clone())
+            || profile.routes.is_empty()
+            || profile.routes.len() > arany::MAX_PROVIDER_FALLBACKS + 1
+        {
+            return Err(INVALID.into());
+        }
+        for index in 0..profile.routes.len() {
+            let route = &mut profile.routes[index];
+            route.validate().map_err(|_| INVALID)?;
+            if route.provider.kind().is_native_api() {
+                route.effort = Some(
+                    arany::resolve_native_effort_for_run(
+                        &route.provider.profile(),
+                        &route.model,
+                        route.effort,
+                    )
+                    .map_err(|_| INVALID)?,
+                );
+            }
+            if profile.routes[..index].contains(&profile.routes[index]) {
+                return Err(INVALID.into());
+            }
+        }
+    }
+    Ok(names)
+}
+
 pub(crate) fn load(
     state_dir: &Path,
     workspace: &Path,
@@ -440,7 +428,8 @@ pub(crate) fn load_without_workspace(
         );
     }
     let bytes = root
-        .read_current(&PROVIDER_ROSTER)
+        .record(PROVIDER_ROSTER.kind)
+        .read()
         .map_err(|_| "Provider roster unavailable or unsafe")?
         .ok_or("provider-roster.json is unavailable")?;
     parse(&bytes, name)
@@ -685,7 +674,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn record() -> Value {
-        json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
+        json!({"profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})
     }
 
     #[test]
@@ -728,7 +717,7 @@ mod tests {
         assert!(parse(&bytes, "coding").is_ok());
         assert!(parse(&bytes, "missing").is_err());
         for (pointer, value) in [
-            ("/version", json!(3)),
+            ("/version", json!(2)),
             ("/extra", json!(true)),
             ("/profiles/0/extra", json!(true)),
             ("/profiles/0/name", json!("../main")),
@@ -751,8 +740,8 @@ mod tests {
             let mut invalid = valid.clone();
             if let Some(slot) = invalid.pointer_mut(pointer) {
                 *slot = value;
-            } else if pointer == "/extra" {
-                invalid["extra"] = value;
+            } else if let Some(key @ ("extra" | "version")) = pointer.strip_prefix('/') {
+                invalid[key] = value;
             } else if pointer == "/profiles/0/extra" {
                 invalid["profiles"][0]["extra"] = value;
             } else {
@@ -780,7 +769,7 @@ mod tests {
         }
         let source = String::from_utf8(bytes.clone()).unwrap();
         for (from, to) in [
-            ("\"version\":2", "\"version\":2,\"version\":2"),
+            ("\"profiles\":[", "\"profiles\":[],\"profiles\":["),
             ("\"name\":\"main\"", "\"name\":\"main\",\"name\":\"main\""),
             ("\"child\":null", "\"child\":null,\"child\":null"),
             ("\"effort\":null", "\"effort\":null,\"effort\":null"),
@@ -870,7 +859,6 @@ mod tests {
             preset.providers.primary = Some(primary.into());
             preset.providers.child = child.map(str::to_owned);
             let bytes = serde_json::to_vec(&Config {
-                version: u8::try_from(PROVIDER_ROSTER.current).unwrap(),
                 profiles: config.profiles.clone(),
                 presets: vec![preset.clone()],
             })
@@ -913,7 +901,6 @@ mod tests {
                 .collect();
             *preset.providers.get_mut(role) = Some(profiles[MAX_ELIGIBLE_PROFILES].name.clone());
             let bytes = serde_json::to_vec(&Config {
-                version: u8::try_from(PROVIDER_ROSTER.current).unwrap(),
                 profiles: profiles.clone(),
                 presets: vec![preset.clone()],
             })

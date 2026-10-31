@@ -43,6 +43,7 @@ pub(crate) fn primary_request(model: &str) -> ProviderRequest {
         AgentPhase::RootPlan,
         RunInput {
             goal_budget: Some(GoalBudget::default()),
+            plan_offered: true,
             tools: Some(tool_context(catalog())),
             ..RunInput::new(PromptRole::Primary, "objective canary".into())
         },
@@ -292,6 +293,10 @@ pub(crate) fn compaction_bound_request(
             assistant: String::new(),
         })],
         max_output_tokens: crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+        prompts: crate::provider::EffectivePrompts::default().with_override(
+            crate::provider::PromptFile::Compaction,
+            &"\u{1}".repeat(crate::provider::MAX_COMPACTION_PROMPT_OVERRIDE_BYTES),
+        ),
     };
     let base = crate::provider::compaction_input_bytes(&request(String::new())).expect("input");
     let slack = crate::session::MAX_COMPACTION_INPUT_BYTES - base;
@@ -307,4 +312,33 @@ pub(crate) fn compaction_bound_request(
     );
     let body = body_of(&at_bound);
     (at_bound, body)
+}
+
+const LOOPBACK_REQUEST_CAP: usize = 512 * 1024;
+
+// Reads one HTTP request through its Content-Length body and returns the raw text.
+pub(crate) async fn read_loopback_request(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut request = Vec::new();
+    loop {
+        let mut chunk = [0; 4096];
+        let size = stream.read(&mut chunk).await.expect("request bytes");
+        assert!(size > 0 && request.len() + size <= LOOPBACK_REQUEST_CAP);
+        request.extend_from_slice(&chunk[..size]);
+        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let header_end = end + 4;
+            let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
+            let body_len = header
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .expect("content length");
+            if request.len() >= header_end + body_len {
+                return String::from_utf8(request).expect("request text");
+            }
+        }
+    }
 }

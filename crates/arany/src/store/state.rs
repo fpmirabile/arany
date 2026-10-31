@@ -1,47 +1,33 @@
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, RecordFormat, StoreError};
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 mod archive;
-pub use archive::ArchivedHistory;
 #[cfg(test)]
 pub(super) use archive::FAIL_AT;
-pub(super) use archive::{
-    Identity, archive_name, identity_of, private_subdirectory, publish, rename, step, sync,
-    valid_archive_name,
-};
+pub(super) use archive::identity_of;
+pub use archive::{ArchivedHistory, ArchivedRecords};
+use archive::{private_subdirectory, rename, sync};
 mod build_cache;
-#[cfg(target_os = "linux")]
 pub(crate) use build_cache::{
-    CACHE_ROOTS, CacheChange, CacheGuardRecovery, MAX_ARCHIVE_ENTRIES,
-    validate_path as validate_cache_path,
+    CACHE_ROOTS, CacheChange, CacheGuardRecovery, validate_path as validate_cache_path,
 };
 pub(crate) mod checkpoints;
-#[cfg(unix)]
 mod inventory;
 mod lock;
 pub(crate) mod spill;
-#[cfg(test)]
-pub(crate) use build_cache::capture_archive;
 pub(crate) use build_cache::{
-    AGGREGATE_BYTES, BuildCacheIdentity, BuildCacheLease,
-    DEFAULT_ARCHIVE_BYTES as BUILD_CACHE_ARCHIVE_BYTES, MAX_ARCHIVE_BYTES,
+    BuildCacheIdentity, BuildCacheLease, DEFAULT_VIEW_BYTES as BUILD_CACHE_DEFAULT_VIEW_BYTES,
 };
-#[cfg(target_os = "macos")]
-pub(crate) use build_cache::{
-    archive_size_with_limit, capture_archive_async_with_limit, restore_archive_async_with_limit,
-};
-#[cfg(unix)]
 pub use inventory::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,
 };
-pub(crate) use lock::{HistoryLock, ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
-#[cfg(unix)]
 pub(crate) use lock::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
+pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
@@ -58,7 +44,6 @@ pub struct HistoryReset {
 
 impl HistoryReset {
     pub fn apply(self) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
 
@@ -86,14 +71,10 @@ impl HistoryReset {
                 .sync_all()?;
             Ok(())
         }
-        #[cfg(not(unix))]
-        {
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 }
 
-// One list generates both the enum and `ALL`, so no variant can be left out of migration.
+// One list generates both the enum and `ALL`, so no variant can be left out of the format checks.
 macro_rules! record_kinds {
     ($($kind:ident),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,10 +105,11 @@ record_kinds!(
     ChatgptAccounts,
     McpOauth,
     UserInstructions,
+    GuardSettings,
 );
 
 impl RecordKind {
-    // User-authored kinds are read-only to the harness; permissions.json changes only through the typed settings edit, and a record migration may replace any.
+    // User-authored kinds are read-only to the harness; permissions.json changes only through the typed settings edit.
     const fn spec(self) -> (&'static str, &'static str, usize, bool) {
         match self {
             Self::ToolsConfig => ("tools.json", "tools.pending", 64 * 1024, false),
@@ -195,6 +177,7 @@ impl RecordKind {
             ),
             Self::McpOauth => ("mcp-oauth.json", "mcp-oauth.pending", 64 * 1024, true),
             Self::UserInstructions => ("AGENTS.md", "AGENTS.pending", 64 * 1024, false),
+            Self::GuardSettings => ("guard.json", "guard.pending", 16 * 1024, true),
             Self::ChatgptAccounts => (
                 "chatgpt-accounts.json",
                 "chatgpt-accounts.pending",
@@ -261,11 +244,6 @@ impl Record<'_> {
         if !self.kind.spec().3 {
             return Err(StoreError::ReadOnly);
         }
-        self.replace_upgraded(record)
-    }
-
-    // Also replaces a user-authored record, so only a record migration calls it.
-    pub(super) fn replace_upgraded(&self, record: &[u8]) -> Result<(), StoreError> {
         let (name, pending, limit, _) = self.kind.spec();
         self.root
             .replace_private_record(name, pending, record, limit)
@@ -283,8 +261,19 @@ impl Record<'_> {
 pub struct StateRoot {
     path: PathBuf,
     pub(super) dir: Dir,
-    #[cfg(unix)]
     ancestors: Vec<(u64, u64)>,
+}
+
+#[cfg(all(target_os = "linux", any(test, feature = "test-support")))]
+fn passwd_is_mounted() -> bool {
+    const MAX_MOUNTINFO_BYTES: u64 = 1024 * 1024;
+    let mut mounts = String::new();
+    std::fs::File::open("/proc/self/mountinfo")
+        .and_then(|file| file.take(MAX_MOUNTINFO_BYTES).read_to_string(&mut mounts))
+        .is_ok()
+        && mounts
+            .lines()
+            .any(|mount| mount.split(' ').nth(4) == Some("/etc/passwd"))
 }
 
 impl StateRoot {
@@ -292,7 +281,6 @@ impl StateRoot {
         Ok(Self {
             path: self.path.clone(),
             dir: self.dir.try_clone()?,
-            #[cfg(unix)]
             ancestors: self.ancestors.clone(),
         })
     }
@@ -304,7 +292,7 @@ impl StateRoot {
         let path = dirs.state_dir().ok_or(StoreError::InvalidStateDirectory)?;
         #[cfg(not(target_os = "linux"))]
         let path = dirs.data_local_dir();
-        if let Some(fixture) = Self::debug_account_root() {
+        if let Some(fixture) = Self::fixture_account_root() {
             let parent = fixture
                 .parent()
                 .filter(|parent| fixture.is_absolute() && *parent != Path::new("/"))
@@ -321,11 +309,7 @@ impl StateRoot {
         if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
             return Err(StoreError::InvalidStateDirectory);
         }
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(path) = crate::test_support::account_root() {
-            return Ok(path.to_path_buf());
-        }
-        if let Some(path) = Self::debug_account_root() {
+        if let Some(path) = Self::fixture_account_root() {
             if !path.is_absolute() {
                 return Err(StoreError::InvalidStateDirectory);
             }
@@ -334,19 +318,47 @@ impl StateRoot {
         Self::configured_account_path()
     }
 
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn fixture_account_root() -> Option<PathBuf> {
+        Self::debug_account_root()
+    }
+
+    // Test-support builds include the binary that `cargo test` spawns, so no test process reaches real state.
+    #[cfg(any(test, feature = "test-support"))]
+    fn fixture_account_root() -> Option<PathBuf> {
+        if let Some(path) = crate::test_support::account_root() {
+            return Some(path.to_path_buf());
+        }
+        if let Some(path) = Self::debug_account_root() {
+            return Some(path);
+        }
+        // Linux passwd-home fixtures mount a private passwd file whose home is the fixture's.
+        #[cfg(target_os = "linux")]
+        if passwd_is_mounted() {
+            return None;
+        }
+        // Optimized builds refuse the fixture variable, so a spawned binary isolates itself.
+        if !cfg!(debug_assertions) {
+            return Some(crate::test_support::isolate_account_root().to_path_buf());
+        }
+        panic!(
+            "debug test builds never resolve the real account or state root: call \
+             arany::test_support::isolate_account_root() or set ARANY_TEST_ACCOUNT_ROOT"
+        );
+    }
+
     fn debug_account_root() -> Option<PathBuf> {
-        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
+        #[cfg(debug_assertions)]
         {
             std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").map(PathBuf::from)
         }
-        #[cfg(not(all(debug_assertions, any(target_os = "linux", target_os = "macos"))))]
+        #[cfg(not(debug_assertions))]
         {
             None
         }
     }
 
     fn configured_account_path() -> Result<PathBuf, StoreError> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use nix::unistd::{User, geteuid};
 
@@ -362,10 +374,6 @@ impl StateRoot {
             let suffix = "Library/Application Support/dev.Arany.arany";
             Ok(user.dir.join(suffix))
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            Self::default_path()
-        }
     }
 
     pub fn admit(path: &Path) -> Result<Self, StoreError> {
@@ -376,9 +384,23 @@ impl StateRoot {
         Self::open(path, false)
     }
 
+    // A missing directory is absent; an existing one without the database is a new root.
+    pub fn open_optional(path: &Path) -> Result<Option<Self>, StoreError> {
+        match Self::open_existing(path) {
+            Ok(root) => Ok(Some(root)),
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(path) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Ok(metadata) if metadata.is_dir() => Self::admit(path).map(Some),
+                    _ => Err(StoreError::Io(error)),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn readmit(&self) -> Result<(), StoreError> {
         let current = Self::open_existing(&self.path)?;
-        #[cfg(unix)]
         if directory_identity(&current.dir)? == directory_identity(&self.dir)? {
             return Ok(());
         }
@@ -387,7 +409,6 @@ impl StateRoot {
 
     fn open(path: &Path, create: bool) -> Result<Self, StoreError> {
         let directory = crate::private_fs::open_directory(path, create)?;
-        #[cfg(unix)]
         if create {
             lock::prepare_history_lock(&directory.dir)?;
         }
@@ -395,7 +416,6 @@ impl StateRoot {
         Ok(Self {
             path: directory.path,
             dir: directory.dir,
-            #[cfg(unix)]
             ancestors: directory.ancestors,
         })
     }
@@ -435,7 +455,6 @@ impl StateRoot {
         name: &str,
         limit: usize,
     ) -> Result<Option<cap_std::fs::Metadata>, StoreError> {
-        #[cfg(unix)]
         {
             let Some(file) = self.open_record_file(name)? else {
                 return Ok(None);
@@ -445,15 +464,9 @@ impl StateRoot {
             crate::fault::private_record_admission(&self.path, name);
             sidecar_metadata(metadata, limit)
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     pub(crate) fn append_development_diagnostic(&self, record: &[u8]) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
             use std::io::{Seek, SeekFrom};
@@ -483,11 +496,6 @@ impl StateRoot {
             file.write_all(record)?;
             Ok(())
         }
-        #[cfg(not(unix))]
-        {
-            let _ = record;
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     pub fn record(&self, kind: RecordKind) -> Record<'_> {
@@ -513,7 +521,7 @@ impl StateRoot {
             }
             match edit {
                 ProviderRecordEdit::Replace(bytes) => {
-                    if !format.accepts_current(bytes) || bytes.is_empty() || bytes.len() > limit {
+                    if !(format.accepts)(bytes) || bytes.is_empty() || bytes.len() > limit {
                         return Err(StoreError::InvalidHistory);
                     }
                     self.replace_private_record(name, pending, bytes, limit)
@@ -529,7 +537,6 @@ impl StateRoot {
         pending: &str,
         limit: usize,
     ) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             crate::fault::record_publication(&self.path, name)?;
             let record = self.open_private_record(name, limit)?;
@@ -550,11 +557,6 @@ impl StateRoot {
                 .map_err(unconfirmed)?;
             Ok(())
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, pending, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
     fn read_private_record(&self, name: &str, limit: usize) -> Result<Option<Vec<u8>>, StoreError> {
@@ -571,12 +573,51 @@ impl StateRoot {
         Ok(Some(record))
     }
 
+    // Reads at most `limit + 1` bytes so the caller can name an oversized file.
+    pub(crate) fn read_user_file(
+        &self,
+        directory: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        {
+            let unsafe_link = |error: io::Error| match error.raw_os_error() {
+                Some(code) if code == nix::libc::ELOOP || code == nix::libc::ENOTDIR => {
+                    StoreError::StateNotPrivate
+                }
+                _ => StoreError::Io(error),
+            };
+            let dir = match self.dir.open_dir_nofollow(directory) {
+                Ok(dir) => dir,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(unsafe_link(error)),
+            };
+            crate::private_fs::check_directory(&dir, true)?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            options.follow(FollowSymlinks::No);
+            nonblocking(&mut options);
+            let mut file = match dir.open_with(name, &options) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(unsafe_link(error)),
+            };
+            crate::private_fs::check_acl(&file, true)?;
+            // Size is the caller's refusal, so only ownership, mode and kind are checked here.
+            check_private_metadata(&file.metadata()?, usize::MAX)?;
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take(limit as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            Ok(Some(bytes))
+        }
+    }
+
     fn open_private_record(
         &self,
         name: &str,
         limit: usize,
     ) -> Result<Option<cap_std::fs::File>, StoreError> {
-        #[cfg(unix)]
         {
             let Some(file) = self.open_record_file(name)? else {
                 return Ok(None);
@@ -585,14 +626,8 @@ impl StateRoot {
             check_private_record_file(&file, limit)?;
             Ok(Some(file))
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
-    #[cfg(unix)]
     fn open_record_file(&self, name: &str) -> Result<Option<cap_std::fs::File>, StoreError> {
         let mut options = OpenOptions::new();
         options.read(true);
@@ -612,7 +647,6 @@ impl StateRoot {
         record: &[u8],
         limit: usize,
     ) -> Result<(), StoreError> {
-        #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
 
@@ -644,14 +678,8 @@ impl StateRoot {
             crate::fault::record_sync(&self.path, name)?;
             sync(&self.dir).map_err(|_| StoreError::ReplaceUnconfirmed)
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (name, pending, record, limit);
-            Err(StoreError::InvalidStateDirectory)
-        }
     }
 
-    #[cfg(unix)]
     pub(crate) fn ensure_outside_workspace(&self, workspace: &Dir) -> Result<(), StoreError> {
         let identity = directory_identity(workspace)?;
         if self.ancestors.contains(&identity) {
@@ -661,7 +689,6 @@ impl StateRoot {
     }
 }
 
-#[cfg(unix)]
 fn sidecar_metadata(
     metadata: cap_std::fs::Metadata,
     limit: usize,
@@ -675,7 +702,6 @@ fn sidecar_metadata(
     Ok(Some(metadata))
 }
 
-#[cfg(unix)]
 pub(super) fn check_private_record_file(
     file: &cap_std::fs::File,
     limit: usize,
@@ -684,7 +710,6 @@ pub(super) fn check_private_record_file(
     check_private_metadata(&file.metadata()?, limit)
 }
 
-#[cfg(unix)]
 fn check_private_metadata(
     metadata: &cap_std::fs::Metadata,
     limit: usize,
@@ -701,13 +726,11 @@ fn check_private_metadata(
     Ok(())
 }
 
-#[cfg(unix)]
 pub(super) fn nonblocking(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt;
     options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
 }
 
-#[cfg(unix)]
 fn directory_identity(dir: &Dir) -> Result<(u64, u64), StoreError> {
     use cap_std::fs::MetadataExt;
     let metadata = dir.dir_metadata()?;
@@ -719,7 +742,6 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         options.follow(FollowSymlinks::No);
-        #[cfg(unix)]
         {
             use cap_std::fs::OpenOptionsExt;
             options.mode(0o600);
@@ -737,16 +759,13 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
         existing.write(true);
     }
     existing.follow(FollowSymlinks::No);
-    #[cfg(unix)]
     nonblocking(&mut existing);
     let file = dir.open_with(DATABASE_FILE, &existing)?;
-    #[cfg(unix)]
     crate::private_fs::check_acl(&file, true)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > MAX_DATABASE_BYTES as u64 {
         return Err(StoreError::StateNotPrivate);
     }
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         if meta.uid() != rustix::process::geteuid().as_raw()
@@ -759,7 +778,7 @@ fn prepare_database_file(dir: &Dir, create: bool) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use nix::{sys::stat::Mode, unistd::mkfifo};
@@ -779,6 +798,36 @@ mod tests {
         let metadata = std::fs::metadata(&path).expect("test account root");
         assert_eq!(metadata.mode() & 0o777, 0o700);
         assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+    }
+
+    #[test]
+    fn optional_open_skips_only_a_missing_directory_and_admits_an_empty_one() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let missing = temp.path().join("missing/state");
+        assert!(StateRoot::open_optional(&missing).unwrap().is_none());
+        assert!(!temp.path().join("missing").exists());
+        let empty = temp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(empty.join("ui-preferences.json"), b"{}").unwrap();
+        std::fs::set_permissions(
+            empty.join("ui-preferences.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let root = StateRoot::open_optional(&empty)
+            .unwrap()
+            .expect("admitted root");
+        assert!(empty.join(DATABASE_FILE).is_file());
+        assert_eq!(
+            root.record(crate::store::RecordKind::UiPreferences)
+                .read()
+                .unwrap(),
+            Some(b"{}".to_vec())
+        );
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(StateRoot::open_optional(&file).is_err());
     }
 
     #[test]
@@ -1132,8 +1181,8 @@ mod tests {
     fn typed_provider_edit_rechecks_snapshot_and_keeps_ordinary_writes_read_only() {
         let temp = tempfile::tempdir().expect("test root");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private state");
-        let empty = br#"{"version":2,"profiles":[]}"#;
         let format = &crate::provider::PROVIDER_PROFILES;
+        let empty = br#"{"profiles":[]}"#.as_slice();
         state
             .edit_provider_record(
                 ProviderRecordTarget::Profiles,
@@ -1568,7 +1617,6 @@ mod tests {
             RecordKind::ChatgptRegistration.pending(),
             RecordKind::ChatgptAccounts.pending(),
             "account-credentials.lock",
-            "provider-check.lock",
             "model-preferences.pending",
             "ui-preferences.pending",
         ] {
@@ -1600,10 +1648,6 @@ mod tests {
             state.with_account_replacement_lock(&workspace, || ()),
             Err(StoreError::StateNotPrivate)
         ));
-        assert!(matches!(
-            state.lock_provider_check(),
-            Err(StoreError::StateNotPrivate)
-        ));
 
         assert!(matches!(
             state
@@ -1627,7 +1671,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod roster_tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};

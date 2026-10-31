@@ -7,6 +7,10 @@ pub const MAX_IMAGE_BYTES: usize = 192 * 1024;
 pub const MAX_MESSAGE_IMAGES: usize = 4;
 pub(crate) const MAX_IMAGE_METADATA_BYTES: usize = 128;
 pub const MAX_ENCODED_IMAGE_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+const MAX_PNG_SIDE: u32 = 4096;
+const MAX_PNG_PIXELS: u64 = 4 * 1024 * 1024;
+// 256 RGB entries.
+const MAX_PNG_PALETTE_BYTES: usize = 256 * 3;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ImageAttachment {
@@ -189,6 +193,36 @@ pub(super) fn validate_images(
     Ok(())
 }
 
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+fn png_header(data: &[u8]) -> Option<(u32, u32)> {
+    let width = u32::from_be_bytes(data[..4].try_into().ok()?);
+    let height = u32::from_be_bytes(data[4..8].try_into().ok()?);
+    if !(1..=MAX_PNG_SIDE).contains(&width)
+        || !(1..=MAX_PNG_SIDE).contains(&height)
+        || u64::from(width) * u64::from(height) > MAX_PNG_PIXELS
+        || !matches!(
+            (data[9], data[8]),
+            (0, 1 | 2 | 4 | 8 | 16) | (2 | 4 | 6, 8 | 16) | (3, 1 | 2 | 4 | 8)
+        )
+        || data[10] != 0
+        || data[11] != 0
+        || data[12] > 1
+    {
+        return None;
+    }
+    Some((width, height))
+}
+
 fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return None;
@@ -211,34 +245,12 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
             return None;
         }
         let expected = u32::from_be_bytes(chunk.get(4 + length..)?.try_into().ok()?);
-        let mut crc = !0_u32;
-        for &byte in &chunk[..4 + length] {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
-            }
-        }
-        if !crc != expected || dimensions.is_none() && kind != b"IHDR" {
+        if png_crc(&chunk[..4 + length]) != expected || dimensions.is_none() && kind != b"IHDR" {
             return None;
         }
         match kind {
             b"IHDR" if cursor == 8 && data.len() == 13 => {
-                let width = u32::from_be_bytes(data[..4].try_into().ok()?);
-                let height = u32::from_be_bytes(data[4..8].try_into().ok()?);
-                if !(1..=4096).contains(&width)
-                    || !(1..=4096).contains(&height)
-                    || u64::from(width) * u64::from(height) > 4 * 1024 * 1024
-                    || !matches!(
-                        (data[9], data[8]),
-                        (0, 1 | 2 | 4 | 8 | 16) | (2 | 4 | 6, 8 | 16) | (3, 1 | 2 | 4 | 8)
-                    )
-                    || data[10] != 0
-                    || data[11] != 0
-                    || data[12] > 1
-                {
-                    return None;
-                }
-                dimensions = Some((width, height));
+                dimensions = Some(png_header(data)?);
                 color = data[9];
                 depth = data[8];
             }
@@ -248,7 +260,7 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
                     || data_started
                     || matches!(color, 0 | 4)
                     || data.is_empty()
-                    || data.len() > 768
+                    || data.len() > MAX_PNG_PALETTE_BYTES
                     || !data.len().is_multiple_of(3)
                     || color == 3 && data.len() / 3 > 1 << depth
                 {

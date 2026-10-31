@@ -555,19 +555,9 @@ mod tests {
                 run_id: run,
                 agent_run_id: agent,
                 record: crate::ProviderCallRecord {
-                    phase: crate::AgentPhase::RootPlan,
                     disposition: ProviderCallDisposition::ToolRequested,
                     requested_tools: 2,
-                    rate_limits: None,
-                    delegation: None,
-                    response_id: None,
-                    input_tokens: None,
-                    output_tokens: None,
-                    cache_read_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    wire_provenance: None,
-                    failure_reason: None,
-                    refusal: None,
+                    ..crate::test_support::provider_call_record()
                 },
             },
             read_start(&reads[0]),
@@ -671,7 +661,7 @@ mod tests {
         for call in [
             ToolCall::Edit {
                 path: "src/main.rs".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
                 old: "before".into(),
                 new: "after".into(),
             },
@@ -681,6 +671,7 @@ mod tests {
                 cwd: "src".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         ] {
             for disposition in [

@@ -1254,7 +1254,7 @@ async fn refresh_rejects_invalid_rotation_without_changing_prior_credentials() {
 #[tokio::test]
 async fn refresh_form_accepts_the_longest_admitted_escaped_token() {
     let mut original = saved_credentials();
-    original.refresh_token = "%".repeat(8 * 1024);
+    original.refresh_token = "%".repeat(crate::accounts::chatgpt::MAX_REFRESH_TOKEN_BYTES);
     let (endpoints, task) = issuer(vec![Reply {
         status: "200 OK",
         content_type: "application/json",
@@ -1282,5 +1282,8 @@ async fn refresh_form_accepts_the_longest_admitted_escaped_token() {
         .into_owned()
         .collect::<Vec<_>>();
     assert_eq!(fields[2].0, "refresh_token");
-    assert_eq!(fields[2].1.len(), 8 * 1024);
+    assert_eq!(
+        fields[2].1.len(),
+        crate::accounts::chatgpt::MAX_REFRESH_TOKEN_BYTES
+    );
 }

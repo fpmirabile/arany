@@ -1,5 +1,3 @@
-use std::path::Path;
-
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct SystemExecutable {
     pub(super) path: &'static str,
@@ -8,39 +6,30 @@ pub(super) struct SystemExecutable {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ExecutableIdentities {
-    pub(super) git: &'static [SystemExecutable],
     pub(super) shell: SystemExecutable,
-    pub(super) git_magics: &'static [&'static [u8]],
     pub(super) program_magics: &'static [&'static [u8]],
     #[cfg(target_os = "macos")]
     pub(super) system_directories: &'static [&'static str],
+    // PATH directories under these roots are never granted whole; programs there need the catalogue.
+    pub(super) platform_roots: &'static [&'static str],
 }
 
 #[cfg(target_os = "linux")]
 pub(super) const EXECUTABLES: ExecutableIdentities = ExecutableIdentities {
-    git: &[SystemExecutable {
-        path: "/usr/bin/git",
-        root: "/usr",
-    }],
     shell: SystemExecutable {
         path: "/usr/bin/sh",
         root: "/usr",
     },
-    git_magics: &[b"\x7fELF"],
     program_magics: &[b"\x7fELF"],
+    platform_roots: &[],
 };
 
 #[cfg(target_os = "macos")]
 pub(super) const EXECUTABLES: ExecutableIdentities = ExecutableIdentities {
-    git: &[SystemExecutable {
-        path: "/Library/Developer/CommandLineTools/usr/bin/git",
-        root: "/Library/Developer/CommandLineTools",
-    }],
     shell: SystemExecutable {
         path: "/bin/sh",
         root: "/bin",
     },
-    git_magics: &[b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe"],
     program_magics: &[
         b"\xfe\xed\xfa\xce",
         b"\xce\xfa\xed\xfe",
@@ -52,11 +41,19 @@ pub(super) const EXECUTABLES: ExecutableIdentities = ExecutableIdentities {
         b"\xbf\xba\xfe\xca",
     ],
     system_directories: &["/bin", "/usr/bin"],
+    platform_roots: MACOS_PLATFORM_ROOTS,
 };
 
-pub(super) fn git_root(path: &Path) -> bool {
-    EXECUTABLES.git.iter().any(|git| path.starts_with(git.root))
-}
+#[cfg(target_os = "macos")]
+const MACOS_PLATFORM_ROOTS: &[&str] = &[
+    "/System",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/libexec",
+    "/Library/Apple",
+];
 
 pub(super) fn has_magic(bytes: &[u8], magics: &[&[u8]]) -> bool {
     magics.iter().any(|magic| bytes.starts_with(magic))
@@ -70,28 +67,19 @@ mod tests {
     fn platform_executable_trust_is_pinned() {
         #[cfg(target_os = "linux")]
         let expected = ExecutableIdentities {
-            git: &[SystemExecutable {
-                path: "/usr/bin/git",
-                root: "/usr",
-            }],
             shell: SystemExecutable {
                 path: "/usr/bin/sh",
                 root: "/usr",
             },
-            git_magics: &[b"\x7fELF"],
             program_magics: &[b"\x7fELF"],
+            platform_roots: &[],
         };
         #[cfg(target_os = "macos")]
         let expected = ExecutableIdentities {
-            git: &[SystemExecutable {
-                path: "/Library/Developer/CommandLineTools/usr/bin/git",
-                root: "/Library/Developer/CommandLineTools",
-            }],
             shell: SystemExecutable {
                 path: "/bin/sh",
                 root: "/bin",
             },
-            git_magics: &[b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe"],
             program_magics: &[
                 b"\xfe\xed\xfa\xce",
                 b"\xce\xfa\xed\xfe",
@@ -103,6 +91,15 @@ mod tests {
                 b"\xbf\xba\xfe\xca",
             ],
             system_directories: &["/bin", "/usr/bin"],
+            platform_roots: &[
+                "/System",
+                "/bin",
+                "/sbin",
+                "/usr/bin",
+                "/usr/sbin",
+                "/usr/libexec",
+                "/Library/Apple",
+            ],
         };
         assert_eq!(EXECUTABLES, expected);
     }

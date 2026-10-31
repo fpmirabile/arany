@@ -2,9 +2,9 @@ use super::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::journal::{Journal, JournalWriter};
 use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
-    AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal, Event, EventEnvelope, GoalBudget,
-    GoalId, GoalLimit, GoalPlanContract, GoalUsage, GoalView, MAX_CHILD_TOOL_CALLS,
-    MAX_DISPLAY_CHUNKS, SessionId, SessionView,
+    AgentRunId, BudgetAction, BudgetRefusal, Event, EventEnvelope, GoalBudget, GoalId, GoalLimit,
+    GoalPlanContract, GoalUsage, GoalView, MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionId,
+    SessionView,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -602,6 +602,17 @@ impl GoalLedger {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
     }
 
+    pub(super) fn children_active(&self) -> Result<bool, EngineError> {
+        self.view(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.agents
+                    .iter()
+                    .skip(1)
+                    .any(|agent| agent.status == crate::session::AgentStatus::Active)
+            })
+        })
+    }
+
     // Admission holds nothing back, so a primary step reserves every lease-holding editor's drain.
     pub(super) fn drain_headroom(&self) -> usize {
         self.view(|view| {
@@ -630,7 +641,7 @@ impl GoalLedger {
             | Action::Child { .. }
             | Action::Tool
             | Action::ToolStep { .. }
-            | Action::Worker => self.can_start_provider_call() && self.remaining_calls() != Some(0),
+            | Action::Worker => self.calls_open(),
             Action::Review | Action::Compaction => {
                 self.can_start_provider_call()
                     && self.remaining_calls().is_none_or(|remaining| remaining > 1)
@@ -651,7 +662,7 @@ impl GoalLedger {
         actor: AgentRunId,
     ) -> Result<Admission<Reservation<'_>>, EngineError> {
         let admission = self.admission.lock().await;
-        if !(self.can_start_provider_call() && self.remaining_calls() != Some(0)) {
+        if !self.calls_open() {
             self.capture_budget_refusal(
                 match action {
                     Action::Compaction | Action::BoundaryCompaction { .. } => {
@@ -986,6 +997,10 @@ impl GoalLedger {
         .unwrap_or(false)
     }
 
+    pub(super) fn calls_open(&self) -> bool {
+        self.can_start_provider_call() && self.remaining_calls() != Some(0)
+    }
+
     pub(super) fn can_start_provider_call(&self) -> bool {
         self.read(|goal, in_flight| {
             goal.effective_budget().max_tokens.is_none_or(|limit| {
@@ -1018,9 +1033,7 @@ fn refusal_at(
     )?;
     refusal.run_id = goal.active_run;
     refusal.agent_run_id = actor.filter(|_| refusal.run_id.is_some());
-    if goal.uncertain_active_ms > 0 {
-        refusal.charge_basis = BudgetChargeBasis::Conservative;
-    }
+    goal.qualify_charge(&mut refusal);
     Some(refusal)
 }
 

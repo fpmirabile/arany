@@ -9,8 +9,8 @@ use crate::tools::{
     ToolRuntime, UnguardedPrompt,
 };
 
-pub(super) enum Resolver<'a> {
-    AiReview { objective: &'a str },
+pub(super) enum Resolver {
+    AiReview,
     Human,
 }
 
@@ -19,6 +19,7 @@ pub(super) enum AskSite {
     Delegated {
         active_deadline: Option<crate::engine::ledger::ActiveDeadline>,
         interrupted: Option<RunCancellation>,
+        unguarded_prompt: Option<UnguardedPrompt>,
     },
 }
 
@@ -26,7 +27,20 @@ pub(super) struct AskOptions {
     pub(super) unguarded_prompt: Option<UnguardedPrompt>,
     pub(super) allow_auto_edits: bool,
     pub(super) remember_prefix: Option<TypedGitPrefix>,
+    pub(super) save_reads: bool,
+    pub(super) pin_repository: bool,
     pub(super) interrupted: Option<RunCancellation>,
+}
+
+impl AskOptions {
+    fn offers(&self) -> crate::tools::ApprovalOffers {
+        crate::tools::ApprovalOffers {
+            allow_auto_edits: self.allow_auto_edits,
+            remember_prefix: self.remember_prefix,
+            save_reads: self.save_reads,
+            pin_repository: self.pin_repository,
+        }
+    }
 }
 
 impl AskSite {
@@ -61,59 +75,30 @@ impl RunLoop<'_> {
         mode: ApprovalMode,
         options: AskOptions,
     ) -> Result<Admission<Resolution>, EngineError> {
+        // The review sees only the Session's user prompts and the action, so both sites share one chain.
+        let review = |allowed: bool| {
+            if mode == ApprovalMode::Auto && allowed && self.ledger().admits(Action::Review) {
+                &[Resolver::AiReview, Resolver::Human][..]
+            } else {
+                &[Resolver::Human][..]
+            }
+        };
         match grant {
-            Grant::Primary {
-                request,
-                review_allowed,
-            } => {
-                let resolvers;
-                let chain = if mode == ApprovalMode::Auto
-                    && *review_allowed
-                    && self.ledger().admits(Action::Review)
-                {
-                    resolvers = [
-                        Resolver::AiReview {
-                            objective: &request.input.objective,
-                        },
-                        Resolver::Human,
-                    ];
-                    &resolvers[..]
-                } else {
-                    &[Resolver::Human]
-                };
-                self.resolve_ask(intent, chain, AskSite::Primary(options))
+            Grant::Primary { review_allowed, .. } => {
+                self.resolve_ask(intent, review(*review_allowed), AskSite::Primary(options))
                     .await
             }
             Grant::Researcher {
                 active_deadline, ..
             } => {
-                let objective =
-                    if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
-                        Some(
-                            self.ledger()
-                                .view(|view| {
-                                    self.goal_id
-                                        .and_then(|id| view.goal(id))
-                                        .map(|goal| goal.objective.clone())
-                                })?
-                                .ok_or(EngineError::InvalidHistory)?,
-                        )
-                    } else {
-                        None
-                    };
-                let resolvers;
-                let chain = if let Some(objective) = &objective {
-                    resolvers = [Resolver::AiReview { objective }, Resolver::Human];
-                    &resolvers[..]
-                } else {
-                    &[Resolver::Human]
-                };
+                let chain = review(true);
                 self.resolve_ask(
                     intent,
                     chain,
                     AskSite::Delegated {
                         active_deadline: active_deadline.clone(),
                         interrupted: options.interrupted,
+                        unguarded_prompt: options.unguarded_prompt,
                     },
                 )
                 .await
@@ -124,7 +109,7 @@ impl RunLoop<'_> {
     async fn resolve_ask(
         &self,
         intent: &EffectIntent,
-        chain: &[Resolver<'_>],
+        chain: &[Resolver],
         site: AskSite,
     ) -> Result<Admission<Resolution>, EngineError> {
         self.propose_tool(intent).await?;
@@ -144,9 +129,9 @@ impl RunLoop<'_> {
                 break;
             }
             match resolver {
-                Resolver::AiReview { objective } => {
+                Resolver::AiReview => {
                     match self
-                        .resolve_ai_review(objective, intent, &site, initial_mode, &mut resolution)
+                        .resolve_ai_review(intent, &site, initial_mode, &mut resolution)
                         .await?
                     {
                         ReviewProgress::Continue => {}
@@ -155,17 +140,9 @@ impl RunLoop<'_> {
                     }
                 }
                 Resolver::Human => match &site {
-                    AskSite::Delegated {
-                        active_deadline,
-                        interrupted,
-                    } => {
-                        self.resolve_delegated_human(
-                            intent,
-                            active_deadline.as_ref(),
-                            &mut resolution,
-                            interrupted.as_ref(),
-                        )
-                        .await?
+                    AskSite::Delegated { .. } => {
+                        self.resolve_delegated_human(intent, &site, &mut resolution)
+                            .await?
                     }
                     AskSite::Primary(options) => {
                         self.resolve_primary_human(intent, options, &mut resolution)
@@ -182,15 +159,12 @@ impl RunLoop<'_> {
 
     async fn resolve_ai_review(
         &self,
-        objective: &str,
         intent: &EffectIntent,
         site: &AskSite,
         initial_mode: Option<ApprovalMode>,
         resolution: &mut Resolution,
     ) -> Result<ReviewProgress, EngineError> {
-        let reviewed = self
-            .resolve_review(objective, intent, site, initial_mode)
-            .await?;
+        let reviewed = self.resolve_review(intent, site, initial_mode).await?;
         resolution.approved = reviewed.approved;
         resolution.source = reviewed.source;
         resolution.active_time_exhausted = reviewed.active_time_exhausted;
@@ -200,16 +174,19 @@ impl RunLoop<'_> {
     async fn resolve_delegated_human(
         &self,
         intent: &EffectIntent,
-        active_deadline: Option<&crate::engine::ledger::ActiveDeadline>,
+        site: &AskSite,
         resolution: &mut Resolution,
-        interrupted: Option<&RunCancellation>,
     ) -> Result<(), EngineError> {
-        let Some(approvals) = self.controls.approvals else {
+        let (
+            Some(approvals),
+            AskSite::Delegated {
+                active_deadline, ..
+            },
+        ) = (self.controls.approvals, site)
+        else {
             return Ok(());
         };
-        let (reply, withdrawal) = self
-            .delegated_human_reply(intent, active_deadline, approvals, interrupted)
-            .await?;
+        let (reply, withdrawal) = self.delegated_human_reply(intent, approvals, site).await?;
         resolution.withdrawal = withdrawal;
         resolution.approved = matches!(
             reply,
@@ -223,7 +200,7 @@ impl RunLoop<'_> {
         } else {
             PermissionSource::Human
         };
-        resolution.active_time_exhausted = active_deadline.is_some_and(|deadline| {
+        resolution.active_time_exhausted = active_deadline.as_ref().is_some_and(|deadline| {
             deadline.reached() && deadline.cause == crate::engine::ledger::ActiveDeadlineCause::Goal
         });
         Ok(())
@@ -255,7 +232,7 @@ impl RunLoop<'_> {
                 reply = async {
                     match prompt.clone() {
                         Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                        None => approvals.ask_local(intent, options.allow_auto_edits, options.remember_prefix).await,
+                        None => approvals.ask_local(intent, options.offers()).await,
                     }
                 } => reply,
             };
@@ -266,6 +243,8 @@ impl RunLoop<'_> {
             ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
             ApprovalReply::AllowPrefixInFolder
                 if options.remember_prefix.is_none()
+                    && !options.save_reads
+                    && !options.pin_repository
                     && !prompt.as_ref().is_some_and(|prompt| prompt.prefix) =>
             {
                 if intent.call.is_unguarded() || intent.call.is_host() {
@@ -295,7 +274,7 @@ impl RunLoop<'_> {
             () = interrupted(options.interrupted.as_ref()) => return (ApprovalReply::Unavailable, None),
             () = cancellation.cancelled() => return (ApprovalReply::Unavailable, None),
             () = self.approval_paused() => return (ApprovalReply::Unavailable, None),
-            pending = approvals.begin_local(intent, options.allow_auto_edits, options.remember_prefix) => pending,
+            pending = approvals.begin_local(intent, options.offers()) => pending,
         };
         let reply = tokio::select! {
             biased;
@@ -345,6 +324,7 @@ pub(super) async fn unguarded_gate(
         prefix: false,
         sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
         inactive_rules: runtime.has_inactive_host_rules(),
+        sandbox_off: runtime.host_fallback(),
     })
 }
 

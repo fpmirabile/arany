@@ -1,4 +1,4 @@
-use super::catalog::{nullable, string};
+use super::catalog::string;
 use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};
@@ -13,10 +13,12 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 pub(super) mod command;
+pub(super) mod editor;
 mod removal;
+pub(super) mod tree;
 #[cfg(any(test, target_os = "macos"))]
 pub(super) use command::prepare_command;
-pub(super) use command::{CommandSelection, selected_command_changeset};
+pub(super) use command::{CommandSelection, command_baseline, selected_command_changeset};
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
@@ -38,7 +40,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
         ToolCall::Delete {
             path,
             expected_digest,
-        } => valid_relative(path, false) && valid_digest(expected_digest),
+        } => valid_relative(path, false) && optional_digest(expected_digest),
         ToolCall::Move {
             source,
             destination,
@@ -47,7 +49,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             valid_relative(source, false)
                 && valid_relative(destination, false)
                 && !source.eq_ignore_ascii_case(destination)
-                && valid_digest(expected_digest)
+                && optional_digest(expected_digest)
         }
         ToolCall::Write {
             path,
@@ -56,9 +58,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
         } => {
             valid_relative(path, false)
                 && content.len() <= MAX_EDIT_CONTENT_BYTES
-                && expected_digest
-                    .as_ref()
-                    .is_none_or(|digest| valid_digest(digest))
+                && optional_digest(expected_digest)
         }
         ToolCall::Edit {
             path,
@@ -67,7 +67,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             new,
         } => {
             valid_relative(path, false)
-                && valid_digest(expected_digest)
+                && optional_digest(expected_digest)
                 && !old.is_empty()
                 && old.len() + new.len() <= MAX_EDIT_CONTENT_BYTES
         }
@@ -77,7 +77,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             edits,
         } => {
             valid_relative(file_path, false)
-                && valid_digest(expected_digest)
+                && optional_digest(expected_digest)
                 && (1..=MAX_MULTI_EDITS).contains(&edits.len())
                 && edits
                     .iter()
@@ -97,95 +97,56 @@ pub(super) fn valid(call: &ToolCall) -> bool {
     }
 }
 
+fn optional_digest(digest: &Option<String>) -> bool {
+    digest.as_ref().is_none_or(|digest| valid_digest(digest))
+}
+
+fn expected_digest(file: &str, otherwise: &str) -> (&'static str, Value) {
+    (
+        "expected_digest",
+        json!({"type":["string", "null"], "description":format!("Optional: null uses the SHA-256 from your latest Read or edit of {file} in this Run{otherwise}; supply one only to pin a specific version. Never invent it.")}),
+    )
+}
+
+fn path(description: &str) -> (&'static str, Value) {
+    ("path", json!({"type":"string", "description":description}))
+}
+
 pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
-    let path = ("path", string());
     Some(match operation {
-        "list" | "mkdir" => vec![path],
-        "read" => vec![
-            (
-                "path",
-                json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
-            ),
-            (
-                "offset",
-                json!({"type":["integer", "null"], "description":format!("1-based start line, 1 through {}; null starts at line 1. Continue using next_line.", u32::MAX)}),
-            ),
-            (
-                "limit",
-                json!({"type":["integer", "null"], "description":format!("Number of lines, 1 through {MAX_READ_PAGE_LINES}; null reads up to {MAX_READ_PAGE_LINES} lines. Lines are numbered and cut after {MAX_READ_LINE_CHARS} characters; the rendered result budget may end the page earlier.")}),
-            ),
-        ],
-        "search" => vec![
-            path,
-            (
-                "query",
-                json!({"type":"string", "description":"Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true."}),
-            ),
-            (
-                "regex",
-                json!({"type":["boolean", "null"], "description":"true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally."}),
-            ),
-            (
-                "include",
-                json!({"type":["string", "null"], "description":"File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file."}),
-            ),
-            (
-                "case_sensitive",
-                json!({"type":["boolean", "null"], "description":"false ignores case; null or true matches case exactly."}),
-            ),
-            (
-                "offset",
-                json!({"type":["integer", "null"], "description":"Number of matching lines to skip; null starts at 0. Continue using next_offset."}),
-            ),
-            (
-                "limit",
-                json!({"type":["integer", "null"], "description":format!("Matching lines to return, 1 through {MAX_SEARCH_ROWS}; null returns up to {MAX_SEARCH_ROWS}. The rendered result budget may end the page earlier.")}),
-            ),
-        ],
+        "list" => vec![path(
+            "Workspace-relative directory whose immediate entries to list.",
+        )],
+        "mkdir" => vec![path(
+            "Workspace-relative path of the new directory; its parent must exist.",
+        )],
+        "read" => read_schema(),
+        "search" => search_schema(),
         "glob" => super::glob::schema(),
-        "multiedit" => vec![
-            ("file_path", string()),
-            (
-                "expected_digest",
-                json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 of the existing file from Read or a file include."}),
-            ),
-            (
-                "edits",
-                json!({
-                    "type":"array",
-                    "description":"Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most 65536. Every intermediate file must fit 1 MiB; unchanged final content rejects.",
-                    "items":{
-                        "type":"object", "additionalProperties":false,
-                        "properties":{
-                            "old_string":{"type":"string", "description":"Nonempty exact literal text, different from new_string; no Read line-number prefixes."},
-                            "new_string":{"type":"string", "description":"Literal replacement; empty removes only the matched bytes."},
-                            "replace_all":{"type":["boolean","null"], "description":"true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false."}
-                        },
-                        "required":["old_string","new_string","replace_all"]
-                    }
-                }),
-            ),
+        "multiedit" => multiedit_schema(),
+        "delete" => vec![
+            path("Workspace-relative regular file to delete."),
+            expected_digest("this file", ""),
         ],
-        "delete" => vec![path, ("expected_digest", string())],
         "move" => vec![
             ("source", string()),
             ("destination", string()),
-            ("expected_digest", string()),
+            expected_digest("source", ""),
         ],
         "write" => vec![
-            path,
-            ("expected_digest", nullable()),
+            path("Workspace-relative file to create or replace."),
+            expected_digest(
+                "this file",
+                ", or creates a missing file when none is known",
+            ),
             (
                 "content",
                 json!({"type":"string", "description":format!("Complete UTF-8 file content, at most {MAX_EDIT_CONTENT_BYTES} bytes.")}),
             ),
         ],
         "edit" => vec![
-            path,
-            (
-                "expected_digest",
-                json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it."}),
-            ),
+            path("Workspace-relative existing file to edit."),
+            expected_digest("this file", ""),
             (
                 "old",
                 json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file, excluding Read line-number prefixes. To append, select a unique ending and include that ending plus the appended text in new."}),
@@ -199,15 +160,82 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     })
 }
 
+fn read_schema() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "path",
+            json!({"type":"string", "description":format!("Workspace file path, or {}<64 lowercase hex intent digest> from a Tool result; use offset and limit to page retained output.", super::spill::READ_PREFIX)}),
+        ),
+        (
+            "offset",
+            json!({"type":["integer", "null"], "description":format!("1-based start line, 1 through {}; null starts at line 1. Continue using next_line.", u32::MAX)}),
+        ),
+        (
+            "limit",
+            json!({"type":["integer", "null"], "description":format!("Number of lines, 1 through {MAX_READ_PAGE_LINES}; null reads up to {MAX_READ_PAGE_LINES} lines. Lines are numbered and cut after {MAX_READ_LINE_CHARS} characters; the rendered result budget may end the page earlier.")}),
+        ),
+    ]
+}
+
+fn search_schema() -> Vec<(&'static str, Value)> {
+    vec![
+        path(
+            "Workspace-relative file or directory. Name a file to search only that file (fastest); use include only for patterns.",
+        ),
+        (
+            "query",
+            json!({"type":"string", "description":format!("Text to find within one line, 1 through {} UTF-8 bytes; literal unless regex is true.", super::search::MAX_PATTERN_BYTES)}),
+        ),
+        (
+            "regex",
+            json!({"type":["boolean", "null"], "description":"true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally."}),
+        ),
+        (
+            "include",
+            json!({"type":["string", "null"], "description":"File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file."}),
+        ),
+        (
+            "case_sensitive",
+            json!({"type":["boolean", "null"], "description":"false ignores case; null or true matches case exactly."}),
+        ),
+        (
+            "offset",
+            json!({"type":["integer", "null"], "description":"Number of matching lines to skip; null starts at 0. Continue using next_offset."}),
+        ),
+        (
+            "limit",
+            json!({"type":["integer", "null"], "description":format!("Matching lines to return, 1 through {MAX_SEARCH_ROWS}; null returns up to {MAX_SEARCH_ROWS}. The rendered result budget may end the page earlier.")}),
+        ),
+    ]
+}
+
+fn multiedit_schema() -> Vec<(&'static str, Value)> {
+    vec![
+        ("file_path", string()),
+        expected_digest("this file", ""),
+        (
+            "edits",
+            json!({
+                "type":"array",
+                "description":format!("Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most {MAX_EDIT_CONTENT_BYTES}. Every intermediate file must fit {} MiB; unchanged final content rejects.", super::types::MAX_FILE_BYTES / (1024 * 1024)),
+                "items":{
+                    "type":"object", "additionalProperties":false,
+                    "properties":{
+                        "old_string":{"type":"string", "description":"Nonempty exact literal text, different from new_string; no Read line-number prefixes."},
+                        "new_string":{"type":"string", "description":"Literal replacement; empty removes only the matched bytes."},
+                        "replace_all":{"type":["boolean","null"], "description":"true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false."}
+                    },
+                    "required":["old_string","new_string","replace_all"]
+                }
+            }),
+        ),
+    ]
+}
+
 struct Entry {
     path: String,
     content: Option<Vec<u8>>,
     executable: bool,
-}
-
-pub(super) struct CommandSnapshot {
-    root_identity: WorkspaceIdentity,
-    entries: BTreeMap<String, Entry>,
 }
 
 #[derive(Default)]
@@ -269,191 +297,31 @@ mod command_budget_tests {
     }
 }
 
-pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, ToolError> {
-    let root = open_directory(workspace)?;
-    check_change_directory(&root, &root)?;
-    let mut builder = CommandSnapshotBuilder {
-        root: &root,
-        entries: BTreeMap::new(),
-        budget: CommandScanBudget::default(),
-        retained: 0,
-    };
-    builder.collect("")?;
-    Ok(CommandSnapshot {
-        root_identity: workspace_identity(&root)?,
-        entries: builder.entries,
-    })
-}
-
-struct CommandSnapshotBuilder<'a> {
-    root: &'a Dir,
-    entries: BTreeMap<String, Entry>,
-    budget: CommandScanBudget,
-    retained: usize,
-}
-
-impl CommandSnapshotBuilder<'_> {
-    fn collect(&mut self, path: &str) -> Result<(), ToolError> {
-        let directory = if path.is_empty() {
-            self.root.try_clone().map_err(|_| ToolError::Path)?
-        } else {
-            Dir::from_std_file(open_file(self.root, path)?)
-        };
-        let mut names = Vec::new();
-        for entry in directory.entries().map_err(|_| ToolError::Path)? {
-            let name = entry
-                .map_err(|_| ToolError::Path)?
-                .file_name()
-                .into_string()
-                .map_err(|_| ToolError::Path)?;
-            let selected = if path.is_empty() {
-                name
-            } else {
-                format!("{path}/{name}")
-            };
-            self.budget.entry(&selected)?;
-            if !valid_relative(&selected, false) {
-                return Err(if selected.split('/').any(forbidden) {
-                    ToolError::FilesystemDenied
-                } else {
-                    ToolError::Path
-                });
-            }
-            if selected.split('/').count() > COMMAND_SNAPSHOT_DEPTH {
-                return Err(ToolError::Limit);
-            }
-            names.push(selected);
-        }
-        names.sort();
-        if names.is_empty() && !path.is_empty() {
-            self.retain()?;
-        }
-        drop(directory);
-        for selected in names {
-            self.entry(selected)?;
-        }
-        Ok(())
-    }
-
-    fn entry(&mut self, path: String) -> Result<(), ToolError> {
-        let file = open_file(self.root, &path)?;
-        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if metadata.mode() & 0o6000 != 0 {
-                return Err(ToolError::FilesystemDenied);
-            }
-        }
-        let entry = if metadata.is_dir() {
-            drop(file);
-            self.collect(&path)?;
-            Entry {
-                path: path.clone(),
-                content: None,
-                executable: false,
-            }
-        } else {
-            #[cfg(unix)]
-            let executable = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o111 != 0
-            };
-            #[cfg(not(unix))]
-            let executable = false;
-            let cap = MAX_FILE_BYTES.min(COMMAND_SNAPSHOT_BYTES.saturating_sub(self.budget.bytes));
-            let content = read_regular(file, cap)?;
-            self.budget.content(content.len())?;
-            self.retain()?;
-            Entry {
-                path: path.clone(),
-                content: Some(content),
-                executable,
-            }
-        };
-        self.entries.insert(path, entry);
-        Ok(())
-    }
-
-    fn retain(&mut self) -> Result<(), ToolError> {
-        self.retained += 1;
-        if self.retained > COMMAND_SNAPSHOT_FILES {
-            return Err(ToolError::Limit);
-        }
-        Ok(())
-    }
+#[cfg(test)]
+pub(super) fn test_baseline(workspace: &Path) -> Result<command::CommandBaseline, ToolError> {
+    let base = workspace.with_extension("base");
+    let copied = std::process::Command::new("cp")
+        .arg("-Rp")
+        .arg(workspace)
+        .arg(&base)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    command_baseline(&base, workspace)
 }
 
 #[cfg(test)]
 pub(super) fn command_changeset(
     workspace: &Path,
-    before: &CommandSnapshot,
+    before: &command::CommandBaseline,
 ) -> Result<CommandChangeset, ToolError> {
-    let after = command_snapshot(workspace)?;
-    compare_command_snapshots(before, &after)
-}
-
-#[cfg(test)]
-fn compare_command_snapshots(
-    before: &CommandSnapshot,
-    after: &CommandSnapshot,
-) -> Result<CommandChangeset, ToolError> {
-    if after.root_identity != before.root_identity {
-        return Err(ToolError::ChangedInput);
-    }
-    let mut files = Vec::new();
-    let mut changed_bytes = 0usize;
-    let paths: BTreeSet<_> = before.entries.keys().chain(after.entries.keys()).collect();
-    for path in paths {
-        let old = before.entries.get(path);
-        let new = after.entries.get(path);
-        if old.is_some_and(|entry| entry.content.is_none())
-            && new.is_some_and(|entry| entry.content.is_some())
-            || old.is_some_and(|entry| entry.content.is_some())
-                && new.is_some_and(|entry| entry.content.is_none())
-        {
-            return Err(ToolError::Path);
-        }
-        if old.map(|entry| (&entry.content, entry.executable))
-            == new.map(|entry| (&entry.content, entry.executable))
-            || old
-                .into_iter()
-                .chain(new)
-                .all(|entry| entry.content.is_none())
-        {
-            continue;
-        }
-        for entry in old.into_iter().chain(new) {
-            changed_bytes = changed_bytes
-                .checked_add(entry.content.as_ref().map_or(0, Vec::len))
-                .ok_or(ToolError::Limit)?;
-        }
-        if changed_bytes > MAX_CHANGESET_BYTES || files.len() >= MAX_CHANGESET_FILES {
-            return Err(ToolError::Limit);
-        }
-        let version = |entry: Option<&Entry>| {
-            entry.and_then(|entry| {
-                entry
-                    .content
-                    .as_ref()
-                    .map(|content| FileVersion::from_bytes(content, entry.executable))
-            })
-        };
-        let old = version(old);
-        let new = version(new);
-        if old != new {
-            files.push(FileChange {
-                path: path.clone(),
-                before: old,
-                after: new,
-            });
-        }
-    }
-    let changeset = CommandChangeset { files };
-    if !changeset.valid() {
-        return Err(ToolError::Limit);
-    }
-    Ok(changeset)
+    selected_command_changeset(
+        workspace,
+        before,
+        &CommandSelection::default(),
+        std::time::Instant::now() + super::selection::TEST_RUNTIME,
+    )
+    .map(|(changeset, _)| changeset)
 }
 
 #[cfg(target_os = "macos")]
@@ -466,16 +334,10 @@ pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
 }
 
 pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         let meta = dir.dir_metadata().map_err(|_| ToolError::Path)?;
         Ok((meta.dev(), meta.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Err(ToolError::ProtectionUnavailable)
     }
 }
 
@@ -570,15 +432,70 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         }
         Ok(file)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+}
+
+// Walks resolve each child from its admitted parent handle instead of re-resolving from the root.
+pub(super) fn open_child(parent: &Dir, name: &str, device: u64) -> Result<File, ToolError> {
+    if name.contains('/') || !valid_relative(name, false) {
+        return Err(ToolError::Path);
+    }
+    #[cfg(target_os = "linux")]
     {
-        let _ = (root, path);
-        Err(ToolError::ProtectionUnavailable)
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        let _ = device;
+        let fd = openat2(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .map_err(|error| match error {
+            rustix::io::Errno::NOENT => ToolError::NotFound,
+            _ => ToolError::Path,
+        })?;
+        Ok(File::from(fd))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+        let file = File::from(
+            openat(
+                parent,
+                name,
+                OFlags::RDONLY
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK
+                    | OFlags::NOFOLLOW
+                    | OFlags::NOCTTY,
+                Mode::empty(),
+            )
+            .map_err(|error| match error {
+                rustix::io::Errno::NOENT => ToolError::NotFound,
+                _ => ToolError::Path,
+            })?,
+        );
+        if file.metadata().map_err(|_| ToolError::Path)?.dev() != device {
+            return Err(ToolError::Path);
+        }
+        Ok(file)
+    }
+}
+
+// A `.git` entry below the Workspace root marks a nested repository or worktree that walks skip.
+pub(super) fn nested_repository(directory: &Dir) -> Result<bool, ToolError> {
+    match directory.symlink_metadata(".git") {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ToolError::Path),
     }
 }
 
 fn non_directory_error(file: &File) -> ToolError {
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if file
@@ -613,7 +530,6 @@ pub(crate) fn read_regular(mut file: File, cap: usize) -> Result<Vec<u8>, ToolEr
     if !metadata.is_file() {
         return Err(ToolError::Path);
     }
-    #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         if metadata.nlink() != 1 {
@@ -662,7 +578,6 @@ fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
     let leaf = parts.pop().ok_or(ToolError::Path)?.to_owned();
     let mut dir = root.try_clone().map_err(|_| ToolError::Operation)?;
     let mut builder = DirBuilder::new();
-    #[cfg(unix)]
     {
         use cap_std::fs::DirBuilderExt;
         builder.mode(0o700);
@@ -679,13 +594,21 @@ fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
 }
 
 pub(super) fn put(root: &Dir, path: &str, bytes: &[u8], executable: bool) -> Result<(), ToolError> {
+    write_new(root, path, bytes, executable).map(drop)
+}
+
+pub(super) fn write_new(
+    root: &Dir,
+    path: &str,
+    bytes: &[u8],
+    executable: bool,
+) -> Result<File, ToolError> {
     let (parent, leaf) = create_parents(root, path)?;
     let mut options = OpenOptions::new();
     options
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
-    #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
         options.mode(if executable { 0o700 } else { 0o600 });
@@ -693,7 +616,8 @@ pub(super) fn put(root: &Dir, path: &str, bytes: &[u8], executable: bool) -> Res
     let mut file = parent
         .open_with(leaf, &options)
         .map_err(|_| ToolError::Operation)?;
-    file.write_all(bytes).map_err(|_| ToolError::Operation)
+    file.write_all(bytes).map_err(|_| ToolError::Operation)?;
+    Ok(file.into_std())
 }
 
 fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
@@ -702,7 +626,6 @@ fn put_entry(root: &Dir, entry: Entry) -> Result<(), ToolError> {
     } else {
         let (parent, leaf) = create_parents(root, &entry.path)?;
         let mut builder = DirBuilder::new();
-        #[cfg(unix)]
         {
             use cap_std::fs::DirBuilderExt;
             builder.mode(0o700);
@@ -898,13 +821,10 @@ fn collect_open(
             )?;
         }
     } else if keep(path) {
-        #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
             metadata.permissions().mode() & 0o111 != 0
         };
-        #[cfg(not(unix))]
-        let executable = false;
         let content = read_regular(file, MAX_FILE_BYTES)?;
         budget.bytes = budget
             .bytes
@@ -1013,8 +933,10 @@ pub(crate) fn workspace_entries(
     validate_mention_path(folder, true)?;
     validate_mention_path(prefix, true)?;
     let root = open_directory(workspace)?;
-    let config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}))
-        .map_err(|_| ToolError::Configuration)?;
+    let config = serde_json::from_value(
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    )
+    .map_err(|_| ToolError::Configuration)?;
     let call = ToolCall::List {
         path: if folder.is_empty() {
             ".".into()
@@ -1079,8 +1001,11 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
 }
 
 #[cfg(not(target_os = "macos"))]
+pub(super) const COMMAND_SEED: &str = "/seed/workspace";
+
+#[cfg(not(target_os = "macos"))]
 pub(super) fn copy_command_seed() -> Result<(), ToolError> {
-    let root = open_directory(Path::new("/seed/workspace"))?;
+    let root = open_directory(Path::new(COMMAND_SEED))?;
     let target = open_directory(Path::new("/workspace"))?;
     CommandSeedCopy {
         root: &root,
@@ -1150,7 +1075,6 @@ impl CommandSeedCopy<'_> {
     fn entry(&mut self, path: String) -> Result<(), ToolError> {
         let file = open_file(self.root, &path)?;
         let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             if metadata.mode() & 0o6000 != 0 {
@@ -1168,13 +1092,10 @@ impl CommandSeedCopy<'_> {
         let content = read_regular(file, cap)?;
         self.budget.content(content.len())?;
         self.retain()?;
-        #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
             metadata.permissions().mode() & 0o111 != 0
         };
-        #[cfg(not(unix))]
-        let executable = false;
         put_entry(
             self.target,
             Entry {
@@ -1330,7 +1251,6 @@ pub(super) fn inspect(
             if !metadata.is_file() {
                 return Err(ToolError::Path);
             }
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
                 if metadata.nlink() != 1 {
@@ -1390,8 +1310,7 @@ pub(super) fn fit_rows(
 }
 
 pub(super) fn in_process_mutation(intent: &EffectIntent) -> bool {
-    intent.target == crate::session::worker::EffectTarget::Workspace
-        && intent.call.facts().family == super::catalog::Family::File
+    intent.call.facts().family == super::catalog::Family::File
         && intent.call.facts().mutates
         && intent.enforcement_digest == FileReceipt::enforcement_digest()
 }
@@ -1558,12 +1477,17 @@ pub(super) fn mutate(
             content,
         } => {
             let bytes = content.as_bytes();
+            if expected_digest.is_none()
+                && valid_relative(path, false)
+                && change_parent(root, path).is_ok_and(|parent| !parent.missing.is_empty())
+            {
+                return create_with_parents(root, path, bytes, control);
+            }
             replace(root, path, expected_digest.as_deref(), bytes, control)
         }
         ToolCall::Mkdir { path } => {
             let (parent, leaf) = parent(root, path)?;
             let mut builder = DirBuilder::new();
-            #[cfg(unix)]
             {
                 use cap_std::fs::DirBuilderExt;
                 builder.mode(0o755);
@@ -1589,6 +1513,7 @@ pub(super) fn mutate(
             expected_digest,
             ..
         } => {
+            let expected_digest = expected_digest.as_deref().ok_or(ToolError::Operation)?;
             let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
             let replacement = edited_content(&bytes, call)?;
             let bytes = replacement.as_bytes();
@@ -1616,10 +1541,12 @@ pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, To
     }
     let expected_digest = match call {
         ToolCall::Edit {
-            expected_digest, ..
+            expected_digest: Some(expected_digest),
+            ..
         }
         | ToolCall::MultiEdit {
-            expected_digest, ..
+            expected_digest: Some(expected_digest),
+            ..
         } => expected_digest,
         _ => return Err(ToolError::Operation),
     };
@@ -1665,6 +1592,30 @@ pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, To
     }
 }
 
+// Create-mode Write reuses Move's checked parent creation for missing directories.
+fn create_with_parents(
+    root: &Dir,
+    path: &str,
+    bytes: &[u8],
+    control: &MutationControl,
+) -> Result<String, ToolError> {
+    let change = FileChange {
+        path: path.into(),
+        before: None,
+        after: Some(FileVersion::from_bytes(bytes, false)),
+    };
+    let files = std::slice::from_ref(&change);
+    worker_publication_paths(root, files)?;
+    apply_files_controlled(root, files, control)?;
+    serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+        sha256: hex_digest(bytes),
+        bytes: bytes.len() as u32,
+        executable: false,
+        before: None,
+    })
+    .map_err(|_| ToolError::Uncertain)
+}
+
 fn remove_or_move(
     root: &Dir,
     call: &ToolCall,
@@ -1673,12 +1624,12 @@ fn remove_or_move(
     let (source, destination, expected) = match call {
         ToolCall::Delete {
             path,
-            expected_digest,
+            expected_digest: Some(expected_digest),
         } => (path, None, expected_digest),
         ToolCall::Move {
             source,
             destination,
-            expected_digest,
+            expected_digest: Some(expected_digest),
         } => (source, Some(destination), expected_digest),
         _ => return Err(ToolError::Configuration),
     };
@@ -1764,7 +1715,6 @@ fn check_change_directory(root: &Dir, directory: &Dir) -> Result<(), ToolError> 
     if !metadata.is_dir() || identity(directory)?.0 != identity(root)?.0 {
         return Err(ToolError::Path);
     }
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         if metadata.mode() & 0o6000 != 0 {
@@ -1791,13 +1741,10 @@ fn check_change_file(
     };
     let file = open_file(parent, leaf).map_err(|_| ToolError::Conflict)?;
     let metadata = file.metadata().map_err(|_| ToolError::Conflict)?;
-    #[cfg(unix)]
     let mode = {
         use std::os::unix::fs::PermissionsExt;
         metadata.permissions().mode()
     };
-    #[cfg(not(unix))]
-    let mode = 0o600;
     if mode & 0o6000 != 0 {
         return Err(ToolError::Path);
     }
@@ -1844,14 +1791,96 @@ pub(super) fn apply_worker_changeset(
     apply_files_controlled(workspace, &changeset.files, control)
 }
 
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
     apply_files_controlled(root, files, &MutationControl::default())
+}
+
+// Publishes an editor's integration: every base digest must still hold in the Workspace, or the
+// conflicting paths are reported and nothing is written; after bytes come from the editor's tree.
+pub(super) fn apply_editor_changes(
+    root: &Dir,
+    tree: &Dir,
+    files: &[crate::session::worker::EditorChange],
+    control: &MutationControl,
+) -> Result<String, ToolError> {
+    let version = |state: &crate::session::rewind::FileState| FileVersion {
+        sha256: state.sha256.clone(),
+        content: String::new(),
+        executable: state.executable,
+    };
+    let changes: Vec<_> = files
+        .iter()
+        .map(|file| FileChange {
+            path: file.path.clone(),
+            before: file.before.as_ref().map(version),
+            after: file.after.as_ref().map(version),
+        })
+        .collect();
+    worker_publication_paths(root, &changes)?;
+    let mut conflicts = Vec::new();
+    for change in &changes {
+        control.check()?;
+        let parent = change_parent(root, &change.path)?;
+        let held = if parent.missing.is_empty() {
+            check_change_file(&parent.directory, &parent.leaf, change.before.as_ref()).map(|_| ())
+        } else if change.before.is_some() {
+            Err(ToolError::Conflict)
+        } else {
+            Ok(())
+        };
+        match held {
+            Ok(()) => {}
+            Err(ToolError::Conflict | ToolError::Limit) => conflicts.push(change.path.as_str()),
+            Err(error) => return Err(error),
+        }
+    }
+    if !conflicts.is_empty() {
+        return Err(ToolError::Conflicts(conflict_list(&conflicts)));
+    }
+    apply_files_with(root, &changes, control, |change, after| {
+        let file = open_file(tree, &change.path)?;
+        let metadata = command::command_metadata(&file)?;
+        let bytes = read_regular(file, MAX_FILE_BYTES)?;
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        if hex_digest(&bytes) != after.sha256 || executable != after.executable {
+            return Err(ToolError::ChangedInput);
+        }
+        Ok(bytes)
+    })
+}
+
+// At most this many conflicting paths are named; the rest are counted.
+const MAX_NAMED_CONFLICTS: usize = 32;
+
+fn conflict_list(paths: &[&str]) -> String {
+    let mut list = paths[..paths.len().min(MAX_NAMED_CONFLICTS)].join(", ");
+    if paths.len() > MAX_NAMED_CONFLICTS {
+        list.push_str(&format!(" and {} more", paths.len() - MAX_NAMED_CONFLICTS));
+    }
+    list
 }
 
 fn apply_files_controlled(
     root: &Dir,
     files: &[FileChange],
     control: &MutationControl,
+) -> Result<String, ToolError> {
+    apply_files_with(root, files, control, |_, after| {
+        after
+            .bytes_with_limit(MAX_FILE_BYTES)
+            .ok_or(ToolError::Path)
+    })
+}
+
+fn apply_files_with(
+    root: &Dir,
+    files: &[FileChange],
+    control: &MutationControl,
+    content: impl Fn(&FileChange, &FileVersion) -> Result<Vec<u8>, ToolError>,
 ) -> Result<String, ToolError> {
     check_change_directory(root, root)?;
     let mut parents = Vec::new();
@@ -1911,7 +1940,6 @@ fn apply_files_controlled(
                     parent.directory = std::sync::Arc::new(live);
                 } else {
                     let mut builder = DirBuilder::new();
-                    #[cfg(unix)]
                     {
                         use cap_std::fs::DirBuilderExt;
                         builder.mode(0o700);
@@ -1939,9 +1967,7 @@ fn apply_files_controlled(
             verify_change_parent(root, &parent)?;
             let mode = check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
             if let Some(after) = &change.after {
-                let bytes = after
-                    .bytes_with_limit(MAX_FILE_BYTES)
-                    .ok_or(ToolError::Path)?;
+                let bytes = content(change, after)?;
                 let mode = mode & 0o666
                     | if after.executable {
                         if mode & 0o111 == 0 {
@@ -1992,13 +2018,10 @@ fn replace(
     let (parent, leaf) = parent(root, path)?;
     let inspect = || match open_file(&parent, &leaf) {
         Ok(file) => {
-            #[cfg(unix)]
             let mode = {
                 use std::os::unix::fs::MetadataExt;
                 file.metadata().map_err(|_| ToolError::Operation)?.mode() & 0o777
             };
-            #[cfg(not(unix))]
-            let mode = 0o600;
             let current = read_regular(file, MAX_FILE_BYTES)?;
             let sha256 = hex_digest(&current);
             if expected != Some(sha256.as_str()) {
@@ -2057,7 +2080,6 @@ fn replace_file(
         .write(true)
         .create_new(true)
         .follow(FollowSymlinks::No);
-    #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
         options.mode(mode);
@@ -2069,7 +2091,6 @@ fn replace_file(
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|_| ToolError::Operation)?;
-        #[cfg(unix)]
         {
             use cap_std::fs::PermissionsExt;
             file.set_permissions(cap_std::fs::Permissions::from_mode(mode))
@@ -2077,7 +2098,6 @@ fn replace_file(
         }
         verify()?;
         control.commit()?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             if create {
                 rustix::fs::renameat_with(
@@ -2095,10 +2115,6 @@ fn replace_file(
             }
             control.sync_parent(parent)?;
             Ok(())
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            Err(ToolError::ProtectionUnavailable)
         }
     })();
     let _ = parent.remove_file(&temporary);
@@ -2354,7 +2370,7 @@ mod read_page_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
 mod path_tests {
     use super::*;
 
@@ -2377,7 +2393,7 @@ mod path_tests {
         let runtime = super::super::tests::in_process_runtime(
             &workspace,
             json!({
-                "version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]
+                "workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]
             }),
         );
         for (path, expected) in [
@@ -2397,15 +2413,17 @@ mod path_tests {
             ("outside/missing", ToolDisposition::Denied),
             ("../missing", ToolDisposition::Denied),
         ] {
-            let intent = runtime.intent(
-                crate::session::RunId::new(),
-                crate::session::AgentRunId::new(),
-                ToolCall::Read {
-                    path: path.into(),
-                    offset: None,
-                    limit: None,
-                },
-            );
+            let intent = runtime
+                .intent(
+                    crate::session::RunId::new(),
+                    crate::session::AgentRunId::new(),
+                    ToolCall::Read {
+                        path: path.into(),
+                        offset: None,
+                        limit: None,
+                    },
+                )
+                .unwrap();
             let observation = runtime
                 .execute(intent, super::super::Cancellation::new())
                 .await;
@@ -2434,14 +2452,16 @@ mod path_tests {
             open_absolute(workspace.join("src/missing").to_str().unwrap()),
             Err(ToolError::Path)
         ));
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Skill {
-                name: "review".into(),
-                resource: None,
-            },
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Skill {
+                    name: "review".into(),
+                    resource: None,
+                },
+            )
+            .unwrap();
         assert_eq!(
             super::super::dispatch::outcome(&intent, Err(ToolError::NotFound)),
             (

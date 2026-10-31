@@ -1,127 +1,16 @@
-use super::active_terminal::{ProductGuard, product_child_of_executable};
-use super::loopback::{ChildGuard, wait_product};
+use super::active_terminal::{
+    ProductGuard, assert_tty_restored, product_child_of_executable, transcript_field,
+};
+use crate::pty::Pty;
 use arany::{SessionView, StateRoot, Store, create_session};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
-    io::{Read, Write},
     os::unix::fs::PermissionsExt,
-    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
 
-pub(super) use crate::{PtyResponses, pump, screen_rows, tail};
-
-#[track_caller]
-pub(super) fn pump_until(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-    what: &str,
-    done: impl Fn(&[u8]) -> bool,
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !done(transcript) {
-        pump(output, input, transcript, answered);
-        assert!(Instant::now() < deadline, "{what}: {}", tail(transcript));
-        thread::yield_now();
-    }
-}
-
-#[track_caller]
-pub(super) fn wait_for(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-    needle: &[u8],
-) {
-    wait_for_after(output, input, transcript, answered, 0, needle);
-}
-
-#[track_caller]
-pub(super) fn wait_for_after(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-    from: usize,
-    needle: &[u8],
-) {
-    pump_until(
-        output,
-        input,
-        transcript,
-        answered,
-        &format!("PTY stage missing {}", tail(needle)),
-        |transcript| {
-            crate::process::pty_text_matches(&transcript[from..], needle)
-                .next()
-                .is_some()
-        },
-    );
-}
-
-pub(super) fn screen_contains(
-    transcript: &[u8],
-    columns: usize,
-    rows: usize,
-    needle: &str,
-) -> bool {
-    screen_rows(transcript, columns, rows)
-        .join(" ")
-        .contains(needle)
-}
-
-#[track_caller]
-pub(super) fn wait_for_screen(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-    (from, columns, rows): (usize, usize, usize),
-    needle: &str,
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    // A stale screen that already shows `needle` is not the action's result: require a
-    // changed decoded screen, while still accepting a needle that was visible before.
-    let before = screen_rows(&transcript[..from], columns, rows);
-    while transcript.len() == from
-        || screen_rows(transcript, columns, rows) == before
-        || !screen_contains(transcript, columns, rows, needle)
-    {
-        pump(output, input, transcript, answered);
-        assert!(
-            Instant::now() < deadline,
-            "screen missing {needle}: {}",
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
-}
-
-// Keep unchanged diff cells while bounding each pump capture; retain raw evidence separately.
-pub(super) fn checkpoint_screen(
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-    history: &mut Vec<u8>,
-    (columns, rows): (usize, usize),
-    from: usize,
-) -> usize {
-    assert!(
-        history.len() + transcript.len() - from <= 512 * 1024,
-        "bounded PTY history"
-    );
-    history.extend_from_slice(&transcript[from..]);
-    let screen = screen_rows(transcript, columns, rows);
-    transcript.clear();
-    for (row, line) in screen.iter().enumerate() {
-        write!(transcript, "\x1b[{};1H{line}", row + 1).expect("screen checkpoint");
-    }
-    *answered = PtyResponses::default();
-    transcript.len()
-}
+pub(super) use crate::pty::screen_contains;
+pub(super) use crate::{screen_rows, tail};
 
 fn mouse_modes_enabled(bytes: &[u8]) -> Vec<u32> {
     [1000, 1002, 1003, 1006, 1015]
@@ -183,40 +72,30 @@ fn run_picker_case(
     let command = format!(
         "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {classic}{no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut attached = crate::isolation::isolated_script(temp.path());
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", "/arany")
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("picker process"));
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp.path())),
+            &command,
+        )
+        .executable("/arany")
+        .session(&state, &workspace)
+        .term("xterm")
+        .spawn(),
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     // Keys reach the picker only after its armed frame; earlier input is discarded.
-    while !crate::armed_selector(&transcript, 0, width.into(), 24)
+    while !crate::armed_selector(&pty.transcript, 0, width.into(), 24)
         .is_some_and(|screen| screen.iter().any(|line| line.contains("Newer")))
     {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        pty.pump();
         assert!(
             Instant::now() < deadline,
             "armed picker not visible in {name}: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let shell_pid = String::from_utf8_lossy(&transcript)
+    let shell_pid = String::from_utf8_lossy(&pty.transcript)
         .lines()
         .find_map(|line| line.trim_end_matches('\r').strip_prefix("SHELL_PID:"))
         .expect("picker shell PID")
@@ -228,11 +107,7 @@ fn run_picker_case(
     );
     if width < 20 {
         let cues: [&[u8]; 5] = [b"Up/Dn", b"Enter", b"Esc", b"Older", b"Newer"];
-        pump_until(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
+        pty.pump_until(
             &format!("narrow picker frame incomplete in {name}"),
             |transcript| {
                 cues.iter().all(|cue| {
@@ -245,33 +120,18 @@ fn run_picker_case(
     }
     if fullscreen {
         // Rows respond to the pointer once Fullscreen has enabled its global capture.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while count(&transcript, b"\x1b[?1000h") == 0 {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "picker capture missing in {name}: {}",
-                tail(&transcript)
-            );
-            thread::yield_now();
-        }
+        pty.pump_until(&format!("picker capture missing in {name}"), |transcript| {
+            count(transcript, b"\x1b[?1000h") != 0
+        });
     }
-    let selected_at = transcript.len();
-    input.write_all(selection).expect("picker selection");
-    pump_until(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        &format!("picker did not close in {name}"),
-        |transcript| {
-            transcript[selected_at..]
-                .windows(b"\x1b[?25h".len())
-                .any(|part| part == b"\x1b[?25h")
-        },
-    );
+    let selected_at = pty.send(selection);
+    pty.pump_until(&format!("picker did not close in {name}"), |transcript| {
+        transcript[selected_at..]
+            .windows(b"\x1b[?25h".len())
+            .any(|part| part == b"\x1b[?25h")
+    });
     if fullscreen {
-        let selected = &transcript[selected_at..];
+        let selected = &pty.transcript[selected_at..];
         let returned = selected
             .windows(b"\x1b[?25h".len())
             .position(|part| part == b"\x1b[?25h")
@@ -289,14 +149,11 @@ fn run_picker_case(
             .permissions();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755))
             .expect("make fixture State unsafe");
-        let rejected_at = transcript.len();
-        input
-            .write_all(b"/resume\r")
-            .expect("reject unsafe listing");
+        let rejected_at = pty.send(b"/resume\r");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let recent = &transcript[rejected_at..];
+            pty.pump();
+            let recent = &pty.transcript[rejected_at..];
             if recent
                 .windows(b"unsafe".len())
                 .any(|part| part == b"unsafe")
@@ -313,24 +170,23 @@ fn run_picker_case(
         }
         std::fs::set_permissions(&state, original_mode).expect("restore fixture State mode");
         assert!(
-            transcript[rejected_at..]
+            pty.transcript[rejected_at..]
                 .windows(b"Arany \xc2\xb7 error:".len())
                 .any(|part| part == b"Arany \xc2\xb7 error:"),
             "unavailable Session listing needs an error heading: {}",
-            tail(&transcript[rejected_at..(rejected_at + 512).min(transcript.len())])
+            tail(&pty.transcript[rejected_at..(rejected_at + 512).min(pty.transcript.len())])
         );
-        let open_at = transcript.len();
-        input.write_all(b"/resume\r").expect("open attached picker");
+        let open_at = pty.send(b"/resume\r");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            if crate::armed_selector(&transcript, open_at, width.into(), 24).is_some() {
+            pty.pump();
+            if crate::armed_selector(&pty.transcript, open_at, width.into(), 24).is_some() {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
                 "attached picker: {}",
-                tail(&transcript[open_at..])
+                tail(&pty.transcript[open_at..])
             );
             thread::yield_now();
         }
@@ -338,14 +194,11 @@ fn run_picker_case(
         let replacement_workspace = temp.path().join("workspace-replacement");
         std::fs::rename(&workspace, &original_workspace).expect("retain original Workspace");
         std::fs::create_dir(&workspace).expect("replace fixture Workspace identity");
-        let failed_at = transcript.len();
-        input
-            .write_all(b"\r")
-            .expect("activate the stale Session row");
+        let failed_at = pty.send(b"\r");
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let recent = &transcript[failed_at..];
+            pty.pump();
+            let recent = &pty.transcript[failed_at..];
             if recent
                 .windows(b"Workspace".len())
                 .any(|part| part == b"Workspace")
@@ -363,20 +216,19 @@ fn run_picker_case(
         std::fs::rename(&workspace, &replacement_workspace).expect("retain replacement fixture");
         std::fs::rename(&original_workspace, &workspace).expect("restore original Workspace");
         assert!(
-            transcript[failed_at..]
+            pty.transcript[failed_at..]
                 .windows(b"Arany \xc2\xb7 error:".len())
                 .any(|part| part == b"Arany \xc2\xb7 error:"),
             "rejected Session activation needs an error heading: {}",
-            tail(&transcript[failed_at..(failed_at + 512).min(transcript.len())])
+            tail(&pty.transcript[failed_at..(failed_at + 512).min(pty.transcript.len())])
         );
     }
-    input
-        .write_all(b"/rename Mouse\r/exit\r")
-        .expect("rename selected Session and exit");
+    pty.send(b"/rename Mouse\r/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if attached
+        pty.pump();
+        if pty
+            .child
             .child()
             .try_wait()
             .expect("picker status")
@@ -387,19 +239,18 @@ fn run_picker_case(
         assert!(
             Instant::now() < deadline,
             "picker did not exit in {name}: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = pty.finish();
     assert!(
         result.status.success(),
         "picker {name} failed: {}",
-        tail(&transcript)
+        tail(&pty.transcript)
     );
     assert_eq!(result.stderr, b"");
-    let output_text = String::from_utf8(transcript).expect("PTY transcript UTF-8");
+    let output_text = String::from_utf8(pty.transcript).expect("PTY transcript UTF-8");
     let before = output_text
         .lines()
         .find_map(|line| line.strip_prefix("TTY_BEFORE:"))
@@ -486,91 +337,50 @@ fn screen_reader_entry(
     let shell = format!(
         "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {entry}; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command = crate::isolation::isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", "/arany")
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", &shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("screen-reader process"));
-    let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout pipe flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
-    let mut transcript = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::process::pty_text_matches(&transcript, b"Input:\n")
-        .next()
-        .is_none()
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "screen-reader input not ready: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            &shell,
+        )
+        .executable("/arany")
+        .session(state, workspace)
+        .term("xterm")
+        .spawn(),
+    );
+    pty.wait_for(b"Input:\n");
     if !resume {
         let original_mode = std::fs::metadata(state)
             .expect("fixture State mode")
             .permissions();
         std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o755))
             .expect("make fixture State unsafe");
-        let rejected_at = transcript.len();
-        input
-            .write_all(b"/resume\r")
-            .expect("reject unsafe listing");
-        let expected = b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n";
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while crate::process::pty_text_matches(&transcript[rejected_at..], expected)
-            .next()
-            .is_none()
-        {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "linear listing error: {}",
-                tail(&transcript[rejected_at..])
-            );
-            thread::yield_now();
-        }
+        pty.send_and_wait(
+            b"/resume\r",
+            b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n",
+        );
         std::fs::set_permissions(state, original_mode).expect("restore fixture State mode");
     }
-    input.write_all(b"/exit\r").expect("exit Session");
-    let result = wait_product(child.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    pty.send(b"/exit\r");
+    let result = pty.finish();
     assert!(
         result.status.success(),
         "Session exit: {}",
-        tail(&transcript)
+        tail(&pty.transcript)
     );
     assert_eq!(result.stderr, b"");
     assert_eq!(
-        answered.cursor_queries, 0,
+        pty.answered.cursor_queries, 0,
         "screen-reader mode uses no cursor query"
     );
-    let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
-    let marker = |name: &str| {
-        text.lines()
-            .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
-            .expect("terminal marker")
-            .to_owned()
-    };
-    assert_eq!(marker("TTY_BEFORE:"), marker("TTY_AFTER:"));
+    let text = String::from_utf8(pty.transcript).expect("screen-reader UTF-8");
+    assert_tty_restored(&text);
     assert!(
         !text.contains('\x1b'),
         "screen-reader output is control-free"
     );
-    marker("Session: ")
+    transcript_field(&text, "Session: ").to_owned()
 }
 
 #[test]

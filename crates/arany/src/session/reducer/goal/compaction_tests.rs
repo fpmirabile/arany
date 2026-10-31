@@ -151,7 +151,7 @@ fn recent_compaction_files_use_newest_committed_workspace_digest() {
             "b".repeat(64),
             crate::tools::ToolCall::Edit {
                 path: "src/lib.rs".into(),
-                expected_digest: "a".repeat(64),
+                expected_digest: Some("a".repeat(64)),
                 old: "first".into(),
                 new: "second".into(),
             },

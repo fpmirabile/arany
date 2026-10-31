@@ -42,10 +42,18 @@ pub(crate) async fn run(
     telemetry: Telemetry,
 ) -> Result<super::CommandOutput, String> {
     let state_dir = super::state_dir(args.state_dir).map_err(str::to_owned)?;
+    super::admit_headless_records(&state_dir)?;
     let state = StateRoot::admit(&state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
+    // Threads pick their own Provider; startup refreshes the saved selection's catalog.
+    if let Ok(workspace) = std::env::current_dir()
+        && let Ok(Some(saved)) = super::attached::models::last_saved_defaults(&workspace)
+        && let Some(profile) = saved.provider
+    {
+        super::attached::models::refresh_at_startup(workspace, profile, saved.account_id);
+    }
     let mut signals = super::run_outcome::StopSignals::install()
         .map_err(|_| "signal handling unavailable".to_owned())?;
     let engine = Engine::open(
@@ -59,16 +67,7 @@ pub(crate) async fn run(
     .map_err(|_| "state store unavailable".to_owned())?;
     let (inbound, receiver) = mpsc::channel(INBOUND_CAPACITY);
     let (outbound, writer) = mpsc::channel(OUTBOUND_CAPACITY);
-    let input = std::fs::File::from(
-        std::os::fd::AsFd::as_fd(&std::io::stdin())
-            .try_clone_to_owned()
-            .map_err(|_| "protocol input unavailable".to_owned())?,
-    );
-    let output = std::fs::File::from(
-        std::os::fd::AsFd::as_fd(&std::io::stdout())
-            .try_clone_to_owned()
-            .map_err(|_| "protocol output unavailable".to_owned())?,
-    );
+    let (input, output) = protocol_stdio()?;
     let reader_task = tokio::spawn(read_messages(
         tokio::fs::File::from_std(input),
         inbound.clone(),
@@ -88,11 +87,13 @@ pub(crate) async fn run(
         async {
             signals.next().await;
         },
-        inbound,
-        outbound,
-        reader_task,
-        writer_task,
-        shutdown,
+        Transport {
+            inbound,
+            outbound,
+            reader: reader_task,
+            writer: writer_task,
+            shutdown,
+        },
     )
     .await?;
     Ok(super::CommandOutput {
@@ -102,15 +103,21 @@ pub(crate) async fn run(
     })
 }
 
+pub(in crate::cli) struct Transport<T> {
+    pub(in crate::cli) inbound: mpsc::Sender<ClientMessage>,
+    pub(in crate::cli) outbound: mpsc::Sender<T>,
+    pub(in crate::cli) reader: tokio::task::JoinHandle<Result<(), String>>,
+    pub(in crate::cli) writer: tokio::task::JoinHandle<Result<(), String>>,
+    pub(in crate::cli) shutdown: watch::Sender<bool>,
+}
+
 pub(in crate::cli) async fn serve_transport<T>(
     serving: impl std::future::Future<Output = Result<(), String>>,
     stop: impl std::future::Future<Output = ()>,
-    inbound: mpsc::Sender<ClientMessage>,
-    outbound: mpsc::Sender<T>,
-    mut reader_task: tokio::task::JoinHandle<Result<(), String>>,
-    mut writer_task: tokio::task::JoinHandle<Result<(), String>>,
-    shutdown: watch::Sender<bool>,
+    transport: Transport<T>,
 ) -> Result<(), String> {
+    let (inbound, outbound, shutdown) = (transport.inbound, transport.outbound, transport.shutdown);
+    let (mut reader_task, mut writer_task) = (transport.reader, transport.writer);
     let mut reader_done = false;
     let mut writer_done = false;
     let shutdown_rx = shutdown.subscribe();
@@ -179,6 +186,20 @@ pub(in crate::cli) async fn serve_transport<T>(
         let _ = writer_task.await;
     }
     result
+}
+
+pub(in crate::cli) fn protocol_stdio() -> Result<(std::fs::File, std::fs::File), String> {
+    let input = std::fs::File::from(
+        std::os::fd::AsFd::as_fd(&std::io::stdin())
+            .try_clone_to_owned()
+            .map_err(|_| "protocol input unavailable".to_owned())?,
+    );
+    let output = std::fs::File::from(
+        std::os::fd::AsFd::as_fd(&std::io::stdout())
+            .try_clone_to_owned()
+            .map_err(|_| "protocol output unavailable".to_owned())?,
+    );
+    Ok((input, output))
 }
 
 pub(in crate::cli) async fn shutdown_grace(

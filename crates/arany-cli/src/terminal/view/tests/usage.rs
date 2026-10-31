@@ -24,11 +24,13 @@ fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
                         draw_usage_frame(
                             frame,
                             frame.area(),
-                            &lines,
-                            scroll,
-                            (0, 2),
-                            true,
-                            Palette { color },
+                            UsageFrame {
+                                lines: &lines,
+                                scroll,
+                                page: (0, 2),
+                                armed: true,
+                                palette: Palette { color },
+                            },
                         )
                     })
                     .unwrap();
@@ -46,7 +48,6 @@ fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
     let mut attached = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
@@ -76,11 +77,13 @@ async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
                 draw_usage_frame(
                     frame,
                     frame.area(),
-                    &lines,
-                    scroll,
-                    (0, 1),
-                    true,
-                    Palette { color: false },
+                    UsageFrame {
+                        lines: &lines,
+                        scroll,
+                        page: (0, 1),
+                        armed: true,
+                        palette: Palette { color: false },
+                    },
                 );
             })
             .unwrap();

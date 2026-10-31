@@ -5,12 +5,11 @@ use serde_json::{Value, json};
 
 const WORKSPACE_ID: &str = "wrkspc_Selected123";
 const MODEL: &str = "claude-sonnet-5";
-const CHECKED_MODEL: &str = "claude-offline-new";
-const CHECK_WORKSPACE_CANARY: &str = "native-check-private-workspace-canary";
+const UNREVIEWED_MODEL: &str = "claude-offline-new";
 const OBJECTIVE: &str = "scoped offline objective";
 
 pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
-    for index in 0..9 {
+    for index in 0..5 {
         let request = chatgpt::read_request(output);
         let header_end = request
             .windows(4)
@@ -18,30 +17,7 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             .expect("bounded header boundary")
             + 4;
         let headers = std::str::from_utf8(&request[..header_end]).expect("ASCII headers");
-        let catalog = matches!(index, 0 | 1 | 5);
-        if index >= 5 {
-            assert!(
-                !request
-                    .windows(CHECK_WORKSPACE_CANARY.len())
-                    .any(|part| part == CHECK_WORKSPACE_CANARY.as_bytes())
-            );
-            let database = rusqlite::Connection::open_with_flags(
-                "/root/state-scoped-check/events.sqlite3",
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .unwrap();
-            let payload: String = database
-                .query_row(
-                    "SELECT payload FROM provider_check_events ORDER BY sequence DESC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let event: arany::CheckEvent = serde_json::from_str(&payload).unwrap();
-            assert!(
-                matches!(event, arany::CheckEvent::ProviderCheckCallStarted { ordinal, .. } if usize::from(ordinal) == index - 5)
-            );
-        }
+        let catalog = matches!(index, 0 | 1);
 
         assert!(
             headers.starts_with(if catalog {
@@ -81,11 +57,11 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
                 &serde_json::to_vec(&json!({
                     "data": [
                         {"id": MODEL, "type": "model", "display_name": "Reviewed fixture"},
-                        {"id": CHECKED_MODEL, "type": "model", "display_name": "Checked fixture"}
+                        {"id": UNREVIEWED_MODEL, "type": "model", "display_name": "Unreviewed fixture"}
                     ],
                     "has_more": false,
                     "first_id": MODEL,
-                    "last_id": CHECKED_MODEL
+                    "last_id": UNREVIEWED_MODEL
                 }))
                 .expect("synthetic catalog"),
             );
@@ -99,19 +75,19 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             "selected credential entered the request body"
         );
         let body: Value = serde_json::from_slice(payload).expect("bounded Messages request");
-        let model = if index < 4 { MODEL } else { CHECKED_MODEL };
+        let model = if index < 4 { MODEL } else { UNREVIEWED_MODEL };
         assert_eq!(body["model"], model);
         assert_eq!(
             body["max_tokens"],
             if matches!(index, 2 | 4) { 4096 } else { 1024 }
         );
-        assert_eq!(body["stream"], index == 6);
+        assert_eq!(body["stream"], false);
         assert_eq!(
             body["output_config"]["effort"],
             if index < 4 { "low" } else { "high" }
         );
         assert!(body["output_config"].get("format").is_none());
-        if matches!(index, 3 | 8) {
+        if index == 3 {
             crate::loopback::assert_compaction_request(&body);
         }
         let content = crate::semantic::input(&body);
@@ -121,55 +97,23 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
                 assert_eq!(content["items"][0]["user"], OBJECTIVE);
                 assert_eq!(content["items"][0]["assistant"], "scoped answer");
             }
-            6 => assert_eq!(
-                content["objective"],
-                "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied."
-            ),
-            7 => assert_eq!(
-                content["objective"],
-                "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied."
-            ),
-            8 => assert_eq!(
-                content["items"][0]["user"],
-                "Synthetic conformance question"
-            ),
             _ => unreachable!("catalog phases returned before Messages decoding"),
         }
-        if matches!(index, 6 | 7) {
-            assert!(content["workspace_guidance"].is_null());
-            assert_eq!(content["includes"], json!([]));
-            assert_eq!(content["history"], json!([]));
-            assert_eq!(content["child_results"], json!([]));
-            assert!(content["derived_context_summary"].is_null());
-        }
-        let outcome = match index {
-            3 | 8 => json!(r#"scoped compacted"#),
-            7 => {
-                json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}})
-            }
-            _ => {
-                json!("scoped answer")
-            }
+        let outcome = if index == 3 {
+            json!("scoped compacted")
+        } else {
+            json!("scoped answer")
         };
-        if matches!(index, 3 | 8) {
-            assert_eq!(outcome, "scoped compacted", "plain-text compaction reply");
-        }
         let response = json!({
             "id": format!("msg_scoped_{index}"), "type": "message", "role": "assistant",
-            "model": model, "stop_reason": if index == 7 { "tool_use" } else { "end_turn" }, "stop_details": null,
+            "model": model, "stop_reason": "end_turn", "stop_details": null,
             "stop_sequence": null, "content": arany::semantic::messages_content(&outcome),
             "usage": {"input_tokens": 12, "output_tokens": 8}
         });
-        if index == 6 {
-            let body = arany::semantic::messages_stream(&response);
-            write!(input, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            input.flush().unwrap();
-        } else {
-            let bytes = serde_json::to_vec(&response).unwrap();
-            write!(input, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nanthropic-ratelimit-input-tokens-remaining: 0\r\nanthropic-priority-output-tokens-limit: 2000\r\nanthropic-priority-output-tokens-reset: 2026-10-28T01:30:00.001+01:30\r\nanthropic-workspace-id: remote-workspace-canary\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
-            input.write_all(&bytes).unwrap();
-            input.flush().unwrap();
-        }
+        let bytes = serde_json::to_vec(&response).unwrap();
+        write!(input, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nanthropic-ratelimit-input-tokens-remaining: 0\r\nanthropic-priority-output-tokens-limit: 2000\r\nanthropic-priority-output-tokens-reset: 2026-10-28T01:30:00.001+01:30\r\nanthropic-workspace-id: remote-workspace-canary\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+        input.write_all(&bytes).unwrap();
+        input.flush().unwrap();
     }
 }
 
@@ -204,7 +148,7 @@ pub(super) fn stage() {
         &SETUP_SHELL.replace("state-one", "state-scoped"),
         &[
             (
-                b"type a choice name: 1. API accounts or 2. Custom routes or 3. Role routing or 4. Roster profiles; empty Enter selects 1. API accounts\r\nInput:\r\n",
+                SETUP_MENU_PROMPT,
                 b"API accounts\r",
             ),
             (
@@ -254,7 +198,7 @@ pub(super) fn stage() {
     );
 
     let models = command(&["provider", "models", "anthropic", "--saved-account"]);
-    assert_eq!(models.stdout, "Provider: anthropic\nModels: 2\nclaude-offline-new · availability only; choose effort; compatibility check optional\nclaude-sonnet-5 · reviewed metadata; effort low, medium, high, xhigh, max\n".as_bytes());
+    assert_eq!(models.stdout, "Provider: anthropic\nModels: 2\nclaude-offline-new · availability only; choose effort\nclaude-sonnet-5 · reviewed metadata; effort low, medium, high, xhigh, max\n".as_bytes());
 
     let output = run_pty(
         &TURN_SHELL.replace("state-three", "state-scoped-run"),
@@ -301,7 +245,7 @@ pub(super) fn stage() {
     );
 
     run_pty(
-        &CHECK_SHELL.replace("state-four", "state-scoped-check"),
+        &CHECK_SHELL.replace("state-four", "state-scoped-unreviewed"),
         &[
             (b"Input:\r\n", b"/model claude-offline-new high\r"),
             (
@@ -311,25 +255,6 @@ pub(super) fn stage() {
         ],
         Some(b"Answer:\r\n  scoped answer"),
     );
-    std::fs::write("/root/workspace/check-private.txt", CHECK_WORKSPACE_CANARY).unwrap();
-    let checked = command(&[
-        "provider",
-        "check",
-        "anthropic",
-        CHECKED_MODEL,
-        "--effort",
-        "high",
-        "--accept-cost",
-        "--saved-account",
-        "--state-dir",
-        "/root/state-scoped-check",
-    ]);
-    crate::assert_check_privacy(
-        &checked,
-        Path::new("/root/state-scoped-check"),
-        &[KEY, CHECK_WORKSPACE_CANARY],
-    );
-    assert_eq!(crate::check_output(&checked.stdout, Path::new("/root/state-scoped-check"), arany::CheckDisposition::Succeeded), b"Provider: anthropic\nModel: claude-offline-new\nEffort: high\nCredential: saved API account\nStatus: native synthetic conformance passed\n");
     server
         .responder
         .take()
@@ -337,16 +262,16 @@ pub(super) fn stage() {
         .join()
         .expect("all scoped requests");
     drop(server);
-    let checked = session("/root/state-scoped-check");
-    assert_eq!(checked.defaults.account_id, Some(id));
+    let unreviewed = session("/root/state-scoped-unreviewed");
+    assert_eq!(unreviewed.defaults.account_id, Some(id));
     assert_eq!(
-        checked.runs.len(),
+        unreviewed.runs.len(),
         1,
-        "conformance calls must not create Runs"
+        "one Run per unreviewed-model turn"
     );
     for (view, model, response_id) in [
         (&direct, MODEL, "msg_scoped_2"),
-        (&checked, CHECKED_MODEL, "msg_scoped_4"),
+        (&unreviewed, UNREVIEWED_MODEL, "msg_scoped_4"),
     ] {
         let run = &view.runs[0];
         assert_eq!(run.status, RunStatus::Finished);
@@ -397,7 +322,7 @@ pub(super) fn stage() {
         );
     }
     assert_eq!(
-        checked.runs[0]
+        unreviewed.runs[0]
             .config
             .as_ref()
             .unwrap()

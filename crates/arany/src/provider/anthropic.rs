@@ -19,21 +19,10 @@ pub struct AnthropicProvider {
     effort: Effort,
     key: String,
     workspace_id: Option<String>,
-    evidence_root: Option<crate::store::StateRoot>,
+    context_window_tokens: Option<u32>,
 }
 
 impl AnthropicProvider {
-    pub(super) fn for_conformance(
-        model: String,
-        effort: Effort,
-        credentials: NativeApiCredentials,
-    ) -> Result<Self, ProviderError> {
-        if !super::catalog::valid_model_id(&model) {
-            return Err(ProviderError::Rejected);
-        }
-        Self::with_resolved_effort(model, effort, credentials)
-    }
-
     /// Reads the native Anthropic key and optional API workspace before Workspace input.
     pub fn from_env(model: String) -> Result<Self, ProviderError> {
         Self::from_env_with_effort(model, None)
@@ -97,84 +86,6 @@ impl AnthropicProvider {
         Ok(provider)
     }
 
-    pub fn from_credentials_with_evidence(
-        root: crate::store::StateRoot,
-        model: String,
-        selected_effort: Option<Effort>,
-        credentials: NativeApiCredentials,
-        saved_api_account_id: Option<Uuid>,
-    ) -> Result<Self, ProviderError> {
-        let mut provider = Self::from_credentials_with_effort(
-            model,
-            selected_effort,
-            credentials,
-            saved_api_account_id,
-        )?;
-        provider.evidence_root = Some(root);
-        Ok(provider)
-    }
-
-    /// Admits one previously checked native model/effort before Workspace input.
-    pub async fn from_checked_api_key_with_effort(
-        root: crate::store::StateRoot,
-        model: String,
-        effort: Effort,
-        key: String,
-        saved_api_account_id: Option<Uuid>,
-    ) -> Result<Self, ProviderError> {
-        if !super::catalog::valid_model_id(&model)
-            || !valid_saved_api_account_id("anthropic", saved_api_account_id)
-        {
-            return Err(ProviderError::Rejected);
-        }
-        Self::from_checked_credentials_with_effort(
-            root,
-            model,
-            effort,
-            NativeApiCredentials::new("anthropic", key, None)?,
-            saved_api_account_id,
-        )
-        .await
-    }
-
-    /// Requires evidence for this exact key, API workspace, model, effort and account source.
-    pub async fn from_checked_credentials_with_effort(
-        root: crate::store::StateRoot,
-        model: String,
-        effort: Effort,
-        credentials: NativeApiCredentials,
-        saved_api_account_id: Option<Uuid>,
-    ) -> Result<Self, ProviderError> {
-        super::native_check::verify_credentials_for_run(
-            root.try_clone().map_err(|_| ProviderError::Unavailable)?,
-            "anthropic",
-            &model,
-            effort,
-            &credentials,
-            saved_api_account_id,
-        )
-        .await?;
-        let mut provider = Self::with_resolved_effort(model, effort, credentials)?;
-        provider.evidence_root = Some(root);
-        provider.identity.provenance = Provenance::Native {
-            saved_api_account_id,
-        };
-        provider.identity.limits.concurrency = native::UNREVIEWED_MODEL_CONCURRENCY;
-        Ok(provider)
-    }
-
-    pub async fn from_checked_env_with_effort(
-        root: crate::store::StateRoot,
-        model: String,
-        effort: Effort,
-    ) -> Result<Self, ProviderError> {
-        if !super::catalog::valid_model_id(&model) {
-            return Err(ProviderError::Rejected);
-        }
-        let credentials = NativeApiCredentials::from_env("anthropic")?;
-        Self::from_checked_credentials_with_effort(root, model, effort, credentials, None).await
-    }
-
     fn with_resolved_effort(
         model: String,
         effort: Effort,
@@ -193,8 +104,16 @@ impl AnthropicProvider {
             effort,
             key: credentials.key,
             workspace_id: credentials.anthropic_workspace_id,
-            evidence_root: None,
+            context_window_tokens: None,
         })
+    }
+
+    /// Pins the window the Provider catalog reported; out-of-range values stay absent.
+    #[must_use]
+    pub fn with_context_window(mut self, tokens: Option<u32>) -> Self {
+        self.context_window_tokens =
+            tokens.and_then(|tokens| super::admitted_context_window(u64::from(tokens)));
+        self
     }
 
     #[cfg(test)]
@@ -395,20 +314,8 @@ impl Provider for AnthropicProvider {
         &self.identity
     }
 
-    async fn context_window_tokens_for_run(&self) -> Option<u32> {
-        let root = self.evidence_root.as_ref()?;
-        let credentials =
-            NativeApiCredentials::new("anthropic", self.key.clone(), self.workspace_id.clone())
-                .ok()?;
-        super::native_check::context_window_for_run(
-            root,
-            "anthropic",
-            &self.identity.model,
-            self.effort,
-            &credentials,
-            self.identity.saved_api_account_id(),
-        )
-        .await
+    fn context_window_tokens(&self) -> Option<u32> {
+        self.context_window_tokens
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

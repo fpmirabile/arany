@@ -53,13 +53,15 @@ async fn completed_run_with_unread_events() -> SettlingRun {
     let mut server = ServerLoop::configured(
         engine,
         state.clone(),
-        inbound,
-        outbound,
+        ServerIo {
+            inbound,
+            outbound,
+            stopping,
+        },
         Threads {
             approval_channel: ApprovalChannel::Terminal,
             ..Default::default()
         },
-        stopping,
         Some(embedded::Native {
             pending: None,
             output: native,

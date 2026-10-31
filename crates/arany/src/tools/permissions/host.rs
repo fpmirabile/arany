@@ -10,13 +10,44 @@ mod tests;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostPrefixRule {
-    version: u32,
     pub prefix: Vec<String>,
     pub decision: Decision,
     pin: HostCommandPin,
     workspace_device: u64,
     workspace_inode: u64,
     pub cwd: String,
+}
+
+// Launchers of other programs beyond the interpreter, wrapper and privilege sets: their approval
+// offers only the exact command, never a derived prefix.
+const UNDERIVED_LAUNCHERS: [&str; 2] = ["osascript", "python"];
+
+// Without a model proposal, the approval offers the first two argv tokens as the remembered prefix.
+pub(crate) fn fill_host_prefix(call: &mut ToolCall) {
+    let ToolCall::CommandUnguarded {
+        program,
+        args,
+        prefix_rule: prefix_rule @ None,
+        ..
+    } = call
+    else {
+        return;
+    };
+    let Some(first) = args.first() else {
+        return;
+    };
+    let name = Path::new(program.as_str())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    let prefix = vec![program.clone(), first.clone()];
+    if !UNDERIVED_LAUNCHERS
+        .iter()
+        .any(|launcher| name.starts_with(launcher))
+        && eligible(program, &prefix)
+    {
+        *prefix_rule = Some(prefix);
+    }
 }
 
 fn eligible(program: &str, tokens: &[String]) -> bool {
@@ -54,7 +85,6 @@ impl HostPrefixRule {
             .ok_or(ToolError::Configuration)?;
         pin.permissions_digest = None;
         let rule = Self {
-            version: crate::tools::unguarded::HOST_POLICY_VERSION,
             prefix: std::iter::once(program.clone())
                 .chain(args.iter().cloned())
                 .take(count)
@@ -72,8 +102,7 @@ impl HostPrefixRule {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.version == crate::tools::unguarded::HOST_POLICY_VERSION
-            && self.pin.valid()
+        self.pin.valid()
             && super::prefix::valid_path(&self.pin.workspace)
             && super::prefix::valid_path(&self.pin.executable)
             && self
@@ -126,6 +155,13 @@ impl HostPrefixRule {
             return false;
         };
         pin.permissions_digest = None;
+        // An editor's tree mirrors the Workspace, so a folder rule applies there by its relative cwd.
+        if matches!(
+            intent.target,
+            crate::session::worker::EffectTarget::EditorWorkspace { .. }
+        ) {
+            pin.workspace.clone_from(&self.pin.workspace);
+        }
         let tokens = std::iter::once(program)
             .chain(args)
             .cloned()

@@ -74,12 +74,13 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         ),
         ("request-cancel", ApprovalMode::Request, "", "cancel", false),
         ("auto-edit", ApprovalMode::AutoEdits, "", "none", false),
-        ("auto-command", ApprovalMode::AutoEdits, "", "allow", true),
+        ("auto-command", ApprovalMode::AutoEdits, "", "none", true),
+        ("request-command", ApprovalMode::Request, "", "none", true),
         (
             "auto-command-narrow",
             ApprovalMode::AutoEdits,
             "",
-            "allow",
+            "none",
             true,
         ),
         ("ai-approve", ApprovalMode::Auto, "approve", "none", false),
@@ -105,7 +106,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         } else {
             json!(["."])
         };
-        let config = json!({"version":1,"workspace_paths":roots,"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
+        let config = json!({"workspace_paths":roots,"write":true,"commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]});
         private_file(
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
@@ -120,6 +121,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                 cwd: "".into(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             }
         } else {
             ToolCall::Write {
@@ -239,11 +241,8 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                     && request.input.context_summary.is_none()
             );
             let payload: Value = serde_json::from_str(&request.input.objective).unwrap();
-            assert_eq!(payload["user_request"], "Guard corpus");
-            assert_eq!(
-                payload["proposed_action"]["call"],
-                serde_json::to_value(&call).unwrap()
-            );
+            assert_eq!(payload["user_prompts"], json!(["Guard corpus"]));
+            assert_eq!(payload["action"], serde_json::to_value(&call).unwrap());
         }
         if allowed {
             let continuation = observed.last().unwrap();

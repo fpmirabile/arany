@@ -1,9 +1,7 @@
-use super::loopback::{
-    ChildGuard, check_profile, read_request, send_response, wait_product, write_profile,
-};
-use super::session_picker::{checkpoint_screen, pump, screen_rows, tail, wait_for_screen};
+use super::loopback::{read_request, send_response, wait_product, write_profile};
+use super::pty::Pty;
+use super::session_picker::{screen_rows, tail};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -23,16 +21,18 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     assert!(text.contains("No Runs yet"));
     assert!(text.contains("History: 0 agents in 0 recent Runs; 0 older Runs"));
     assert!(text.contains("No AgentRuns yet"));
-    assert!(text.contains("Next Run: auto · up to 3 children"));
+    assert!(text.contains("Next Run: single"));
     assert!(text.contains("Agent inspection closed"));
     assert!(!text.contains("\x1b[?1000h"));
 }
 
-#[tokio::test]
-async fn editor_inspector_retains_observation_derived_paths_and_digests_after_cancel() {
+// Runs an editor command case, then opens the inspector over its closed Session without changing it.
+async fn inspect_editor_case(
+    case: &'static str,
+) -> (arany::test_support::worker_teams::TeamObservation, String) {
     let observed = arany::test_support::worker_teams::run_case(
         std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
-        "command_cancel",
+        case,
     )
     .await;
     let state = observed.directory.path().join("state");
@@ -50,13 +50,6 @@ async fn editor_inspector_retains_observation_derived_paths_and_digests_after_ca
     .expect("inspector provider defaults");
     let (before, _) = arany::test_support::goals::replayed(&state, observed.session).await;
     let text = inspect_agents(&state, &workspace, Some(observed.session));
-    let report = &observed.view.runs[0].worker_history()[0].changed_paths;
-    assert!(text.contains("Changed paths (untrusted"));
-    assert!(text.contains("notes/0"));
-    let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
-    assert!(text.contains(row["after_sha256"].as_str().unwrap()));
-    assert!(text.contains("Lease released: true; verified: false"));
-    assert!(text.contains("Publication: Confirmed"));
     for removed in [
         "integration:",
         "discarded:",
@@ -67,6 +60,44 @@ async fn editor_inspector_retains_observation_derived_paths_and_digests_after_ca
     }
     let (events, _) = arany::test_support::goals::replayed(&state, observed.session).await;
     assert_eq!(events, before);
+    (observed, text)
+}
+
+#[tokio::test]
+async fn editor_inspector_shows_integrated_paths_and_digests() {
+    let (observed, text) = inspect_editor_case("command").await;
+    let report = &observed.view.runs[0].worker_history()[0].changed_paths;
+    assert!(text.contains("Changed paths (untrusted"));
+    assert!(text.contains("notes/0"));
+    let row: serde_json::Value = serde_json::from_str(report.lines().nth(1).unwrap()).unwrap();
+    assert!(text.contains(row["after_sha256"].as_str().unwrap()));
+    assert!(text.contains("Lease released: true; verified: true"));
+    assert!(text.contains("Publication: Confirmed"));
+}
+
+#[tokio::test]
+async fn editor_inspector_shows_a_cancelled_editor_integrated_nothing() {
+    let (observed, text) = inspect_editor_case("command_cancel").await;
+    let run = &observed.view.runs[0];
+    assert!(run.worker_history()[0].changed_paths.is_empty());
+    assert!(text.contains("Worker: Cancelled; cause: Some(Cancelled)"));
+    assert!(text.contains("Publication: Unpublished"));
+    assert!(text.contains("Lease released: true; verified: false"));
+    assert!(!text.contains("Changed paths (untrusted"));
+    let directory = observed.directory.path();
+    assert_eq!(
+        std::fs::read(directory.join("workspace/notes/0")).unwrap(),
+        b"original 0"
+    );
+    // The command's edit stays in the editor's kept workspace, and inspecting does not sweep it.
+    let kept = directory
+        .join("state/editors")
+        .join(observed.session.to_string())
+        .join(run.agents[1].id.to_string());
+    assert_eq!(
+        std::fs::read(kept.join("tree/notes/0")).unwrap(),
+        b"edited 0"
+    );
 }
 
 fn inspect_agents(
@@ -74,10 +105,9 @@ fn inspect_agents(
     workspace: &std::path::Path,
     session: Option<SessionId>,
 ) -> String {
-    let mut command = inspector_command(state, workspace, session);
-    let mut child = ChildGuard::new(command.spawn().expect("attached PTY process"));
+    let mut child = inspector_command(state, workspace, session).spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(child.child().stdout.take().expect("PTY output"));
     let (sender, receiver) = mpsc::channel();
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
@@ -152,30 +182,23 @@ fn inspector_command(
     state: &std::path::Path,
     workspace: &std::path::Path,
     session: Option<SessionId>,
-) -> Command {
+) -> crate::product::PtyLaunch {
     let invocation = if session.is_some() {
         "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider openai"
     } else {
         "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai"
     };
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env(
-            "ARANY_TEST_SESSION",
-            session.map(|id| id.to_string()).unwrap_or_default(),
-        )
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", invocation, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    command
+    crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        invocation,
+    )
+    .session(state, workspace)
+    .env(
+        "ARANY_TEST_SESSION",
+        session.map(|id| id.to_string()).unwrap_or_default(),
+    )
 }
 
 #[test]
@@ -194,7 +217,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let (release_run, released) = mpsc::channel();
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..5 {
+        for index in 3..5 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -218,23 +241,10 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
             let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
             assert_eq!(wire["model"], "model-1");
             assert!(wire.get("text").is_none());
-            if index == 2 {
-                crate::loopback::assert_compaction_request(&wire);
-            }
-            assert_eq!(
-                wire["max_output_tokens"],
-                if index == 1 || index == 2 { 128 } else { 4096 }
-            );
+            assert_eq!(wire["max_output_tokens"], 4096);
             let input: serde_json::Value = crate::semantic::input(&wire);
             assert!(!input.to_string().contains("/agents"));
             match index {
-                0..=2 => {
-                    assert!(
-                        input
-                            .get("workspace_guidance")
-                            .is_none_or(serde_json::Value::is_null)
-                    );
-                }
                 3 => assert_eq!(input["objective"], "prior"),
                 _ => {
                     assert_eq!(input["objective"], "current");
@@ -245,11 +255,6 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                 }
             }
             let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
                 3 => {
                     serde_json::json!("prior answer")
                 }
@@ -257,18 +262,16 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                     serde_json::json!("current answer")
                 }
             };
-            if index == 2 {
-                assert_eq!(text, "synthetic summary", "plain-text compaction reply");
-            }
             send_response(&mut stream, index, text);
         }
     });
 
-    check_profile(&workspace, &state);
-
     let mut first = Command::new(env!("CARGO_BIN_EXE_arany"));
     first
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -288,30 +291,17 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
         .find_map(|id| id.parse::<SessionId>().ok())
         .expect("Session ID");
 
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_SESSION", session_id.to_string())
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 current",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    opt_into_delegation(&state, &workspace, session_id);
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(state.parent().expect("fixture root"))),
+        "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 current",
+    )
+    .session(&state, &workspace)
+    .env("ARANY_TEST_SESSION", session_id.to_string())
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(attached.child().stdout.take().expect("PTY output"));
     let (stage_sender, stages) = mpsc::channel();
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
@@ -437,113 +427,48 @@ fn inline_inspector(
     let command = format!(
         "stty rows 24 cols {width}; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command_line =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command_line
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            &command,
+        )
+        .session(state, workspace)
         .env("ARANY_TEST_SESSION", id.to_string())
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(command_line.spawn().expect("inline inspector process"));
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
     let mut capture_from = 0;
-    let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (0, width.into(), 24),
-        "Ask Arany",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.wait_for_screen((0, width.into(), 24), "Ask Arany");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let opened_at = capture_from;
-    input.write_all(b"/agents\r").expect("open inspector");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
+    pty.send(b"/agents\r");
+    pty.wait_for_screen(
         (opened_at, width.into(), 24),
         // The newest Run's details name its objective; 16 columns keep this prefix.
         "Objective: curr",
     );
     // The inspector takes keys only once its armed frame is drawn.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while crate::armed_selector(&transcript, opened_at, width.into(), 24).is_none() {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "armed inspector missing: {}",
-            tail(&transcript[opened_at..])
-        );
-        thread::yield_now();
-    }
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.pump_until("armed inspector missing", |transcript| {
+        crate::armed_selector(transcript, opened_at, width.into(), 24).is_some()
+    });
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let checkpoint = capture_from;
-    input.write_all(b"\x1b[B").expect("select prior AgentRun");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (checkpoint, width.into(), 24),
-        "Objective: prior",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.send(b"\x1b[B");
+    pty.wait_for_screen((checkpoint, width.into(), 24), "Objective: prior");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let checkpoint = capture_from;
-    input.write_all(b"\x1b").expect("close inspector");
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (checkpoint, width.into(), 24),
-        "Agent ins",
-    );
-    capture_from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
-    input.write_all(b"/exit\r").expect("exit attached mode");
+    pty.send(b"\x1b");
+    pty.wait_for_screen((checkpoint, width.into(), 24), "Agent ins");
+    capture_from = pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if attached
+        pty.pump();
+        if pty
+            .child
             .child()
             .try_wait()
             .expect("inspector status")
@@ -554,21 +479,14 @@ fn inline_inspector(
         assert!(
             Instant::now() < deadline,
             "inline inspector did not exit: {}",
-            tail(&transcript)
+            tail(&pty.transcript)
         );
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = pty.finish();
     assert!(result.status.success(), "inline inspector exited cleanly");
     assert_eq!(result.stderr, b"");
-    checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (width.into(), 24),
-        capture_from,
-    );
+    pty.checkpoint_screen(&mut history, (width.into(), 24), capture_from);
     let transcript = String::from_utf8(history).expect("inline transcript UTF-8");
     let before = transcript
         .lines()
@@ -604,6 +522,26 @@ fn replayed(state: &std::path::Path, id: SessionId) -> (Vec<arany::EventEnvelope
     (events, view)
 }
 
+// New conversations default to single; the resumed Run opts into delegation like `/agents auto`.
+fn opt_into_delegation(state: &std::path::Path, workspace: &std::path::Path, id: SessionId) {
+    let (_, view) = replayed(state, id);
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("defaults runtime")
+        .block_on(arany::set_session_defaults(
+            StateRoot::open_existing(state).expect("fixture State"),
+            workspace.to_path_buf(),
+            id,
+            arany::SessionDefaults {
+                policy: arany::CollaborationPolicy::Auto {
+                    max_active_children: 3,
+                },
+                ..view.defaults
+            },
+        ))
+        .expect("delegation opt-in");
+}
+
 #[test]
 fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -615,10 +553,10 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
         &state,
         listener.local_addr().expect("listener address").port(),
     );
-    // Three conformance calls, then a Run whose primary delegates to two children.
+    // A Run whose primary delegates to two children.
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..7 {
+        for index in 0..4 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -633,16 +571,11 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
             let wire: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
             let input = crate::semantic::input(&wire);
-            let text = match (index, input["phase"].as_str()) {
-                (0, _) => serde_json::json!("ok"),
-                (1, _) => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                (2, _) => serde_json::json!(r#"synthetic summary"#),
-                (_, Some("root_plan")) => {
+            let text = match input["phase"].as_str() {
+                Some("root_plan") => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})
                 }
-                (_, Some("child_work")) => serde_json::json!(format!(
+                Some("child_work") => serde_json::json!(format!(
                     "result of {}\n\n> - nested **result**\n>\n>   ~~~\n>   nested code\n>   ~~~",
                     input["objective"].as_str().expect("child objective")
                 )),
@@ -651,9 +584,11 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
             send_response(&mut stream, index, text);
         }
     });
-    check_profile(&workspace, &state);
     let mut team = Command::new(env!("CARGO_BIN_EXE_arany"));
     team.env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -665,6 +600,8 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
             "custom:local",
             "--model",
             "model-1",
+            "--collaboration",
+            "auto",
             "team task",
         ])
         .stdout(Stdio::piped())
@@ -714,51 +651,35 @@ fn agent_chat_journey(
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command_line =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command_line
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
+    let mut pty = Pty::new(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+                state.parent().expect("fixture root"),
+            )),
+            &command,
+        )
+        .session(state, workspace)
         .env("ARANY_TEST_SESSION", id.to_string())
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(command_line.spawn().expect("agent chat process"));
-    let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut transcript = Vec::new();
+        .term("xterm")
+        .spawn(),
+    );
     let mut history = Vec::new();
-    let mut answered = crate::session_picker::PtyResponses::default();
     let mut capture_from = 0;
     let context = if classic { "Classic" } else { "Fullscreen" };
     // Decoding stops at the last cursor hide or show that ends a Ratatui frame, so a partial one never releases keys.
     let mut step = |keys: &[u8], needles: &[&str], absent: &[&str]| {
-        capture_from = checkpoint_screen(
-            &mut transcript,
-            &mut answered,
-            &mut history,
-            (size.0, size.1),
-            capture_from,
-        );
+        capture_from = pty.checkpoint_screen(&mut history, (size.0, size.1), capture_from);
         let from = capture_from;
-        input.write_all(keys).expect("PTY keys");
+        pty.send(keys);
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let frame_end = transcript[from..]
+            pty.pump();
+            let frame_end = pty.transcript[from..]
                 .windows(6)
                 .rposition(|part| part == b"\x1b[?25l" || part == b"\x1b[?25h")
                 .map(|offset| from + offset + 6);
             let screen =
-                frame_end.map(|end| screen_rows(&transcript[..end], size.0, size.1).join("\n"));
+                frame_end.map(|end| screen_rows(&pty.transcript[..end], size.0, size.1).join("\n"));
             if let Some(screen) = screen.as_ref().filter(|screen| {
                 needles.iter().all(|needle| {
                     crate::process::pty_text_matches(screen.as_bytes(), needle.as_bytes())
@@ -775,7 +696,7 @@ fn agent_chat_journey(
             assert!(
                 Instant::now() < deadline,
                 "{context} missing {needles:?} or showing {absent:?}: {screen:?} {}",
-                tail(&transcript[from..])
+                tail(&pty.transcript[from..])
             );
             thread::yield_now();
         }
@@ -881,31 +802,24 @@ fn agent_chat_journey(
     );
     step(b"x", &["> x"], &["queued-submit", "queued-draft"]);
     step(b"\x7f", &["Alt+Left/Right agents"], &["> x"]);
-    let from = checkpoint_screen(
-        &mut transcript,
-        &mut answered,
-        &mut history,
-        (size.0, size.1),
-        capture_from,
-    );
-    input.write_all(b"/exit\r").expect("exit attached mode");
+    let from = pty.checkpoint_screen(&mut history, (size.0, size.1), capture_from);
+    pty.send(b"/exit\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        if attached.child().try_wait().expect("chat status").is_some() {
+        pty.pump();
+        if pty.child.child().try_wait().expect("chat status").is_some() {
             break;
         }
         assert!(
             Instant::now() < deadline,
             "{context} chat did not exit: {}",
-            tail(&transcript[from..])
+            tail(&pty.transcript[from..])
         );
         thread::yield_now();
     }
-    let result = wait_product(attached.take());
-    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let result = pty.finish();
     assert!(result.status.success(), "{context} chat exited cleanly");
-    history.extend_from_slice(&transcript[from..]);
+    history.extend_from_slice(&pty.transcript[from..]);
     let text = String::from_utf8_lossy(&history);
     let setting = |marker: &str| {
         text.split_once(marker)
@@ -939,29 +853,15 @@ fn agent_chat_journey(
 }
 
 fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: SessionId) {
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("ARANY_TEST_SESSION", id.to_string())
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("linear chat process"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(state.parent().expect("fixture root"))),
+        "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"",
+    )
+    .session(state, workspace)
+    .env("ARANY_TEST_SESSION", id.to_string())
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(child.child().stdout.take().expect("PTY output"));
     let (sender, receiver) = mpsc::channel();
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
@@ -1109,7 +1009,7 @@ fn gated_team_server(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..4 + journeys * 4 {
+        for index in 0..1 + journeys * 4 {
             let deadline = Instant::now() + Duration::from_secs(20);
             let mut stream = loop {
                 match listener.accept() {
@@ -1147,12 +1047,7 @@ fn gated_team_server(
                     .expect("released response");
             };
             let text = match (index, input["phase"].as_str()) {
-                (0, _) => serde_json::json!("ok"),
-                (1, _) => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                (2, _) => serde_json::json!(r#"synthetic summary"#),
-                (3, _) => serde_json::json!("prior answer"),
+                (0, _) => serde_json::json!("prior answer"),
                 (_, Some("root_plan")) => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})
                 }
@@ -1189,10 +1084,12 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 5, false, requests, released);
-    check_profile(&workspace, &state);
     let mut prior = Command::new(env!("CARGO_BIN_EXE_arany"));
     prior
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
         .current_dir(&workspace)
         .args(["exec", "--state-dir"])
@@ -1245,10 +1142,12 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 1, false, requests, released);
-    check_profile(&workspace, &state);
     let prior = wait_product(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(&workspace)
             .args(["exec", "--state-dir"])
@@ -1271,7 +1170,7 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
         })
         .expect("prior Run reports its Session");
     let gates = Gates { requested, release };
-    let (mut attached, mut pty) = live_pty(&workspace, &state, id, false);
+    let mut pty = live_pty(&workspace, &state, id, false);
     pty.await_request(&gates, "first");
     pty.frame(0, &["Alt+Left/Right agents"], &[]);
     gates.release.send(()).expect("release the first child");
@@ -1280,7 +1179,7 @@ fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
     pty.await_request(&gates, "synthesis");
     // The synthesis is held, so the Run is active: `/exit` is refused until it is released.
     let release = gates.release.clone();
-    exit_live_after_refusal(&mut attached, &mut pty, move || {
+    exit_live_after_refusal(&mut pty, move || {
         release.send(()).expect("release the synthesis");
     });
     server.join().expect("server thread finishes");
@@ -1300,10 +1199,12 @@ fn selected_child_messaging_journey() {
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 3, true, requests, released);
-    check_profile(&workspace, &state);
     let prior = wait_product(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(&workspace)
             .args(["exec", "--state-dir"])
@@ -1327,7 +1228,7 @@ fn selected_child_messaging_journey() {
         .expect("prior Run reports its Session");
     let gates = Gates { requested, release };
     for classic in [false, true] {
-        let (mut attached, mut pty) = live_pty(&workspace, &state, id, classic);
+        let mut pty = live_pty(&workspace, &state, id, classic);
         let total = if classic { 7 } else { 4 };
         pty.await_request(&gates, "first");
         pty.frame(0, &["Alt+Left/Right agents", "child 2"], &[]);
@@ -1408,7 +1309,7 @@ fn selected_child_messaging_journey() {
         );
         gates.release.send(()).expect("server accepts the release");
         pty.step(b"\x1b", &["team answer", "Ask Arany"], &["viewing child"]);
-        exit_live(&mut attached, &mut pty);
+        exit_live(&mut pty);
     }
     live_linear_agent_chat(&workspace, &state, id, &gates, true);
     server.join().expect("server thread finishes");
@@ -1441,23 +1342,31 @@ const LIVE_SIZE: (usize, usize) = (80, 24);
 
 // Decode at cursor markers; Classic resizing also emits them before the replacement frame.
 struct LivePty {
-    input: std::process::ChildStdin,
-    output: std::process::ChildStdout,
-    transcript: Vec<u8>,
+    pty: Pty,
     history: Vec<u8>,
-    answered: crate::session_picker::PtyResponses,
     capture_from: usize,
     context: &'static str,
 }
 
+impl std::ops::Deref for LivePty {
+    type Target = Pty;
+
+    fn deref(&self) -> &Pty {
+        &self.pty
+    }
+}
+
+impl std::ops::DerefMut for LivePty {
+    fn deref_mut(&mut self) -> &mut Pty {
+        &mut self.pty
+    }
+}
+
 impl LivePty {
-    fn pump(&mut self) {
-        pump(
-            &mut self.output,
-            &mut self.input,
-            &mut self.transcript,
-            &mut self.answered,
-        );
+    // Bounds the capture at `from`, keeping the raw bytes in `history`.
+    fn checkpoint(&mut self, from: usize) -> usize {
+        self.pty
+            .checkpoint_screen(&mut self.history, LIVE_SIZE, from)
     }
 
     fn frame_ends(&self, from: usize) -> Vec<usize> {
@@ -1505,15 +1414,8 @@ impl LivePty {
     }
 
     fn step(&mut self, keys: &[u8], needles: &[&str], absent: &[&str]) -> usize {
-        self.capture_from = checkpoint_screen(
-            &mut self.transcript,
-            &mut self.answered,
-            &mut self.history,
-            LIVE_SIZE,
-            self.capture_from,
-        );
-        let from = self.capture_from;
-        self.input.write_all(keys).expect("PTY keys");
+        self.capture_from = self.checkpoint(self.capture_from);
+        let from = self.send(keys);
         self.frame(from, needles, absent)
     }
 
@@ -1564,55 +1466,38 @@ fn live_pty(
     state: &std::path::Path,
     id: SessionId,
     classic: bool,
-) -> (ChildGuard, LivePty) {
+) -> LivePty {
+    opt_into_delegation(state, workspace, id);
     let mode = if classic { "--classic " } else { "" };
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
-    let mut command_line =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command_line
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("ARANY_TEST_SESSION", id.to_string())
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(command_line.spawn().expect("live agent chat process"));
-    let input = attached.child().stdin.take().expect("PTY input");
-    let output = attached.child().stdout.take().expect("PTY output");
-    let flags = fcntl_getfl(&output).expect("stdout flags");
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let pty = LivePty {
-        input,
-        output,
-        transcript: Vec::new(),
+    let attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        &command,
+    )
+    .session(state, workspace)
+    .env("ARANY_TEST_SESSION", id.to_string())
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .term("xterm")
+    .spawn();
+    LivePty {
+        pty: Pty::new(attached),
         history: Vec::new(),
-        answered: crate::session_picker::PtyResponses::default(),
         capture_from: 0,
         context: if classic { "Classic" } else { "Fullscreen" },
-    };
-    (attached, pty)
+    }
 }
 
 // Exits through `/exit` and checks that the terminal settings were restored.
-fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
-    exit_live_after_refusal(attached, pty, || {});
+fn exit_live(pty: &mut LivePty) {
+    exit_live_after_refusal(pty, || {});
 }
 
 // `on_refused` runs once a refusal of `/exit` is on screen, before the retry.
-fn exit_live_after_refusal(
-    attached: &mut ChildGuard,
-    pty: &mut LivePty,
-    mut on_refused: impl FnMut(),
-) {
+fn exit_live_after_refusal(pty: &mut LivePty, mut on_refused: impl FnMut()) {
     let refused = "unavailable while a Run is active";
     let count = |screen: &str, text: &str| {
         crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes()).count()
@@ -1621,21 +1506,15 @@ fn exit_live_after_refusal(
     let mut from = pty.capture_from;
     // The `/exit` refusal notice persists, so resend after a newer refusal reaches idle.
     'exit: loop {
-        from = checkpoint_screen(
-            &mut pty.transcript,
-            &mut pty.answered,
-            &mut pty.history,
-            LIVE_SIZE,
-            from,
-        );
+        from = pty.checkpoint(from);
         pty.capture_from = from;
         let earlier = count(&pty.screen(pty.transcript.len()), refused);
-        pty.input.write_all(b"/exit\r").expect("exit attached mode");
+        pty.send(b"/exit\r");
         let mut was_refused = false;
         let mut inspected = 0;
         loop {
             pty.pump();
-            if attached.child().try_wait().expect("chat status").is_some() {
+            if pty.child.child().try_wait().expect("chat status").is_some() {
                 break 'exit;
             }
             for end in pty.frame_ends(from).into_iter().skip(inspected) {
@@ -1658,14 +1537,13 @@ fn exit_live_after_refusal(
             thread::yield_now();
         }
     }
-    let result = wait_product(attached.take());
-    pty.pump();
+    let result = pty.finish();
     assert!(
         result.status.success(),
         "{} chat exited cleanly",
         pty.context
     );
-    pty.history.extend_from_slice(&pty.transcript[from..]);
+    pty.history.extend_from_slice(&pty.pty.transcript[from..]);
     let text = String::from_utf8_lossy(&pty.history);
     let setting = |marker: &str| {
         text.split_once(marker)
@@ -1684,7 +1562,7 @@ fn live_agent_chat_journey(
     classic: bool,
     gates: &Gates,
 ) {
-    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
+    let mut pty = live_pty(workspace, state, id, classic);
     let armed = "agents · Esc primary";
     pty.await_request(gates, "first");
     // The shelf lists both children once their spawns are committed and reduced.
@@ -1762,7 +1640,7 @@ fn live_agent_chat_journey(
         ],
         &["viewing child", "agents · Esc primary"],
     );
-    exit_live(&mut attached, &mut pty);
+    exit_live(&mut pty);
     if classic {
         // Live records were appended once each, below the chat's read-only boundary.
         let (scrollback, screen) = crate::terminal_grid(&pty.history, LIVE_SIZE.0, LIVE_SIZE.1);
@@ -1783,7 +1661,7 @@ fn live_agent_picker_journey(
     classic: bool,
     gates: &Gates,
 ) {
-    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
+    let mut pty = live_pty(workspace, state, id, classic);
     let picker = "Enter open · Esc close";
     let focused = |pty: &LivePty, end: usize| {
         pty.screen(end)
@@ -1850,7 +1728,7 @@ fn live_agent_picker_journey(
         ],
         &["viewing child", "agents · Esc primary"],
     );
-    exit_live(&mut attached, &mut pty);
+    exit_live(&mut pty);
 }
 
 fn live_linear_agent_chat(
@@ -1860,30 +1738,16 @@ fn live_linear_agent_chat(
     gates: &Gates,
     messaging: bool,
 ) {
-    let mut command =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("ARANY_TEST_SESSION", id.to_string())
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args([
-            "-q",
-            "-e",
-            "-c",
-            "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'",
-            "/dev/null",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = ChildGuard::new(command.spawn().expect("live linear chat process"));
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(state.parent().expect("fixture root"))),
+        "exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'",
+    )
+    .session(state, workspace)
+    .env("ARANY_TEST_SESSION", id.to_string())
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .spawn();
     let mut input = child.child().stdin.take().expect("PTY input");
-    let mut output = child.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(child.child().stdout.take().expect("PTY output"));
     let (sender, receiver) = mpsc::channel();
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));

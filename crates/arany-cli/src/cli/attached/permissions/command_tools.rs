@@ -204,9 +204,40 @@ async fn select(
         Some(2) => CommandToolRole::Prefix,
         _ => return Ok(None),
     };
-    let mut args = Vec::new();
     let argument_limit =
         CommandTool::ARGUMENT_COUNT_LIMIT - usize::from(role == CommandToolRole::Prefix);
+    let Some(args) = fixed_arguments(terminal, argument_limit).await? else {
+        return Ok(None);
+    };
+    match CommandTool::pin(
+        editor.state,
+        &editor.admission.workspace,
+        &candidates[index],
+        args,
+    ) {
+        Ok(mut tool) => {
+            tool.role = role;
+            Ok(Some(tool))
+        }
+        Err(error) => {
+            super::super::setup::review_warning(
+                terminal,
+                "Command tools",
+                &format!("Cannot select executable: {error}"),
+                "Return to Command tools",
+            )
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
+// None abandons the selection.
+async fn fixed_arguments(
+    terminal: &mut AttachedTerminal,
+    argument_limit: usize,
+) -> Result<Option<Vec<String>>, SetupError> {
+    let mut args = Vec::new();
     while args.len() < argument_limit {
         match super::pick(
             terminal,
@@ -235,27 +266,7 @@ async fn select(
             _ => return Ok(None),
         }
     }
-    match CommandTool::pin(
-        editor.state,
-        &editor.admission.workspace,
-        &candidates[index],
-        args,
-    ) {
-        Ok(mut tool) => {
-            tool.role = role;
-            Ok(Some(tool))
-        }
-        Err(error) => {
-            super::super::setup::review_warning(
-                terminal,
-                "Command tools",
-                &format!("Cannot select executable: {error}"),
-                "Return to Command tools",
-            )
-            .await?;
-            Ok(None)
-        }
-    }
+    Ok(Some(args))
 }
 
 async fn candidate(

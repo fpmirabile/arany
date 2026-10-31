@@ -11,17 +11,19 @@ async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
     std::os::unix::fs::symlink(fixture.path().join("outside.txt"), workspace.join("link")).unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for (path, disposition) in [
         ("link", ToolDisposition::Denied),
         ("missing", ToolDisposition::Failed),
     ] {
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            search(path, "payload"),
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                search(path, "payload"),
+            )
+            .unwrap();
         let inspected = inspect_read(&runtime, intent.clone()).await;
         let observation = runtime.execute(intent, super::Cancellation::new()).await;
         assert_eq!(inspected, observation);
@@ -33,11 +35,13 @@ async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
         ));
         assert!(!observation.output.contains("outside payload"));
     }
-    let intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        search("missing", "payload"),
-    );
+    let intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            search("missing", "payload"),
+        )
+        .unwrap();
     std::fs::rename(&workspace, fixture.path().join("moved")).unwrap();
     std::fs::create_dir(&workspace).unwrap();
     let observation = runtime.execute(intent, super::Cancellation::new()).await;
@@ -80,11 +84,13 @@ pub(super) async fn search_page(
     call: ToolCall,
     result_bytes: u32,
 ) -> Value {
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        call.clone(),
-    );
+    let mut intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call.clone(),
+        )
+        .unwrap();
     intent.limits.result_bytes = result_bytes;
     let observation = inspect_read(runtime, intent).await;
     assert_eq!(
@@ -130,7 +136,7 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
     }
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let row = |path: &str, line: u64| (path.to_owned(), line);
     let regex = |call| with_search(call, |regex, _, _, _, _| *regex = true);
@@ -264,11 +270,13 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
     ] {
         assert!(call.valid(), "{call:?}");
         // Refusals fit the smallest admitted result budget.
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            call.clone(),
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                call.clone(),
+            )
+            .unwrap();
         intent.limits.result_bytes = 128;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Failed, "{call:?}");
@@ -281,7 +289,7 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
         );
         assert!(matches!(
             observation.attestation,
-            Some(Attestation::Guard(_))
+            Some(Attestation::InProcess { .. })
         ));
         assert!(!observation.stops_run());
         assert!(observation.valid());
@@ -316,7 +324,7 @@ async fn search_pages_rows_with_a_hard_cap_and_resumes_after_fitted_rows() {
     .unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let paged = |offset: u32, limit: u32| {
         with_search(search("src", "hit"), move |_, _, _, o, l| {

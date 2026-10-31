@@ -566,6 +566,7 @@ fn build_jobs_are_bound_to_goal_resources_before_tool_admission() {
             cwd: String::new(),
             resource_class: Some(crate::tools::ToolResourceClass::Build),
             timeout_ms: None,
+            additional_reads: None,
         };
         intent.limits.resource_class = crate::tools::ToolResourceClass::Build;
         intent.limits.build_jobs = jobs;

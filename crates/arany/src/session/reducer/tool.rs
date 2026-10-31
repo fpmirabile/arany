@@ -178,15 +178,17 @@ pub(crate) fn validate_tool_lease(
         | ToolCall::MultiEdit {
             file_path: path, ..
         }
-        | ToolCall::Mkdir { path } => vec![path],
+        | ToolCall::Mkdir { path } => vec![path.as_str()],
         ToolCall::Move {
             source,
             destination,
             ..
-        } => vec![source, destination],
+        } => vec![source.as_str(), destination.as_str()],
         ToolCall::ApplyChangeset {
-            source: crate::worker::ChangesetSource::CommandReceipt { changeset, .. },
-        } => changeset.files.iter().map(|file| &file.path).collect(),
+            source:
+                crate::worker::ChangesetSource::CommandReceipt { .. }
+                | crate::worker::ChangesetSource::EditorWorkspace { .. },
+        } => call.changeset_paths(),
         _ if !leases.is_empty() => return Err(LeaseOverlap),
         _ => Vec::new(),
     };
@@ -634,8 +636,6 @@ fn start_lifecycle(
     if hook.event == HookEvent::CommandRewrite {
         return rewrite::started(current, run_id, agent_id, hook, sequence);
     }
-    use crate::session::{AgentRole, ChildGrant, RunStatus};
-    use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, compact_subject, stop_subject};
     let previous = current.previous_subject_sequence();
     let run = current
         .runs
@@ -648,20 +648,9 @@ fn start_lifecycle(
         .iter()
         .find(|agent| agent.id == agent_id)
         .ok_or(ReplayError::InvalidTransition)?;
-    if !permissions_pinned(run)
-        || !run.hooks_settled()
-        || hook.intent.policy_digest
-            != config
-                .tool_policy
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?
-                .config_digest
-        || hook.intent.workspace_device != config.workspace_device
-        || hook.intent.workspace_inode != config.workspace_inode
-    {
+    if !permissions_pinned(run) || !run.hooks_settled() || !hook_pins_match(config, hook)? {
         return Err(ReplayError::InvalidTransition);
     }
-    let count = agent.provider_calls.len();
     let same: Vec<_> = run
         .lifecycle_hooks
         .iter()
@@ -671,17 +660,7 @@ fn start_lifecycle(
                 && view.invocation.intent.agent_run_id == agent_id
         })
         .collect();
-    if same.len() >= MAX_HOOKS_PER_OCCURRENCE
-        || same.iter().any(|hook| {
-            hook.outcome
-                .as_ref()
-                .is_some_and(|outcome| matches!(outcome.result, HookResult::Blocked { .. }))
-        })
-        || run
-            .lifecycle_hooks
-            .iter()
-            .any(|view| view.invocation.intent.id == hook.intent.id)
-    {
+    if occurrence_refused(run, &same, hook) {
         return Err(ReplayError::InvalidTransition);
     }
     let adjacent = if same.is_empty() {
@@ -689,33 +668,8 @@ fn start_lifecycle(
     } else {
         run.lifecycle_hook_sequence
     } == Some(previous);
-    match hook.event {
-        HookEvent::Stop | HookEvent::SubagentStop => {
-            let role_matches = if hook.event == HookEvent::Stop {
-                agent.role == AgentRole::Primary
-            } else {
-                agent.role == AgentRole::Child
-                    && matches!(
-                        (agent.grant, agent.assignment.is_some()),
-                        (Some(ChildGrant::ReadOnly { .. }), false)
-                            | (Some(ChildGrant::EditOnly { .. }), true)
-                    )
-            };
-            if run.status != RunStatus::Active
-                || agent.status != AgentStatus::Active
-                || !role_matches
-                || !adjacent
-                || count == 0
-                || hook.subject_digest != stop_subject(agent_id, count - 1)
-                || agent.provider_calls.last().is_none_or(|call| {
-                    call.disposition != ProviderCallDisposition::Finished
-                        || call.phase == AgentPhase::ToolReview
-                })
-                || run.stop_continuations(agent_id) >= MAX_STOP_CONTINUATIONS
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-        }
+    let valid = match hook.event {
+        HookEvent::Stop | HookEvent::SubagentStop => stop_hook_valid(run, agent, hook, adjacent),
         HookEvent::PreCompact => {
             let pending = current
                 .goals
@@ -725,42 +679,20 @@ fn start_lifecycle(
                     !goal.unobserved_provider_calls.is_empty()
                         || goal.compaction_call_reserved.is_some()
                 });
-            if pending
-                || run.tools.iter().any(|tool| tool.observation.is_none())
-                || agent.role != AgentRole::Primary
-                || !(run.status == RunStatus::Active || run.status.is_outcome())
-                || !["manual", "auto"]
-                    .iter()
-                    .any(|trigger| hook.subject_digest == compact_subject(trigger, count))
-                || !same.is_empty() && run.lifecycle_hook_sequence != Some(previous)
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
+            !pending
+                && pre_compact_valid(run, agent, hook)
+                && (same.is_empty() || run.lifecycle_hook_sequence == Some(previous))
         }
-        _ => return Err(ReplayError::InvalidTransition),
+        _ => false,
+    };
+    if !valid {
+        return Err(ReplayError::InvalidTransition);
     }
-    let boundary = run.status != RunStatus::Active;
+    let boundary = run.status != crate::session::RunStatus::Active;
     let goal = current.goals.iter_mut().find(|goal| {
         goal.status == crate::session::GoalStatus::Running && goal.run_ids.last() == Some(&run_id)
     });
-    if hook.active_ceiling_ms.is_some() != goal.is_some() {
-        return Err(ReplayError::InvalidTransition);
-    }
-    if let Some(ceiling) = hook.active_ceiling_ms {
-        let goal = goal.ok_or(ReplayError::InvalidTransition)?;
-        if ceiling == 0
-            || goal
-                .effective_budget()
-                .max_active_ms
-                .is_some_and(|limit| goal.active_ms.saturating_add(ceiling) > limit)
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
-        if boundary && goal.active_run.is_some() {
-            return Err(ReplayError::InvalidTransition);
-        }
-        super::goal::record_active_ceiling(goal, ceiling);
-    }
+    reserve_hook_ceiling(goal, hook.active_ceiling_ms, boundary)?;
     run.lifecycle_hooks.push(HookView {
         sequence,
         invocation: hook.clone(),
@@ -768,6 +700,111 @@ fn start_lifecycle(
         idle: boundary,
     });
     run.lifecycle_hook_sequence = Some(sequence);
+    Ok(())
+}
+
+fn hook_pins_match(
+    config: &crate::session::RunConfig,
+    hook: &crate::tools::permissions::HookInvocation,
+) -> Result<bool, ReplayError> {
+    Ok(hook.intent.policy_digest
+        == config
+            .tool_policy
+            .as_ref()
+            .ok_or(ReplayError::InvalidTransition)?
+            .config_digest
+        && hook.intent.workspace_device == config.workspace_device
+        && hook.intent.workspace_inode == config.workspace_inode)
+}
+
+fn occurrence_refused(
+    run: &RunView,
+    same: &[&HookView],
+    hook: &crate::tools::permissions::HookInvocation,
+) -> bool {
+    same.len() >= MAX_HOOKS_PER_OCCURRENCE
+        || same.iter().any(|hook| {
+            hook.outcome
+                .as_ref()
+                .is_some_and(|outcome| matches!(outcome.result, HookResult::Blocked { .. }))
+        })
+        || run
+            .lifecycle_hooks
+            .iter()
+            .any(|view| view.invocation.intent.id == hook.intent.id)
+}
+
+fn stop_hook_valid(
+    run: &RunView,
+    agent: &super::AgentView,
+    hook: &crate::tools::permissions::HookInvocation,
+    adjacent: bool,
+) -> bool {
+    use crate::session::{AgentRole, ChildGrant, RunStatus};
+    use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, stop_subject};
+    let count = agent.provider_calls.len();
+    let role_matches = if hook.event == HookEvent::Stop {
+        agent.role == AgentRole::Primary
+    } else {
+        agent.role == AgentRole::Child
+            && matches!(
+                (agent.grant, agent.assignment.is_some()),
+                (Some(ChildGrant::ReadOnly { .. }), false)
+                    | (Some(ChildGrant::EditOnly { .. }), true)
+            )
+    };
+    !(run.status != RunStatus::Active
+        || agent.status != AgentStatus::Active
+        || !role_matches
+        || !adjacent
+        || count == 0
+        || hook.subject_digest != stop_subject(agent.id, count - 1)
+        || agent.provider_calls.last().is_none_or(|call| {
+            call.disposition != ProviderCallDisposition::Finished
+                || call.phase == AgentPhase::ToolReview
+        })
+        || run.stop_continuations(agent.id) >= MAX_STOP_CONTINUATIONS)
+}
+
+fn pre_compact_valid(
+    run: &RunView,
+    agent: &super::AgentView,
+    hook: &crate::tools::permissions::HookInvocation,
+) -> bool {
+    use crate::session::{AgentRole, RunStatus};
+    let count = agent.provider_calls.len();
+    !(run.tools.iter().any(|tool| tool.observation.is_none())
+        || agent.role != AgentRole::Primary
+        || !(run.status == RunStatus::Active || run.status.is_outcome())
+        || !["manual", "auto"].iter().any(|trigger| {
+            hook.subject_digest == crate::tools::permissions::compact_subject(trigger, count)
+        }))
+}
+
+// A hook reserves a ceiling exactly when a running Goal owns its Run.
+fn reserve_hook_ceiling(
+    goal: Option<&mut super::GoalView>,
+    ceiling: Option<u64>,
+    boundary: bool,
+) -> Result<(), ReplayError> {
+    if ceiling.is_some() != goal.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let (Some(goal), Some(ceiling)) = (goal, ceiling) else {
+        return Ok(());
+    };
+    if ceiling == 0
+        || goal
+            .effective_budget()
+            .max_active_ms
+            .is_some_and(|limit| goal.active_ms.saturating_add(ceiling) > limit)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if boundary && goal.active_run.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    super::goal::record_active_ceiling(goal, ceiling);
     Ok(())
 }
 
@@ -846,26 +883,57 @@ pub(super) fn before_lifecycle_event(
     if matches!(
         event,
         Event::GoalCompactionCallReserved { .. } | Event::ContextCompacted { .. }
-    ) {
-        if !run.hooks_settled() {
-            return Err(ReplayError::InvalidTransition);
-        }
-        let count = run.primary().map_or(0, |agent| agent.provider_calls.len());
-        if run.lifecycle_hooks.iter().any(|hook| {
-            hook.invocation.event == HookEvent::PreCompact
-                && ["manual", "auto"].iter().any(|trigger| {
-                    hook.invocation.subject_digest
-                        == crate::tools::permissions::compact_subject(trigger, count)
-                })
-                && hook
-                    .outcome
-                    .as_ref()
-                    .is_some_and(|outcome| matches!(outcome.result, HookResult::Blocked { .. }))
-        }) {
-            return Err(ReplayError::InvalidTransition);
-        }
+    ) && (!run.hooks_settled() || compaction_blocked(run))
+    {
+        return Err(ReplayError::InvalidTransition);
     }
     Ok(())
+}
+
+fn compaction_blocked(run: &RunView) -> bool {
+    let count = run.primary().map_or(0, |agent| agent.provider_calls.len());
+    run.lifecycle_hooks.iter().any(|hook| {
+        hook.invocation.event == HookEvent::PreCompact
+            && ["manual", "auto"].iter().any(|trigger| {
+                hook.invocation.subject_digest
+                    == crate::tools::permissions::compact_subject(trigger, count)
+            })
+            && hook
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| matches!(outcome.result, HookResult::Blocked { .. }))
+    })
+}
+
+// An editor spawned without a sandbox runs host commands per call: never a session or new rule.
+fn host_approval_tools<'a>(
+    run: &'a RunView,
+    policy: &ToolPolicyReceipt,
+    actor: crate::session::AgentRunId,
+    verdict: &PermissionVerdict,
+) -> Option<&'a [ToolView]> {
+    if run.primary().is_some_and(|agent| agent.id == actor) {
+        return Some(&run.tools);
+    }
+    match run.agents.iter().find(|agent| {
+        agent.id == actor
+            && agent.grant
+                == Some(crate::session::ChildGrant::EditOnly {
+                    unguarded: crate::tools::UnguardedGrant::HumanOnly,
+                })
+    }) {
+        Some(agent)
+            if policy.child_unguarded == crate::tools::UnguardedGrant::HumanOnly
+                && !verdict.host.as_ref().is_some_and(|host| {
+                    host.session
+                        || host.source_intent.is_some()
+                        || verdict.source == PermissionSource::Human && host.rule.is_some()
+                }) =>
+        {
+            Some(&agent.tools)
+        }
+        _ => None,
+    }
 }
 
 fn valid_host_approval(
@@ -877,20 +945,19 @@ fn valid_host_approval(
     let Some(run) = view.runs.last().filter(|run| run.id == run_id) else {
         return false;
     };
-    if run.primary().is_none_or(|agent| agent.id != actor) {
-        return false;
-    }
-    let Some(tool) = run
-        .tools
-        .iter()
-        .find(|tool| tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest)
-    else {
-        return false;
-    };
     let Some(policy) = run
         .config
         .as_ref()
         .and_then(|config| config.tool_policy.as_ref())
+    else {
+        return false;
+    };
+    let Some(tools) = host_approval_tools(run, policy, actor, verdict) else {
+        return false;
+    };
+    let Some(tool) = tools
+        .iter()
+        .find(|tool| tool.observation.is_none() && tool.intent.digest() == verdict.intent_digest)
     else {
         return false;
     };
@@ -921,9 +988,17 @@ fn valid_host_approval(
         PermissionSource::HostPrefixRule => {
             valid_host_prefix_approval(policy, &tool.intent, verdict, host)
         }
+        // Auto's review approves a host command no user rule decided; it never saves one.
+        PermissionSource::AiReview => {
+            host.rule.is_none()
+                && !host.session
+                && host.source_intent.is_none()
+                && verdict.decision == Decision::Ask
+                && verdict.basis == PermissionSource::Mode
+                && matches!(verdict.mode, None | Some(PermissionMode::Auto))
+        }
         PermissionSource::Rule
         | PermissionSource::Mode
-        | PermissionSource::AiReview
         | PermissionSource::UnavailableApproval
         | PermissionSource::PinnedGrant
         | PermissionSource::Hook
@@ -1005,7 +1080,12 @@ fn valid_host_prefix_approval(
             .is_some_and(|pin| policy.permissions_digest == pin.permissions_digest)
         && matches!(
             verdict.mode,
-            Some(PermissionMode::Default | PermissionMode::DontAsk)
+            Some(
+                PermissionMode::Default
+                    | PermissionMode::DontAsk
+                    | PermissionMode::AcceptEdits
+                    | PermissionMode::Auto
+            )
         )
         && rule.decision == Decision::Allow
         && rule.matches(intent)

@@ -1,8 +1,8 @@
-#[cfg(unix)]
 use crate::store::{MAX_SESSION_LOCK_FILES, MAX_STATE_OVERHEAD_FILES, MAX_WORKSPACE_LOCK_FILES};
 use crate::{
     provider::{
         COMPACTION_INPUT_EXPANSION, COMPACTION_REQUEST_ENVELOPE_BYTES, MAX_PROVIDER_REQUEST_BYTES,
+        MAX_WINDOW_REQUEST_BYTES,
     },
     session::{
         AUTO_COMPACTION_HISTORY_BYTES, MAX_BUDGET_REFUSAL_BYTES, MAX_COMPACTION_INPUT_BYTES,
@@ -12,38 +12,41 @@ use crate::{
         MAX_STEP_TOOL_CALLS, MAX_USER_MESSAGE_BYTES, MAX_WINDOW_CONTENT_BYTES,
     },
     store::{
-        AGGREGATE_BYTES, MAX_ARCHIVE_BYTES, MAX_COMPACTION_EVENT_BYTES, MAX_DISCOVERED_SESSIONS,
-        MAX_EVENT_BYTES, MAX_EVIDENCE_AGE_MS, MAX_EVIDENCE_ROWS, MAX_GOAL_FINISHED_BYTES,
-        MAX_GOAL_STARTED_BYTES, MAX_HOT_SESSION_PAYLOAD_BYTES, MAX_LIST_SCAN_EVENTS,
-        MAX_MESSAGE_ACCEPTED_BYTES, MAX_NATIVE_EVIDENCE_ROWS, MAX_SESSION_EVENTS,
+        MAX_COMPACTION_EVENT_BYTES, MAX_DISCOVERED_SESSIONS, MAX_EVENT_BYTES,
+        MAX_GOAL_FINISHED_BYTES, MAX_GOAL_STARTED_BYTES, MAX_HOT_SESSION_PAYLOAD_BYTES,
+        MAX_LIST_SCAN_EVENTS, MAX_MESSAGE_ACCEPTED_BYTES, MAX_SESSION_EVENTS,
         MAX_TOOL_FINISHED_BYTES, MAX_TOOL_STARTED_BYTES,
     },
     supervisor::{MAX_VERDICT_BYTES, MAX_VERDICTS},
     tools::{
-        FRAME_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_MCP_RESPONSE_BYTES, MAX_METADATA_BYTES,
-        MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS, MAX_QUERY_BYTES,
-        MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES, NETWORK_IDLE_MS,
-        WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS, WRITE_FRAME_BYTES,
+        FRAME_BYTES, MAX_ACCESS_TOKEN_BYTES, MAX_ADDITIONAL_READS_PER_CALL, MAX_MCP_RESPONSE_BYTES,
+        MAX_METADATA_BYTES, MAX_NETWORK_BYTES, MAX_NETWORK_CONNECTIONS, MAX_NETWORK_PATTERNS,
+        MAX_QUERY_BYTES, MAX_SEARCH_FIELD_CHARS, MAX_SESSION_SEARCHES, MAX_URL_BYTES,
+        NETWORK_IDLE_MS, WEB_DOWNLOAD_BYTES, WEB_FETCH_CHARS, WEB_SEARCH_RESULTS,
         command_tools::{MAX_COMMAND_TOOL_CANDIDATES, MAX_COMMAND_TOOLS},
+        guard_settings::{MAX_READ_FOLDER_ENTRIES, MAX_RUN_READ_GRANTS, MAX_SAVED_READ_GRANTS},
         permissions::MAX_CONFIG_BYTES,
         toolchains::{
-            MAX_DISCOVERY_PATH_ENTRIES, MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS,
-            MAX_USER_PROGRAM_GRANTS,
+            MAX_DISCOVERY_PATH_ENTRIES, MAX_LINK_SCAN_ENTRIES, MAX_LINK_TARGET_GRANTS,
+            MAX_MANAGER_SHIM_GRANTS, MAX_RUNTIME_GRANTS, MAX_USER_PROGRAM_GRANTS,
         },
         types::{
             COMMAND_COMPARE_BYTES_PER_UPPER_BYTE, COMMAND_PATH_METADATA_BYTES,
             COMMAND_SCAN_ENTRIES, COMMAND_SNAPSHOT_BYTES, COMMAND_SNAPSHOT_DEPTH,
-            COMMAND_SNAPSHOT_FILES, DEFAULT_COMMAND_TIMEOUT_MS, MAX_BUILD_CACHE_BYTES,
-            MAX_BUILD_MEMORY_BYTES, MAX_BUILD_PROCESSES_OR_THREADS, MAX_BUILD_PROJECT_BYTES,
-            MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES, MAX_COMMAND_TIMEOUT_MS, MAX_FILE_BYTES,
-            MAX_ORDINARY_TOOL_ARGUMENT_BYTES, MAX_PROCESSES_OR_THREADS, MAX_READ_LINE_CHARS,
-            MAX_READ_PAGE_LINES, MAX_RUNTIME_BYTES, MAX_SKILLS, MAX_SNAPSHOT_BYTES,
-            MAX_SNAPSHOT_FILES, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_CATALOG_BYTES,
-            MAX_TOOL_OBSERVATION_BYTES, MAX_TOOL_RESULT_BYTES, MCP_TIMEOUT_MS, MEMORY_BYTES,
-            SCRATCH_BYTES,
+            COMMAND_SNAPSHOT_FILES, DEFAULT_COMMAND_TIMEOUT_MS, GUARD_DISK_EVICTION_BYTES,
+            GUARD_DISK_RESERVE_BYTES, MAX_BUILD_MEMORY_BYTES, MAX_BUILD_PROCESSES_OR_THREADS,
+            MAX_BUILD_PROJECT_BYTES, MAX_COMMAND_INTEGRATION_ARGUMENT_BYTES,
+            MAX_COMMAND_TIMEOUT_MS, MAX_FILE_BYTES, MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
+            MAX_PROCESSES_OR_THREADS, MAX_READ_LINE_CHARS, MAX_READ_PAGE_LINES, MAX_RUNTIME_BYTES,
+            MAX_SKILLS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES, MAX_TOOL_ARGUMENT_BYTES,
+            MAX_TOOL_CATALOG_BYTES, MAX_TOOL_OBSERVATION_BYTES, MAX_TOOL_RESULT_BYTES,
+            MCP_TIMEOUT_MS, MEMORY_BYTES, SCRATCH_BYTES,
         },
     },
-    worker::MAX_EDITOR_CHANGE_REPORT_BYTES,
+    worker::{
+        DEFAULT_EDITOR_CHANGE_BYTES, DEFAULT_EDITOR_CHANGE_FILES, MAX_EDITOR_CHANGE_BYTES,
+        MAX_EDITOR_CHANGE_FILES, MAX_EDITOR_CHANGE_REPORT_BYTES,
+    },
 };
 
 #[derive(Debug)]
@@ -94,6 +97,30 @@ pub const LIMITS: LimitsTable = LimitsTable {
         Limit {
             name: "MAX_EDITOR_CHANGE_REPORT_BYTES",
             value: MAX_EDITOR_CHANGE_REPORT_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "DEFAULT_EDITOR_CHANGE_FILES",
+            value: DEFAULT_EDITOR_CHANGE_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "MAX_EDITOR_CHANGE_FILES",
+            value: MAX_EDITOR_CHANGE_FILES as u64,
+            unit: "files",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "DEFAULT_EDITOR_CHANGE_BYTES",
+            value: DEFAULT_EDITOR_CHANGE_BYTES,
+            unit: "bytes",
+            owner: "crates/arany/src/session/worker.rs",
+        },
+        Limit {
+            name: "MAX_EDITOR_CHANGE_BYTES",
+            value: MAX_EDITOR_CHANGE_BYTES,
             unit: "bytes",
             owner: "crates/arany/src/session/worker.rs",
         },
@@ -170,6 +197,24 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/provider.rs",
         },
         Limit {
+            name: "MAX_WINDOW_REQUEST_BYTES",
+            value: MAX_WINDOW_REQUEST_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider.rs",
+        },
+        Limit {
+            name: "MAX_PROMPT_OVERRIDE_BYTES",
+            value: crate::provider::MAX_PROMPT_OVERRIDE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider/prompts.rs",
+        },
+        Limit {
+            name: "MAX_COMPACTION_PROMPT_OVERRIDE_BYTES",
+            value: crate::provider::MAX_COMPACTION_PROMPT_OVERRIDE_BYTES as u64,
+            unit: "bytes",
+            owner: "crates/arany/src/provider/prompts.rs",
+        },
+        Limit {
             name: "MAX_GOAL_PROVIDER_CALLS",
             value: MAX_GOAL_PROVIDER_CALLS as u64,
             unit: "Provider calls",
@@ -199,21 +244,18 @@ pub const LIMITS: LimitsTable = LimitsTable {
             unit: "bytes",
             owner: "crates/arany/src/store.rs",
         },
-        #[cfg(unix)]
         Limit {
             name: "MAX_SESSION_LOCK_FILES",
             value: MAX_SESSION_LOCK_FILES as u64,
             unit: "files",
             owner: "crates/arany/src/store/state/lock.rs",
         },
-        #[cfg(unix)]
         Limit {
             name: "MAX_STATE_OVERHEAD_FILES",
             value: MAX_STATE_OVERHEAD_FILES as u64,
             unit: "files",
             owner: "crates/arany/src/store/state/lock.rs",
         },
-        #[cfg(unix)]
         Limit {
             name: "MAX_WORKSPACE_LOCK_FILES",
             value: MAX_WORKSPACE_LOCK_FILES as u64,
@@ -303,24 +345,6 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: MAX_TOOL_FINISHED_BYTES as u64,
             unit: "bytes",
             owner: "crates/arany/src/store.rs",
-        },
-        Limit {
-            name: "MAX_EVIDENCE_ROWS",
-            value: MAX_EVIDENCE_ROWS as u64,
-            unit: "custom Provider rows",
-            owner: "crates/arany/src/store/evidence.rs",
-        },
-        Limit {
-            name: "MAX_NATIVE_EVIDENCE_ROWS",
-            value: MAX_NATIVE_EVIDENCE_ROWS as u64,
-            unit: "native Provider rows",
-            owner: "crates/arany/src/store/evidence.rs",
-        },
-        Limit {
-            name: "MAX_EVIDENCE_AGE_MS",
-            value: MAX_EVIDENCE_AGE_MS as u64,
-            unit: "ms",
-            owner: "crates/arany/src/store/evidence.rs",
         },
         Limit {
             name: "MAX_DISCOVERED_SESSIONS",
@@ -497,14 +521,62 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/toolchains.rs",
         },
         Limit {
+            name: "MAX_LINK_TARGET_GRANTS",
+            value: MAX_LINK_TARGET_GRANTS as u64,
+            unit: "roots",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
+            name: "MAX_LINK_SCAN_ENTRIES",
+            value: MAX_LINK_SCAN_ENTRIES as u64,
+            unit: "directory entries",
+            owner: "crates/arany/src/tools/toolchains.rs",
+        },
+        Limit {
             name: "MAX_DISCOVERY_PATH_ENTRIES",
             value: MAX_DISCOVERY_PATH_ENTRIES as u64,
             unit: "entries",
             owner: "crates/arany/src/tools/toolchains.rs",
         },
         Limit {
+            name: "MAX_READ_FOLDER_ENTRIES",
+            value: MAX_READ_FOLDER_ENTRIES as u64,
+            unit: "entries",
+            owner: "crates/arany/src/tools/guard_settings.rs",
+        },
+        Limit {
+            name: "MAX_SAVED_READ_GRANTS",
+            value: MAX_SAVED_READ_GRANTS as u64,
+            unit: "directories",
+            owner: "crates/arany/src/tools/guard_settings.rs",
+        },
+        Limit {
+            name: "MAX_RUN_READ_GRANTS",
+            value: MAX_RUN_READ_GRANTS as u64,
+            unit: "directories",
+            owner: "crates/arany/src/tools/guard_settings.rs",
+        },
+        Limit {
+            name: "MAX_ADDITIONAL_READS_PER_CALL",
+            value: MAX_ADDITIONAL_READS_PER_CALL as u64,
+            unit: "directories",
+            owner: "crates/arany/src/tools/process.rs",
+        },
+        Limit {
             name: "SCRATCH_BYTES",
             value: SCRATCH_BYTES,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/types.rs",
+        },
+        Limit {
+            name: "GUARD_DISK_RESERVE_BYTES",
+            value: GUARD_DISK_RESERVE_BYTES,
+            unit: "bytes",
+            owner: "crates/arany/src/tools/types.rs",
+        },
+        Limit {
+            name: "GUARD_DISK_EVICTION_BYTES",
+            value: GUARD_DISK_EVICTION_BYTES,
             unit: "bytes",
             owner: "crates/arany/src/tools/types.rs",
         },
@@ -533,24 +605,6 @@ pub const LIMITS: LimitsTable = LimitsTable {
             owner: "crates/arany/src/tools/types.rs",
         },
         Limit {
-            name: "MAX_BUILD_CACHE_BYTES",
-            value: MAX_BUILD_CACHE_BYTES,
-            unit: "bytes",
-            owner: "crates/arany/src/tools/types.rs",
-        },
-        Limit {
-            name: "MAX_ARCHIVE_BYTES",
-            value: MAX_ARCHIVE_BYTES,
-            unit: "bytes",
-            owner: "crates/arany/src/store/state/build_cache.rs",
-        },
-        Limit {
-            name: "AGGREGATE_BYTES",
-            value: AGGREGATE_BYTES,
-            unit: "bytes",
-            owner: "crates/arany/src/store/state/build_cache.rs",
-        },
-        Limit {
             name: "MAX_BUILD_PROCESSES_OR_THREADS",
             value: MAX_BUILD_PROCESSES_OR_THREADS as u64,
             unit: "processes or threads",
@@ -573,12 +627,6 @@ pub const LIMITS: LimitsTable = LimitsTable {
             value: FRAME_BYTES as u64,
             unit: "bytes",
             owner: "crates/arany/src/tools/mcp.rs",
-        },
-        Limit {
-            name: "WRITE_FRAME_BYTES",
-            value: WRITE_FRAME_BYTES as u64,
-            unit: "bytes",
-            owner: "crates/arany/src/tools/git.rs",
         },
         Limit {
             name: "MCP_TIMEOUT_MS",

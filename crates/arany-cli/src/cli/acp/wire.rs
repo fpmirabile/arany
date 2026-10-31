@@ -258,12 +258,6 @@ pub(super) struct Cancel {
     pub session_id: SessionId,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct CancelRequest {
-    pub request_id: RequestId,
-}
-
 pub(super) fn initialized() -> Value {
     json!({
         "protocolVersion": 1,

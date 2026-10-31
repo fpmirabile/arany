@@ -281,7 +281,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
             "busy Session never reaches serve"
         );
     }
-    events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),"payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
+    events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
     let recovered = output.recv().await.unwrap();
     validate(&recovered);
     assert_eq!(
@@ -747,7 +747,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events: Vec<Value> = [("ToolStarted",json!({"intent":intent,"active_ceiling_ms":1,"verdict":null})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"payload":payload,"created_at_ms":0
     })).collect();
     let recover = adapter.request().await;
     assert_eq!(
@@ -984,7 +984,7 @@ async fn expiry_during_blocked_reconciliation_drops_the_resumed_completion() {
             id: recover.id,
             result: json!({"events":[{
                 "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
-                "kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),"payload":{"text":"Late"},"created_at_ms":0
+                "kind":"MessageCommitted","payload":{"text":"Late"},"created_at_ms":0
             }],"nextSince":null}),
         }))
         .await
@@ -1059,7 +1059,7 @@ async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
             id: recover.id,
             result: json!({"events":[{
                 "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
-                "kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),"payload":{"text":"Late"},"created_at_ms":0
+                "kind":"MessageCommitted","payload":{"text":"Late"},"created_at_ms":0
             }],"nextSince":null}),
         }))
         .await

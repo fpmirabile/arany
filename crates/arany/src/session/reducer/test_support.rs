@@ -155,32 +155,7 @@ pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> Session
 pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
     RunConfig {
         supervisor: tools.then(crate::supervisor::SupervisorPolicy::all_off),
-        worker_policy: None,
-        agent_definitions: None,
-        roster: None,
-        providers: None,
-        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
-        model: "gpt-5.4".into(),
-        effort: None,
-        custom_profile_provenance: None,
-        saved_api_account_id: None,
-        chatgpt_provenance: None,
-        output_token_bound: OutputTokenBound::ProviderEnforced,
-        context_window_tokens: None,
         policy,
-        output_token_cap: 4096,
-        provider_concurrency: 1,
-        workspace_device: 1,
-        workspace_inode: 2,
-        user_instruction_digest: None,
-        instruction_sources: Vec::new(),
-        launch_directory: String::new(),
-        include_digests: Vec::new(),
-        history_run_ids: Vec::new(),
-        excluded_history_runs: 0,
-        context_usage: None,
-        compaction_event_sequence: None,
-        compaction_content_digest: None,
         tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
             host_epoch: None,
             command_tools_digest: None,
@@ -193,7 +168,14 @@ pub(super) fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
             unguarded: crate::tools::UnguardedGrant::HumanOnly,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
             child_web: false,
+            git: None,
+            guard: crate::tools::GuardPin {
+                mode: crate::tools::GuardMode::Auto,
+                sandbox: true,
+                saved_reads: Vec::new(),
+            },
         })),
+        ..crate::test_support::run_config()
     }
 }
 
@@ -203,7 +185,6 @@ pub(super) fn record(
     tokens: Option<u32>,
 ) -> ProviderCallRecord {
     ProviderCallRecord {
-        rate_limits: None,
         delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
             vec![crate::session::worker::ChildAssignment::Researcher {
                 objective: "Check the child result".into(),
@@ -213,15 +194,10 @@ pub(super) fn record(
         }),
         phase,
         disposition,
-        response_id: None,
         input_tokens: tokens,
         output_tokens: tokens,
-        wire_provenance: None,
-        refusal: None,
-        failure_reason: None,
         requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
-        cache_read_input_tokens: None,
-        cache_creation_input_tokens: None,
+        ..crate::test_support::provider_call_record()
     }
 }
 
@@ -645,13 +621,13 @@ pub(super) fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObser
         let expected = match &intent.call {
             ToolCall::Write {
                 expected_digest, ..
-            } => expected_digest.clone(),
-            ToolCall::Edit {
+            }
+            | ToolCall::Edit {
                 expected_digest, ..
             }
             | ToolCall::MultiEdit {
                 expected_digest, ..
-            } => Some(expected_digest.clone()),
+            } => expected_digest.clone(),
             _ => unreachable!(),
         };
         serde_json::to_string(&crate::session::rewind::FilePublicationResult {
@@ -673,6 +649,7 @@ pub(super) fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObser
         serde_json::to_string(&crate::tools::types::CommandResult {
             selection: Some(Default::default()),
             network_refusals: Vec::new(),
+            hidden_grants: Vec::new(),
             exit_code: Some(0),
             stdout_total: crate::tools::OutputTotal {
                 bytes: stdout.len() as u64,
@@ -1036,8 +1013,8 @@ pub(super) fn failed_compaction_record(run: RunId, covered_sequence: u64) -> Com
         recent_files: Vec::new(),
         provider: "openai".into(),
         model: "gpt-5.4".into(),
-        prompt_version: 1,
-        schema_version: 1,
+        prompt: crate::provider::EffectivePrompts::default()
+            .pin(crate::provider::PromptFile::Compaction),
         compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
         source_bytes: 1,
         source_tokens_estimate: 1,
@@ -1080,6 +1057,7 @@ pub async fn selection_failure_session(
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     intent.workspace_device = identity.device;

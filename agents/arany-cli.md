@@ -1,10 +1,12 @@
 # Binary practice
 
-Load for work in `crates/arany-cli/`: `cli/`, `terminal/`, `presentation/` and `accounts/`. Read the [terminal](../docs/specs/terminal.md), [credentials](../docs/specs/credentials.md) or [ChatGPT](../docs/specs/chatgpt.md) contract for the affected flow and [security rules](./security.md) when triggered. The [system overview](../docs/architecture/system-overview.md#2-runtime-architecture) owns runtime composition and dependency direction.
+Practice for `crates/arany-cli/` (`cli/`, `terminal/`, `presentation/`, `accounts/`); read only the section your edit needs. Open the [terminal](../docs/specs/terminal/README.md), [credentials](../docs/specs/credentials.md) or [ChatGPT](../docs/specs/chatgpt.md) section for the affected flow and [security rules](./security.md) only when triggered. The [system overview](../docs/architecture/system-overview.md#2-runtime-architecture) owns runtime composition and dependency direction.
 
 [Testing](./testing.md#corpus-placement) owns corpus placement and shared support; load [fixture procedures](./references/testing-details.md) for native or process work.
 
-Present sizes, durations, counts and text limits in human terms through shared presentation formatters; audit every human view against the [measure formats](../docs/specs/terminal.md#human-readable-measures).
+Load the `terminal-ui-design` skill for terminal layout and interaction work. Read the owning [terminal spec](../docs/specs/terminal/README.md) section before every design or review, apply [AGENTS.md priorities](../AGENTS.md#product-and-implementation-priorities) (Ponytail, OS parity) and [testing](./testing.md) before verification claims, and keep screenshots in gitignored `.lavish/`. The [library skill notes](./arany.md#skills) apply to Rust here too.
+
+Present sizes, durations, counts and text limits in human terms through shared presentation formatters; audit every human view against the [measure formats](../docs/specs/terminal/entry-and-modes.md#human-readable-measures).
 
 ## Growth
 

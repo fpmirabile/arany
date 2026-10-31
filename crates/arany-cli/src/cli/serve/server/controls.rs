@@ -73,6 +73,7 @@ impl Submission {
             goal.budget = Some(loaded.goal_budget);
             goal.resource_settings = loaded.resource_settings;
         }
+        goal.context_window = loaded.context_window;
         Ok(goal)
     }
 }

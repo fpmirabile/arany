@@ -1,18 +1,4 @@
-use super::{Preferences, Setting};
-use serde_json::Value;
-
-pub(super) fn with_default(mut record: Value) -> Option<Value> {
-    let resources = record
-        .get_mut("preferences")?
-        .get_mut("resources")?
-        .as_object_mut()?;
-    if resources.contains_key("build_jobs") {
-        return None;
-    }
-    resources.insert("build_jobs".into(), Value::Null);
-    record.as_object_mut()?.insert("version".into(), 7.into());
-    Some(record)
-}
+use super::{Preferences, Setting, SettingInput};
 
 pub(super) fn cores() -> Option<u32> {
     std::thread::available_parallelism()
@@ -44,6 +30,7 @@ fn display(preferences: &Preferences) -> String {
 pub(super) const SETTING: Setting = Setting {
     label: "Build jobs",
     hint: "automatic or 1..cores",
+    input: SettingInput::Typed,
     value: display,
     apply: |preferences, raw| {
         let raw = if raw == display(preferences) {
@@ -71,6 +58,7 @@ pub(super) const SETTING: Setting = Setting {
             Some(_) => None,
         };
     },
+    reset: |preferences, default| preferences.resources.build_jobs = default.resources.build_jobs,
     guidance: None,
 };
 

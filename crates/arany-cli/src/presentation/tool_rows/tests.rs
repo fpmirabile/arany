@@ -16,6 +16,7 @@ mod peer_row_tests {
             cwd: String::new(),
             resource_class: Some(arany::ToolResourceClass::Build),
             timeout_ms: Some(600_000),
+            additional_reads: None,
         };
         let lines = approval_call_lines(&call);
         assert!(lines.iter().any(|line| line == "Resources: Build"));
@@ -97,6 +98,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "untrusted timeout text\u{1b}[2J",
         );
@@ -485,10 +487,16 @@ mod peer_row_tests {
                 arany::ToolCall::GhPrList { .. } => arany::HostIntent {
                     source_oid: "gh-pr-list-v1".into(),
                     refspec: "fixed-list".into(),
+                    destination: String::new(),
                 },
                 _ => arany::HostIntent {
                     source_oid: "1".repeat(40),
                     refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+                    destination: if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
+                        "https://github.com/example/project.git".into()
+                    } else {
+                        String::new()
+                    },
                 },
             });
             let lines = tool_approval_lines(&tool.intent).join("\n");
@@ -574,7 +582,7 @@ mod peer_row_tests {
             (
                 ToolCall::Delete {
                     path: "src/source".into(),
-                    expected_digest: "0".repeat(64),
+                    expected_digest: Some("0".repeat(64)),
                 },
                 "⏺ Delete(src/source)\n  ⎿ applied",
                 vec!["Delete src/source · only if the file is unchanged"],
@@ -583,7 +591,7 @@ mod peer_row_tests {
                 ToolCall::Move {
                     source: "src/source".into(),
                     destination: "dest/target".into(),
-                    expected_digest: "0".repeat(64),
+                    expected_digest: Some("0".repeat(64)),
                 },
                 "⏺ Move(src/source → dest/target)\n  ⎿ applied",
                 vec![
@@ -601,7 +609,7 @@ mod peer_row_tests {
             ToolCall::Move {
                 source: "source\u{1b}[2J".into(),
                 destination: "target\nline".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
             },
             "{}",
         );
@@ -617,7 +625,7 @@ mod peer_row_tests {
         let tool = tool_fixture(
             ToolCall::MultiEdit {
                 file_path: "src/a".into(),
-                expected_digest: "0".repeat(64),
+                expected_digest: Some("0".repeat(64)),
                 edits: vec![
                     arany::LiteralEdit {
                         old_string: "old\nline".into(),
@@ -723,6 +731,7 @@ mod peer_row_tests {
                     cwd: String::new(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
                 "Command(sh )",
                 60_000,
@@ -791,6 +800,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             &output,
         );
@@ -906,6 +916,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             &result.to_string(),
         );
@@ -944,6 +955,7 @@ mod peer_row_tests {
                     cwd: String::new(),
                     resource_class: None,
                     timeout_ms: None,
+                    additional_reads: None,
                 },
                 "",
             );
@@ -959,6 +971,7 @@ mod peer_row_tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             "",
         );
@@ -983,6 +996,7 @@ mod peer_row_tests {
                 ToolCall::Glob {
                     pattern: "**/*.rs".into(),
                     path: "src".into(),
+                    offset: 0,
                     limit: 1,
                 },
                 r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":1,"may_be_truncated":true}"#,
@@ -1327,6 +1341,7 @@ mod unguarded_tests {
                 prefix: offered,
                 sensitive: false,
                 inactive_rules: false,
+                sandbox_off: false,
             };
             let lines = unguarded_approval_lines(&intent, &prompt);
             let prefix =
@@ -1363,6 +1378,7 @@ mod unguarded_tests {
             attribution: None,
             remember: true,
             prefix: false,
+            sandbox_off: false,
         };
         let lines = unguarded_approval_lines(&intent(&["-c", "cargo test"], ""), &prompt);
         assert_eq!(
@@ -1605,6 +1621,7 @@ mod rewrite_summary_tests {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let fact = |stage| arany::CommandRewrite {
             hook_intent_id: None,

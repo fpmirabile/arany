@@ -1,3 +1,4 @@
+use super::attached::models::refresh_at_startup;
 use super::provider::select::{ProviderArg, validate_headless_selection};
 pub(in crate::cli) use super::run_outcome::SHUTDOWN_GRACE;
 use super::run_outcome::{StopSignals, StopStep, stop_after_answer, stop_step, stop_text};
@@ -8,7 +9,6 @@ use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
     GoalId, GoalPhase, GoalRequest, GoalStatus, MAX_USER_MESSAGE_BYTES, Provider, RunRequest,
     RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
-    native_protection_supported,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr, sync::Arc};
@@ -26,17 +26,12 @@ impl CollaborationArg {
         max_active_children: Option<u8>,
     ) -> Result<CollaborationPolicy, &'static str> {
         match (self, max_active_children) {
-            (Self::Single, None) => Ok(CollaborationPolicy::Single),
-            (Self::Auto, count) if count.unwrap_or(3) <= 8 => Ok(CollaborationPolicy::Auto {
-                max_active_children: count.unwrap_or(3),
-            }),
-            (Self::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
-                Ok(CollaborationPolicy::Team {
-                    max_active_children: count.unwrap_or(3),
-                })
-            }
-            _ => Err("invalid collaboration policy"),
+            (Self::Single, None) => Some(CollaborationPolicy::Single),
+            (Self::Single, Some(_)) => None,
+            (Self::Auto, count) => CollaborationPolicy::auto(count),
+            (Self::Team, count) => CollaborationPolicy::team(count),
         }
+        .ok_or("invalid collaboration policy")
     }
 }
 
@@ -48,11 +43,10 @@ pub(crate) struct ExecArgs {
     pub workspace: Option<PathBuf>,
     #[arg(
         long,
-        required_unless_present = "profile",
-        help = "openai, anthropic, chatgpt, or custom:NAME"
+        help = "openai, anthropic, chatgpt, or custom:NAME; defaults to the saved selection"
     )]
     pub provider: Option<ProviderArg>,
-    #[arg(long, required_unless_present = "profile")]
+    #[arg(long)]
     pub model: Option<String>,
     #[arg(long)]
     pub profile: Option<String>,
@@ -81,7 +75,7 @@ pub(crate) struct ExecArgs {
     pub goal: Option<String>,
     #[arg(long, value_enum, default_value_t = OutputArg::Text)]
     pub output: OutputArg,
-    #[arg(long, value_enum, default_value_t = CollaborationArg::Auto)]
+    #[arg(long, value_enum, default_value_t = CollaborationArg::Single)]
     pub collaboration: CollaborationArg,
     #[arg(long)]
     pub max_active_children: Option<u8>,
@@ -98,7 +92,9 @@ fn apply_saved_limits(
     goal: &mut GoalRequest,
     budget: GoalBudget,
     resource_settings: arany::ToolResourceSettings,
+    context_window: arany::ContextWindow,
 ) {
+    goal.context_window = context_window;
     if goal.continues.is_some() {
         return;
     }
@@ -188,6 +184,9 @@ impl ExecArgs {
 }
 
 pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<CommandOutput, String> {
+    let (_, state_dir) = super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+        .map_err(str::to_owned)?;
+    super::admit_headless_records(&state_dir)?;
     if let Some(name) = &args.profile {
         let (workspace, state_dir) =
             super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
@@ -210,6 +209,11 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
             _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
             result = selected.admit(&state_dir, &workspace) => result?,
         };
+        refresh_at_startup(
+            workspace.clone(),
+            primary.provider.profile(),
+            primary.account_id,
+        );
         let state = StateRoot::open_existing(&state_dir)
             .map_err(|_| "state directory unavailable or unsafe")?;
         super::admit_headless_history(&state)?;
@@ -225,6 +229,7 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
         .map_err(|_| "state store unavailable")?;
         return run_on_engine(args, admission, providers, engine, Some(signals)).await;
     }
+    apply_saved_selection(&mut args)?;
     let admission = args.admit().map_err(str::to_owned)?;
     let provider = super::provider::select::select_env_provider(
         args.provider.as_ref().ok_or("--provider is required")?,
@@ -235,7 +240,38 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
     )
     .await
     .map_err(|error| error.to_string())?;
+    refresh_at_startup(
+        admission.workspace.clone(),
+        provider.identity().profile.clone(),
+        None,
+    );
     run_with_provider(args, admission, provider, telemetry).await
+}
+
+const MISSING_SELECTION: &str = "no saved model selection; pass --provider and --model, or choose a model with /model in attached mode";
+
+// Like attached mode, exec without --provider uses the saved selection and a missing effort its saved one.
+fn apply_saved_selection(args: &mut ExecArgs) -> Result<(), String> {
+    let (workspace, _) = super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+        .map_err(str::to_owned)?;
+    if args.provider.is_none() {
+        if args.model.is_some() {
+            return Err("--provider is required with --model".into());
+        }
+        let saved = super::attached::models::last_saved_defaults(&workspace)?
+            .and_then(|defaults| Some((defaults.provider?, defaults.model?, defaults.effort)))
+            .ok_or(MISSING_SELECTION)?;
+        args.provider = Some(ProviderArg::from_str(&saved.0).map_err(str::to_owned)?);
+        args.model = Some(saved.1);
+        args.effort = args.effort.or(saved.2);
+    }
+    if args.effort.is_none()
+        && let (Some(provider), Some(model)) = (&args.provider, &args.model)
+    {
+        args.effort =
+            super::attached::models::saved_effort(&workspace, &provider.profile_label(), model)?;
+    }
+    Ok(())
 }
 
 async fn run_with_provider(
@@ -338,21 +374,15 @@ async fn submit_and_wait(
     let session_id = admission.session_id;
     let output = args.output;
     let tools = if args.tools {
-        if !native_protection_supported() {
-            return Err(
-                "Tools require native OS protection, unavailable on this host; rerun without --tools"
-                    .to_owned(),
-            );
-        }
         ToolGrant::Configured
     } else {
         ToolGrant::None
     };
-    let (goal_budget, resource_settings) =
+    let (goal_budget, resource_settings, context_window) =
         crate::cli::attached::controls::execution_limits(&admission.state_dir).await?;
     let (objective, skill) = invoked_skill(&args, &admission)?;
     let mut goal = admission.goal;
-    apply_saved_limits(&mut goal, goal_budget, resource_settings);
+    apply_saved_limits(&mut goal, goal_budget, resource_settings, context_window);
     let resumed_goal = goal.id;
     let request = RunRequest {
         skill,
@@ -662,7 +692,7 @@ fn text_receipt(committed: &CommittedOutcome) -> Result<String, String> {
                 "Provider: ChatGPT plan\nOutput bound: local only; remote usage is not capped\n"
             }
             Some(config) if config.custom_profile_provenance.is_some() => {
-                "Provider: custom verified\n"
+                "Provider: custom\n"
             }
             _ => "",
         },
@@ -1005,7 +1035,7 @@ mod tests {
         );
         assert_eq!(provider.requests.lock().unwrap().len(), 2);
         assert!(provider.responses.lock().unwrap().is_empty());
-        assert_host_exec_output(&state_dir, &output, matches!(mode, "default" | "dontAsk")).await;
+        assert_host_exec_output(&state_dir, &output, mode != "plan").await;
     }
 
     async fn assert_host_exec_output(
@@ -1078,7 +1108,7 @@ mod tests {
         let config = state_dir.join("tools.json");
         std::fs::write(
             &config,
-            r#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[]}"#,
+            r#"{"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[]}"#,
         )
         .expect("config");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).expect("mode");
@@ -1299,15 +1329,27 @@ mod tests {
             max_runs: 1,
             ..GoalBudget::default()
         };
+        let window = arany::ContextWindow::Tokens(500_000);
         apply_saved_limits(
             &mut continued,
             saved,
             arany::ToolResourceSettings::default(),
+            window,
         );
         assert_eq!(continued.budget, Some(GoalBudget::default()));
+        assert_eq!(
+            continued.context_window, window,
+            "every Run uses the saved window"
+        );
         let mut fresh = GoalRequest::default();
-        apply_saved_limits(&mut fresh, saved, arany::ToolResourceSettings::default());
+        apply_saved_limits(
+            &mut fresh,
+            saved,
+            arany::ToolResourceSettings::default(),
+            window,
+        );
         assert_eq!(fresh.budget, Some(saved));
+        assert_eq!(fresh.context_window, window);
         assert!(parse(&["--continue-goal", &goal_id]).is_err());
         assert!(
             parse(&[
@@ -1409,14 +1451,16 @@ mod tests {
             let state_dir = temp.path().join("state");
             let root = StateRoot::admit(&state_dir).expect("state");
             let config = state_dir.join("tools.json");
-            std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+            std::fs::write(
+                &config,
+                br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            )
+            .expect("config");
             std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
                 .expect("private config");
             if finite {
-                let preferences = serde_json::json!({"version":7,"preferences":{
-                    "completion":"tabs","view":"fullscreen",
+                let preferences = serde_json::json!({"preferences":{
                     "goal_budget":GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-                    "resources":arany::ToolResourceSettings::default(),"copy_on_select":true,"newline":"shift_enter"
                 }});
                 root.record(arany::RecordKind::UiPreferences)
                     .replace(&serde_json::to_vec(&preferences).expect("settings"))
@@ -1441,7 +1485,7 @@ mod tests {
                 }
             );
             let receipt: Vec<_> = report.stderr.lines().collect();
-            assert_eq!(receipt.len(), if finite { 5 } else { 3 });
+            assert_eq!(receipt.len(), if finite { 6 } else { 3 });
             let id = SessionId::from_str(
                 receipt[0]
                     .strip_prefix("Session: ")
@@ -1488,57 +1532,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_rejects_malformed_and_unsafe_settings_before_dispatch() {
+    async fn exec_rejects_unsafe_settings_before_dispatch() {
         use std::os::unix::fs::PermissionsExt;
-        for unsafe_record in [false, true] {
-            let temp = tempfile::tempdir().expect("private root");
-            let workspace = temp.path().join("workspace");
-            std::fs::create_dir(&workspace).expect("Workspace");
-            let state = temp.path().join("state");
-            let root = StateRoot::admit(&state).expect("State");
-            root.record(arany::RecordKind::UiPreferences)
-                .replace(b"malformed")
-                .expect("record");
-            if unsafe_record {
-                std::fs::set_permissions(
-                    state.join("ui-preferences.json"),
-                    std::fs::Permissions::from_mode(0o644),
-                )
-                .expect("unsafe fixture");
-            }
-            drop(root);
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let exec = args(state.clone(), workspace.clone(), "Never dispatched");
-            let admission = exec.admit().expect("arguments");
-            let error = run_with_provider(
-                exec,
-                admission,
-                Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
-                Telemetry::disabled(),
-            )
-            .await
-            .err()
-            .expect("settings refusal");
-            assert_eq!(
-                error,
-                if unsafe_record {
-                    "display settings unavailable or unsafe"
-                } else {
-                    "invalid display settings; use /settings to replace them"
-                }
-            );
-            assert!(observed.lock().expect("observations").is_empty());
-            assert!(
-                arany::list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
-                    .await
-                    .expect("history")
-                    .is_empty()
-            );
-            assert_eq!(
-                std::fs::read(state.join("ui-preferences.json")).expect("unchanged record"),
-                b"malformed"
-            );
-        }
+        let temp = tempfile::tempdir().expect("private root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("Workspace");
+        let state = temp.path().join("state");
+        let root = StateRoot::admit(&state).expect("State");
+        root.record(arany::RecordKind::UiPreferences)
+            .replace(b"malformed")
+            .expect("record");
+        std::fs::set_permissions(
+            state.join("ui-preferences.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("unsafe fixture");
+        drop(root);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let exec = args(state.clone(), workspace.clone(), "Never dispatched");
+        let admission = exec.admit().expect("arguments");
+        let error = run_with_provider(
+            exec,
+            admission,
+            Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
+            Telemetry::disabled(),
+        )
+        .await
+        .err()
+        .expect("settings refusal");
+        assert_eq!(error, "display settings unavailable or unsafe");
+        assert!(observed.lock().expect("observations").is_empty());
+        assert!(
+            arany::list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
+                .await
+                .expect("history")
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::read(state.join("ui-preferences.json")).expect("unchanged record"),
+            b"malformed"
+        );
     }
 
     #[tokio::test]
@@ -1750,16 +1783,12 @@ mod tests {
         let tools = state_dir.join("tools.json");
         std::fs::write(
             &tools,
-            br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
         )
         .expect("Tool configuration");
         std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600))
             .expect("private Tool configuration");
-        let preferences = serde_json::json!({"version":7,"preferences":{
-            "completion":"tabs","view":"fullscreen","goal_budget":budget,
-            "resources":arany::ToolResourceSettings::default(),
-            "copy_on_select":true,"newline":"shift_enter"
-        }});
+        let preferences = serde_json::json!({"preferences":{"goal_budget":budget}});
         root.record(arany::RecordKind::UiPreferences)
             .replace(&serde_json::to_vec(&preferences).expect("settings"))
             .expect("record settings");
@@ -2212,8 +2241,7 @@ mod tests {
                     text: "Bounded answer".into(),
                 }),
             ])
-            .with_profile("anthropic", "claude-sonnet-5")
-            .with_effort(Effort::Low)
+            .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32])
             .with_context_window(CONTEXT_WINDOW_TOKENS),
         );
         let mut input = arany::test_support::scenario::request(&workspace, "Prior question");
@@ -2473,7 +2501,6 @@ mod tests {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             assert_eq!(line["kind"], event.event.kind());
-            assert_eq!(line["event_version"], event.event.version());
         }
         store.close().await.expect("closed store");
 

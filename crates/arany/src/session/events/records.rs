@@ -8,10 +8,23 @@ use crate::validate::{MAX_PATH_BYTES, valid_digest, valid_relative};
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectTarget {
     Workspace,
+    // An editor's private copy-on-write workspace, pinned by its root identity.
+    EditorWorkspace {
+        assignment_id: AgentRunId,
+        device: u64,
+        inode: u64,
+    },
 }
 impl EffectTarget {
+    pub(crate) fn editor(&self) -> bool {
+        matches!(self, Self::EditorWorkspace { .. })
+    }
+
     pub(crate) fn valid(&self) -> bool {
-        true
+        match self {
+            Self::Workspace => true,
+            Self::EditorWorkspace { assignment_id, .. } => assignment_id.valid(),
+        }
     }
 }
 
@@ -89,22 +102,43 @@ impl From<ToolIntentRecord> for EffectIntent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CollaborationPolicy {
+    #[default]
     Single,
-    Auto { max_active_children: u8 },
-    Team { max_active_children: u8 },
+    Auto {
+        max_active_children: u8,
+    },
+    Team {
+        max_active_children: u8,
+    },
 }
 
-impl Default for CollaborationPolicy {
-    fn default() -> Self {
-        Self::Auto {
-            max_active_children: 3,
-        }
-    }
-}
 impl CollaborationPolicy {
+    pub const MAX_ACTIVE_CHILDREN: u8 = 8;
+    pub const DEFAULT_ACTIVE_CHILDREN: u8 = 3;
+
+    pub fn auto(max_active_children: Option<u8>) -> Option<Self> {
+        let max_active_children = max_active_children.unwrap_or(Self::DEFAULT_ACTIVE_CHILDREN);
+        (max_active_children <= Self::MAX_ACTIVE_CHILDREN).then_some(Self::Auto {
+            max_active_children,
+        })
+    }
+
+    pub fn team(max_active_children: Option<u8>) -> Option<Self> {
+        let max_active_children = max_active_children.unwrap_or(Self::DEFAULT_ACTIVE_CHILDREN);
+        (1..=Self::MAX_ACTIVE_CHILDREN)
+            .contains(&max_active_children)
+            .then_some(Self::Team {
+                max_active_children,
+            })
+    }
+
+    // Only autonomous Goals and an explicit team are offered the binding plan contract.
+    pub(crate) fn offers_plan(self, autonomous: bool) -> bool {
+        autonomous || matches!(self, Self::Team { .. })
+    }
     pub fn max_children(self) -> u8 {
         match self {
             Self::Single => 0,
@@ -121,10 +155,10 @@ impl CollaborationPolicy {
             Self::Single => Ok(()),
             Self::Auto {
                 max_active_children,
-            } if max_active_children <= 8 => Ok(()),
+            } if max_active_children <= Self::MAX_ACTIVE_CHILDREN => Ok(()),
             Self::Team {
                 max_active_children,
-            } if (1..=8).contains(&max_active_children) => Ok(()),
+            } if (1..=Self::MAX_ACTIVE_CHILDREN).contains(&max_active_children) => Ok(()),
             _ => Err(ReplayError::InvalidPayload),
         }
     }
@@ -175,7 +209,7 @@ impl SessionDefaults {
             bounded(provider, 128)?;
         }
         if let Some(model) = &self.model {
-            bounded(model, 128)?;
+            bounded(model, crate::provider::MAX_MODEL_ID_BYTES)?;
         }
         self.policy.validate()
     }
@@ -236,6 +270,9 @@ pub struct RunConfig {
     pub output_token_bound: crate::provider::OutputTokenBound,
     #[serde(deserialize_with = "Option::deserialize")]
     pub context_window_tokens: Option<u32>,
+    // The user's context window setting resolved against `context_window_tokens`; every budget uses it.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub effective_context_window_tokens: Option<u32>,
     pub policy: CollaborationPolicy,
     pub output_token_cap: u32,
     pub provider_concurrency: u8,
@@ -244,8 +281,9 @@ pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
     pub user_instruction_digest: Option<[u8; 32]>,
     pub instruction_sources: Vec<InstructionSource>,
+    pub prompts: Vec<crate::provider::PromptPin>,
     pub launch_directory: String,
-    pub include_digests: Vec<[u8; 32]>,
+    pub include_sources: Vec<IncludeSource>,
     pub history_run_ids: Vec<RunId>,
     pub excluded_history_runs: u32,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -262,9 +300,17 @@ pub struct RunConfig {
 #[serde(deny_unknown_fields)]
 pub struct InstructionSource {
     pub directory: String,
-    // Null only for a source migrated from version 18, which journaled the digest alone.
+    // Null was produced only by the retired version-18 journal migration.
     #[serde(deserialize_with = "Option::deserialize")]
     pub file: Option<InstructionFile>,
+    pub digest: [u8; 32],
+}
+
+// A directory include's path ends with '/', so it never matches a file precondition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncludeSource {
+    pub path: String,
     pub digest: [u8; 32],
 }
 
@@ -327,23 +373,33 @@ impl RunConfig {
     }
 
     fn context_window_valid(&self) -> bool {
-        let ceiling = super::content_ceiling(self.context_window_tokens);
-        self.context_window_tokens.is_none_or(|tokens| {
-            crate::provider::admitted_context_window(u64::from(tokens)).is_some()
-                && self.custom_profile_provenance.is_none()
-                && self
-                    .identity()
-                    .is_some_and(|identity| supports_context_window_evidence(&identity))
-                && self.providers.as_ref().is_none_or(|providers| {
-                    providers
-                        .primary
-                        .iter()
-                        .all(supports_context_window_evidence)
-                })
-        }) && self
-            .context_usage
-            .as_ref()
-            .is_none_or(|usage| usage.budget_bytes as usize <= ceiling)
+        let ceiling = super::content_ceiling(self.effective_context_window_tokens);
+        let effective_valid = match (
+            self.context_window_tokens,
+            self.effective_context_window_tokens,
+        ) {
+            (None, None) => true,
+            (Some(window), Some(effective)) => (crate::provider::MIN_CONTEXT_WINDOW_TOKENS
+                .min(window)..=window)
+                .contains(&effective),
+            _ => false,
+        };
+        effective_valid
+            && self.context_window_tokens.is_none_or(|tokens| {
+                crate::provider::admitted_context_window(u64::from(tokens)).is_some()
+                    && self.custom_profile_provenance.is_none()
+                    && self
+                        .identity()
+                        .is_some_and(|identity| has_catalog_window(&identity))
+                    && self
+                        .providers
+                        .as_ref()
+                        .is_none_or(|providers| providers.primary.iter().all(has_catalog_window))
+            })
+            && self
+                .context_usage
+                .as_ref()
+                .is_none_or(|usage| usage.budget_bytes as usize <= ceiling)
             && self
                 .tool_policy
                 .as_ref()
@@ -388,75 +444,25 @@ impl RunConfig {
                 .agent_definitions
                 .as_ref()
                 .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
-            || self.roster.as_ref().is_some_and(|roster| {
-                !roster.valid()
-                    || std::iter::once(&roster.providers.primary)
-                        .chain(roster.child_profiles.iter())
-                        .any(|name| {
-                            roster.chain(name).is_none_or(|chain| {
-                                chain.iter().any(|identity| {
-                                    self.provider_concurrency > identity.limits.concurrency
-                                })
-                            })
-                        })
-                    || roster
-                        .role_routes()
-                        .is_none_or(|routes| match &self.providers {
-                            Some(pinned) => *pinned != routes,
-                            None => self.identity().is_none_or(|identity| {
-                                routes.values().iter().any(|chain| {
-                                    chain.len() != 1
-                                        || chain[0].profile != identity.profile
-                                        || chain[0].model != identity.model
-                                        || chain[0].effort != identity.effort
-                                        || chain[0].provenance != identity.provenance
-                                        || chain[0].limits.max_output_tokens
-                                            != identity.limits.max_output_tokens
-                                        || chain[0].limits.output_token_bound
-                                            != identity.limits.output_token_bound
-                                        || identity.limits.concurrency > chain[0].limits.concurrency
-                                })
-                            }),
-                        })
-                    || self.tool_policy.is_some()
-                        && roster.child_profiles.iter().any(|name| {
-                            roster.chain(name).is_none_or(|chain| {
-                                chain
-                                    .iter()
-                                    .any(|identity| !identity.shares_account(&chain[0]))
-                            })
-                        })
-            })
-            || self.providers.as_ref().is_some_and(|providers| {
-                !providers.valid()
-                    || providers
-                        .values()
-                        .iter()
-                        .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
-                    || self.identity().is_none_or(|identity| {
-                        let primary = &providers.primary[0];
-                        identity.profile != primary.profile
-                            || identity.model != primary.model
-                            || identity.effort != primary.effort
-                            || identity.provenance != primary.provenance
-                            || identity.limits.max_output_tokens != primary.limits.max_output_tokens
-                            || identity.limits.output_token_bound
-                                != primary.limits.output_token_bound
-                            || self.provider_concurrency > primary.limits.concurrency
-                    })
-                    || self.tool_policy.is_some()
-                        && providers.values().iter().take(2).any(|chain| {
-                            chain
-                                .iter()
-                                .any(|identity| !identity.shares_account(&chain[0]))
-                        })
-            })
+            || self
+                .roster
+                .as_ref()
+                .is_some_and(|roster| self.invalid_roster(roster))
+            || self
+                .providers
+                .as_ref()
+                .is_some_and(|providers| self.invalid_providers(providers))
             || !self.identity().is_some_and(|identity| identity.valid())
             || self
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
-            || self.include_digests.len() > 16
+            || self.include_sources.len() > crate::session::input::MAX_INCLUDES
+            || self
+                .include_sources
+                .iter()
+                .any(|source| !crate::session::input::valid_include_path(&source.path))
+            || !crate::provider::PromptPin::pins_valid(&self.prompts)
             || !self.instruction_scope_valid()
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS
             || self.compaction_event_sequence.is_some() != self.compaction_content_digest.is_some()
@@ -470,11 +476,76 @@ impl RunConfig {
         }
         self.policy.validate()
     }
+
+    fn invalid_roster(&self, roster: &crate::provider::RosterSnapshot) -> bool {
+        !roster.valid()
+            || std::iter::once(&roster.providers.primary)
+                .chain(roster.child_profiles.iter())
+                .any(|name| {
+                    roster.chain(name).is_none_or(|chain| {
+                        chain
+                            .iter()
+                            .any(|identity| self.provider_concurrency > identity.limits.concurrency)
+                    })
+                })
+            || roster
+                .role_routes()
+                .is_none_or(|routes| match &self.providers {
+                    Some(pinned) => *pinned != routes,
+                    None => self.identity().is_none_or(|identity| {
+                        routes.values().iter().any(|chain| {
+                            chain.len() != 1
+                                || chain[0].profile != identity.profile
+                                || chain[0].model != identity.model
+                                || chain[0].effort != identity.effort
+                                || chain[0].provenance != identity.provenance
+                                || chain[0].limits.max_output_tokens
+                                    != identity.limits.max_output_tokens
+                                || chain[0].limits.output_token_bound
+                                    != identity.limits.output_token_bound
+                                || identity.limits.concurrency > chain[0].limits.concurrency
+                        })
+                    }),
+                })
+            || self.tool_policy.is_some()
+                && roster.child_profiles.iter().any(|name| {
+                    roster.chain(name).is_none_or(|chain| {
+                        chain
+                            .iter()
+                            .any(|identity| !identity.shares_account(&chain[0]))
+                    })
+                })
+    }
+
+    fn invalid_providers(&self, providers: &crate::provider::ProviderRoutes) -> bool {
+        !providers.valid()
+            || providers
+                .values()
+                .iter()
+                .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
+            || self.identity().is_none_or(|identity| {
+                let primary = &providers.primary[0];
+                identity.profile != primary.profile
+                    || identity.model != primary.model
+                    || identity.effort != primary.effort
+                    || identity.provenance != primary.provenance
+                    || identity.limits.max_output_tokens != primary.limits.max_output_tokens
+                    || identity.limits.output_token_bound != primary.limits.output_token_bound
+                    || self.provider_concurrency > primary.limits.concurrency
+            })
+            || self.tool_policy.is_some()
+                && providers.values().iter().take(2).any(|chain| {
+                    chain
+                        .iter()
+                        .any(|identity| !identity.shares_account(&chain[0]))
+                })
+    }
 }
 
-fn supports_context_window_evidence(identity: &crate::provider::ProviderIdentity) -> bool {
+// ChatGPT and native API catalogs report windows; custom protocols expose no catalog.
+fn has_catalog_window(identity: &crate::provider::ProviderIdentity) -> bool {
     identity.chatgpt_provenance().is_some()
-        || ProviderKind::parse(&identity.profile) == Some(ProviderKind::Anthropic)
+        || ProviderKind::parse(&identity.profile).is_some_and(ProviderKind::is_native_api)
             && matches!(
                 identity.provenance,
                 crate::provider::Provenance::Native { .. }
@@ -548,6 +619,7 @@ pub enum RunFailure {
 pub enum ProposalRefusalCause {
     InvalidArguments,
     InvalidPath,
+    DigestUnknown,
     Phase,
     PlanInvalid,
     PlanBudgetOutsideGoal,
@@ -700,8 +772,7 @@ pub struct CompactionRecord {
     pub recent_files: Vec<RecentFile>,
     pub provider: String,
     pub model: String,
-    pub prompt_version: u16,
-    pub schema_version: u16,
+    pub prompt: crate::provider::PromptPin,
     pub compiler_version: u16,
     pub source_bytes: u32,
     pub source_tokens_estimate: u32,
@@ -759,8 +830,7 @@ impl CompactionRecord {
                         .any(|previous| previous.path == file.path)
             })
             || self.covered_sequence == 0
-            || self.prompt_version != 1
-            || self.schema_version != 1
+            || self.prompt.file != crate::provider::PromptFile::Compaction
             || !(crate::session::MIN_RECORDED_COMPACTION_COMPILER_VERSION
                 ..=crate::session::COMPACTION_COMPILER_VERSION)
                 .contains(&self.compiler_version)
@@ -772,11 +842,10 @@ impl CompactionRecord {
                 .output_tokens
                 .is_some_and(|value| value > crate::provider::MAX_REPORTED_OUTPUT_TOKENS)
             || !self.usage().cache_consistent()
-            || self.response_id.as_ref().is_some_and(|value| {
-                value.is_empty()
-                    || value.len() > 128
-                    || !value.bytes().all(|byte| byte.is_ascii_graphic())
-            })
+            || self
+                .response_id
+                .as_ref()
+                .is_some_and(|value| !crate::provider::valid_wire_id(value))
             || self.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     self.response_id.as_deref(),
@@ -796,7 +865,8 @@ impl CompactionRecord {
             return Err(ReplayError::InvalidSnapshot);
         }
         bounded(&self.provider, 128).map_err(|_| ReplayError::InvalidSnapshot)?;
-        bounded(&self.model, 128).map_err(|_| ReplayError::InvalidSnapshot)?;
+        bounded(&self.model, crate::provider::MAX_MODEL_ID_BYTES)
+            .map_err(|_| ReplayError::InvalidSnapshot)?;
         if let CompactionStatus::Succeeded {
             summary,
             summary_bytes,
@@ -849,6 +919,9 @@ pub struct ProviderCallRecord {
     pub response_id: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub input_tokens: Option<u32>,
+    // The Engine's count of a primary request's content bytes; with `input_tokens` it calibrates the ceiling.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub context_bytes: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub output_tokens: Option<u32>,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -896,12 +969,21 @@ impl ProviderCallRecord {
                     crate::provider::AgentPhase::RootPlan
                         | crate::provider::AgentPhase::RootSynthesis
                 )
+            || self.context_bytes.is_some_and(|bytes| {
+                bytes as usize > super::MAX_WINDOW_CONTENT_BYTES
+                    || !matches!(
+                        self.phase,
+                        crate::provider::AgentPhase::RootPlan
+                            | crate::provider::AgentPhase::RootSynthesis
+                    )
+            })
             || self.requested_tools > MAX_STEP_TOOL_CALLS
             || (self.disposition == ProviderCallDisposition::ToolRequested)
                 != (self.requested_tools > 0)
-            || self.response_id.as_ref().is_some_and(|id| {
-                id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
-            })
+            || self
+                .response_id
+                .as_ref()
+                .is_some_and(|id| !crate::provider::valid_wire_id(id))
             || self
                 .input_tokens
                 .is_some_and(|count| count > crate::provider::MAX_REPORTED_INPUT_TOKENS)
@@ -916,62 +998,9 @@ impl ProviderCallRecord {
                     self.output_tokens,
                 )
             })
-            || self.failure_reason.is_some_and(|reason| {
-                if matches!(
-                    reason,
-                    crate::provider::ProviderFailureReason::WorkerAnswerDeferred
-                        | crate::provider::ProviderFailureReason::WorkerDelegateRefused
-                        | crate::provider::ProviderFailureReason::WorkerToolRefused
-                ) && self.phase != crate::provider::AgentPhase::RootSynthesis
-                {
-                    return true;
-                }
-                if reason == crate::provider::ProviderFailureReason::ProposalRefused
-                    && (!matches!(
-                        self.phase,
-                        crate::provider::AgentPhase::RootPlan
-                            | crate::provider::AgentPhase::RootSynthesis
-                            | crate::provider::AgentPhase::ChildWork
-                    ) || self.phase == crate::provider::AgentPhase::ChildWork
-                        && self.refusal.as_ref().is_none_or(|refusal| {
-                            refusal.cause != ProposalRefusalCause::InvalidArguments
-                        }))
-                {
-                    return true;
-                }
-                if reason == crate::provider::ProviderFailureReason::CriterionNotMetInView
-                    && self.phase != crate::provider::AgentPhase::ChildWork
-                {
-                    return true;
-                }
-
-                use crate::provider::ProviderFailureReason;
-                !matches!(
-                    (self.disposition, reason),
-                    (
-                        ProviderCallDisposition::Rejected,
-                        ProviderFailureReason::AccountAccess
-                            | ProviderFailureReason::UsageLimit
-                            | ProviderFailureReason::RateLimited
-                            | ProviderFailureReason::ProposalRefused
-                    ) | (
-                        ProviderCallDisposition::Unavailable,
-                        ProviderFailureReason::UsageTemporarilyUnavailable
-                            | ProviderFailureReason::ServiceUnavailable
-                    ) | (
-                        ProviderCallDisposition::InvalidResponse,
-                        ProviderFailureReason::StreamProtocol
-                            | ProviderFailureReason::OutcomeDecode
-                            | ProviderFailureReason::ResponseContract
-                            | ProviderFailureReason::OutcomeContract
-                            | ProviderFailureReason::LocalOutputLimit
-                            | ProviderFailureReason::WorkerAnswerDeferred
-                            | ProviderFailureReason::WorkerDelegateRefused
-                            | ProviderFailureReason::WorkerToolRefused
-                            | ProviderFailureReason::CriterionNotMetInView
-                    )
-                )
-            })
+            || self
+                .failure_reason
+                .is_some_and(|reason| self.invalid_failure_reason(reason))
             || (!matches!(
                 self.disposition,
                 ProviderCallDisposition::Finished
@@ -990,6 +1019,64 @@ impl ProviderCallRecord {
             return Err(ReplayError::InvalidPayload);
         }
         Ok(())
+    }
+
+    fn invalid_failure_reason(&self, reason: crate::provider::ProviderFailureReason) -> bool {
+        if matches!(
+            reason,
+            crate::provider::ProviderFailureReason::WorkerAnswerDeferred
+                | crate::provider::ProviderFailureReason::WorkerDelegateRefused
+                | crate::provider::ProviderFailureReason::WorkerToolRefused
+        ) && self.phase != crate::provider::AgentPhase::RootSynthesis
+        {
+            return true;
+        }
+        if reason == crate::provider::ProviderFailureReason::ProposalRefused
+            && (!matches!(
+                self.phase,
+                crate::provider::AgentPhase::RootPlan
+                    | crate::provider::AgentPhase::RootSynthesis
+                    | crate::provider::AgentPhase::ChildWork
+            ) || self.phase == crate::provider::AgentPhase::ChildWork
+                && self
+                    .refusal
+                    .as_ref()
+                    .is_none_or(|refusal| refusal.cause != ProposalRefusalCause::InvalidArguments))
+        {
+            return true;
+        }
+        if reason == crate::provider::ProviderFailureReason::CriterionNotMetInView
+            && self.phase != crate::provider::AgentPhase::ChildWork
+        {
+            return true;
+        }
+
+        use crate::provider::ProviderFailureReason;
+        !matches!(
+            (self.disposition, reason),
+            (
+                ProviderCallDisposition::Rejected,
+                ProviderFailureReason::AccountAccess
+                    | ProviderFailureReason::UsageLimit
+                    | ProviderFailureReason::RateLimited
+                    | ProviderFailureReason::ProposalRefused
+            ) | (
+                ProviderCallDisposition::Unavailable,
+                ProviderFailureReason::UsageTemporarilyUnavailable
+                    | ProviderFailureReason::ServiceUnavailable
+            ) | (
+                ProviderCallDisposition::InvalidResponse,
+                ProviderFailureReason::StreamProtocol
+                    | ProviderFailureReason::OutcomeDecode
+                    | ProviderFailureReason::ResponseContract
+                    | ProviderFailureReason::OutcomeContract
+                    | ProviderFailureReason::LocalOutputLimit
+                    | ProviderFailureReason::WorkerAnswerDeferred
+                    | ProviderFailureReason::WorkerDelegateRefused
+                    | ProviderFailureReason::WorkerToolRefused
+                    | ProviderFailureReason::CriterionNotMetInView
+            )
+        )
     }
 }
 

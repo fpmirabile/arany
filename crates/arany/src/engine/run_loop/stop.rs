@@ -175,6 +175,30 @@ fn uncertain_tool_outcomes(run: &crate::session::RunView) -> bool {
         .any(crate::session::ToolView::outcome_unknown)
 }
 
+fn action_cancelled(run: &crate::session::RunView) -> bool {
+    run.lifecycle_hooks.iter().any(|hook| {
+        hook.outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.observation.disposition == ToolDisposition::Cancelled)
+    }) || run.tools.iter().any(|tool| {
+        tool.observation
+            .as_ref()
+            .is_some_and(|observation| observation.disposition == ToolDisposition::Cancelled)
+    })
+}
+
+fn tools_acknowledged(run: &crate::session::RunView) -> bool {
+    run.tools.iter().all(|tool| {
+        tool.observation
+            .as_ref()
+            .is_some_and(|observation| observation.disposition != ToolDisposition::Uncertain)
+            || tool.started_sequence.is_none()
+                && run
+                    .primary()
+                    .is_some_and(|agent| agent.tool_refusal.is_some())
+    })
+}
+
 impl RunFacts {
     pub(super) fn observe(run: &RunLoop<'_>) -> Result<Self, EngineError> {
         let ledger = run.ledger();
@@ -202,29 +226,13 @@ impl RunFacts {
                 })
             }) || uncertain_tool_outcomes(current)
                 || run.uncertain_hook_in(current);
-            let action_cancelled = current.lifecycle_hooks.iter().any(|hook| {
-                hook.outcome.as_ref().is_some_and(|outcome| {
-                    outcome.observation.disposition == ToolDisposition::Cancelled
-                })
-            }) || current.tools.iter().any(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == ToolDisposition::Cancelled
-                })
-            });
-            let acknowledged = current.tools.iter().all(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition != ToolDisposition::Uncertain
-                }) || tool.started_sequence.is_none()
-                    && current
-                        .primary()
-                        .is_some_and(|agent| agent.tool_refusal.is_some())
-            });
+            let acknowledged = tools_acknowledged(current);
             let goal_open = goal.status == GoalStatus::Running
                 && goal.active_run == Some(run.run_id)
                 && goal.unobserved_provider_calls.is_empty()
                 && goal.compaction_call_reserved.is_none();
             let facts = Self {
-                action_cancelled,
+                action_cancelled: action_cancelled(current),
                 outcome_correction_pending: current
                     .primary()
                     .is_some_and(|agent| agent.outcome_correction_pending()),

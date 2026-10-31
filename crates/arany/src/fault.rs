@@ -1,20 +1,15 @@
 use crate::provider::{ProviderError, ProviderRequest, ProviderResponse};
 use crate::session::{Event, EventEnvelope, RunId, SessionId};
-#[cfg(any(target_os = "macos", test))]
-use crate::store::BuildCacheLease;
 use crate::store::{AdmissionKind, StoreError};
 use crate::tools::{ToolError, ToolObservation};
 use std::io;
 use std::time::Duration;
 use tokio::time::Instant;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use injection::FaultPlan;
 #[cfg(test)]
 pub(crate) use injection::PRIVATE_RECORD_GATE_DEADLINE;
-#[cfg(any(test, feature = "test-support"))]
-pub use injection::{FaultPlan, GitStorageFault};
-
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub(crate) mod git_write;
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn tool_preflight(session: SessionId, event: &mut Event) {
@@ -45,16 +40,6 @@ pub(crate) fn acknowledge(
         release.recv().map_err(|_| StoreError::Closed)?;
     }
     result
-}
-
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-pub(crate) async fn acknowledge_check(view: &crate::CheckView) -> Result<(), StoreError> {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Some((entered, release)) = FaultPlan::check_acknowledgment_gate(view) {
-        let _ = entered.send(());
-        release.await.map_err(|_| StoreError::Closed)?;
-    }
-    Ok(())
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
@@ -91,17 +76,6 @@ pub(crate) fn record_publication(state: &std::path::Path, record: &str) -> Resul
 pub(crate) fn private_record_admission(state: &std::path::Path, record: &str) {
     #[cfg(test)]
     FaultPlan::private_record_admission_gate(state, record);
-}
-
-#[cfg(any(target_os = "macos", test))]
-#[cfg_attr(
-    not(any(test, all(target_os = "macos", feature = "test-support"))),
-    expect(unused_variables)
-)]
-pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-    #[cfg(any(test, all(target_os = "macos", feature = "test-support")))]
-    FaultPlan::commit_marker(token)?;
-    Ok(())
 }
 
 #[derive(Default)]
@@ -238,6 +212,15 @@ pub(crate) fn file_parent_sync(intent: Option<uuid::Uuid>) -> Result<(), ToolErr
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn guard_before_dispatch(call: &crate::tools::ToolCall) -> Result<(), ToolError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(error) = FaultPlan::guard_before_dispatch(call) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn guard_result(
     intent: uuid::Uuid,
     result: Result<ToolObservation, ToolError>,
@@ -293,14 +276,6 @@ pub(crate) async fn guard_cache_report(observation: &ToolObservation) {
     FaultPlan::guard_cache_report_gate(observation).await;
 }
 
-#[cfg(target_os = "macos")]
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-pub(crate) fn git_storage(root: &std::path::Path, call: &crate::tools::ToolCall) -> io::Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
-    FaultPlan::git_storage(root, call)?;
-    Ok(())
-}
-
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) async fn guard_cache_publication(intent: uuid::Uuid) {
     #[cfg(any(test, feature = "test-support"))]
@@ -323,33 +298,6 @@ pub(crate) async fn guard_dispatch_gate(intent: &crate::tools::EffectIntent) {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-pub(crate) struct CandidateSync {
-    #[cfg(any(test, feature = "test-support"))]
-    finished: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn candidate_sync(lease: &BuildCacheLease) -> io::Result<CandidateSync> {
-    Ok(CandidateSync {
-        #[cfg(any(test, feature = "test-support"))]
-        finished: FaultPlan::candidate_sync(lease.token())?,
-    })
-}
-
-#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
-#[cfg(any(target_os = "macos", test))]
-pub(crate) fn candidate_sync_finished(completion: io::Result<CandidateSync>) {
-    #[cfg(any(test, feature = "test-support"))]
-    if let Ok(CandidateSync {
-        finished: Some(finished),
-    }) = completion
-    {
-        let _ = finished.send(());
-    }
-}
-
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn record_tool_failure(
     intent: uuid::Uuid,
@@ -360,6 +308,15 @@ pub(crate) fn record_tool_failure(
 ) {
     #[cfg(any(test, feature = "test-support"))]
     crate::test_support::record_tool_failure(intent, site, stage, check, detail.map(str::to_owned));
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) fn sandbox_unavailable(workspace: &std::path::Path) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if FaultPlan::sandbox_unavailable(workspace) {
+        return true;
+    }
+    false
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
@@ -432,10 +389,6 @@ pub(crate) fn commit_latency(recorder: &LatencyRecorder, envelope: &EventEnvelop
 #[cfg(any(test, feature = "test-support"))]
 mod injection {
     use crate::session::{Event, SessionId};
-    #[cfg(any(target_os = "macos", test))]
-    use crate::store::BuildCacheIdentity;
-    #[cfg(any(target_os = "macos", test))]
-    use std::io;
     use std::sync::Mutex;
     #[cfg(target_os = "linux")]
     use std::time::Duration;
@@ -451,18 +404,17 @@ mod injection {
             oneshot::Receiver<()>,
         ),
         ToolPreflight(SessionId, &'static str, oneshot::Sender<()>),
-        CheckAcknowledgment(
-            crate::CheckId,
-            fn(&crate::CheckView) -> bool,
-            oneshot::Sender<()>,
-            oneshot::Receiver<()>,
-        ),
         Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         AutonomousContinuation(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         CheckpointStall(SessionId),
         SpillWrite(std::path::PathBuf, super::SpillWriteGate),
         SupervisorOff(SessionId),
+        SandboxUnavailable(std::path::PathBuf),
+        #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+        MaskScanRefused(std::path::PathBuf),
         GuardReceipt(uuid::Uuid),
+        GuardUnavailable(String),
+        GuardLimit(String),
         #[cfg(target_os = "linux")]
         GuardCompletion(uuid::Uuid, oneshot::Sender<()>),
         FileParentSync(uuid::Uuid),
@@ -477,8 +429,6 @@ mod injection {
             oneshot::Sender<()>,
             oneshot::Receiver<()>,
         ),
-        #[cfg(target_os = "macos")]
-        GitStorage(crate::tools::ToolCall, GitStorageFault, std::path::PathBuf),
         GuardCacheReport(
             uuid::Uuid,
             oneshot::Sender<crate::tools::ToolObservation>,
@@ -501,17 +451,6 @@ mod injection {
             oneshot::Sender<()>,
             std::sync::mpsc::Receiver<()>,
         ),
-        #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
-        CandidateSync(String),
-        #[cfg(test)]
-        CandidateSyncGate(
-            String,
-            oneshot::Sender<()>,
-            std::sync::mpsc::Receiver<()>,
-            oneshot::Sender<()>,
-        ),
-        #[cfg(any(target_os = "macos", test))]
-        CommitMarker(String),
         // Without a gate the Session's retry backoffs end at once; a gate holds one backoff.
         RetryBackoff(
             SessionId,
@@ -548,12 +487,6 @@ mod injection {
             matches!(fault, Fault::PrivateRecordAdmission(path, name, ..)
                 if path == state && *name == record)
         })
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub enum GitStorageFault {
-        Refuse,
-        Exhaust,
     }
 
     pub struct FaultPlan;
@@ -609,29 +542,6 @@ mod injection {
                         crate::tools::EffectIntent::from(intent.clone()).digest();
                 }
                 let _ = entered.send(());
-            }
-        }
-
-        pub fn gate_check_acknowledgment(
-            check: crate::CheckId,
-            admits: fn(&crate::CheckView) -> bool,
-        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (entered, wait) = oneshot::channel();
-            let (release, released) = oneshot::channel();
-            plan().push(Fault::CheckAcknowledgment(check, admits, entered, released));
-            (wait, release)
-        }
-
-        pub(crate) fn check_acknowledgment_gate(
-            view: &crate::CheckView,
-        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
-            match take(
-                |fault| matches!(fault, Fault::CheckAcknowledgment(id, admits, ..) if *id == view.id && admits(view)),
-            ) {
-                Some(Fault::CheckAcknowledgment(_, _, entered, release)) => {
-                    Some((entered, release))
-                }
-                _ => None,
             }
         }
 
@@ -721,6 +631,29 @@ mod injection {
             take(|fault| matches!(fault, Fault::SupervisorOff(id) if *id == session_id)).is_some()
         }
 
+        /// Admits every later Run of `workspace` as if the platform had no sandbox.
+        pub fn make_sandbox_unavailable(workspace: &std::path::Path) {
+            plan().push(Fault::SandboxUnavailable(workspace.to_owned()));
+        }
+
+        /// Treats every later scan of `root` for protected names as over its entry bound.
+        pub fn refuse_mask_scan(root: &std::path::Path) {
+            plan().push(Fault::MaskScanRefused(root.to_owned()));
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn mask_scan_refused(root: &std::path::Path) -> bool {
+            plan()
+                .iter()
+                .any(|fault| matches!(fault, Fault::MaskScanRefused(path) if path == root))
+        }
+
+        pub(crate) fn sandbox_unavailable(workspace: &std::path::Path) -> bool {
+            plan()
+                .iter()
+                .any(|fault| matches!(fault, Fault::SandboxUnavailable(path) if path == workspace))
+        }
+
         /// Fails the next Event that `admits` accepts for the Session before it commits.
         pub fn fail_goal_append(session_id: SessionId, admits: Admits) {
             plan().push(Fault::GoalAppend(session_id, admits));
@@ -741,36 +674,6 @@ mod injection {
                 wait_release,
             ));
             (wait_entered, release)
-        }
-
-        #[cfg(test)]
-        pub(crate) fn fail_candidate_sync(identity: &BuildCacheIdentity) {
-            plan().push(Fault::CandidateSync(identity.token()));
-        }
-
-        #[cfg(test)]
-        pub(crate) fn gate_candidate_sync(
-            identity: &BuildCacheIdentity,
-        ) -> (
-            oneshot::Receiver<()>,
-            std::sync::mpsc::Sender<()>,
-            oneshot::Receiver<()>,
-        ) {
-            let (entered, wait_entered) = oneshot::channel();
-            let (release, wait_release) = std::sync::mpsc::channel();
-            let (finished, wait_finished) = oneshot::channel();
-            plan().push(Fault::CandidateSyncGate(
-                identity.token(),
-                entered,
-                wait_release,
-                finished,
-            ));
-            (wait_entered, release, wait_finished)
-        }
-
-        #[cfg(any(target_os = "macos", test))]
-        pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
-            plan().push(Fault::CommitMarker(identity.token()));
         }
 
         /// Ends every same-route retry backoff of the Session at once; the journaled delays are unchanged.
@@ -864,6 +767,32 @@ mod injection {
             take(|fault| matches!(fault, Fault::FileParentSync(id) if *id == intent)).is_some()
         }
 
+        /// Fails the next Guard command running `program` before dispatch, as an unavailable Guard would.
+        pub fn fail_guard_before_dispatch(program: &str) {
+            plan().push(Fault::GuardUnavailable(program.to_owned()));
+        }
+
+        /// Limits the next Guard command running `program` before dispatch, as an over-limit project snapshot would.
+        pub fn limit_guard_before_dispatch(program: &str) {
+            plan().push(Fault::GuardLimit(program.to_owned()));
+        }
+
+        pub(crate) fn guard_before_dispatch(
+            call: &crate::tools::ToolCall,
+        ) -> Option<crate::tools::ToolError> {
+            let crate::tools::ToolCall::Command { program, .. } = call else {
+                return None;
+            };
+            take(|fault| {
+                matches!(fault, Fault::GuardUnavailable(candidate) | Fault::GuardLimit(candidate)
+                    if candidate == program)
+            })
+            .map(|fault| match fault {
+                Fault::GuardLimit(_) => crate::tools::ToolError::Limit,
+                _ => crate::tools::ToolError::Operation,
+            })
+        }
+
         pub fn lose_guard_receipt(intent: uuid::Uuid) {
             plan().push(Fault::GuardReceipt(intent));
         }
@@ -885,34 +814,6 @@ mod injection {
             } else {
                 false
             }
-        }
-
-        /// Makes the macOS Git unit for `call` refuse after its volume attaches, or fill that volume.
-        pub fn fail_git_storage(
-            call: crate::tools::ToolCall,
-            fault: GitStorageFault,
-            refusal_evidence: std::path::PathBuf,
-        ) {
-            #[cfg(target_os = "macos")]
-            plan().push(Fault::GitStorage(call, fault, refusal_evidence));
-            #[cfg(not(target_os = "macos"))]
-            let _ = (call, fault, refusal_evidence);
-        }
-
-        #[cfg(target_os = "macos")]
-        pub(crate) fn git_storage(
-            root: &std::path::Path,
-            call: &crate::tools::ToolCall,
-        ) -> io::Result<()> {
-            let Some(Fault::GitStorage(_, fault, refusal_evidence)) = take(
-                |fault| matches!(fault, Fault::GitStorage(candidate, ..) if candidate == call),
-            ) else {
-                return Ok(());
-            };
-            let injection =
-                serde_json::to_vec(&(fault, refusal_evidence)).map_err(io::Error::other)?;
-            std::fs::write(root.join(crate::tools::GIT_STORAGE_CANARY), b"control")?;
-            std::fs::write(root.join(crate::tools::GIT_STORAGE_FAULT), injection)
         }
 
         // The returned sender arms the real deadline after the test observes the intended phase.
@@ -1055,35 +956,6 @@ mod injection {
             }) {
                 Some(Fault::GoalAcknowledgment(_, _, entered, release)) => Some((entered, release)),
                 _ => None,
-            }
-        }
-
-        #[cfg(any(target_os = "macos", test))]
-        pub(crate) fn candidate_sync(token: &str) -> io::Result<Option<oneshot::Sender<()>>> {
-            let finished = None;
-            #[cfg(test)]
-            let finished = if let Some(Fault::CandidateSyncGate(_, entered, release, finished)) =
-                take(|fault| matches!(fault, Fault::CandidateSyncGate(key, ..) if key == token))
-            {
-                let _ = entered.send(());
-                release
-                    .recv()
-                    .map_err(|_| io::Error::other("candidate sync gate closed"))?;
-                Some(finished)
-            } else {
-                finished
-            };
-            match take(|fault| matches!(fault, Fault::CandidateSync(key) if key == token)) {
-                Some(_) => Err(io::Error::other("injected candidate sync failure")),
-                None => Ok(finished),
-            }
-        }
-
-        #[cfg(any(target_os = "macos", test))]
-        pub(crate) fn commit_marker(token: &str) -> io::Result<()> {
-            match take(|fault| matches!(fault, Fault::CommitMarker(key) if key == token)) {
-                Some(_) => Err(io::Error::other("injected commit marker failure")),
-                None => Ok(()),
             }
         }
     }

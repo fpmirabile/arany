@@ -25,8 +25,6 @@ pub(in crate::cli) enum RunFailure {
     Routing(RoutingError),
     #[error("state directory unavailable or unsafe")]
     StateUnavailable,
-    #[error("{}", crate::cli::attached::permissions::UNAVAILABLE_NOTICE)]
-    ToolsUnavailable,
     #[error(transparent)]
     Engine(arany::EngineError),
     #[error("{0}")]
@@ -258,7 +256,7 @@ impl Connection {
             while let Some(message) = messages.recv().await {
                 let relevant = match &message {
                     Message::Request(_) => true,
-                    Message::Notification(note) => note.method == "$/cancel_request",
+                    Message::Notification(note) => note.method == CANCEL_REQUEST_METHOD,
                     _ => false,
                 };
                 if !relevant {
@@ -282,14 +280,16 @@ impl Connection {
                 super::server::run_embedded(
                     engine,
                     state,
-                    inbound,
-                    rpc,
+                    super::server::ServerIo {
+                        inbound,
+                        outbound: rpc,
+                        stopping,
+                    },
                     Native {
                         pending: Some(submission),
                         output,
                         start_error: None,
                     },
-                    stopping,
                 ),
             )
             .await
@@ -428,9 +428,6 @@ fn tool_grant(
     permissions: Option<&arany::WorkspacePermissions>,
 ) -> Result<arany::ToolGrant, RunAttemptError> {
     if configured {
-        if !arany::native_protection_supported() {
-            return Err(RunAttemptError::Failed(RunFailure::ToolsUnavailable));
-        }
         return Ok(arany::ToolGrant::Configured);
     }
     let trusted_tools = crate::cli::attached::permissions::supports_tools(Some(

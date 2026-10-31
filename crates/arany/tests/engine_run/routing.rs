@@ -483,8 +483,8 @@ async fn refused_fallback_admission_settles_the_known_compaction_failure() {
     for sequence in last + 1..=10_000 - i64::try_from(slots).unwrap() {
         transaction
             .execute(
-                "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                rusqlite::params![sequence, result.session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
+                "INSERT INTO events (sequence,session_id,kind,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed','{\"title\":\"x\"}',0)",
+                rusqlite::params![sequence, result.session_id.to_string()],
             )
             .unwrap();
     }
@@ -634,8 +634,7 @@ async fn custom_routes_receive_the_same_workspace_tools_as_native_routes() {
     primary.identity.profile = "custom:messages".into();
     primary.identity.provenance = arany::Provenance::Custom(arany::CustomProfileProvenance {
         endpoint: "https://example.com/anthropic/v1/messages".into(),
-        evidence_digest: [7; 32],
-        capability_evidence_version: 2,
+        profile_digest: [7; 32],
     });
     primary.identity.limits.concurrency = 1;
     let primary = route(primary);
@@ -719,8 +718,7 @@ async fn invalid_custom_names_refuse_primary_fallback_and_roster_admission() {
             invalid.identity.provenance =
                 arany::Provenance::Custom(arany::CustomProfileProvenance {
                     endpoint: "https://example.com/responses".into(),
-                    evidence_digest: [7; 32],
-                    capability_evidence_version: 2,
+                    profile_digest: [7; 32],
                 });
             let invalid = route(invalid);
             let mut bindings = routes(&primary);
@@ -1647,8 +1645,7 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
             primary.identity.provenance =
                 arany::Provenance::Custom(arany::CustomProfileProvenance {
                     endpoint: "https://example.com/anthropic/v1/messages".into(),
-                    evidence_digest: [7; 32],
-                    capability_evidence_version: 2,
+                    profile_digest: [7; 32],
                 });
             primary.identity.limits.concurrency = 1;
             let journal = state.join("events.sqlite3");

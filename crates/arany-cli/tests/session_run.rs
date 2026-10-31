@@ -1,11 +1,18 @@
 use arany::WorkspaceIdentity;
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", any(debug_assertions, arany_ci))
+))]
+use arany::test_support::private_file;
+use arany::test_support::scenario::tool_outcome;
+use arany::test_support::sha256_hex as hash;
 use arany::{
     AgentRole, AgentRunId, AgentStatus, CollaborationPolicy, ContextUsage, EngineError, Event,
     RunConfig, RunId, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store,
     StoreError, continue_session, create_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn assert_git_range_outputs(
     run: &arany::RunView,
     workspace: &std::path::Path,
@@ -60,7 +67,7 @@ fn assert_git_range_outputs(
     assert!(diff["patch"].as_str().unwrap().contains("+bravo"));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::ProviderRequest]) {
     for (request_index, tool_index) in [(6, 5), (7, 6), (8, 7), (9, 8)] {
         assert_eq!(
@@ -78,7 +85,7 @@ fn assert_git_range_continuation(run: &arany::RunView, requests: &[arany::Provid
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
     for index in [5, 6, 7, 8] {
         assert_eq!(
@@ -88,7 +95,7 @@ fn assert_git_range_replay(run: &arany::RunView, replay: &arany::RunView) {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
     let timed_out = branches["timed_out"].as_bool().unwrap();
     let rows = branches["branches"].as_array().unwrap();
@@ -124,7 +131,7 @@ fn assert_restricted_git_branch_journey(branches: &serde_json::Value, workspace:
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn assert_closed_git_views(
     state: &std::path::Path,
     home: &std::path::Path,
@@ -177,11 +184,9 @@ fn assert_closed_git_views(
 use process::BoundedOutput;
 use std::process::Command;
 
-#[cfg(unix)]
 #[path = "session_run/worker.rs"]
 mod worker;
 
-#[cfg(unix)]
 fn reply_positioned_cursor_queries(
     input: &mut impl std::io::Write,
     bytes: &[u8],
@@ -257,28 +262,6 @@ impl PtyResponses {
         Self {
             auto_consent: false,
             ..Self::default()
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-pub(crate) fn pump(
-    output: &mut impl std::io::Read,
-    input: &mut impl std::io::Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-) {
-    drain_pty(output, transcript);
-    reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
-    if answered.auto_consent {
-        let mut declined = false;
-        process::decline_workspace_consent(
-            input,
-            &transcript[answered.consent_from..],
-            &mut declined,
-        );
-        if declined {
-            answered.consent_from = transcript.len();
         }
     }
 }
@@ -535,10 +518,8 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = uuid::Uuid::now_v7();
     let record = serde_json::json!({
-        "schema": 2,
         "storage": "private_file",
         "account": {
-            "schema": 3,
             "id": account_id,
             "provider": {"kind": "openai", "custom_name": null},
             "model": "gpt-5.4",
@@ -552,13 +533,6 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
         .replace(&serde_json::to_vec(&record).expect("test record"))
         .expect("test file backend");
     account_id
-}
-
-fn tool_outcome(call: arany::ToolCall) -> arany::ProviderOutcome {
-    arany::ProviderOutcome::Tools(vec![arany::ToolRequest {
-        id: arany::ToolUseId::new("call_1").expect("scripted Tool id"),
-        call,
-    }])
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
@@ -618,7 +592,6 @@ pub use arany::test_support::process;
 
 pub use arany::test_support::engine as engine_support;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use arany::test_support::git;
 
 #[cfg(target_os = "linux")]
@@ -634,51 +607,37 @@ mod tools;
 mod tools;
 
 #[cfg(target_os = "macos")]
-#[path = "session_run/tools_macos_git.rs"]
-mod tools_git;
-
-#[cfg(target_os = "macos")]
 #[path = "session_run/tools_macos_researcher.rs"]
 mod tools_researcher;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
 
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
+#[cfg(target_os = "linux")]
 #[path = "session_run/tools/git_journey.rs"]
 mod git_journey;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "session_run/supervisor.rs"]
 mod supervisor;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn hash(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
-fn private_file(path: &std::path::Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
+    ui_preferences(&[
+        ("completion", completion, "tabs"),
+        ("view", view, "fullscreen"),
+    ])
+}
+
+// `/settings` saves only `(key, value, default)` pairs whose value differs from the default.
+fn ui_preferences(fields: &[(&str, &str, &str)]) -> Vec<u8> {
+    let changed: serde_json::Map<String, serde_json::Value> = fields
+        .iter()
+        .filter(|(_, value, default)| value != default)
+        .map(|(key, value, _)| ((*key).to_owned(), (*value).into()))
+        .collect();
     format!(
-        r#"{{"version":8,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_cpu_cores":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}},"copy_on_select":true,"newline":"shift_enter"}}}}"#
+        r#"{{"preferences":{}}}"#,
+        serde_json::Value::Object(changed)
     )
     .into_bytes()
 }
@@ -775,7 +734,6 @@ fn seed_answer_session(
 #[path = "session_run/roster.rs"]
 mod roster;
 
-#[cfg(unix)]
 #[path = "session_run/custom.rs"]
 mod custom;
 
@@ -783,7 +741,6 @@ mod custom;
 #[path = "session_run/exec_interrupt.rs"]
 mod exec_interrupt;
 
-#[cfg(unix)]
 #[path = "session_run/live.rs"]
 mod live;
 
@@ -810,7 +767,16 @@ mod account_lock;
 #[path = "session_run/setup.rs"]
 mod setup;
 
-#[cfg(unix)]
+// Only the Linux debug PTY fixtures use every launcher variant.
+#[cfg_attr(not(all(target_os = "linux", debug_assertions)), allow(dead_code))]
+#[path = "support/product.rs"]
+mod product;
+
+#[test]
+fn launches_use_the_product_helper() {
+    product::assert_launches_use_the_product_helper(&["session_run.rs", "session_run"]);
+}
+
 #[path = "session_run/loopback.rs"]
 mod loopback;
 
@@ -833,6 +799,10 @@ mod active_terminal;
 #[cfg(target_os = "linux")]
 #[path = "session_run/chat_mouse.rs"]
 mod chat_mouse;
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[path = "session_run/pty.rs"]
+mod pty;
 #[cfg(target_os = "linux")]
 #[path = "session_run/session_picker.rs"]
 mod session_picker;
@@ -853,7 +823,6 @@ mod disk_fault;
 #[path = "session_run/performance.rs"]
 mod performance;
 
-#[cfg(unix)]
 #[test]
 fn terminal_readers_preserve_shared_output_and_setup_redraw() {
     use arany_cli::terminal::{AttachedTerminal, Composer, TerminalInput, TerminalMode};
@@ -1278,28 +1247,43 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn account_path_ignores_session_state_environment() {
-    use nix::unistd::{User, geteuid};
-
     const CASE: &str = "ARANY_TEST_ACCOUNT_PATH_CASE";
     const TEST: &str = "account_path_ignores_session_state_environment";
     if let Some(case) = std::env::var_os(CASE) {
         match case.to_str() {
+            #[cfg(debug_assertions)]
             Some("system") => {
-                let home = User::from_uid(geteuid())
-                    .expect("OS user lookup")
-                    .expect("OS user")
-                    .dir;
-                #[cfg(target_os = "linux")]
-                let expected = home.join(".local/state/arany");
-                #[cfg(target_os = "macos")]
-                let expected = home.join("Library/Application Support/dev.Arany.arany");
-                assert_eq!(
-                    StateRoot::account_path().expect("OS user account path"),
-                    expected
+                for (name, resolve) in [
+                    ("account", StateRoot::account_path as fn() -> _),
+                    ("default state", StateRoot::default_path),
+                ] {
+                    let panic = std::panic::catch_unwind(resolve)
+                        .expect_err("test builds refuse the real root");
+                    let message = panic.downcast_ref::<&str>().expect("refusal message");
+                    assert!(
+                        message.contains("never resolve the real account or state root"),
+                        "{name}: {message}"
+                    );
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            Some("system") => {
+                let account = StateRoot::account_path().expect("self-isolated account root");
+                assert!(
+                    account
+                        .parent()
+                        .and_then(std::path::Path::file_name)
+                        .is_some_and(|name| name
+                            .to_string_lossy()
+                            .starts_with("arany-test-accounts-")),
+                    "optimized test builds isolate instead of resolving the real root"
                 );
+                assert!(matches!(
+                    StateRoot::default_path(),
+                    Err(StoreError::InvalidStateDirectory)
+                ));
             }
             #[cfg(debug_assertions)]
             Some("fixture") => {
@@ -1385,6 +1369,32 @@ fn account_path_ignores_session_state_environment() {
     }
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn unisolated_binary_refuses_the_real_state_root() {
+    let temp = tempfile::tempdir().expect("temporary home");
+    let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+        .args([
+            "show",
+            "--output",
+            "text",
+            "01900000-0000-7000-8000-000000000000",
+        ])
+        .env_clear()
+        .env("HOME", temp.path())
+        .current_dir(temp.path())
+        .bounded_output_for(std::time::Duration::from_secs(10), 64 * 1024)
+        .expect("bounded unisolated product");
+    assert_eq!(output.status.code(), Some(101), "the refusal is a panic");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("never resolve the real account or state root"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn native_keychain_fixture_cannot_fall_back_to_default_store() {
@@ -1426,8 +1436,7 @@ fn unsupported_journal_versions_reject_without_changing_existing_data() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    let migration_floor = 4;
-    for version in (0..migration_floor).chain(std::iter::once(current_version + 1)) {
+    for version in (0..current_version).chain(std::iter::once(current_version + 1)) {
         let temp = tempfile::tempdir().expect("private test root");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -1523,6 +1532,7 @@ fn attached_command_rejects_pipes_before_creating_state() {
     let state_dir = temp.path().join("state");
     let output = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .arg("--state-dir")
         .arg(&state_dir)
@@ -1541,6 +1551,7 @@ fn attached_command_rejects_pipes_before_creating_state() {
 
     let picker = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .arg("--state-dir")
         .arg(&state_dir)
@@ -1557,6 +1568,7 @@ fn attached_command_rejects_pipes_before_creating_state() {
     for flag in ["--screen-reader", "--no-color"] {
         let flagged = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(process::account_fixture(temp.path().join("account")))
             .current_dir(temp.path())
             .arg("--state-dir")
             .arg(&state_dir)
@@ -1642,6 +1654,29 @@ fn model_catalog_command_reads_only_selected_configuration() {
         assert!(!account_root.exists());
         assert!(!state_dir.exists());
 
+        let unsaved_selection = Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("HOME", &fixture_home)
+            .env("XDG_STATE_HOME", &fixture_state)
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+            .current_dir(&workspace)
+            .args([
+                "exec",
+                "--state-dir",
+                state_dir.to_str().expect("test path"),
+                "objective",
+            ])
+            .bounded_output()
+            .expect("exec without a saved selection");
+        assert!(!unsaved_selection.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&unsaved_selection.stderr),
+            "error: no saved model selection; pass --provider and --model, or choose a model with /model in attached mode\n"
+        );
+        assert!(!account_root.exists());
+        assert!(!state_dir.exists());
+
         let unselected_run = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
             .env("HOME", &fixture_home)
@@ -1673,57 +1708,6 @@ fn model_catalog_command_reads_only_selected_configuration() {
         assert!(!account_root.exists());
         assert!(!state_dir.exists());
 
-        let unchecked = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("HOME", &fixture_home)
-            .env("XDG_STATE_HOME", &fixture_state)
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-            .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
-            .current_dir(&workspace)
-            .args([
-                "provider",
-                "check",
-                "chatgpt",
-                "model-one",
-                "--effort",
-                "high",
-            ])
-            .bounded_output()
-            .expect("ChatGPT check requires explicit cost acceptance");
-        assert!(!unchecked.status.success());
-        assert_eq!(unchecked.stdout, b"");
-        assert!(String::from_utf8_lossy(&unchecked.stderr).contains("no remote output-token cap"));
-        assert!(!account_root.exists());
-
-        let check_missing = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("HOME", &fixture_home)
-            .env("XDG_STATE_HOME", &fixture_state)
-            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-            .env("OPENAI_API_KEY", "synthetic-unselected-api-key")
-            .current_dir(&workspace)
-            .args([
-                "provider",
-                "check",
-                "chatgpt",
-                "model-one",
-                "--effort",
-                "high",
-                "--accept-cost",
-            ])
-            .bounded_output()
-            .expect("ChatGPT check with missing account");
-        assert!(!check_missing.status.success());
-        assert_eq!(check_missing.stdout, b"");
-        assert_eq!(
-            check_missing.stderr,
-            b"error: no selected ChatGPT account; run arany --setup\n"
-        );
-        assert!(!account_root.exists());
-        assert!(!state_dir.exists());
-
         for flag in ["--saved-account", "--state-dir"] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command
@@ -1749,34 +1733,6 @@ fn model_catalog_command_reads_only_selected_configuration() {
                 "{flag}"
             );
             assert!(!account_root.exists(), "{flag}");
-        }
-
-        for flag in ["--saved-account", "--state-dir"] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-            command
-                .env_clear()
-                .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-                .env("HOME", &fixture_home)
-                .env("XDG_STATE_HOME", &fixture_state)
-                .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-                .current_dir(&workspace)
-                .args(["provider", "check", flag]);
-            if flag == "--state-dir" {
-                command.arg(&state_dir);
-            }
-            let result = command
-                .args(["chatgpt", "model-one", "--effort", "high", "--accept-cost"])
-                .bounded_output()
-                .expect("invalid ChatGPT check flag");
-            assert!(!result.status.success(), "{flag}");
-            assert_eq!(result.stdout, b"", "{flag}");
-            assert!(
-                String::from_utf8_lossy(&result.stderr)
-                    .contains("omit --saved-account and --state-dir"),
-                "{flag}"
-            );
-            assert!(!account_root.exists(), "{flag}");
-            assert!(!state_dir.exists(), "{flag}");
         }
     }
 
@@ -1817,14 +1773,10 @@ fn model_catalog_command_reads_only_selected_configuration() {
     }
 
     let root = StateRoot::admit(&state_dir).expect("private state root");
-    let profile_file = root.path().join("provider-profiles.json");
-    std::fs::write(&profile_file, r#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"http://127.0.0.1:9321/v1/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#).expect("profile file");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&profile_file, std::fs::Permissions::from_mode(0o600))
-            .expect("private profile file");
-    }
+    arany::test_support::save_custom_profiles(
+        root.path(),
+        &[arany::test_support::local_custom_profile(9321)],
+    );
     let custom = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
         .current_dir(&workspace)
@@ -1840,124 +1792,9 @@ fn model_catalog_command_reads_only_selected_configuration() {
     );
     assert_eq!(
         custom.stdout,
-        b"Provider: custom:local\nModels: 1\nmodel-1 \xC2\xB7 exact profile; Run requires current conformance; effort provider default\n"
+        b"Provider: custom:local\nModels: 1\nmodel-1 \xC2\xB7 exact profile; effort provider default\n"
     );
     assert_eq!(custom.stderr, b"");
-}
-
-#[test]
-fn native_model_check_requires_explicit_cost_consent_before_state_or_credentials() {
-    let temp = tempfile::tempdir().expect("private test root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("Workspace");
-    let state_dir = temp.path().join("state");
-    let without_consent = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args(["openai", "example-model", "--effort", "high"])
-        .bounded_output()
-        .expect("native check without consent");
-    assert!(!without_consent.status.success());
-    assert_eq!(without_consent.stdout, b"");
-    assert_eq!(
-        without_consent.stderr,
-        b"error: native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost\n"
-    );
-    assert!(!state_dir.exists());
-
-    let saved_without_consent = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args([
-            "openai",
-            "example-model",
-            "--effort",
-            "high",
-            "--saved-account",
-        ])
-        .bounded_output()
-        .expect("saved native check without consent");
-    assert!(!saved_without_consent.status.success());
-    assert_eq!(saved_without_consent.stdout, b"");
-    assert_eq!(saved_without_consent.stderr, without_consent.stderr);
-    assert!(!state_dir.exists());
-
-    let invalid_model = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args(["openai", "bad\nmodel", "--effort", "high", "--accept-cost"])
-        .bounded_output()
-        .expect("native check with invalid model");
-    assert!(!invalid_model.status.success());
-    assert_eq!(invalid_model.stdout, b"");
-    assert_eq!(
-        invalid_model.stderr,
-        b"error: native Provider, model, or effort is invalid\n"
-    );
-    assert!(!state_dir.exists());
-
-    let without_key = Command::new(env!("CARGO_BIN_EXE_arany"))
-        .env_clear()
-        .current_dir(&workspace)
-        .args(["provider", "check", "--state-dir"])
-        .arg(&state_dir)
-        .args([
-            "openai",
-            "example-model",
-            "--effort",
-            "high",
-            "--accept-cost",
-        ])
-        .bounded_output()
-        .expect("native check without key");
-    assert!(!without_key.status.success());
-    assert_eq!(without_key.stdout, b"");
-    assert_eq!(
-        without_key.stderr,
-        b"error: selected native API key is unavailable or invalid\n"
-    );
-    assert!(state_dir.exists());
-
-    #[cfg(all(target_os = "linux", debug_assertions))]
-    {
-        let marker = temp.path().join("credential-command-marker");
-        let address = format!("unixexec:path=/usr/bin/touch,argv1={}", marker.display());
-        let unsafe_saved_account = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
-            .env("DBUS_SESSION_BUS_ADDRESS", address)
-            .current_dir(&workspace)
-            .args(["provider", "check", "--state-dir"])
-            .arg(&state_dir)
-            .args([
-                "openai",
-                "example-model",
-                "--effort",
-                "high",
-                "--saved-account",
-                "--accept-cost",
-            ])
-            .bounded_output()
-            .expect("saved native check with unsafe transport");
-        assert!(!unsafe_saved_account.status.success());
-        assert_eq!(unsafe_saved_account.stdout, b"");
-        assert_eq!(
-            unsafe_saved_account.stderr,
-            b"error: unsafe or unsupported D-Bus session address for the OS credential store\n"
-        );
-        assert!(!marker.exists());
-    }
 }
 
 #[test]
@@ -2046,30 +1883,11 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert!(shown.status.success());
         assert_eq!(shown.stderr, b"");
         let expected = format!(
-            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"event_version\":{},\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
-             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"event_version\":{},\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
-            events[0].event.version(), events[0].created_at_ms, events[1].event.version(), events[1].created_at_ms
+            "{{\"sequence\":1,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionStarted\",\"payload\":{{\"title\":\"New Session\",\"workspace_device\":{device},\"workspace_inode\":{inode}}},\"created_at_ms\":{}}}\n\
+             {{\"sequence\":2,\"session_id\":\"{id}\",\"run_id\":null,\"agent_run_id\":null,\"kind\":\"SessionRenamed\",\"payload\":{{\"title\":\"Research thread\"}},\"created_at_ms\":{}}}\n",
+            events[0].created_at_ms, events[1].created_at_ms
         );
         assert_eq!(shown.stdout, expected.as_bytes());
-        let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
-            .expect("version inspection");
-        let version: i64 = connection
-            .query_row("SELECT event_version FROM events WHERE sequence=1", [], |row| {
-                row.get(0)
-            })
-            .expect("start Event version");
-        assert_eq!(version, events[0].event.version());
-        connection
-            .execute("UPDATE events SET event_version=1 WHERE sequence=1", [])
-            .expect("version fault injection");
-        drop(connection);
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
-            .expect("read-only reopen after corruption");
-        assert!(matches!(
-            store.load_view(id).await,
-            Err(StoreError::InvalidHistory)
-        ));
-        store.close().await.expect("store shutdown after corruption");
     });
 }
 
@@ -2185,7 +2003,7 @@ fn continue_selects_latest_committed_activity_in_the_admitted_workspace() {
             .expect("test fault injection");
         connection
             .execute(
-                "UPDATE events SET event_version=9 WHERE session_id=?1",
+                "UPDATE events SET kind='ToolPermissionDecided' WHERE session_id=?1",
                 [other.to_string()],
             )
             .expect("malformed unrelated Session");
@@ -2341,39 +2159,16 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
-            supervisor: None,
-            worker_policy: None,
-            agent_definitions: None,
-            roster: None,
-            providers: None,
-            provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
             model: "test-model".into(),
-            effort: None,
-            custom_profile_provenance: None,
-            saved_api_account_id: None,
-            chatgpt_provenance: None,
-            output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-            context_window_tokens: None,
-            policy: CollaborationPolicy::Single,
-            output_token_cap: 4096,
-            provider_concurrency: 1,
             workspace_device,
             workspace_inode,
-            user_instruction_digest: None,
-            instruction_sources: Vec::new(),
-            launch_directory: String::new(),
-            include_digests: Vec::new(),
-            history_run_ids: Vec::new(),
-            excluded_history_runs: 0,
             context_usage: Some(ContextUsage {
                 used_bytes: 101,
                 budget_bytes: 100,
                 compactable_bytes: 10,
                 tool_history_bytes: 0,
             }),
-            compaction_event_sequence: None,
-            compaction_content_digest: None,
-            tool_policy: None,
+            ..arany::test_support::run_config()
         };
         let encoded_config = serde_json::to_value(&config).expect("current Run config JSON");
         assert!(encoded_config["effort"].is_null());
@@ -2467,7 +2262,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                 id,
                 Event::SessionStarted {
                     title: "First Session".into(),
-                    workspace_identity: WorkspaceIdentity { device: 1, inode: 1 },
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 1,
+                    },
                 },
             )
             .await
@@ -2489,7 +2287,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                     id,
                     Event::SessionStarted {
                         title: "Invalid duplicate".into(),
-                        workspace_identity: WorkspaceIdentity { device: 1, inode: 1 },
+                        workspace_identity: WorkspaceIdentity {
+                            device: 1,
+                            inode: 1
+                        },
                     },
                 )
                 .await,
@@ -2506,7 +2307,13 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             .expect("Session exists");
         assert_eq!(view.title, hostile_title);
         assert_eq!(view.last_sequence, 2);
-        assert_eq!(view.workspace_identity, Some(WorkspaceIdentity { device: 1, inode: 1 }));
+        assert_eq!(
+            view.workspace_identity,
+            Some(WorkspaceIdentity {
+                device: 1,
+                inode: 1
+            })
+        );
         store.close().await.expect("closed reopened store");
 
         let text = Command::new(env!("CARGO_BIN_EXE_arany"))
@@ -2549,13 +2356,15 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["kind"], "SessionStarted");
         assert_eq!(lines[1]["payload"]["title"], hostile_title);
-        assert_eq!(jsonl.stdout.iter().filter(|byte| **byte == b'\n').count(), 2);
+        assert_eq!(
+            jsonl.stdout.iter().filter(|byte| **byte == b'\n').count(),
+            2
+        );
         for (line, event) in lines.iter().zip(&events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["session_id"], id.to_string());
             assert!(line["run_id"].is_null());
             assert!(line["agent_run_id"].is_null());
-            assert_eq!(line["event_version"], event.event.version());
             assert_eq!(line["created_at_ms"], event.created_at_ms);
         }
 
@@ -2593,8 +2402,8 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             .expect("test fault injection");
         connection
             .execute(
-                "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-                 VALUES (3, ?1, 'UnknownEvent', 1, '{}', 1)",
+                "INSERT INTO events (sequence, session_id, kind, payload, created_at_ms)
+                 VALUES (3, ?1, 'UnknownEvent', '{}', 1)",
                 [id.to_string()],
             )
             .expect("injected unsupported Event");
@@ -2605,7 +2414,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             store.load_session(id).await,
             Err(StoreError::InvalidHistory)
         ));
-        store.close().await.expect("closed store after rejected replay");
+        store
+            .close()
+            .await
+            .expect("closed store after rejected replay");
 
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
             .expect("test fault injection");
@@ -2622,7 +2434,10 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             store.load_session(id).await,
             Err(StoreError::InvalidHistory)
         ));
-        store.close().await.expect("closed store after size rejection");
+        store
+            .close()
+            .await
+            .expect("closed store after size rejection");
     });
 }
 
@@ -2634,6 +2449,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     let state = temp.path().join("state");
     let missing_key = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .env("ANTHROPIC_API_KEY", "test-placeholder-key")
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
@@ -2648,11 +2464,11 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     assert_eq!(missing_key.stderr, b"error: OPENAI_API_KEY unavailable\n");
     assert!(!state.exists());
 
-    #[cfg(unix)]
     for workspace_id in ["", "default", "wrkspc_a\r\nx-header:value"] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(process::account_fixture(temp.path().join("account")))
             .env("ANTHROPIC_API_KEY", "test-placeholder-key")
             .env("ANTHROPIC_WORKSPACE_ID", workspace_id)
             .current_dir(temp.path())
@@ -2676,6 +2492,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let malformed_model = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2725,6 +2542,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     ] {
         let selection = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(process::account_fixture(temp.path().join("account")))
             .current_dir(temp.path())
             .args(["exec", "--state-dir"])
             .arg(&state)
@@ -2750,6 +2568,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
     let overlapping_state = workspace.join("state");
     let overlap = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&overlapping_state)
@@ -2768,6 +2587,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let unsupported_model = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2786,6 +2606,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let unsupported_effort = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2812,6 +2633,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let missing_anthropic_key = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .env("OPENAI_API_KEY", "test-placeholder-key")
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
@@ -2837,6 +2659,7 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let unsupported_anthropic_model = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
         .args(["exec", "--state-dir"])
         .arg(&state)
@@ -2861,20 +2684,24 @@ fn exec_process_rejects_unselected_or_unavailable_provider_before_workspace_admi
 
     let no_provider = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
+        .envs(process::account_fixture(temp.path().join("account")))
         .current_dir(temp.path())
-        .args(["exec", "--model", "gpt-5.4", "prompt"])
+        .args(["exec", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .args(["--model", "gpt-5.4", "prompt"])
         .bounded_output()
         .expect("unselected provider process");
     assert!(!no_provider.status.success());
     assert_eq!(no_provider.stdout, b"");
     assert_eq!(
         no_provider.stderr,
-        b"error: invalid arguments; run arany --help\n"
+        b"error: --provider is required with --model\n"
     );
     assert!(!state.exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn private_state_admission_rejects_unsafe_path_objects() {
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -2946,34 +2773,10 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
-                supervisor: None,
-                worker_policy: None,
-                agent_definitions: None,
-                roster: None,
-                providers: None,
-                provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
                 model: "test-model".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                context_window_tokens: None,
-                policy: CollaborationPolicy::Single,
-                output_token_cap: 4096,
-                provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
-                user_instruction_digest: None,
-                instruction_sources: Vec::new(),
-                launch_directory: String::new(),
-                include_digests: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
-                context_usage: None,
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
+                ..arany::test_support::run_config()
             };
             let mut store =
                 Store::open(StateRoot::admit(&state_path).expect("private state")).expect("store");
@@ -3030,19 +2833,10 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     record: arany::ProviderCallRecord {
-                        rate_limits: None,
-                        delegation: None,
-                        phase: arany::AgentPhase::RootPlan,
-                        disposition: arany::ProviderCallDisposition::Finished,
                         response_id: Some("synthetic-response".into()),
                         input_tokens: Some(7),
                         output_tokens: Some(3),
-                        wire_provenance: None,
-                        refusal: None,
-                        failure_reason: None,
-                        requested_tools: 0,
-                        cache_read_input_tokens: None,
-                        cache_creation_input_tokens: None,
+                        ..arany::test_support::provider_call_record()
                     },
                 },
                 Event::AgentFinished {
@@ -3262,10 +3056,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
     });
 }
 
-#[cfg(unix)]
 struct SupervisedChild(Option<std::process::Child>);
 
-#[cfg(unix)]
 impl SupervisedChild {
     fn child(&mut self) -> &mut std::process::Child {
         self.0.as_mut().expect("live child")
@@ -3280,7 +3072,6 @@ impl SupervisedChild {
     }
 }
 
-#[cfg(unix)]
 impl Drop for SupervisedChild {
     fn drop(&mut self) {
         if let Some(child) = &mut self.0 {
@@ -3290,7 +3081,6 @@ impl Drop for SupervisedChild {
     }
 }
 
-#[cfg(unix)]
 fn process_output_before_deadline(mut command: Command) -> std::process::Output {
     use std::process::Stdio;
     use std::time::Duration;
@@ -3300,12 +3090,10 @@ fn process_output_before_deadline(mut command: Command) -> std::process::Output 
     process::capture(process.child(), Duration::from_secs(5), 32 * 1024 * 1024)
 }
 
-#[cfg(unix)]
 struct HeldProvider {
     ready_path: std::path::PathBuf,
 }
 
-#[cfg(unix)]
 #[async_trait::async_trait]
 impl arany::Provider for HeldProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
@@ -3355,7 +3143,6 @@ impl arany::Provider for HeldProvider {
     }
 }
 
-#[cfg(unix)]
 #[test]
 #[ignore = "supervised process helper"]
 fn process_lock_holder() {
@@ -3404,7 +3191,6 @@ fn process_lock_holder() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
     use std::process::Stdio;
@@ -3559,6 +3345,7 @@ fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
     let output = process::file_output(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .envs(process::account_fixture(root.path().join("account")))
             .current_dir(&workspace)
             .args(["serve", "--stdio", "--state-dir"])
             .arg(&state),
@@ -3662,15 +3449,14 @@ fn headless_startup_archives_incompatible_history_and_fails_closed_on_unsafe_his
             .unwrap();
         rusqlite::Connection::open(state.join("events.sqlite3"))
             .unwrap()
-            .execute_batch(
-                "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
-            )
+            .execute_batch("UPDATE events SET kind = 'ToolPermissionDecided' WHERE sequence = 1")
             .unwrap();
         let history = std::fs::read(state.join("events.sqlite3")).unwrap();
         let run = || {
             process::file_output(
                 Command::new(env!("CARGO_BIN_EXE_arany"))
                     .env_clear()
+                    .env("ARANY_TEST_ACCOUNT_ROOT", root.path().join("account"))
                     .current_dir(&workspace)
                     .args(surface)
                     .arg("--state-dir")
@@ -3744,6 +3530,7 @@ fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
     let output = process::file_output(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", root.path().join("account"))
             .current_dir(&workspace)
             .args([
                 "acp",
@@ -3800,11 +3587,10 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     std::fs::create_dir(&workspace).unwrap();
     let state = root.path().join("state");
     StateRoot::admit(&state).unwrap();
-    private_file(
+    arany::test_support::private_file(
         &state.join("provider-roster.json"),
         &serde_json::to_vec(&serde_json::json!({
-            "version":1,
-            "profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]}],
+            "profiles":[{"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}]}],
             "presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]
         })).unwrap(),
     );
@@ -3818,6 +3604,7 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     let output = process::file_output(
         Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", root.path().join("account"))
             .env("OPENAI_API_KEY", "synthetic-acp-key")
             .current_dir(root.path())
             .args(["acp", "--profile", "coding", "--state-dir"])
@@ -3897,105 +3684,11 @@ fn acp_refuses_terminal_input_before_state_admission() {
     assert!(!state.exists());
 }
 
-fn check_output(
-    bytes: &[u8],
-    state: &std::path::Path,
-    disposition: arany::CheckDisposition,
-) -> Vec<u8> {
-    let text = std::str::from_utf8(bytes).expect("check output UTF-8");
-    let (prefix, receipt) = text.rsplit_once("Check: ").expect("durable check receipt");
-    let (id, status) = receipt.split_once('\n').expect("check disposition");
-    let id: arany::CheckId = id.parse().expect("check UUID");
-    assert_eq!(status, format!("Disposition: {disposition}\n"));
-    let database = rusqlite::Connection::open_with_flags(
-        state.join("events.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .expect("closed check database");
-    let mut statement = database.prepare("SELECT kind, event_version, payload FROM provider_check_events WHERE check_id=?1 ORDER BY sequence").expect("check events");
-    let events: Vec<arany::CheckEvent> = statement
-        .query_map([id.to_string()], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .expect("query")
-        .map(|row| {
-            let (kind, version, payload) = row.expect("event row");
-            let event: arany::CheckEvent =
-                serde_json::from_str(&payload).expect("typed check event");
-            assert_eq!(kind, event.kind());
-            assert_eq!(version, event.version());
-            event
-        })
-        .collect();
-    let view = arany::CheckView::replay(id, &events)
-        .expect("strict check replay")
-        .expect("check");
-    assert_eq!(view.disposition, Some(disposition));
-    if disposition == arany::CheckDisposition::Succeeded {
-        let catalog_pages = events
-            .windows(2)
-            .filter(|pair| {
-                matches!(
-                    *pair,
-                    [
-                        arany::CheckEvent::ProviderCheckCallStarted {
-                            kind: arany::CheckCallKind::Catalog,
-                            ..
-                        },
-                        arany::CheckEvent::ProviderCheckCallFinished {
-                            disposition: arany::CheckDisposition::Succeeded,
-                            ..
-                        }
-                    ]
-                )
-            })
-            .count();
-        assert_eq!(
-            view.completed_calls as usize,
-            view.start.probes.len() + catalog_pages
-        );
-    }
-    prefix.as_bytes().to_vec()
-}
-
-#[cfg(unix)]
-fn assert_check_privacy(output: &std::process::Output, state: &std::path::Path, canaries: &[&str]) {
-    let database = std::fs::read(state.join("events.sqlite3")).expect("whole check database");
-    let diagnostics = match std::fs::read(state.join("development.log")) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => panic!("diagnostic inspection failed: {error}"),
-    };
-    for (channel, bytes) in [
-        ("stdout", output.stdout.as_slice()),
-        ("stderr", output.stderr.as_slice()),
-        ("database", database.as_slice()),
-        ("diagnostics", diagnostics.as_slice()),
-    ] {
-        for canary in canaries {
-            assert!(
-                !bytes
-                    .windows(canary.len())
-                    .any(|part| part == canary.as_bytes()),
-                "check leaked a private canary into {channel}"
-            );
-        }
-    }
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
     use arany::test_support::scenario::{ScriptedProvider, request};
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
-    use std::process::Stdio;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -4050,46 +3743,28 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
     );
     let report_ready = format!("{expected}Input:\n");
     for _ in 0..2 {
-        let mut command = isolation::account_isolated_script(temp.path());
-        command.env_clear().current_dir(&workspace)
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
-            .env("ARANY_TEST_SESSION", id.to_string()).env("TERM", "dumb")
-            .args(["-q", "-e", "-c", "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"", "/dev/null"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let flags = fcntl_getfl(&output).unwrap();
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-        let mut bytes = Vec::new();
-        let mut answered = session_picker::PtyResponses::default();
+        let mut pty = pty::Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
+                "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"",
+            )
+            .session(&state, &workspace)
+            .env("ARANY_TEST_SESSION", id.to_string())
+            .spawn(),
+        );
         for (needle, action) in [("Input:\n", "/usage\n"), (report_ready.as_str(), "/exit\n")] {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !String::from_utf8_lossy(&bytes)
-                .replace('\r', "")
-                .contains(needle)
-            {
-                session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
-                assert!(
-                    Instant::now() < deadline,
-                    "usage PTY stage: waiting for {needle:?}"
-                );
-                std::thread::yield_now();
-            }
-            input.write_all(action.as_bytes()).unwrap();
+            pty.pump_until(
+                &format!("usage PTY stage: waiting for {needle:?}"),
+                |bytes| {
+                    String::from_utf8_lossy(bytes)
+                        .replace('\r', "")
+                        .contains(needle)
+                },
+            );
+            pty.send(action.as_bytes());
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
-            if let Some(status) = child.child().try_wait().unwrap() {
-                assert!(status.success());
-                break;
-            }
-            assert!(Instant::now() < deadline, "usage PTY exit");
-            std::thread::yield_now();
-        }
-        let text = String::from_utf8(bytes).unwrap().replace('\r', "");
+        assert!(pty.wait_exit("usage PTY exit").success());
+        let text = String::from_utf8(pty.transcript).unwrap().replace('\r', "");
         let start = text.find("Usage page 1 of 1\n").unwrap();
         assert_eq!(&text[start..start + expected.len()], expected);
         assert!(!text.contains('\u{1b}'));
@@ -4101,6 +3776,6 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
         });
     }
 }
-#[cfg(all(unix, any(debug_assertions, target_os = "linux")))]
+#[cfg(any(debug_assertions, target_os = "linux"))]
 #[path = "session_run/storage.rs"]
 mod storage;

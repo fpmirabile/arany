@@ -1,13 +1,11 @@
 use arany::{
-    ChatGptAdmission, ChatGptProvenance, ChatGptProvider, Effort, ProviderError,
-    validate_native_model_id,
+    ChatGptAdmission, ChatGptProvenance, ChatGptProvider, Effort, validate_native_model_id,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::{Uuid, Variant, Version};
 
 use account::SignOutOutcome;
@@ -23,25 +21,12 @@ pub(crate) mod registration;
 
 pub(crate) use account::{
     AccountAccess, AccountInspection, MAX_TOKEN_RECORD_BYTES, ReauthorizationTarget, save_verified,
-    valid_keyring_record, valid_written_keyring_record,
+    valid_keyring_record,
 };
 pub(crate) use browser::open_authorization_url;
 pub(crate) use callback::CallbackListener;
 pub(crate) use catalog::ChatGptModel;
 pub(crate) use consent::{RiskAcknowledgment, RiskPrompt};
-
-static MIGRATION_NOTICE_PENDING: AtomicBool = AtomicBool::new(false);
-const MIGRATION_NOTICE: &str = "Saved ChatGPT accounts were upgraded; earlier sign-ins are disconnected. Reconnect through /setup to use the Codex OAuth client.";
-
-pub(crate) fn record_migration_notice() {
-    MIGRATION_NOTICE_PENDING.store(true, Ordering::Release);
-}
-
-pub(crate) fn take_migration_notice() -> Option<&'static str> {
-    MIGRATION_NOTICE_PENDING
-        .swap(false, Ordering::AcqRel)
-        .then_some(MIGRATION_NOTICE)
-}
 
 pub(crate) async fn selected_models(
     workspace: PathBuf,
@@ -118,191 +103,10 @@ pub(crate) fn selected_reauthorization_target(
     account::selected_reauthorization_target(expected_id)
 }
 
-pub(crate) struct ModelCheckReport {
-    pub(crate) account: Uuid,
-    pub(crate) context_window_tokens: Option<u32>,
-    pub(crate) view: arany::CheckView,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ModelCheckError {
-    #[error("{0}")]
-    Admission(#[from] AuthorizationError),
-    #[error("Provider check could not start: {0}")]
-    Journal(#[from] arany::CheckOpenError),
-    #[error("{source}\n{receipt}")]
-    Check {
-        source: AuthorizationError,
-        receipt: arany::CheckReceipt,
-    },
-}
-
-pub(crate) async fn check_selected_model(
-    workspace: PathBuf,
-    expected_account_id: Option<Uuid>,
-    model: String,
-    effort: Effort,
-    cancellation: arany::RunCancellation,
-) -> Result<ModelCheckReport, ModelCheckError> {
-    validate_native_model_id(&model).map_err(|_| AuthorizationError::InvalidSelection)?;
-    let selected = account::selected_for_use(workspace.clone(), expected_account_id).await?;
-    let fingerprint = account::model_check_fingerprint(&selected, &model, effort)?;
-    let root = arany::StateRoot::account_path()
-        .and_then(|path| arany::StateRoot::open_existing(&path))
-        .map_err(|_| AuthorizationError::Unavailable)?;
-    let mut check = arany::ChatGptCheck::start(
-        root,
-        arany::ChatGptCheckRequest {
-            account: selected.id,
-            model: model.clone(),
-            effort,
-            fingerprint,
-        },
-        account::retained_checks,
-        cancellation,
-    )
-    .await?;
-    let result = check_model(&mut check, workspace, selected.clone(), model, effort).await;
-    if result.is_err() {
-        let _ = check.finish(arany::CheckDisposition::Failed).await;
-    }
-    let receipt = check.receipt();
-    let closed = check.close().await;
-    match (result, closed) {
-        (Ok(context_window_tokens), Ok(view)) => Ok(ModelCheckReport {
-            account: selected.id,
-            context_window_tokens,
-            view,
-        }),
-        (Err(source), _) => Err(ModelCheckError::Check { source, receipt }),
-        (Ok(_), Err(_)) => Err(ModelCheckError::Check {
-            source: AuthorizationError::EvidenceUnavailable,
-            receipt,
-        }),
-    }
-}
-
-async fn check_model(
-    check: &mut arany::ChatGptCheck,
-    workspace: PathBuf,
-    selected: account::SelectedAccount,
-    model: String,
-    effort: Effort,
-) -> Result<Option<u32>, AuthorizationError> {
-    account::clear_model_check(workspace.clone(), selected.clone(), model.clone(), effort).await?;
-    check
-        .evidence_cleared()
-        .await
-        .map_err(|_| AuthorizationError::EvidenceUnavailable)?;
-    let models = catalog::list_models_checked(
-        &selected.credentials,
-        &selected.consent,
-        selected.storage,
-        check,
-    )
-    .await?;
-    let context_window_tokens = catalog::model_window(&models, &model)?;
-    arany::probe_chatgpt_model(&selected.credentials.access_token, &model, effort, check)
-        .await
-        .map_err(AuthorizationError::from)?;
-    let record = account::prepare_model_check(
-        workspace.clone(),
-        selected.clone(),
-        (model, effort),
-        context_window_tokens,
-        check.id(),
-    )
-    .await?;
-    let digest = record.digest()?;
-    check
-        .evidence_started(digest)
-        .await
-        .map_err(AuthorizationError::from)?;
-    account::record_model_check(workspace, selected, record).await?;
-    check
-        .evidence_published(digest)
-        .await
-        .map_err(AuthorizationError::from)?;
-    Ok(context_window_tokens)
-}
-
-impl From<arany::ChatGptCheckError> for AuthorizationError {
-    fn from(error: arany::ChatGptCheckError) -> Self {
-        match error {
-            arany::ChatGptCheckError::Cancelled => Self::CheckCancelled,
-            arany::ChatGptCheckError::Deadline => Self::CheckDeadline,
-            arany::ChatGptCheckError::Journal(_) => Self::EvidenceUnavailable,
-            arany::ChatGptCheckError::Provider(error) => conformance_error(error),
-        }
-    }
-}
-
-fn conformance_error(error: ProviderError) -> AuthorizationError {
-    match error {
-        ProviderError::RemoteHttp(status) => AuthorizationError::ConformanceHttp {
-            status,
-            advice: admission_http_advice(status),
-        },
-        ProviderError::RateLimited(_) | ProviderError::QuotaExceeded => {
-            AuthorizationError::ConformanceHttp {
-                status: 429,
-                advice: admission_http_advice(429),
-            }
-        }
-        ProviderError::RemoteServerError(status, _) => AuthorizationError::ConformanceHttp {
-            status,
-            advice: admission_http_advice(status),
-        },
-        ProviderError::RemoteStreamCode(code) => AuthorizationError::ConformanceStream {
-            advice: stream_failure_advice(&code),
-            code,
-        },
-        _ => AuthorizationError::ConformanceFailed,
-    }
-}
-
-fn stream_failure_advice(code: &str) -> &'static str {
-    match code {
-        "subscription_sharing_usage_limit_exceeded" => {
-            "pause ChatGPT plan checks and review ChatGPT Settings > Usage"
-        }
-        "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => {
-            "keep the saved account and try again later"
-        }
-        "subscription_sharing_user_not_eligible" => {
-            "this account or workspace cannot use ChatGPT plan sharing"
-        }
-        "subscription_sharing_unsupported_capability" => {
-            "review model, effort, and request compatibility"
-        }
-        "subscription_sharing_route_not_supported"
-        | "chatpass_v2_scope_not_authorized"
-        | "chatpass_v2_invalid_authorization_context" => {
-            "check direct-route integration and granted permissions"
-        }
-        "subscription_sharing_invalid_user" => {
-            "verify the selected account; reconnect only after confirmed revocation"
-        }
-        _ => "review this Provider error before trying again",
-    }
-}
-
-fn admission_http_advice(status: u16) -> &'static str {
-    match status {
-        401 => "verify the selected account and granted direct-use permission",
-        403 => "check account, region, and integration policy",
-        429 => "pause checks and retry later",
-        503 => "direct routing may be unavailable; keep the saved account and retry later",
-        500..=599 => "keep the saved account and retry later",
-        _ => "review the direct-route request and selected account",
-    }
-}
-
 struct AdmittedAccount {
     id: Uuid,
     access_token: String,
-    evidence_fingerprint: [u8; 32],
-    context_window_tokens: Option<u32>,
+    admission_fingerprint: [u8; 32],
 }
 
 async fn admitted_account_for_run(
@@ -317,8 +121,7 @@ async fn admitted_account_for_run(
     Ok(AdmittedAccount {
         id: admitted.selected.id,
         access_token: admitted.selected.credentials.access_token,
-        evidence_fingerprint: admitted.fingerprint,
-        context_window_tokens: admitted.context_window_tokens,
+        admission_fingerprint: admitted.fingerprint,
     })
 }
 
@@ -336,11 +139,10 @@ pub(crate) async fn provider_for_run(
         admitted.access_token,
         ChatGptProvenance {
             account_id: admitted.id,
-            evidence_fingerprint: admitted.evidence_fingerprint,
+            admission_fingerprint: admitted.admission_fingerprint,
             admission: ChatGptAdmission::AccountConsent,
         },
     )
-    .map(|provider| provider.with_context_window(admitted.context_window_tokens))
     .map_err(|_| AuthorizationError::Unavailable)
 }
 
@@ -354,6 +156,10 @@ const MAX_CALLBACK_BYTES: usize = 4096;
 const MAX_CODE_BYTES: usize = 2048;
 const MAX_CLIENT_ID_BYTES: usize = 128;
 const MAX_SCOPE_BYTES: usize = 512;
+const MAX_SUBJECT_BYTES: usize = 512;
+const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_REFRESH_TOKEN_BYTES: usize = 8 * 1024;
 
 fn publication_error(error: arany::StoreError) -> AuthorizationError {
     match error {
@@ -432,22 +238,6 @@ pub(crate) enum AuthorizationError {
     CatalogHttp { status: u16, advice: &'static str },
     #[error("ChatGPT model or effort is invalid")]
     InvalidSelection,
-    #[error("model is not visible to the selected ChatGPT account")]
-    ModelUnavailable,
-    #[error("ChatGPT conformance check cancelled")]
-    CheckCancelled,
-    #[error("ChatGPT conformance check deadline reached")]
-    CheckDeadline,
-    #[error("ChatGPT synthetic conformance failed")]
-    ConformanceFailed,
-    #[error(
-        "ChatGPT synthetic conformance returned HTTP {status}; {advice}; no model check was saved"
-    )]
-    ConformanceHttp { status: u16, advice: &'static str },
-    #[error("ChatGPT synthetic conformance failed ({code}); {advice}; no model check was saved")]
-    ConformanceStream { code: String, advice: &'static str },
-    #[error("ChatGPT conformance evidence is unavailable")]
-    EvidenceUnavailable,
 }
 
 pub(crate) struct AuthorizationUrl(Url);
@@ -469,10 +259,7 @@ pub(crate) struct AuthorizationAttempt {
 
 enum AuthorizationMode {
     NewRegistration,
-    Returning {
-        subject: String,
-        account_id: Option<String>,
-    },
+    Returning { subject: String, account_id: String },
 }
 
 pub(crate) struct CodeExchange {
@@ -511,14 +298,14 @@ impl VerifiedCredentials {
         valid_client_id(&self.client_id)
             && self.host_id.get_version() == Some(Version::Random)
             && self.host_id.get_variant() == Variant::RFC4122
-            && bounded_graphic(&self.subject, 512)
+            && bounded_graphic(&self.subject, MAX_SUBJECT_BYTES)
             && self
                 .chatgpt_account_id
                 .as_deref()
                 .is_none_or(valid_account_id)
-            && bounded_graphic(&self.id_token, 16 * 1024)
-            && bounded_graphic(&self.access_token, 16 * 1024)
-            && bounded_graphic(&self.refresh_token, 8 * 1024)
+            && bounded_graphic(&self.id_token, MAX_ID_TOKEN_BYTES)
+            && bounded_graphic(&self.access_token, MAX_ACCESS_TOKEN_BYTES)
+            && bounded_graphic(&self.refresh_token, MAX_REFRESH_TOKEN_BYTES)
             && self.access_expires_at_unix != 0
     }
 
@@ -549,11 +336,8 @@ impl AuthorizationAttempt {
         callback_port: u16,
     ) -> Result<Self, AuthorizationError> {
         if !valid_client_id(&account.client_id)
-            || account
-                .chatgpt_account_id
-                .as_deref()
-                .is_some_and(|id| !valid_account_id(id))
-            || !bounded_graphic(&account.subject, 512)
+            || !valid_account_id(&account.chatgpt_account_id)
+            || !bounded_graphic(&account.subject, MAX_SUBJECT_BYTES)
             || account.id.get_version() != Some(Version::SortRand)
         {
             return Err(AuthorizationError::InvalidIdentity);
@@ -679,7 +463,7 @@ impl AuthorizationAttempt {
             expected_subject: accepted.expected_subject,
             expected_account_id: match self.mode {
                 AuthorizationMode::NewRegistration => None,
-                AuthorizationMode::Returning { account_id, .. } => account_id,
+                AuthorizationMode::Returning { account_id, .. } => Some(account_id),
             },
         }
     }
@@ -738,73 +522,6 @@ mod tests {
     use super::*;
     use crate::accounts::credentials::AccountStorage;
 
-    #[test]
-    fn stopped_checks_report_the_stop_cause_without_claiming_a_journal_failure() {
-        for (error, expected) in [
-            (
-                arany::ChatGptCheckError::Cancelled,
-                "ChatGPT conformance check cancelled",
-            ),
-            (
-                arany::ChatGptCheckError::Deadline,
-                "ChatGPT conformance check deadline reached",
-            ),
-            (
-                arany::StoreError::Closed.into(),
-                "ChatGPT conformance evidence is unavailable",
-            ),
-        ] {
-            assert_eq!(AuthorizationError::from(error).to_string(), expected);
-        }
-    }
-
-    #[test]
-    fn conformance_http_notice_has_fixed_admission_recovery() {
-        for (status, advice) in [
-            (
-                401,
-                "verify the selected account and granted direct-use permission",
-            ),
-            (403, "check account, region, and integration policy"),
-            (429, "pause checks and retry later"),
-            (500, "keep the saved account and retry later"),
-            (
-                503,
-                "direct routing may be unavailable; keep the saved account and retry later",
-            ),
-            (418, "review the direct-route request and selected account"),
-        ] {
-            assert_eq!(
-                AuthorizationError::ConformanceHttp {
-                    status,
-                    advice: admission_http_advice(status),
-                }
-                .to_string(),
-                format!(
-                    "ChatGPT synthetic conformance returned HTTP {status}; {advice}; no model check was saved"
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn stream_failure_notice_preserves_code_with_specific_recovery() {
-        let code = "subscription_sharing_usage_limit_exceeded";
-        let advice = stream_failure_advice(code);
-        assert_eq!(
-            AuthorizationError::ConformanceStream {
-                code: code.into(),
-                advice,
-            }
-            .to_string(),
-            "ChatGPT synthetic conformance failed (subscription_sharing_usage_limit_exceeded); pause ChatGPT plan checks and review ChatGPT Settings > Usage; no model check was saved"
-        );
-        assert_eq!(
-            stream_failure_advice("subscription_sharing_usage_unavailable"),
-            "keep the saved account and try again later"
-        );
-    }
-
     fn fixture_attempt() -> AuthorizationAttempt {
         let mut random = [0; 96];
         random[..32].fill(7);
@@ -838,7 +555,7 @@ mod tests {
             client_id: account.client_id,
             subject: account.subject,
             storage: AccountStorage::Keyring,
-            chatgpt_account_id: account.chatgpt_account_id,
+            chatgpt_account_id: "account-saved".into(),
         }
     }
 
@@ -945,7 +662,10 @@ mod tests {
                 Some("verified-subject")
             );
             assert_eq!(exchange.host_id, account.host_id);
-            assert_eq!(exchange.expected_account_id, account.chatgpt_account_id);
+            assert_eq!(
+                exchange.expected_account_id.as_deref(),
+                Some(account.chatgpt_account_id.as_str())
+            );
         }
     }
 

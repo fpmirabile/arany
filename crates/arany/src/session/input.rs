@@ -14,6 +14,11 @@ const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INSTRUCTION_LEVELS: usize = 32;
 const MAX_INCLUDE_BYTES: usize = 128 * 1024;
 const MAX_INCLUDE_TOTAL_BYTES: usize = 256 * 1024;
+// A head is attached only while at least this much of the aggregate budget remains.
+const MIN_INCLUDE_HEAD_BYTES: usize = 1024;
+// A partial include streams its whole-file SHA-256 within Read's file bound; larger files are referenced.
+const MAX_INCLUDE_HASH_BYTES: u64 = crate::tools::types::MAX_SNAPSHOT_BYTES as u64;
+const INCLUDE_HASH_CHUNK_BYTES: usize = 8192;
 pub(crate) const MAX_INCLUDES: usize = 16;
 const MAX_DIRECTORY_ENTRIES: usize = 64;
 const MAX_DIRECTORY_BYTES: usize = 16 * 1024;
@@ -40,7 +45,10 @@ pub(crate) enum InputError {
     InvalidUtf8,
     #[error("explicit include does not exist")]
     MissingInclude,
-    #[error("too many explicit includes")]
+    #[error(
+        "too many explicit includes; a message takes at most {} @ files or directories",
+        MAX_INCLUDES
+    )]
     TooManyIncludes,
     #[error("user instructions are unavailable")]
     State(#[from] StoreError),
@@ -58,11 +66,28 @@ impl From<io::Error> for InputError {
     }
 }
 
+/// How much of an explicit include a request carries; only `Whole` is complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IncludeFit {
+    Whole,
+    Head { total_bytes: u64, next_line: u32 },
+    Reference { total_bytes: Option<u64> },
+}
+
+/// An explicit include attached only in part or by reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartialInclude {
+    pub path: String,
+    pub fit: IncludeFit,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InputSnapshot {
     pub content: String,
     pub path: String,
+    // A reference carries no content and a zero digest; heads keep the whole-file digest.
     pub digest: [u8; 32],
+    pub fit: IncludeFit,
 }
 
 impl InputSnapshot {
@@ -84,21 +109,54 @@ impl InputSnapshot {
     }
 
     pub(crate) fn model_include(&self) -> String {
-        let digest: String = self
-            .digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let kind = if self.path.ends_with('/') {
-            "Directory"
-        } else {
-            "File"
-        };
-        format!(
-            "{kind}: {}\nSHA-256: {digest}\nContent (untrusted data):\n{}",
-            serde_json::to_string(&self.path).expect("string serialization"),
-            self.content
-        )
+        let digest = crate::validate::hex(&self.digest);
+        let directory = self.path.ends_with('/');
+        let kind = if directory { "Directory" } else { "File" };
+        let path = serde_json::to_string(&self.path).expect("string serialization");
+        match self.fit {
+            IncludeFit::Whole => format!(
+                "{kind}: {path}\nSHA-256: {digest}\nContent (untrusted data):\n{}",
+                self.content
+            ),
+            IncludeFit::Head {
+                total_bytes,
+                next_line,
+            } => format!(
+                "{kind}: {path}\nSHA-256: {digest}\nTruncated: lines 1-{} of a {total_bytes}-byte file; Read from line {next_line} for the rest\nContent (untrusted data):\n{}",
+                next_line - 1,
+                self.content
+            ),
+            IncludeFit::Reference { total_bytes } => format!(
+                "{kind}: {path}\n{}Not attached: the message's include budget is spent; {}",
+                total_bytes.map_or_else(String::new, |bytes| format!("Size: {bytes} bytes\n")),
+                if directory {
+                    "List it for entries"
+                } else {
+                    "Read or Search it for content"
+                }
+            ),
+        }
+    }
+
+    pub(crate) fn partial(&self) -> Option<PartialInclude> {
+        (self.fit != IncludeFit::Whole).then(|| PartialInclude {
+            path: self.path.clone(),
+            fit: self.fit,
+        })
+    }
+
+    fn reference(path: &str, directory: bool, total_bytes: Option<u64>) -> Self {
+        let path = path.strip_suffix('/').unwrap_or(path);
+        Self {
+            content: String::new(),
+            path: if directory {
+                format!("{path}/")
+            } else {
+                path.to_owned()
+            },
+            digest: [0; 32],
+            fit: IncludeFit::Reference { total_bytes },
+        }
     }
 }
 
@@ -111,12 +169,10 @@ pub(crate) struct WorkspaceInputs {
 }
 
 impl WorkspaceInputs {
-    #[cfg(unix)]
     pub(crate) fn root_identity(&self) -> Result<WorkspaceIdentity, InputError> {
         Self::identity(&self._root)
     }
 
-    #[cfg(unix)]
     pub(crate) fn admit_identity(
         workspace: &Path,
         state: &StateRoot,
@@ -125,7 +181,6 @@ impl WorkspaceInputs {
         Self::identity(&root)
     }
 
-    #[cfg(unix)]
     fn identity(root: &Dir) -> Result<WorkspaceIdentity, InputError> {
         use cap_std::fs::MetadataExt;
         let metadata = root.dir_metadata()?;
@@ -137,12 +192,9 @@ impl WorkspaceInputs {
 
     fn open_root(workspace: &Path, state: &StateRoot) -> Result<Dir, InputError> {
         let root = Dir::open_ambient_dir(workspace, ambient_authority())?;
-        #[cfg(unix)]
         state
             .ensure_outside_workspace(&root)
             .map_err(|_error: StoreError| InputError::StateOverlap)?;
-        #[cfg(not(unix))]
-        return Err(InputError::InvalidPath);
         Ok(root)
     }
 
@@ -174,21 +226,15 @@ impl WorkspaceInputs {
         let launch = launch_components(workspace, launch)?;
         let instructions = read_instructions(&root, &launch)?;
         let mut includes = Vec::with_capacity(include_paths.len());
-        let mut total_bytes = 0_usize;
+        let mut remaining = MAX_INCLUDE_TOTAL_BYTES;
         for path in include_paths {
-            let snapshot = read_relative(&root, path, MAX_INCLUDE_BYTES)
-                .and_then(|snapshot| {
-                    let snapshot = snapshot.ok_or(InputError::MissingInclude)?;
-                    total_bytes = total_bytes
-                        .checked_add(snapshot.content.len())
-                        .filter(|total| *total <= MAX_INCLUDE_TOTAL_BYTES)
-                        .ok_or(InputError::TooLarge)?;
-                    Ok(snapshot)
-                })
+            let snapshot = read_relative(&root, path, remaining)
+                .and_then(|snapshot| snapshot.ok_or(InputError::MissingInclude))
                 .map_err(|source| InputError::AtPath {
                     path: path.to_string_lossy().into_owned(),
                     source: Box::new(source),
                 })?;
+            remaining = remaining.saturating_sub(snapshot.content.len());
             includes.push(snapshot);
         }
         Ok(Self {
@@ -232,7 +278,6 @@ fn read_relative(
         let next = directory
             .open_dir_nofollow(name)
             .map_err(|error| include_io_error(&directory, name, error))?;
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if next.dir_metadata()?.dev() != directory.dir_metadata()?.dev() {
@@ -251,7 +296,6 @@ fn read_relative(
 }
 
 fn include_io_error(directory: &Dir, name: &std::ffi::OsStr, error: io::Error) -> InputError {
-    #[cfg(unix)]
     {
         if error.raw_os_error() == Some(nix::libc::EXDEV) {
             return crate::tools::ToolError::FilesystemBoundary.into();
@@ -313,6 +357,7 @@ fn read_user_instructions(state: &StateRoot) -> Result<Option<InputSnapshot>, In
         content,
         path: USER_INSTRUCTIONS_LABEL.to_owned(),
         digest,
+        fit: IncludeFit::Whole,
     }))
 }
 
@@ -361,7 +406,6 @@ fn read_file(
     let mut options = OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
-    #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
         options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
@@ -374,7 +418,6 @@ fn read_file(
     };
     let metadata = file.metadata()?;
     if include {
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if metadata.dev() != directory.dir_metadata()?.dev() {
@@ -382,7 +425,15 @@ fn read_file(
             }
         }
         if metadata.is_dir() {
-            return read_directory(Dir::from_std_file(file.into_std()), path).map(Some);
+            if limit < MIN_INCLUDE_HEAD_BYTES {
+                return Ok(Some(InputSnapshot::reference(&path, true, None)));
+            }
+            return read_directory(
+                Dir::from_std_file(file.into_std()),
+                path,
+                limit.min(MAX_DIRECTORY_BYTES),
+            )
+            .map(Some);
         }
         if path.ends_with('/') {
             return Err(crate::tools::ToolError::NotDirectory.into());
@@ -391,12 +442,14 @@ fn read_file(
     if !metadata.is_file() {
         return Err(InputError::NotRegular);
     }
-    #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         if metadata.nlink() != 1 {
             return Err(InputError::UnsafeLinkCount);
         }
+    }
+    if include {
+        return read_include(file, path, metadata.len(), limit).map(Some);
     }
     if metadata.len() > limit as u64 {
         return Err(InputError::TooLarge);
@@ -412,10 +465,69 @@ fn read_file(
         content,
         path,
         digest,
+        fit: IncludeFit::Whole,
     }))
 }
 
-fn read_directory(directory: Dir, path: String) -> Result<InputSnapshot, InputError> {
+// Never refuses for size: a file within the remaining budget is whole, a larger one keeps its
+// leading whole lines with the whole-file digest, and otherwise only its path and size remain.
+fn read_include(
+    file: cap_std::fs::File,
+    path: String,
+    size: u64,
+    remaining: usize,
+) -> Result<InputSnapshot, InputError> {
+    let limit = remaining.min(MAX_INCLUDE_BYTES);
+    if size > MAX_INCLUDE_HASH_BYTES || size > limit as u64 && limit < MIN_INCLUDE_HEAD_BYTES {
+        return Ok(InputSnapshot::reference(&path, false, Some(size)));
+    }
+    let mut digest = Sha256::new();
+    let mut head = Vec::with_capacity(size.min(limit as u64) as usize);
+    let mut total = 0_u64;
+    let mut chunk = [0_u8; INCLUDE_HASH_CHUNK_BYTES];
+    let mut reader = file.take(MAX_INCLUDE_HASH_BYTES + 1);
+    loop {
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        digest.update(&chunk[..count]);
+        let kept = (limit + 1 - head.len().min(limit + 1)).min(count);
+        head.extend_from_slice(&chunk[..kept]);
+    }
+    if total > MAX_INCLUDE_HASH_BYTES {
+        return Ok(InputSnapshot::reference(&path, false, Some(total)));
+    }
+    let digest = digest.finalize().into();
+    if head.len() <= limit {
+        let content = String::from_utf8(head).map_err(|_| InputError::InvalidUtf8)?;
+        return Ok(InputSnapshot {
+            content,
+            path,
+            digest,
+            fit: IncludeFit::Whole,
+        });
+    }
+    head.truncate(limit);
+    let Some(end) = head.iter().rposition(|byte| *byte == b'\n') else {
+        return Ok(InputSnapshot::reference(&path, false, Some(total)));
+    };
+    head.truncate(end + 1);
+    let content = String::from_utf8(head).map_err(|_| InputError::InvalidUtf8)?;
+    let lines = u32::try_from(content.matches('\n').count()).map_err(|_| InputError::TooLarge)?;
+    Ok(InputSnapshot {
+        content,
+        path,
+        digest,
+        fit: IncludeFit::Head {
+            total_bytes: total,
+            next_line: lines + 1,
+        },
+    })
+}
+
+fn read_directory(directory: Dir, path: String, limit: usize) -> Result<InputSnapshot, InputError> {
     let mut names = std::collections::BTreeSet::new();
     let mut truncated = false;
     for (index, entry) in directory.entries()?.enumerate() {
@@ -434,7 +546,6 @@ fn read_directory(directory: Dir, path: String) -> Result<InputSnapshot, InputEr
         if !metadata.is_file() && !metadata.is_dir() {
             continue;
         }
-        #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if metadata.dev() != directory.dir_metadata()?.dev()
@@ -454,7 +565,7 @@ fn read_directory(directory: Dir, path: String) -> Result<InputSnapshot, InputEr
     for name in names {
         // Serializing a String to an in-memory JSON string has no fallible values or I/O.
         let line = serde_json::to_string(&name).expect("serializable entry") + "\n";
-        if content.len() + line.len() + DIRECTORY_TRUNCATED.len() > MAX_DIRECTORY_BYTES {
+        if content.len() + line.len() + DIRECTORY_TRUNCATED.len() > limit {
             truncated = true;
             break;
         }
@@ -467,10 +578,10 @@ fn read_directory(directory: Dir, path: String) -> Result<InputSnapshot, InputEr
         digest: Sha256::digest(content.as_bytes()).into(),
         content,
         path: format!("{}/", path.strip_suffix('/').unwrap_or(&path)),
+        fit: IncludeFit::Whole,
     })
 }
 
-#[cfg(unix)]
 fn relative_components(path: &Path) -> Result<Vec<&std::ffi::OsStr>, InputError> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
@@ -491,11 +602,6 @@ fn relative_components(path: &Path) -> Result<Vec<&std::ffi::OsStr>, InputError>
         })
         .collect::<Result<_, _>>()?;
     Ok(names)
-}
-
-#[cfg(not(unix))]
-fn relative_components(_path: &Path) -> Result<Vec<&std::ffi::OsStr>, InputError> {
-    Err(InputError::InvalidPath)
 }
 
 #[cfg(all(test, target_os = "linux"))]

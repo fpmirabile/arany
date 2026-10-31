@@ -27,6 +27,11 @@ fn cache_overlay_reuses_deletes_recreates_and_bounds_writes() {
 
 async fn journey() {
     let fixture = SpillFixture::new();
+    // Sandboxed commands ask nothing; an ask rule gives the fault its intent before dispatch.
+    private_file(
+        &fixture.state.join("permissions.json"),
+        br#"{"permissions":{"ask":["Bash"]}}"#,
+    );
     let mut outcomes = Vec::new();
     for class in [
         arany::ToolResourceClass::Default,
@@ -61,7 +66,8 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
         "set -eu; test ! -e /cache/cargo/.package-cache; test ! -e /cache/.npm/_logs/entry; test \"$(cat \"$CARGO_TARGET_DIR/nested/old\")\" = old; rm -rf \"$CARGO_TARGET_DIR/nested\"; mkdir \"$CARGO_TARGET_DIR/nested\"; printf new > \"$CARGO_TARGET_DIR/nested/new\"; rm \"$CARGO_TARGET_DIR/stable\"",
         "set -eu; test ! -e \"$CARGO_TARGET_DIR/nested/old\"; test ! -e \"$CARGO_TARGET_DIR/stable\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; dd if=/dev/zero of=\"$CARGO_TARGET_DIR/exhausted\" bs=1048576 count=80",
         "set -eu; mkdir -p \"$CARGO_TARGET_DIR/inodes\"; i=0; while { : > \"$CARGO_TARGET_DIR/inodes/empty-$i\"; } 2>/dev/null; do i=$((i + 1)); done; test \"$(/usr/bin/stat -f -c %d /cache)\" -eq 0",
-        "set -eu; test ! -e \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused",
+        // The unlimited default published the 80 MiB file; deleting it keeps Build under its set size.
+        "set -eu; test -s \"$CARGO_TARGET_DIR/exhausted\"; rm \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused",
     ];
     let switched = format!(
         "set -eu; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; {}",
@@ -69,6 +75,7 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
     );
     if class == arany::ToolResourceClass::Build {
         scripts[0] = &switched;
+        scripts[4] = "set -eu; test ! -e \"$CARGO_TARGET_DIR/exhausted\"; test \"$(cat \"$CARGO_TARGET_DIR/nested/new\")\" = new; printf reused";
     }
     let calls = scripts
         .iter()
@@ -78,6 +85,7 @@ async fn cache_run(fixture: &SpillFixture, class: arany::ToolResourceClass) -> a
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         })
         .collect::<Vec<_>>();
     let mut steps = calls
@@ -194,22 +202,17 @@ fn assert_observations(
         let observation = tool.observation.as_ref().unwrap();
         assert!(observation.attestation.is_some());
         assert_eq!(observation.intent.limits.resource_class, class);
+        // The view is the disk headroom, so the 80 MiB write succeeds and only Build's set size
+        // rejects it; the inode-exhausted upper exceeds the capture scan bound in both classes.
         assert_eq!(
             observation.cache_update,
-            match index {
-                2 => arany::CacheUpdate::NotAttempted,
-                3 => arany::CacheUpdate::Rejected,
+            match (index, class) {
+                (2, arany::ToolResourceClass::Build) | (3, _) => arany::CacheUpdate::Rejected,
                 _ => arany::CacheUpdate::Published,
-            }
+            },
+            "command {index}"
         );
-        assert_eq!(
-            observation.disposition,
-            if index == 2 {
-                ToolDisposition::Failed
-            } else {
-                ToolDisposition::Succeeded
-            }
-        );
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         let result: Value = serde_json::from_str(&observation.output).unwrap();
         assert_eq!(result["changeset"]["files"], json!([]));
     }
@@ -326,6 +329,11 @@ fn cache_completion_loss_retains_the_lower_and_stops_without_retry() {
 
 async fn completion_loss(class: arany::ToolResourceClass) {
     let fixture = SpillFixture::new();
+    // Sandboxed commands ask nothing; an ask rule gives the fault its intent before dispatch.
+    private_file(
+        &fixture.state.join("permissions.json"),
+        br#"{"permissions":{"ask":["Bash"]}}"#,
+    );
     let session = fixture
         .engine
         .create_session(fixture.workspace.clone(), None)
@@ -340,6 +348,7 @@ async fn completion_loss(class: arany::ToolResourceClass) {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut steps = vec![crate::tool_outcome(command.clone())];
     add_build_plan(&mut steps, class, command.clone());

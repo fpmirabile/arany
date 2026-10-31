@@ -1,7 +1,11 @@
 mod background;
 mod bounds;
+mod cargo;
 mod commands;
+pub use commands::HOST_CASE;
 mod waves;
+
+pub use cargo::cargo_editor_journey;
 
 use super::goals::{assert_action_bounds, finish_with, replayed};
 use super::scenario::{request, tool_outcome};
@@ -174,9 +178,12 @@ impl LiveProvider {
             assignment.mode = WorkerMode::Background;
             assignment.lease = vec!["notes/0".into()];
             assignment.commands = vec!["build".into()];
-            if matches!(self.case, "command_criterion" | "command_bash_only") {
+            if matches!(
+                self.case,
+                "command_criterion" | "command_bash_only" | "command_large"
+            ) {
                 assignment.criterion = GoalSuccessCriterion::ToolCallSucceeded {
-                    call: Box::new(commands::call(false)),
+                    call: Box::new(commands::case_call(self.case)),
                 };
             }
         }
@@ -197,6 +204,25 @@ impl LiveProvider {
                 });
             }
             step - 1
+        } else if self.case == "omitted_digest" {
+            // The editor's own Read supplies the digest its null-digest Write replaces.
+            match step {
+                0 => {
+                    return tool_outcome(ToolCall::Read {
+                        path: "notes/0".into(),
+                        offset: None,
+                        limit: Some(128),
+                    });
+                }
+                1 => {
+                    return tool_outcome(ToolCall::Write {
+                        path: "notes/0".into(),
+                        expected_digest: None,
+                        content: "edited 0".into(),
+                    });
+                }
+                _ => step - 1,
+            }
         } else {
             step
         };
@@ -213,9 +239,10 @@ impl LiveProvider {
             _ if self.case == "no_change" => finish_with("No change required"),
             0 | 1 => {
                 if step == 1 && self.case != "no_channel" {
+                    // The editor works in its own workspace; the Workspace changes only at integration.
                     assert_eq!(
                         std::fs::read(self.workspace.join("notes/0")).unwrap(),
-                        b"edited 0"
+                        b"original 0"
                     );
                     if self.case == "cancel_landed" {
                         self.cancellation.cancel();
@@ -323,6 +350,8 @@ impl Provider for LiveProvider {
             self.background_outcome(&request, step).await
         } else if commands::is_case(self.case) {
             self.command_outcome(&request, step)
+        } else if self.case == cargo::CASE {
+            self.cargo_outcome(&request, step)
         } else if matches!(self.case, "waves_stale" | "waves_fresh") {
             self.wave_outcome(&request, step)
         } else {
@@ -358,12 +387,6 @@ impl Provider for LiveProvider {
     }
 }
 
-fn private_file(path: &Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
-
 pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     if case == "capacity" {
         bounds::capacity_case(guard).await
@@ -391,10 +414,10 @@ async fn run_case_inner(
     }
     let state = directory.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
-    std::fs::create_dir(state.join("agents")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::private_file(
+        &state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    );
     let definition = if case == "invalid_turns" {
         "maxTurns: 1\n"
     } else {
@@ -409,19 +432,15 @@ async fn run_case_inner(
     } else {
         "Read, Write"
     };
-    private_file(&state.join("agents/editor.md"), format!("---\nname: editor\ndescription: Edit leased notes\ntools: {tools}\n{definition}isolation: worktree\n---\nEdit the live Workspace within the lease.\n").as_bytes());
-    private_file(
-        &state.join("permissions.json"),
-        br#"{"permissions":{"defaultMode":"default"}}"#,
-    );
+    write_editor(&state, tools, definition);
     if case == "hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
-        private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
-            "version":1,"workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
+        crate::test_support::private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
+            "workspace_paths":["notes"],"write":true,"skills":[],"mcp":[],
             "commands":[{"name":"sh","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}]
         })).unwrap());
         let hook = serde_json::json!({"type":"command","command":"exit 0","timeout":5});
-        private_file(
+        crate::test_support::private_file(
             &state.join("permissions.json"),
             &serde_json::to_vec(&serde_json::json!({
                 "permissions":{"defaultMode":"default"},"hooks":{
@@ -436,8 +455,21 @@ async fn run_case_inner(
     if commands::is_case(case) {
         commands::configure(&state, case);
     }
-    commands::overlay::configure(&workspace, case);
+    if case == commands::HOST_CASE {
+        crate::fault::FaultPlan::make_sandbox_unavailable(&workspace);
+    }
     run_live(directory, root, guard, case, LiveStart::New { padding }).await
+}
+
+fn write_editor(state: &Path, tools: &str, definition: &str) {
+    std::fs::create_dir(state.join("agents")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::private_file(&state.join("agents/editor.md"), format!("---\nname: editor\ndescription: Edit leased notes\ntools: {tools}\n{definition}isolation: worktree\n---\nEdit the live Workspace within the lease.\n").as_bytes());
+    crate::test_support::private_file(
+        &state.join("permissions.json"),
+        br#"{"permissions":{"defaultMode":"default"}}"#,
+    );
 }
 
 async fn run_live(
@@ -515,14 +547,18 @@ async fn run_live(
     } else {
         ApprovalMode::Request
     });
-    let mut overlay_dispatch = commands::overlay::dispatch_gate(case);
     let mut cache_failure: Option<commands::CacheFailure> = None;
     let mut running = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
             input,
             RunControls {
-                tools: ToolGrant::Configured,
+                // Only a trusted Workspace grant carries the selected runtime profiles.
+                tools: if case == cargo::CASE {
+                    ToolGrant::Trusted(WorkspacePermissions::open(&workspace).unwrap())
+                } else {
+                    ToolGrant::Configured
+                },
                 approvals: (case != "no_channel").then_some(approvals),
                 cancellation,
                 steering: Some(steering),
@@ -535,16 +571,6 @@ async fn run_live(
         tokio::select! {
             result = &mut running => break result,
             Some(()) = clock_gate.recv() => bounds::exhaust(case).await,
-            dispatched = async {
-                match &mut overlay_dispatch {
-                    Some(dispatch) => dispatch.await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                dispatched.expect("editor command reached GO");
-                commands::overlay::dispatched(&state, &workspace, case);
-                overlay_dispatch = None;
-            }
             () = async {
                 match &mut cache_failure {
                     Some(failure) => failure.inject().await,
@@ -552,7 +578,6 @@ async fn run_live(
                 }
             } => cache_failure = None,
             Some(approval) = inbox.next() => {
-                commands::overlay::prepare_approval(case, &approval.intent);
                 if case == "command_cache_unknown" && matches!(approval.intent.call, ToolCall::Command { .. }) {
                     cache_failure = Some(commands::CacheFailure::new(&state, &workspace, &approval.intent));
                 }
@@ -580,22 +605,12 @@ async fn run_live(
             "uncertain command cache must stop the Run with Tool(Uncertain): {result:?}"
         );
     }
-    if case == "command_overlay_uncertain" {
-        assert!(matches!(
-            &result,
-            Err(EngineError::Tool(ToolError::Uncertain))
-        ));
-    }
-    let result = if matches!(
-        case,
-        "uncertain" | "capacity" | "command_cache_unknown" | "command_overlay_uncertain"
-    ) {
+    let result = if matches!(case, "uncertain" | "capacity" | "command_cache_unknown") {
         result.ok()
     } else {
         Some(result.unwrap())
     };
     engine.close().await.unwrap();
-    commands::overlay::assert_cache_reusable(case, &state, &workspace);
     let (events, view) = replayed(&state, session).await;
     let run = view.runs.last().unwrap();
     if let Some(result) = result {
@@ -620,9 +635,10 @@ async fn run_live(
                 .released
                 .is_none()
         );
+        // The unknown edit was in the editor's workspace; the Workspace itself is untouched.
         assert_eq!(
             std::fs::read(workspace.join("notes/0")).unwrap(),
-            b"edited 0"
+            b"original 0"
         );
         assert_eq!(
             std::fs::read(workspace.join("notes/1")).unwrap(),
@@ -632,15 +648,21 @@ async fn run_live(
     if case == "cancel_landed" {
         assert_eq!(
             std::fs::read(workspace.join("notes/0")).unwrap(),
+            b"original 0"
+        );
+        let kept = state
+            .join("editors")
+            .join(session.to_string())
+            .join(run.agents[1].id.to_string());
+        assert_eq!(
+            std::fs::read(kept.join("tree/notes/0")).unwrap(),
             b"edited 0"
         );
-        assert!(run.agents[1].tools[0].checkpoint.is_some());
-        assert!(run.worker_history()[0].changed_paths.contains("notes/0"));
         assert!(
-            run.worker_history()[0]
-                .changed_paths
-                .contains(&crate::validate::hex_digest(b"edited 0"))
+            run.agents[1].tools[0].intent.target.editor()
+                && run.agents[1].tools[0].checkpoint.is_none()
         );
+        assert!(run.worker_history()[0].changed_paths.is_empty());
         assert_eq!(run.status, RunStatus::Cancelled);
         let goal = view.goals.last().unwrap();
         assert_eq!(goal.status, GoalStatus::Interrupted);
@@ -698,7 +720,8 @@ async fn run_live(
     }
     if case == "hooks" {
         let child = &run.agents[1];
-        for tool in &child.tools {
+        let (_, edits) = child.tools.split_last().unwrap();
+        for tool in edits {
             assert_eq!(tool.hooks.len(), 2);
             assert!(
                 tool.hooks
@@ -768,14 +791,37 @@ fn assert_live_editor_evidence(
     view: &SessionView,
 ) {
     let run = view.runs.last().unwrap();
-    if matches!(case, "success" | "hooks" | "discovery" | "primary_after") {
+    if matches!(
+        case,
+        "success" | "hooks" | "discovery" | "primary_after" | "omitted_digest"
+    ) {
         assert_eq!(run.status, RunStatus::Finished);
         let worker = run.agents[1].assignment.as_ref().unwrap();
         assert!(worker.released.is_some() && worker.verification.as_ref().unwrap().1.passed);
         assert_eq!(
             run.agents[1].tools.len(),
-            if case == "discovery" { 4 } else { 3 }
+            if matches!(case, "discovery" | "omitted_digest") {
+                5
+            } else {
+                4
+            }
         );
+        let (integration, edits) = run.agents[1].tools.split_last().unwrap();
+        assert!(
+            edits
+                .iter()
+                .all(|t| t.intent.target.editor() && t.checkpoint.is_none())
+        );
+        assert!(crate::session::editor_integration(&integration.intent.call));
+        assert_eq!(integration.intent.target, EffectTarget::Workspace);
+        assert!(integration.checkpoint.is_some());
+        if case == "omitted_digest" {
+            assert!(matches!(
+                &run.agents[1].tools[1].intent.call,
+                ToolCall::Write { expected_digest: Some(digest), .. }
+                    if *digest == crate::validate::hex_digest(b"original 0")
+            ));
+        }
         assert!(run.agents[1].tools.iter().all(
             |tool| tool.observation.as_ref().unwrap().disposition == ToolDisposition::Succeeded
         ));
@@ -786,15 +832,9 @@ fn assert_live_editor_evidence(
                     .as_ref()
                     .unwrap()
                     .attestation,
-                Some(Attestation::Guard(_))
+                Some(Attestation::InProcess { .. })
             ));
         }
-        assert!(
-            run.agents[1]
-                .tools
-                .iter()
-                .all(|t| t.intent.target == EffectTarget::Workspace)
-        );
         let goal = view.goals.last().unwrap();
         assert_eq!(goal.status, GoalStatus::Completed);
         assert!(

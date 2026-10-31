@@ -15,7 +15,6 @@ pub(super) const MAX_MCP_SERVERS: usize = 4;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Config {
-    pub version: u32,
     pub workspace_paths: Vec<String>,
     pub write: bool,
     #[serde(default, skip_serializing_if = "UnguardedGrant::is_denied")]
@@ -29,8 +28,6 @@ pub(crate) struct Config {
     pub runtime_grants: Vec<RuntimeGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Program>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_identity: Option<GitIdentity>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub locale: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,38 +70,6 @@ impl WebSearch {
                         byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
                     })
             })
-    }
-}
-
-// Author and committer of typed Git commits; never read from repository configuration.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct GitIdentity {
-    pub name: String,
-    pub email: String,
-}
-
-impl Default for GitIdentity {
-    fn default() -> Self {
-        Self {
-            name: "Arany".into(),
-            email: "arany@localhost.invalid".into(),
-        }
-    }
-}
-
-impl GitIdentity {
-    pub(crate) fn valid(&self) -> bool {
-        let field = |value: &str, limit: usize| {
-            !value.trim().is_empty()
-                && value.len() <= limit
-                && !value
-                    .chars()
-                    .any(|character| character.is_control() || matches!(character, '<' | '>'))
-        };
-        field(&self.name, 256)
-            && field(&self.email, 256)
-            && !self.email.contains(char::is_whitespace)
     }
 }
 
@@ -158,7 +123,38 @@ pub(crate) enum McpAuth {
     Oauth,
 }
 
+impl Skill {
+    fn valid_entry(&self) -> bool {
+        valid_name(&self.name)
+            && !self.description.trim().is_empty()
+            && self.description.len() <= 1024
+            && valid_absolute(&self.directory)
+            && self.files.contains_key("SKILL.md")
+            && self.files.len() <= 32
+            && self
+                .files
+                .iter()
+                .all(|(path, hash)| valid_relative(path, false) && valid_digest(hash))
+    }
+}
+
 impl Server {
+    fn valid_entry(&self) -> bool {
+        valid_name(&self.name)
+            && !self.tools.is_empty()
+            && self.tools.len() <= 64
+            && self.tools.iter().collect::<BTreeSet<_>>().len() == self.tools.len()
+            && self.tools.iter().all(|tool| {
+                !tool.is_empty() && tool.len() <= 128 && !tool.chars().any(char::is_control)
+            })
+            && self.valid_transport()
+            && self.args.len() <= 64
+            && self
+                .args
+                .iter()
+                .all(|arg| arg.len() <= MAX_ARGUMENT_BYTES && !arg.contains('\0'))
+    }
+
     // Local servers run a pinned program; remote ones speak streamable HTTP through the egress proxy, which is Linux-only.
     fn valid_transport(&self) -> bool {
         match (&self.program, &self.url) {
@@ -192,22 +188,34 @@ impl Server {
 
 pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
     kind: RecordKind::ToolsConfig,
-    field: "version",
-    floor: 1,
-    current: 1,
-    steps: &[],
     accepts: |bytes| Config::parse(bytes).is_ok(),
 };
 
 impl Config {
-    pub(crate) fn bind_environment(&mut self, environment: &super::CommandEnvironment) {
+    pub(crate) fn bind_environment(
+        &mut self,
+        environment: &super::CommandEnvironment,
+        protected: &[&std::path::Path],
+    ) -> Result<(), ToolError> {
         self.locale = environment.locale();
         self.environment_sha256 = Some(environment.sha256().to_owned());
+        let path = super::toolchains::path_grants(
+            &environment.path_string(),
+            &self.runtime_grants,
+            protected,
+        )?;
+        self.runtime_grants.extend(path);
+        let targets = super::toolchains::link_target_grants(&self.runtime_grants, protected);
+        self.runtime_grants.extend(targets);
+        let reads = super::GuardSettings::load()?.grants(protected);
+        self.runtime_grants.extend(reads);
+        Ok(())
     }
 
     pub(crate) fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let bytes = state
-            .read_current(&TOOLS_CONFIG)
+            .record(TOOLS_CONFIG.kind)
+            .read()
             .map_err(|_| ToolError::Configuration)?
             .ok_or(ToolError::MissingConfiguration)?;
         Self::parse(&bytes)
@@ -242,7 +250,6 @@ impl Config {
 
     pub(crate) fn validate(&self) -> Result<(), ToolError> {
         if self.child_unguarded != UnguardedGrant::Denied
-            || self.version != 1
             || self.workspace_paths.is_empty()
             || self.workspace_paths.len() > MAX_WORKSPACE_PATHS
             || self.workspace_paths.iter().any(|path| {
@@ -251,13 +258,6 @@ impl Config {
             || self.commands.len() > 8
             || self.skills.len() > MAX_SKILLS
             || self.mcp.len() > MAX_MCP_SERVERS
-        {
-            return Err(ToolError::Configuration);
-        }
-        if self
-            .git_identity
-            .as_ref()
-            .is_some_and(|identity| !identity.valid())
         {
             return Err(ToolError::Configuration);
         }
@@ -287,14 +287,7 @@ impl Config {
         {
             return Err(ToolError::Configuration);
         }
-        let roots: BTreeSet<_> = self.workspace_paths.iter().collect();
-        if roots.len() != self.workspace_paths.len()
-            || roots.iter().any(|left| {
-                roots
-                    .iter()
-                    .any(|right| left != right && std::path::Path::new(left).starts_with(right))
-            })
-        {
+        if !disjoint_roots(&self.workspace_paths) {
             return Err(ToolError::Configuration);
         }
         for program in self
@@ -306,46 +299,13 @@ impl Config {
         }
         if let Some(git) = &self.git {
             git.validate()?;
-            if git.name != "git"
-                || git.interpreter
-                || !git.inputs.is_empty()
-                || !super::executable::git_root(std::path::Path::new(&git.executable))
-            {
+            if git.name != "git" || git.interpreter || !git.inputs.is_empty() {
                 return Err(ToolError::Configuration);
             }
         }
-        for server in &self.mcp {
-            if !valid_name(&server.name)
-                || server.tools.is_empty()
-                || server.tools.len() > 64
-                || server.tools.iter().collect::<BTreeSet<_>>().len() != server.tools.len()
-                || server.tools.iter().any(|tool| {
-                    tool.is_empty() || tool.len() > 128 || tool.chars().any(char::is_control)
-                })
-                || !server.valid_transport()
-                || server.args.len() > 64
-                || server
-                    .args
-                    .iter()
-                    .any(|arg| arg.len() > MAX_ARGUMENT_BYTES || arg.contains('\0'))
-            {
-                return Err(ToolError::Configuration);
-            }
-        }
-        for skill in &self.skills {
-            if !valid_name(&skill.name)
-                || skill.description.trim().is_empty()
-                || skill.description.len() > 1024
-                || !valid_absolute(&skill.directory)
-                || !skill.files.contains_key("SKILL.md")
-                || skill.files.len() > 32
-                || skill
-                    .files
-                    .iter()
-                    .any(|(path, hash)| !valid_relative(path, false) || !valid_digest(hash))
-            {
-                return Err(ToolError::Configuration);
-            }
+        if !self.mcp.iter().all(Server::valid_entry) || !self.skills.iter().all(Skill::valid_entry)
+        {
+            return Err(ToolError::Configuration);
         }
         for names in [
             self.commands
@@ -424,6 +384,26 @@ impl Config {
             unguarded: UnguardedGrant::HumanOnly,
             child_unguarded: UnguardedGrant::Denied,
             child_web: self.child_web && cfg!(target_os = "linux"),
+            git: self.git.as_ref().map(|git| GitRunPin {
+                executable: git.executable.clone(),
+                sha256: git.sha256.clone(),
+                hooks: None,
+                repository: None,
+            }),
+            guard: GuardPin {
+                mode: super::GuardMode::Auto,
+                sandbox: true,
+                saved_reads: self
+                    .runtime_grants
+                    .iter()
+                    .filter(|grant| grant.kind == super::toolchains::RuntimeKind::ExtraRead)
+                    .map(|grant| ReadPin {
+                        path: grant.path.to_string_lossy().into_owned(),
+                        device: grant.device,
+                        inode: grant.inode,
+                    })
+                    .collect(),
+            },
         }
     }
 
@@ -454,7 +434,7 @@ impl Config {
             | ToolCall::Delete { path, .. }
             | ToolCall::MultiEdit {
                 file_path: path, ..
-            } => Some(path),
+            } => path,
             ToolCall::Move {
                 source,
                 destination,
@@ -467,12 +447,14 @@ impl Config {
                 return self.commands.iter().any(|value| &value.name == program);
             }
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+                source:
+                    crate::session::worker::ChangesetSource::CommandReceipt { .. }
+                    | crate::session::worker::ChangesetSource::EditorWorkspace { .. },
             } => {
-                return changeset
-                    .files
-                    .iter()
-                    .all(|change| self.in_workspace_scope(&change.path));
+                return call
+                    .changeset_paths()
+                    .into_iter()
+                    .all(|path| self.in_workspace_scope(path));
             }
             ToolCall::Skill { name, resource } => {
                 return self.skills.iter().any(|value| {
@@ -485,11 +467,9 @@ impl Config {
             ToolCall::McpList { server } => {
                 return self.mcp.iter().any(|value| &value.name == server);
             }
-            ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
-                return self.git_available()
-                    && self.write
-                    && (!matches!(call, ToolCall::GhPrCreate { .. })
-                        || self.pinned_gh().is_some());
+            ToolCall::GitPush { .. } => return self.git_available() && self.write,
+            ToolCall::GhPrCreate { .. } => {
+                return self.git_available() && self.write && self.pinned_gh().is_some();
             }
             ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
                 return self.git_available() && self.pinned_gh().is_some();
@@ -499,10 +479,7 @@ impl Config {
             | ToolCall::GitLog { .. }
             | ToolCall::GitCommit { .. }
             | ToolCall::GitBranch { .. }
-            | ToolCall::GitSwitch { .. } => {
-                return self.git_available()
-                    && (!call.mutates() || super::guard::git_writes_available());
-            }
+            | ToolCall::GitSwitch { .. } => return self.git_available(),
             ToolCall::McpCall { server, tool, .. } => {
                 return self
                     .mcp
@@ -513,12 +490,21 @@ impl Config {
                 return self.admits_web(call);
             }
         };
-        let path = path.expect("file operation has path");
         if matches!(call, ToolCall::Read { .. }) && super::spill::read_reference(path).is_some() {
             return true;
         }
         (path.is_empty() || path == ".") && !call.mutates() || self.in_workspace_scope(path)
     }
+}
+
+fn disjoint_roots(paths: &[String]) -> bool {
+    let roots: BTreeSet<_> = paths.iter().collect();
+    roots.len() == paths.len()
+        && !roots.iter().any(|left| {
+            roots
+                .iter()
+                .any(|right| left != right && std::path::Path::new(left).starts_with(right))
+        })
 }
 
 pub(super) const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;

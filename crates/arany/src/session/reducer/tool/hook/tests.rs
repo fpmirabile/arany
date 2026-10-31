@@ -122,6 +122,7 @@ fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
                         cwd: String::new(),
                         resource_class: None,
                         timeout_ms: None,
+                        additional_reads: None,
                     },
                 ),
                 command_subject: None,
@@ -209,6 +210,7 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         );
         let started = |subject: [u8; 32], hook_intent: &EffectIntent| Event::HookStarted {
@@ -266,10 +268,9 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
             started(intent.digest(), &hook_intent),
             finished(hook_observation.clone(), deny.clone()),
         ] {
-            let version = event.version();
             let payload = event.payload().unwrap();
             assert_eq!(
-                Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
+                Event::decode(event.kind(), &payload, Some(run), Some(agent)).unwrap(),
                 event
             );
         }
@@ -418,18 +419,6 @@ fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
             .payload()
             .is_err()
         );
-        let payload = verdict(
-            Decision::Deny,
-            Some(Decision::Deny),
-            1,
-            PermissionSource::Hook,
-        )
-        .payload()
-        .unwrap();
-        assert!(matches!(
-            Event::decode("ToolStarted", 2, &payload, Some(run), Some(agent)),
-            Err(ReplayError::UnknownEvent)
-        ));
 
         // An unknown hook outcome stops the Run exactly like an uncertain Tool.
         let mut uncertain = observation_for(hook_intent.clone(), b"");
@@ -593,6 +582,7 @@ fn post_tool_use_hooks_need_a_committed_observation_and_feed_back_only_their_res
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         );
         let started = |event, subject: [u8; 32]| Event::HookStarted {
@@ -759,6 +749,7 @@ fn post_tool_hook(intent: &EffectIntent) -> crate::tools::permissions::HookInvoc
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         ),
         command_subject: None,
@@ -1169,6 +1160,7 @@ fn primary_host_approval_preserves_ignored_hook_outcomes() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         );
         apply(
@@ -1363,6 +1355,7 @@ fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
         );
         let subject = if event == HookEvent::PreCompact {
@@ -1606,6 +1599,7 @@ fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     apply(
@@ -1696,6 +1690,7 @@ fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     let last_call = view.runs[0].agents[0].provider_calls.len() - 1;
@@ -1784,6 +1779,7 @@ fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     apply(
@@ -1834,6 +1830,7 @@ fn command_rewrite_start(run: RunId, agent: AgentRunId) -> Event {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     Event::HookStarted {
@@ -1888,14 +1885,7 @@ fn unknown_command_rewrite_stops_the_primary_and_never_reuses_the_hook() {
     let mut observation = observation_for(hook.intent.clone(), b"");
     let payload = start.payload().unwrap();
     assert_eq!(
-        Event::decode(
-            start.kind(),
-            start.version(),
-            &payload,
-            Some(run),
-            Some(agent)
-        )
-        .unwrap(),
+        Event::decode(start.kind(), &payload, Some(run), Some(agent)).unwrap(),
         start
     );
     apply(&mut view, start.clone()).unwrap();
@@ -1928,6 +1918,7 @@ fn unknown_command_rewrite_stops_the_primary_and_never_reuses_the_hook() {
             cwd: String::new(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         },
     );
     assert!(rejected(&view, tool_proposed(run, agent, &payload)));

@@ -315,11 +315,13 @@ async fn waiting_turn(stop: TurnStop) {
             async {
                 let _ = signalled.await;
             },
-            transport_input,
-            transport_output,
-            reader,
-            writer,
-            shutdown,
+            Transport {
+                inbound: transport_input,
+                outbound: transport_output,
+                reader,
+                writer,
+                shutdown,
+            },
         )
         .await
     };
@@ -363,6 +365,7 @@ fn thread_capacity_refuses_new_threads_and_preserves_loaded_threads() {
                 policy: arany::CollaborationPolicy::Single,
                 goal_budget: arany::GoalBudget::default(),
                 resource_settings: arany::ToolResourceSettings::default(),
+                context_window: arany::ContextWindow::default(),
             },
         );
     }
@@ -383,9 +386,8 @@ async fn failed_accepted_turns_complete_with_error_guidance_instead_of_rpc_error
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = root.path().join("state");
-        StateRoot::admit(&state).unwrap().record(arany::RecordKind::UiPreferences).replace(&serde_json::to_vec(&json!({"version":7,"preferences":{
-        "completion":"tabs", "view":"fullscreen", "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-        "resources":arany::ToolResourceSettings::default(), "copy_on_select":true,"newline":"shift_enter"
+        StateRoot::admit(&state).unwrap().record(arany::RecordKind::UiPreferences).replace(&serde_json::to_vec(&json!({"preferences":{
+        "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
     }})).unwrap()).unwrap();
         let provider = Arc::new(
             ScriptedProvider::new(if budget_stop {

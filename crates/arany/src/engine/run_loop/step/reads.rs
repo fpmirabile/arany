@@ -280,7 +280,7 @@ impl RunLoop<'_> {
         batch: &mut ReadBatch<'_>,
     ) -> Result<Result<Admission<Verdict>, PendingToolRefusal>, EngineError> {
         let interrupted = RunCancellation::new();
-        let permission = self.permission(grant, runtime, &intent.call);
+        let permission = self.permission(grant, runtime, intent);
         let narrowable = matches!(grant, Grant::Primary { .. })
             && step.narrowed_observations.len() < MAX_NARROWINGS_PER_STEP;
         let admission = self.before_dispatch(
@@ -484,7 +484,7 @@ impl RunLoop<'_> {
 }
 
 fn read_end(answer: &Answer, cancelled: bool) -> StepEnd {
-    let observed = (answer.observation.stops_run() || cancelled)
+    let observed = (answer.observation.stops_tool_step() || cancelled)
         .then(|| RunLoop::observation_stop(&answer.observation, cancelled));
     decide_read_end(
         answer.stop,
@@ -551,7 +551,7 @@ async fn execute(
     deadline: ReadDeadline,
 ) -> Answer {
     let cancellation = RunCancellation::new();
-    let execution = runtime.execute_concurrent_read(intent, cancellation.clone());
+    let execution = runtime.execute(intent, cancellation.clone());
     tokio::pin!(execution);
     let mut timed_out = false;
     let mut observation = tokio::select! {

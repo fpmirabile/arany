@@ -7,6 +7,7 @@ use std::fmt::Write;
 
 pub(crate) const MAX_USAGE_PAGE_BYTES: usize = 8 * 1024;
 const MAX_USAGE_GROUPS: usize = 16;
+const PAGE_FOOTER_RESERVE_BYTES: usize = 96;
 const MAX_FRESH_LIMIT_AGE_SECONDS: i64 = 15 * 60;
 const FIVE_HOUR_WINDOW_MINUTES: u32 = 300;
 const WEEKLY_WINDOW_MINUTES: u32 = 10_080;
@@ -57,7 +58,40 @@ pub fn usage_pages_at(
     if status {
         return vec![status_summary(view, starting_sequence, now)];
     }
+    let mut header = usage_header(view);
+    let mut sections = Vec::new();
+    for scope in [
+        ("Current/latest Run", false, true),
+        ("Session totals", false, false),
+        (
+            "Inherited history (excluded from Session totals)",
+            true,
+            false,
+        ),
+    ] {
+        sections.extend(scope_sections(view, scope, &mut header));
+    }
+    for (index, group) in view.usage.plan_limits.iter().enumerate() {
+        let run_number = view
+            .runs
+            .iter()
+            .position(|run| run.id == group.run_id)
+            .map_or(0, |index| index + 1);
+        let historical = group.session_id != view.id
+            || view
+                .runs
+                .last()
+                .is_none_or(|run| run.id != group.run_id || run.status != arany::RunStatus::Active);
+        sections.push(plan_section(group, run_number, index + 1, historical, now));
+    }
+    sections.extend(api::sections(view, now));
+    if sections.is_empty() {
+        header.push_str("Limits: unknown (not reported)\n");
+    }
+    paginate(&header, sections)
+}
 
+fn usage_header(view: &SessionView) -> String {
     let mut header = String::from("Usage: Provider-reported tokens\n");
     let _ = writeln!(header, "Committed through Event {}", view.last_sequence);
     header.push_str(
@@ -85,103 +119,89 @@ pub fn usage_pages_at(
     {
         header.push_str("ChatGPT weekly: unknown (not reported)\n");
     }
+    header
+}
+
+fn scope_sections(
+    view: &SessionView,
+    (scope, inherited, latest_only): (&str, bool, bool),
+    header: &mut String,
+) -> Vec<String> {
     let latest = view.runs.last().map(|run| run.id);
     let mut sections = Vec::new();
-    for (scope, inherited, latest_only) in [
-        ("Current/latest Run", false, true),
-        ("Session totals", false, false),
-        (
-            "Inherited history (excluded from Session totals)",
-            true,
-            false,
-        ),
-    ] {
-        let mut groups: BTreeMap<(&str, &str), [TokenCount; 4]> = BTreeMap::new();
-        for group in &view.usage.groups {
-            if (group.session_id != view.id) != inherited
-                || latest_only && Some(group.run_id) != latest
-            {
-                continue;
-            }
-            let total = groups.entry((&group.provider, &group.model)).or_default();
-            for (target, value) in total.iter_mut().zip(counters(group)) {
-                merge(target, value);
-            }
+    let mut groups: BTreeMap<(&str, &str), [TokenCount; 4]> = BTreeMap::new();
+    for group in &view.usage.groups {
+        if (group.session_id != view.id) != inherited || latest_only && Some(group.run_id) != latest
+        {
+            continue;
         }
-        let scope_pending = view.usage.pending.iter().any(|(session, run, _)| {
-            (*session != view.id) == inherited && (!latest_only || Some(*run) == latest)
-        });
-        if groups.is_empty() && (!inherited || scope_pending) {
-            header.push_str(&format!(
-                "\n{scope}: {}\n",
-                if scope_pending {
-                    "usage pending; totals incomplete"
+        let total = groups.entry((&group.provider, &group.model)).or_default();
+        for (target, value) in total.iter_mut().zip(counters(group)) {
+            merge(target, value);
+        }
+    }
+    let scope_pending = view.usage.pending.iter().any(|(session, run, _)| {
+        (*session != view.id) == inherited && (!latest_only || Some(*run) == latest)
+    });
+    if groups.is_empty() && (!inherited || scope_pending) {
+        header.push_str(&format!(
+            "\n{scope}: {}\n",
+            if scope_pending {
+                "usage pending; totals incomplete"
+            } else {
+                "no calls yet"
+            }
+        ));
+    }
+    for ((provider, model), values) in groups {
+        let mut text = format!(
+            "\n{scope}\nProvider: {}\nModel: {}\n",
+            escape_terminal(provider),
+            escape_terminal(model)
+        );
+        for (label, value) in [
+            "Input",
+            "Output",
+            "Cache read (included in input)",
+            "Cache write (included in input)",
+        ]
+        .into_iter()
+        .zip(values)
+        {
+            let _ = writeln!(text, "{label}: {}", count(value, scope_pending));
+        }
+        text.push_str(
+            if ProviderKind::parse(provider) == Some(ProviderKind::ChatGpt) {
+                if view.usage.plan_limits.is_empty() {
+                    "ChatGPT weekly: unknown (not reported)\n"
                 } else {
-                    "no calls yet"
+                    "Plan windows: see account-level observations below\n"
                 }
-            ));
-        }
-        for ((provider, model), values) in groups {
-            let mut text = format!(
-                "\n{scope}\nProvider: {}\nModel: {}\n",
-                escape_terminal(provider),
-                escape_terminal(model)
-            );
-            for (label, value) in [
-                "Input",
-                "Output",
-                "Cache read (included in input)",
-                "Cache write (included in input)",
-            ]
-            .into_iter()
-            .zip(values)
-            {
-                let _ = writeln!(text, "{label}: {}", count(value, scope_pending));
-            }
-            text.push_str(
-                if ProviderKind::parse(provider) == Some(ProviderKind::ChatGpt) {
-                    if view.usage.plan_limits.is_empty() {
-                        "ChatGPT weekly: unknown (not reported)\n"
-                    } else {
-                        "Plan windows: see account-level observations below\n"
-                    }
-                } else if api::reported(view, provider, model, (inherited, latest_only)) {
-                    "API rate limits: see route observations below\n"
-                } else {
-                    "API rate limits: unknown (not reported)\n"
-                },
-            );
-            sections.push(text);
-        }
+            } else if api::reported(view, provider, model, (inherited, latest_only)) {
+                "API rate limits: see route observations below\n"
+            } else {
+                "API rate limits: unknown (not reported)\n"
+            },
+        );
+        sections.push(text);
     }
-    for (index, group) in view.usage.plan_limits.iter().enumerate() {
-        let run_number = view
-            .runs
-            .iter()
-            .position(|run| run.id == group.run_id)
-            .map_or(0, |index| index + 1);
-        let historical = group.session_id != view.id
-            || view
-                .runs
-                .last()
-                .is_none_or(|run| run.id != group.run_id || run.status != arany::RunStatus::Active);
-        sections.push(plan_section(group, run_number, index + 1, historical, now));
-    }
-    sections.extend(api::sections(view, now));
-    if sections.is_empty() {
-        header.push_str("Limits: unknown (not reported)\n");
-    }
+    sections
+}
+
+// Pages stay within the group and byte bounds; a reserve keeps room for the footer.
+fn paginate(header: &str, sections: Vec<String>) -> Vec<String> {
     let total = sections.len();
     let mut pages = Vec::new();
-    let mut page = header.clone();
+    let mut page = header.to_owned();
     let mut start = 0;
     let mut end = 0;
     for section in sections {
-        if end - start >= MAX_USAGE_GROUPS || page.len() + section.len() + 96 > MAX_USAGE_PAGE_BYTES
+        if end - start >= MAX_USAGE_GROUPS
+            || page.len() + section.len() + PAGE_FOOTER_RESERVE_BYTES > MAX_USAGE_PAGE_BYTES
         {
             let _ = writeln!(page, "Groups {}-{end} of {total}", start + 1);
             pages.push(page);
-            page = header.clone();
+            page = header.to_owned();
             start = end;
         }
         page.push_str(&section);

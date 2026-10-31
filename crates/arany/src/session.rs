@@ -2,6 +2,8 @@ pub(crate) mod checkpoint;
 pub use checkpoint::{Checkpoint, CheckpointReason, CheckpointStatus};
 mod compaction;
 mod context;
+mod context_window;
+pub use context_window::{ContextWindow, MIN_CONTEXT_WINDOW_PERCENT};
 pub(crate) mod environment;
 pub use environment::{
     EnvironmentCaptureEvent, EnvironmentCaptureIntent, EnvironmentCapturePhase,
@@ -9,7 +11,10 @@ pub use environment::{
 };
 mod events;
 pub(crate) mod input;
+pub use input::{IncludeFit, PartialInclude};
 mod lineage;
+mod precondition;
+pub(crate) use precondition::{digest_known, fill_expected_digest};
 mod reducer;
 pub mod rewind;
 mod stop;
@@ -22,13 +27,42 @@ pub(crate) mod tests;
 pub mod worker;
 
 pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
-pub(crate) const MAX_WINDOW_CONTENT_BYTES: usize = 1024 * 1024;
+// The largest calibrated ceiling: 95% of the largest admitted window at the maximum bytes per token.
+pub(crate) const MAX_WINDOW_CONTENT_BYTES: usize = crate::provider::MAX_CONTEXT_WINDOW_TOKENS
+    as usize
+    * MAX_CALIBRATED_BYTES_PER_TOKEN as usize
+    * CALIBRATED_WINDOW_PERCENT as usize
+    / 100;
 
 // 90% of the window at a conservative 3 bytes per token.
 pub(crate) fn content_ceiling(context_window_tokens: Option<u32>) -> usize {
     context_window_tokens.map_or(MAX_CONTEXT_CONTENT_BYTES, |tokens| {
         (tokens as usize * 27 / 10).min(MAX_WINDOW_CONTENT_BYTES)
     })
+}
+
+const CALIBRATED_WINDOW_PERCENT: u64 = 95;
+pub(crate) const MAX_CALIBRATED_BYTES_PER_TOKEN: u32 = 4;
+
+// Committed bytes per reported token may raise the baseline, up to the maximum ratio and 95% of the window.
+pub(crate) fn calibrated_content_ceiling(
+    context_window_tokens: u32,
+    content_bytes: u32,
+    input_tokens: u32,
+) -> usize {
+    let bytes = u64::from(content_bytes)
+        .min(u64::from(input_tokens) * u64::from(MAX_CALIBRATED_BYTES_PER_TOKEN));
+    let observed = (u64::from(context_window_tokens) * bytes * CALIBRATED_WINDOW_PERCENT)
+        .checked_div(u64::from(input_tokens) * 100)
+        .unwrap_or(0);
+    usize::try_from(observed).unwrap_or(usize::MAX).clamp(
+        content_ceiling(Some(context_window_tokens)),
+        MAX_WINDOW_CONTENT_BYTES,
+    )
+}
+
+pub(crate) fn max_calibrated_content_ceiling(context_window_tokens: u32) -> usize {
+    calibrated_content_ceiling(context_window_tokens, MAX_CALIBRATED_BYTES_PER_TOKEN, 1)
 }
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
 pub const MAX_USER_MESSAGE_BYTES: usize = 64 * 1024;
@@ -48,45 +82,28 @@ pub(crate) use compaction::{
     recent_files_across, recent_files_match, render_recent_files, validate_compaction_references,
     validate_compactions_with_sequence, validate_goal_context_compactions_with_sequence,
 };
-pub(crate) use context::CompiledContext;
-#[cfg(test)]
-pub(crate) use events::PAYLOAD_VERSIONS;
+pub(crate) use context::{CompiledContext, HISTORY_TURN_OVERHEAD_BYTES};
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal,
     BudgetRefusalCause, ChildGrant, CollaborationPolicy, CompactionFailure, CompactionRecord,
     CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory, DisplayChunk,
     EffectTarget, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase,
     GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
-    InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_DISPLAY_CHUNK_BYTES,
-    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS,
-    MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
-    MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
-    ProviderCallRecord, ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind,
-    RecentFile, ReplayError, RunConfig, RunDisposition, RunFailure, RunId, SessionDefaults,
-    SessionId, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason,
-    WorkspaceIdentity,
+    IncludeSource, InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES,
+    MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
+    MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS,
+    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
+    ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
+    RunDisposition, RunFailure, RunId, SessionDefaults, SessionId, ToolIntentRecord,
+    ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, WorkspaceIdentity,
 };
 pub(crate) use events::{
-    GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
+    GoalSuccessState, GoalUsage, MAX_CHILD_RESULT_BYTES, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
     MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS,
-    goal_finished_v7_payload, goal_finished_v7_to_v8, payload_version, requested_command_resources,
+    requested_command_resources, run_started_fits,
 };
-pub(crate) use events::{
-    add_command_selection, add_selection_timing, expiring_intent_text, expiring_payload,
-    goal_started_v7_payload, goal_started_v7_to_v8, intent_without_expiry, live_editor_payload,
-    pre_command_selection_payload, pre_command_tools_payload, pre_file_removal_payload,
-    pre_gh_pr_list_payload, pre_gh_pr_view_payload, pre_git_write_payload, pre_glob_payload,
-    pre_host_git_payload, pre_host_payload, pre_multiedit_payload, pre_proxy_payload,
-    pre_role_routing_payload, pre_roster_setup_payload, pre_selection_timing_payload,
-    pre_shared_editor_payload, pre_web_payload, provider_call_v18_payload,
-    provider_call_v18_to_v19, provider_call_v19_payload, provider_call_v19_to_v20,
-    provider_call_v22_payload, rebind_intent_pins, replace_intent_pin, retired_worker_payload,
-    rewind_started_v1_payload, rewind_started_v1_to_v2, run_started_fits, run_started_v18_payload,
-    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
-    run_started_v23_payload, run_started_v23_to_v24, run_started_v24_payload,
-    run_started_v24_to_v25,
-};
-pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
+pub(crate) use lineage::prefix_digest;
 #[cfg(test)]
 pub(crate) use reducer::rewind_tests::{
     finished as rewind_finished_fixture, started as rewind_started_fixture,
@@ -102,8 +119,9 @@ pub use reducer::{
 };
 pub(crate) use reducer::{
     ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,
-    editor_tool_failed, evidence_admitted, validate_editor_request, validate_primary_tool_lease,
-    validate_primary_tool_scope, validate_tool_started, verification_passed, wave_settled,
+    editor_integration, editor_tool_failed, evidence_admitted, validate_editor_request,
+    validate_primary_tool_lease, validate_primary_tool_scope, validate_tool_lease,
+    validate_tool_started, verification_passed, wave_settled,
 };
 pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};
 
@@ -141,17 +159,23 @@ pub(crate) fn answer_summary(text: &str) -> String {
     line[..end].to_owned()
 }
 
+pub const MAX_SESSION_TITLE_BYTES: usize = 128;
+
+pub fn valid_session_title(title: &str) -> bool {
+    !title.is_empty() && title.len() <= MAX_SESSION_TITLE_BYTES
+}
+
 pub(crate) fn title_preview(text: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     let mut title = String::new();
     'words: for word in text.split_whitespace() {
         for grapheme in word.graphemes(true) {
-            if title.len() + grapheme.len() > 128 {
+            if title.len() + grapheme.len() > MAX_SESSION_TITLE_BYTES {
                 break 'words;
             }
             title.push_str(grapheme);
         }
-        if title.len() == 128 {
+        if title.len() == MAX_SESSION_TITLE_BYTES {
             break;
         }
         title.push(' ');

@@ -19,7 +19,6 @@ struct ExactCommand<'a> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuleRecord {
-    version: u8,
     commands: Vec<ExactCommandRule>,
 }
 
@@ -53,10 +52,6 @@ impl ExactCommandRule {
 
 pub(crate) const UNGUARDED_COMMANDS: RecordFormat = RecordFormat {
     kind: RecordKind::UnguardedCommands,
-    field: "version",
-    floor: 1,
-    current: 1,
-    steps: &[],
     accepts: |bytes| ExactCommandRules::parse(bytes).is_ok(),
 };
 
@@ -80,8 +75,7 @@ impl ExactCommandRules {
         }
         let record: RuleRecord =
             serde_json::from_slice(bytes).map_err(|_| ToolError::Configuration)?;
-        if record.version != 1
-            || record.commands.len() > MAX_ENTRIES
+        if record.commands.len() > MAX_ENTRIES
             || record.commands.iter().enumerate().any(|(index, entry)| {
                 !valid_workspace(Path::new(&entry.workspace.path), entry.workspace.inode)
                     || !super::process::valid_command(&entry.program, &entry.args, &entry.cwd)

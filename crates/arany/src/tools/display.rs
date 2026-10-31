@@ -57,6 +57,13 @@ impl ToolCall {
                     .collect(),
             ),
             Self::ApplyChangeset {
+                source: ChangesetSource::EditorWorkspace { files },
+            } => (
+                "Integrate",
+                files.first().map_or("", |file| file.path.as_str()).into(),
+                files.iter().map(|file| file.path.as_str()).collect(),
+            ),
+            Self::ApplyChangeset {
                 source: ChangesetSource::Rewind { .. },
             } => ("Rewind publication", "".into(), vec![]),
             Self::Command { program, cwd, .. } => {

@@ -335,7 +335,6 @@ impl AsyncRead for FailingReader {
     }
 }
 
-#[cfg(unix)]
 fn private_json(path: &std::path::Path, value: Value) {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
     let mut file = std::fs::OpenOptions::new()

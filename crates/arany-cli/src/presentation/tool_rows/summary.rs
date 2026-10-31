@@ -7,9 +7,11 @@ pub(super) fn operation(call: &ToolCall) -> String {
         Family::Skill | Family::Web => simple(call),
         Family::Mcp => mcp(call),
         Family::Git => match call.site() {
-            Site::Guard => git(call),
+            Site::Git => git(call),
             Site::Host => host(call),
-            Site::InProcess | Site::Unguarded => unreachable!("Git family execution site"),
+            Site::InProcess | Site::Guard | Site::Unguarded => {
+                unreachable!("Git family execution site")
+            }
         },
         Family::Preparation => simple(call),
     }

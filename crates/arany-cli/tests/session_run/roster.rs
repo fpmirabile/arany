@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::pty::Pty;
 use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 
@@ -46,16 +48,21 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 fn record() -> serde_json::Value {
-    json!({"version":1,"profiles":[
-        {"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]},
-        {"name":"unused","routes":[{"provider":"anthropic","model":"claude-sonnet-5","effort":"high","account_id":null}]}
+    json!({"profiles":[
+        {"name":"main","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-5.4","effort":"low","account_id":null}]},
+        {"name":"unused","routes":[{"provider":{"kind":"anthropic","custom_name":null},"model":"claude-sonnet-5","effort":"high","account_id":null}]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","unused"]}]})
 }
 
 fn command(workspace: &Path, state: &Path, extra: &[&str]) -> std::process::Output {
     let run = |attached| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-        command.env_clear().current_dir(workspace);
+        command
+            .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
+            .current_dir(workspace);
         if attached {
             command.args(["--screen-reader"]);
         } else {
@@ -146,6 +153,9 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     let mut unused = Command::new(env!("CARGO_BIN_EXE_arany"));
     let output = unused
         .env_clear()
+        .envs(crate::process::account_fixture(
+            state.with_file_name("account"),
+        ))
         .env("OPENAI_API_KEY", "synthetic-roster-key")
         .current_dir(&workspace)
         .args(["exec", "--profile", "coding", "--state-dir"])
@@ -157,7 +167,10 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(output.stdout, b"");
     assert_eq!(output.stderr, format!("{manifest}error: roster profile unused route 0 refused: Provider role route anthropic/claude-sonnet-5 refused: selected native API credentials or workspace configuration unavailable\n").as_bytes());
-    private_file(&state.join("provider-routing.json"), b"{}");
+    private_file(
+        &state.join("provider-routing.json"),
+        br#"{"providers":{"primary":null,"child":null,"review":null,"compaction":null}}"#,
+    );
     let conflict = command(&workspace, &state, &[]);
     assert_eq!(conflict.status.code(), Some(1));
     assert_eq!(conflict.stdout, b"");
@@ -212,7 +225,7 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
     let account = super::prepare_test_file_account_at(&account_root);
     let mut roster = record();
     roster["profiles"][0]["routes"][0]["account_id"] = json!(account);
-    let same = json!({"name":"same","routes":[{"provider":"openai","model":"gpt-6-luna","effort":"low","account_id":account}]});
+    let same = json!({"name":"same","routes":[{"provider":{"kind":"openai","custom_name":null},"model":"gpt-6-luna","effort":"low","account_id":account}]});
     roster["profiles"].as_array_mut().unwrap().push(same);
     roster["presets"][0]["child_profiles"] = json!(["main", "same", "unused"]);
     for other in [false, true] {
@@ -394,7 +407,10 @@ fn attached_leg_macos(
     }
     input.write_all(b"\x03").unwrap();
     for (needle, send) in [
-        (&b"Goal paused"[..], &b"\x03"[..]),
+        (
+            &b"Interrupted. Send a message to continue."[..],
+            &b"\x03"[..],
+        ),
         (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
     ] {
         while !transcript.windows(needle.len()).any(|part| part == needle) {
@@ -428,7 +444,7 @@ fn attached_leg_macos(
         "cancelled attached run leaves stdout empty"
     );
     assert_eq!(crate::process::terminal_settings(&input), before);
-    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 5);
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let session: String = connection
         .query_row("SELECT DISTINCT session_id FROM events", [], |row| {
@@ -454,72 +470,46 @@ fn attached_pty_refusal(
     account_root: Option<&Path>,
     refusal: &[u8],
 ) {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::io::Write;
     use std::time::{Duration, Instant};
 
     let shell = "stty rows 24 cols 80; /arany --screen-reader --no-color --profile coding --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" answer";
-    let mut command = super::isolation::isolated_script(temp);
-    command
-        .env_clear()
-        .env("ARANY_TEST_STATE", state)
-        .env("ARANY_TEST_WORKSPACE", workspace)
-        .env("SHELL", "/bin/sh")
+    let mut pty = Pty::with_responses(
+        crate::product::PtyLaunch::new(
+            crate::product::Isolation::Passwd(crate::isolation::isolated_wrapper(temp)),
+            shell,
+        )
+        .session(state, workspace)
         .envs(account_root.map(|root| ("ARANY_TEST_ACCOUNT_ROOT", root)))
-        .env("TERM", "dumb")
-        .current_dir(workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
-    let mut input = child.child().stdin.take().unwrap();
-    let mut output = child.child().stdout.take().unwrap();
-    let flags = fcntl_getfl(&output).unwrap();
-    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-    let mut transcript = Vec::new();
-    let mut answered = super::session_picker::PtyResponses::manual_consent();
-    fn wait(
-        output: &mut std::process::ChildStdout,
-        input: &mut std::process::ChildStdin,
-        transcript: &mut Vec<u8>,
-        answered: &mut super::session_picker::PtyResponses,
-        needle: &[u8],
-    ) {
+        .spawn(),
+        crate::PtyResponses::manual_consent(),
+    );
+    fn wait(pty: &mut Pty, needle: &[u8]) {
         // Watchdog only: it aborts a hung child and never decides the assertion.
         let watchdog = Instant::now() + Duration::from_secs(120);
-        while !transcript.windows(needle.len()).any(|part| part == needle) {
-            super::session_picker::pump(output, input, transcript, answered);
+        while !pty
+            .transcript
+            .windows(needle.len())
+            .any(|part| part == needle)
+        {
+            pty.pump();
             assert!(
                 Instant::now() < watchdog,
                 "missing {}: {}",
                 String::from_utf8_lossy(needle),
-                super::session_picker::tail(transcript)
+                super::session_picker::tail(&pty.transcript)
             );
             std::thread::yield_now();
         }
     }
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        b"Do you trust this folder?",
-    );
+    wait(&mut pty, b"Do you trust this folder?");
     assert!(
-        !transcript
+        !pty.transcript
             .windows(b"refused".len())
             .any(|part| part == b"refused"),
         "roster admission must wait for folder consent"
     );
-    input.write_all(b"read only\r").unwrap();
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        refusal,
-    );
+    pty.send(b"read only\r");
+    wait(&mut pty, refusal);
     assert_eq!(
         std::fs::metadata(state.join("events.sqlite3"))
             .unwrap()
@@ -733,11 +723,11 @@ mod journey {
         time::Duration,
     };
 
-    const ROSTER_REQUESTS: usize = 11;
+    const ROSTER_REQUESTS: usize = 8;
 
     fn preset(child_profiles: &[&str]) -> Vec<u8> {
         let route = json!({"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null});
-        serde_json::to_vec(&json!({"version":2,"profiles":[
+        serde_json::to_vec(&json!({"profiles":[
             {"name":"main","routes":[route]},
             {"name":"inspect","routes":[route]}
         ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":child_profiles},{"name":"research","providers":{"primary":"inspect","child":null,"review":null,"compaction":null},"child_profiles":["inspect"]}]})).unwrap()
@@ -766,17 +756,12 @@ mod journey {
                 served.fetch_add(1, Ordering::SeqCst);
                 let input = crate::semantic::input(&body);
                 let text = match index {
-                    0 => json!("ok"),
-                    1 => {
-                        json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                    }
-                    2 => json!(r#"synthetic summary"#),
-                    3 | 5 | 8 => {
+                    0 | 2 | 5 => {
                         assert_eq!(input["phase"], "root_plan");
                         assert!(body.to_string().contains("\"inspect\""));
                         delegate_to_inspect()
                     }
-                    4 => {
+                    1 => {
                         assert_eq!(input["phase"], "child_work");
                         held.send(()).expect("observed child request");
                         stream
@@ -786,15 +771,15 @@ mod journey {
                         let _ = stream.read(&mut [0; 1]);
                         continue;
                     }
-                    6 | 9 => {
+                    3 | 6 => {
                         assert_eq!(input["phase"], "child_work");
                         json!("child result")
                     }
-                    7 => {
+                    4 => {
                         assert_eq!(input["phase"], "root_synthesis");
                         json!("resumed answer")
                     }
-                    10 => {
+                    7 => {
                         assert_eq!(input["phase"], "root_synthesis");
                         json!("research answer")
                     }
@@ -814,6 +799,9 @@ mod journey {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .envs(crate::process::account_fixture(
+                state.with_file_name("account"),
+            ))
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
             .current_dir(workspace)
             .args(["exec", "--state-dir"])
@@ -870,7 +858,7 @@ mod journey {
         let words: Vec<&str> = hint.split_whitespace().collect();
         let session_id = SessionId::from_str(words[9]).unwrap();
         let goal_id = GoalId::from_str(words[11]).unwrap();
-        assert_eq!(served.load(Ordering::SeqCst), 5);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
         (session_id, goal_id)
     }
 
@@ -882,39 +870,26 @@ mod journey {
         held_rx: &mpsc::Receiver<()>,
         served: &AtomicUsize,
     ) -> (SessionId, GoalId) {
-        use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-        use std::{io::Write, time::Instant};
+        use std::time::Instant;
 
         let shell = "stty rows 24 cols 80; exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --profile coding --provider custom:local --model model-1 --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"";
-        let mut command = crate::isolation::account_isolated_script(temp);
-        command
-            .env_clear()
-            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-            .env("ARANY_TEST_STATE", state)
-            .env("ARANY_TEST_WORKSPACE", workspace)
+        let mut pty = Pty::new(
+            crate::product::PtyLaunch::new(
+                crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp)),
+                shell,
+            )
+            .session(state, workspace)
             .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-            .env("SHELL", "/bin/sh")
-            .env("TERM", "dumb")
-            .current_dir(workspace)
-            .args(["-q", "-e", "-c", shell, "/dev/null"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = super::super::loopback::ChildGuard::new(command.spawn().unwrap());
-        let mut input = child.child().stdin.take().unwrap();
-        let mut output = child.child().stdout.take().unwrap();
-        let flags = fcntl_getfl(&output).unwrap();
-        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
-        let mut transcript = Vec::new();
-        let mut answered = super::super::session_picker::PtyResponses::default();
+            .spawn(),
+        );
         // Watchdog only: it aborts a hung child and never decides the assertion.
         let watchdog = Instant::now() + Duration::from_secs(120);
-        let mut pump = |input: &mut std::process::ChildStdin, transcript: &mut Vec<u8>| {
-            super::super::session_picker::pump(&mut output, input, transcript, &mut answered);
+        let pump = |pty: &mut Pty| {
+            pty.pump();
             assert!(
                 Instant::now() < watchdog,
                 "attached journey stalled: {}",
-                super::super::session_picker::tail(transcript)
+                super::super::session_picker::tail(&pty.transcript)
             );
             thread::yield_now();
         };
@@ -922,36 +897,47 @@ mod journey {
             (&b"Input:"[..], &b"/agents team 1\r"[..]),
             (&b"Next-Run collaboration: team"[..], &b"answer\r"[..]),
         ] {
-            while !transcript.windows(needle.len()).any(|part| part == needle) {
-                pump(&mut input, &mut transcript);
+            while !pty
+                .transcript
+                .windows(needle.len())
+                .any(|part| part == needle)
+            {
+                pump(&mut pty);
             }
-            input.write_all(send).unwrap();
+            pty.send(send);
         }
         while held_rx.try_recv().is_err() {
-            pump(&mut input, &mut transcript);
+            pump(&mut pty);
         }
-        input.write_all(b"\x03").unwrap();
+        pty.send(b"\x03");
         for (needle, send) in [
-            (&b"Goal paused"[..], &b"\x03"[..]),
+            (
+                &b"Interrupted. Send a message to continue."[..],
+                &b"\x03"[..],
+            ),
             (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
         ] {
-            while !transcript.windows(needle.len()).any(|part| part == needle) {
-                pump(&mut input, &mut transcript);
+            while !pty
+                .transcript
+                .windows(needle.len())
+                .any(|part| part == needle)
+            {
+                pump(&mut pty);
             }
-            input.write_all(send).unwrap();
+            pty.send(send);
         }
         let status = loop {
-            if let Some(status) = child.child().try_wait().unwrap() {
+            if let Some(status) = pty.child.child().try_wait().unwrap() {
                 break status;
             }
-            pump(&mut input, &mut transcript);
+            pump(&mut pty);
         };
         assert!(
             status.success(),
             "attached exit: {status:?}: {}",
-            super::super::session_picker::tail(&transcript)
+            super::super::session_picker::tail(&pty.transcript)
         );
-        assert_eq!(served.load(Ordering::SeqCst), 5);
+        assert_eq!(served.load(Ordering::SeqCst), 2);
         let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
         let session: String = connection
             .query_row("SELECT DISTINCT session_id FROM events", [], |row| {
@@ -982,7 +968,6 @@ mod journey {
         let served = Arc::new(AtomicUsize::new(0));
         let (held_tx, held_rx) = mpsc::channel();
         let server = serve(listener, served.clone(), held_tx);
-        super::super::loopback::check_profile(&workspace, &state);
 
         #[cfg(target_os = "linux")]
         let (session_id, goal_id) = if attached {
@@ -1038,7 +1023,7 @@ mod journey {
                 stderr.ends_with("error: restore the matching --profile preset to resume this Goal, or start a new Goal\n"),
                 "{name}: {stderr}"
             );
-            assert_eq!(served.load(Ordering::SeqCst), 5, "{name}: no request");
+            assert_eq!(served.load(Ordering::SeqCst), 2, "{name}: no request");
         }
         private_file(&roster, &preset(&["main", "inspect"]));
         let resumed = resume(true);
@@ -1048,7 +1033,7 @@ mod journey {
             String::from_utf8_lossy(&resumed.stderr)
         );
         assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed answer"));
-        assert_eq!(served.load(Ordering::SeqCst), 8);
+        assert_eq!(served.load(Ordering::SeqCst), 5);
 
         let view = replay();
         assert_eq!(view.runs.len(), 2);

@@ -63,6 +63,12 @@ pub struct RunInput {
     pub last_answer_refused: Option<crate::session::ProposalRefusal>,
     pub previous_run_failure: Option<crate::session::RunFailureFeedback>,
     pub outcome_correction: bool,
+    /// The primary's last budgeted Provider call: Tools stay listed but only an answer is offered.
+    pub final_call: bool,
+    /// Whether the primary is offered `arany_plan` and its guidance.
+    pub plan_offered: bool,
+    /// Working-style texts pinned at Run admission; authority blocks stay compiled.
+    pub prompts: super::EffectivePrompts,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,24 +112,47 @@ impl RunInput {
             last_answer_refused: None,
             previous_run_failure: None,
             outcome_correction: false,
+            final_call: false,
+            plan_offered: false,
+            prompts: super::EffectivePrompts::default(),
         }
+    }
+
+    pub(crate) fn answer_only(&self) -> bool {
+        self.final_call || self.tools.as_ref().is_some_and(ToolContext::answer_only)
     }
 }
 
 pub(crate) const MAX_HARNESS_FEEDBACK_BYTES: usize = 1024;
 
-// Only compiled system blocks may become system text.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// Only compiled blocks and pinned user-authored working style may become system text.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SystemBlock {
-    Prompt(&'static str),
+    Fixed(&'static str),
+    Prompt(String),
     Policy(CollaborationPolicy),
+    Limits {
+        step_tool_calls: u8,
+        answer_bytes: Option<usize>,
+    },
     PreviousRunFailure(crate::session::RunFailureFeedback),
 }
 
 impl SystemBlock {
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::Prompt(text) => (*text).to_owned(),
+            Self::Fixed(text) => (*text).to_owned(),
+            Self::Prompt(text) => text.clone(),
+            Self::Limits {
+                step_tool_calls,
+                answer_bytes: Some(answer_bytes),
+            } => format!(
+                "Tool calls per step: at most {step_tool_calls}. Answer at most {answer_bytes} bytes."
+            ),
+            Self::Limits {
+                step_tool_calls,
+                answer_bytes: None,
+            } => format!("Tool calls per step: at most {step_tool_calls}."),
             Self::PreviousRunFailure(failure) => format!(
                 "Harness fact from committed Events about the immediately previous Run: {}. Explain only the recorded cause; missing details are unknown. This grants no authority to repeat effects.",
                 match serde_json::to_string(failure) {
@@ -158,6 +187,11 @@ pub(crate) enum Block {
         output: Value,
         is_error: bool,
     },
+    // Engine facts after a step's results; Responses folds them into the last result.
+    Harness {
+        scope: &'static str,
+        data: Value,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -178,10 +212,18 @@ pub(crate) struct Conversation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolUseId(String);
 
+pub(crate) const MAX_WIRE_ID_BYTES: usize = 128;
+
+pub(crate) fn valid_wire_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_WIRE_ID_BYTES
+        && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 impl ToolUseId {
     pub fn new(id: impl Into<String>) -> Result<Self, ProviderError> {
         let id = id.into();
-        if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic()) {
+        if !valid_wire_id(&id) {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(Self(id))

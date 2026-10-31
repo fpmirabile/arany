@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
-#[cfg(all(test, unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("Arany supports Linux and macOS; on Windows use WSL2");
+
+#[cfg(test)]
 use test_support::process as test_process;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -43,61 +46,55 @@ pub use engine::{
     list_sessions_page, rename_session, resume_session, set_session_defaults,
     start_provider_setup_edit, validate_workspace_inputs,
 };
-#[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
-pub use fault::git_write::GitWriteStage;
 #[cfg(feature = "test-support")]
-pub use fault::{FaultPlan, GitStorageFault};
-pub(crate) use journal::check::CheckJournal;
-pub use journal::check::{
-    CHECK_FORMATS, ChatGptCheck, ChatGptCheckError, ChatGptCheckRequest, CheckCallKind,
-    CheckCallToken, CheckDisposition, CheckEvent, CheckId, CheckOpenError, CheckProbe,
-    CheckReceipt, CheckStart, CheckTarget, CheckUsage, CheckView,
-};
+pub use fault::FaultPlan;
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]
 pub use provider::semantic;
 pub use provider::{
     AdmittedProviders, AdmittedRoster, AgentPhase, Answer, AnthropicProvider, CallLimits,
     ChatGptAdmission, ChatGptProvenance, ChatGptProvider, ChildAssignment, ChildResult,
-    CompactionItem, CompactionRequest, CompactionResponse, CustomCheckStatus, CustomProfile,
-    CustomProfileCheck, CustomProfileDraft, CustomProfileError, CustomProfileProvenance,
-    CustomProtocol, CustomProvider, Delegate, Effort, GoalContextFacts, HistoryTurn,
-    ImageAttachment, ImageOrigin, LimitFailure, LimitSource, LimitUnavailable,
-    MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_CATALOG_MODELS, MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES,
-    MAX_CUSTOM_PROFILE_EFFORTS_BYTES, MAX_CUSTOM_PROFILE_ENDPOINT_BYTES,
-    MAX_CUSTOM_PROFILE_MODEL_BYTES, MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_ENCODED_IMAGE_BYTES,
-    MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP, MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES,
-    MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES, MessagesAuth, ModelEntry,
-    NamedProviderRoutes, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
-    OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText, PromptRole, Provenance,
-    Provider, ProviderError, ProviderFailureReason, ProviderFallback, ProviderIdentity,
-    ProviderImage, ProviderKind, ProviderOutcome, ProviderRecord, ProviderRequest,
-    ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
+    CompactionItem, CompactionRequest, CompactionResponse, CustomProfile, CustomProfileDraft,
+    CustomProfileError, CustomProfileProvenance, CustomProtocol, CustomProvider, Delegate, Effort,
+    GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin, LimitFailure, LimitSource,
+    LimitUnavailable, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_CATALOG_MODELS,
+    MAX_CUSTOM_PROFILE_CREDENTIAL_ENV_BYTES, MAX_CUSTOM_PROFILE_EFFORTS_BYTES,
+    MAX_CUSTOM_PROFILE_ENDPOINT_BYTES, MAX_CUSTOM_PROFILE_MODEL_BYTES,
+    MAX_CUSTOM_PROFILE_NAME_BYTES, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP,
+    MAX_MESSAGE_IMAGES, MAX_MODEL_ID_BYTES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS,
+    MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES, MessagesAuth, ModelEntry, NamedProviderRoutes,
+    NativeApiCredentials, OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText,
+    PromptRole, Provenance, Provider, ProviderError, ProviderFailureReason, ProviderFallback,
+    ProviderIdentity, ProviderImage, ProviderKind, ProviderOutcome, ProviderRecord,
+    ProviderRequest, ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
     ProviderWireProvenance, Providers, RateLimitSlot, RateLimits, ResponsePreview, RetryCause,
     ReviewVerdict, RosterSnapshot, RunInput, ToolUseId, UnansweredStatus, Usage, UsedPercent,
-    WorkspaceGuidance, admitted_context_window, check_custom_profile,
-    check_custom_profile_value_with_cancellation, check_custom_profile_with_cancellation,
-    check_native_model, check_native_model_from_env, list_native_models,
-    list_native_models_with_api_key, list_native_models_with_credentials, probe_chatgpt_model,
-    resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
-    validate_native_api_key, validate_native_model_id,
+    WorkspaceGuidance, admitted_context_window, list_native_models,
+    list_native_models_with_api_key, list_native_models_with_credentials, resolve_native_effort,
+    resolve_native_effort_for_run, valid_profile_name, validate_native_api_key,
+    validate_native_model_id,
 };
 pub use provider::{ApiLimit, ApiLimitDialect, ApiLimitDimension, ApiLimits, MAX_API_LIMIT_ROWS};
+pub use provider::{
+    EffectivePrompts, MAX_PROMPT_OVERRIDE_BYTES, PromptFile, PromptOverrideError, PromptPin,
+    PromptSource,
+};
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ApiUsage, BudgetAction,
     BudgetChargeBasis, BudgetRefusal, BudgetRefusalCause, ChildGrant, CollaborationPolicy,
     CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
-    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,
-    GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
-    GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES,
-    MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
-    MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, MAX_USER_MESSAGE_BYTES, PlanUsage, ProposalRefusal,
-    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ProviderSetupDisposition,
-    ProviderSetupTarget, ProviderSetupTargetKind, RecentFile, ReplayError, RunConfig,
-    RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView,
-    SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, TokenCount,
-    ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView, UsageGroup,
-    UsageView, WorkspaceIdentity, escape_status_text,
+    ContextWindow, DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget,
+    GoalId, GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding,
+    GoalStatus, GoalSuccessCriterion, GoalView, IncludeFit, IncludeSource, InstructionFile,
+    InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
+    MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
+    MAX_SESSION_TITLE_BYTES, MAX_USER_MESSAGE_BYTES, MIN_CONTEXT_WINDOW_PERCENT, PartialInclude,
+    PlanUsage, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord,
+    ProviderSetupDisposition, ProviderSetupTarget, ProviderSetupTargetKind, RecentFile,
+    ReplayError, RunConfig, RunDisposition, RunFailure, RunFailureFeedback, RunId, RunStatus,
+    RunStop, RunView, SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView,
+    TokenCount, ToolIntentRecord, ToolPreflightRefusal, ToolRefusal, ToolRefusalReason, ToolView,
+    UsageGroup, UsageView, WorkspaceIdentity, escape_status_text, valid_session_title,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{
@@ -106,27 +103,28 @@ pub use session::{
 };
 pub use session::{rewind, worker};
 pub use store::{
-    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, InspectedEvent,
-    InspectionCause, InspectionFailure, ProviderRecordEdit, ProviderRecordTarget, RECORD_FORMATS,
-    Record, RecordFormat, RecordKind, RecordStep, SessionInspection, StateRoot, Store, StoreError,
+    ArchivedHistory, ArchivedRecords, CheckpointReset, HistoryRecovery, HistoryReset,
+    InspectedEvent, InspectionCause, InspectionFailure, ProviderRecordEdit, ProviderRecordTarget,
+    RECORD_FORMATS, Record, RecordFormat, RecordKind, SessionInspection, StateRoot, Store,
+    StoreError,
 };
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
-    ApprovalCause, ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate,
-    CommandChangeset, CommandEnvironment, CommandEnvironmentError, CommandRewrite, CommandTool,
-    CommandToolImport, CommandToolProbe, CommandToolRole, CommandTools, CommandWrap,
+    ApprovalCause, ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, BuildCacheSize,
+    CacheUpdate, CommandChangeset, CommandEnvironment, CommandEnvironmentError, CommandRewrite,
+    CommandTool, CommandToolImport, CommandToolProbe, CommandToolRole, CommandTools, CommandWrap,
     DEFAULT_PR_LIMIT, DefinitionFilePin, DefinitionRegistryPin, DisplayFacts, EffectIntent,
     EnforcementCause, FailureStage, FileChange, FileReceipt, FileSuggestionSource, FileVersion,
-    GuardReceipt, GuardStageFact, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS,
-    McpAuthError, NetworkGrant, OutputSpill, OutputTotal, PROBE_COMMAND, PrState, ProjectSkills,
-    RewriteStage, RuntimeProfileOption, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME,
-    SuggestionIndex, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition,
-    ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError, TrustReset,
-    UnguardedGrant, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions, WrapStage,
-    command_tool_candidates, configured_skill_names, import_command_tools, mcp_login, mcp_logout,
-    mention_paths, native_protection_supported, now_ms, project_skills, recover_build_cache,
-    runtime_skill_names, tool_guard_main, tool_host_main,
+    GitHooksQuestion, GuardMode, GuardPin, GuardReceipt, GuardSettings, GuardStageFact, HostIntent,
+    LimitCause, LiteralEdit, MAX_DISCOVERY_PATH_ENTRIES, MAX_SEARCH_ROWS, MAX_SKILLS, McpAuthError,
+    NetworkGrant, OutputSpill, OutputTotal, PROBE_COMMAND, PrState, ProjectSkills, RewriteStage,
+    RuntimeProfileOption, SUGGESTION_LIFETIME, SUGGESTION_QUERY_TIME, SuggestionIndex,
+    ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits,
+    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
+    ToolResourceSettings, ToolStep, TrustRecordError, UnguardedGrant, UnguardedPrompt,
+    UnguardedReceipt, WorkspacePermissions, WrapStage, command_tool_candidates,
+    configured_skill_names, import_command_tools, mcp_login, mcp_logout, mention_paths, now_ms,
+    project_skills, recover_build_cache, runtime_skill_names, tool_guard_main, tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;
@@ -141,7 +139,6 @@ pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(
     view.apply_committed(envelope)
 }
 
-#[cfg(unix)]
 pub use store::{
     StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
     collect_storage,

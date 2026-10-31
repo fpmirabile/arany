@@ -1,6 +1,5 @@
-use crate::provider::conversation::{Block, Conversation, Message, Role};
+use crate::provider::conversation::{Block, Conversation, Message, Role, SystemBlock};
 use crate::provider::decode::{function_outcome, review_outcome, tool_function};
-use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{ToolSpec, name_of, outcome_specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, ProviderError,
@@ -30,11 +29,7 @@ pub(crate) fn run_body(
         .chain(outcome_specs(&conversation.outcome))
         .map(function_json)
         .collect();
-    let exhausted = request
-        .input
-        .tools
-        .as_ref()
-        .is_some_and(crate::tools::ToolContext::answer_only);
+    let exhausted = request.input.answer_only();
     if request.input.role == crate::provider::PromptRole::ToolReview {
         body["response_format"] = json!({
             "type":"json_schema",
@@ -59,7 +54,7 @@ pub(crate) fn compaction_body(request: &CompactionRequest, effort: Option<Effort
     let mut body = json!({
         "model": request.model,
         "messages": [
-            {"role":"system", "content": COMPACTION_INSTRUCTIONS},
+            {"role":"system", "content": request.prompts.compaction_instructions()},
             {"role":"user", "content": crate::provider::compaction_input(request).to_string()}
         ],
         "max_completion_tokens": request.max_output_tokens,
@@ -77,7 +72,14 @@ fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
     let instructions = conversation
         .system
         .iter()
-        .map(|block| block.text())
+        .map(|block| match block {
+            SystemBlock::Limits { answer_bytes, .. } => SystemBlock::Limits {
+                step_tool_calls: 1,
+                answer_bytes: *answer_bytes,
+            }
+            .text(),
+            block => block.text(),
+        })
         .collect::<Vec<_>>()
         .join("\n\n");
     if !instructions.is_empty() {
@@ -131,6 +133,9 @@ fn push_user_blocks(
     for block in &message.blocks {
         match block {
             Block::Text(text) => output.push(json!({"role":"user", "content":text})),
+            Block::Harness { scope, data } => output.push(json!({
+                "role":"user", "content":crate::provider::render::data_text(scope, data)
+            })),
             Block::ToolResult {
                 id, output: value, ..
             } => output.push(json!({
@@ -249,7 +254,7 @@ fn decode_function_call(
     }
     let id = call["id"]
         .as_str()
-        .filter(|id| valid_id(id))
+        .filter(|id| crate::provider::valid_wire_id(id))
         .ok_or(ProviderError::InvalidResponseContract)?;
     let arguments = call
         .pointer("/function/arguments")
@@ -352,7 +357,7 @@ fn admit(value: &Value, model: &str, cap: u32) -> Result<AdmittedResponse, Provi
         .ok_or(ProviderError::InvalidResponseContract)?;
     let id = value["id"]
         .as_str()
-        .filter(|id| valid_id(id))
+        .filter(|id| crate::provider::valid_wire_id(id))
         .ok_or(ProviderError::InvalidResponseContract)?
         .to_owned();
     if value["model"] != model
@@ -373,10 +378,6 @@ fn admit(value: &Value, model: &str, cap: u32) -> Result<AdmittedResponse, Provi
         },
         choice: choices[0].clone(),
     })
-}
-
-fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[cfg(test)]

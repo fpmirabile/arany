@@ -1,4 +1,4 @@
-use super::loopback::{ChildGuard, check_profile, read_request, send_response, write_profile};
+use super::loopback::{ChildGuard, read_request, send_response, write_profile};
 use arany::{RecordKind, RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, waitid};
 use std::{
@@ -878,62 +878,39 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             let (release_tx, release) = mpsc::sync_channel(1);
             let peer = thread::spawn(move || {
                 listener.set_nonblocking(true).unwrap();
-                for index in 0..4 {
-                    let mut stream = crate::process::accept_with_deadline(
-                        &listener,
-                        Duration::from_secs(15),
-                        &format!("native request {index}"),
+                let mut stream = crate::process::accept_with_deadline(
+                    &listener,
+                    Duration::from_secs(15),
+                    "native request",
+                );
+                stream.set_nonblocking(false).unwrap();
+                let body = read_request(&mut stream);
+                let wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(wire["model"], "model-1");
+                assert!(wire.get("text").is_none());
+                let input: serde_json::Value = crate::semantic::input(&wire);
+                assert_eq!(input["objective"], "cancel");
+                assert_eq!(input["phase"], "root_plan");
+                assert_eq!(input["history"], serde_json::json!([]));
+                assert_eq!(input["includes"], serde_json::json!([]));
+                assert!(input["workspace_guidance"].is_null());
+                assert!(input["tools"].is_null());
+                ready_tx.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(10)).unwrap();
+                if matches!(exit, Exit::Failure) {
+                    // A Retry-After past the action deadline ends the call without a same-route retry.
+                    stream.write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    assert_eq!(
+                        stream.read(&mut [0]).unwrap(),
+                        0,
+                        "cancelled native request must close"
                     );
-                    stream.set_nonblocking(false).unwrap();
-                    let body = read_request(&mut stream);
-                    let wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    assert_eq!(wire["model"], "model-1");
-                    assert!(wire.get("text").is_none());
-                    if index == 2 {
-                        crate::loopback::assert_compaction_request(&wire);
-                    }
-                    let input: serde_json::Value = crate::semantic::input(&wire);
-                    if index == 3 {
-                        assert_eq!(input["objective"], "cancel");
-                        assert_eq!(input["phase"], "root_plan");
-                        assert_eq!(input["history"], serde_json::json!([]));
-                        assert_eq!(input["includes"], serde_json::json!([]));
-                        assert!(input["workspace_guidance"].is_null());
-                        assert!(input["tools"].is_null());
-                        ready_tx.send(()).unwrap();
-                        release.recv_timeout(Duration::from_secs(10)).unwrap();
-                        if matches!(exit, Exit::Failure) {
-                            // A Retry-After past the action deadline ends the call without a same-route retry.
-                            stream.write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                        } else {
-                            stream
-                                .set_read_timeout(Some(Duration::from_secs(5)))
-                                .unwrap();
-                            assert_eq!(
-                                stream.read(&mut [0]).unwrap(),
-                                0,
-                                "cancelled native request must close"
-                            );
-                        }
-                        return;
-                    }
-                    assert!(input["workspace_guidance"].is_null());
-                    let outcome = match index {
-                        0 => {
-                            serde_json::json!("ok")
-                        }
-                        1 => {
-                            serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                        }
-                        _ => serde_json::json!(r#"synthetic summary"#),
-                    };
-                    if index == 2 {
-                        assert_eq!(outcome, "synthetic summary", "plain-text compaction reply");
-                    }
-                    send_response(&mut stream, index, outcome);
                 }
             });
-            check_profile(&workspace, &state);
             let geometry = nix::pty::Winsize {
                 ws_row: 24,
                 ws_col: 80,
@@ -1366,7 +1343,6 @@ fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
     std::fs::create_dir(&workspace).unwrap();
     let id = crate::seed_transcript_session(&state, &workspace);
     let provider = super::loopback::held_stream_provider(&state, ANSWER);
-    check_profile(&workspace, &state);
     let geometry = nix::pty::Winsize {
         ws_row: 24,
         ws_col: 80,

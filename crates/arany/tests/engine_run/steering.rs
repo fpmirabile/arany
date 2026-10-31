@@ -1075,7 +1075,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     for (name, bytes) in [
         (
             "tools.json",
-            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+            &br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
         ),
         (
             "permissions.json",
@@ -1090,10 +1090,10 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     let pause = steering.clone();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+            arany::test_support::scenario::plan_outcome(super::budgets::protected_facts_plan()),
             crate::tool_outcome(facts_read()),
             crate::tool_outcome(arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
+                path: "notes/AGENTS.md".into(),
                 expected_digest: None,
                 content: "v2".into(),
             }),
@@ -1116,10 +1116,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
-    assert_eq!(
-        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
-        "v1"
-    );
+    assert!(!workspace.join("notes/AGENTS.md").exists());
     let (events, _) = replayed(&state_path, outcome.session_id).await;
     let verdicts: Vec<_> = events
         .iter()
@@ -1144,8 +1141,11 @@ async fn a_pause_in_an_in_run_compaction_backoff_starts_no_further_compaction_ca
     let mut failing = ScriptedProvider::new(vec![]).with_profile("openai", "compact-primary");
     failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
     let failing = Arc::new(failing);
-    let primary =
-        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("openai", "primary"));
+    let primary = Arc::new(
+        ScriptedProvider::new(paged_read_outcomes())
+            .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32])
+            .with_context_window(SMALL_WINDOW_TOKENS),
+    );
     let mut bindings = AdmittedProviders::single(primary.clone());
     bindings.roles.compaction = vec![failing.clone()];
     let engine = facts_engine(

@@ -26,14 +26,12 @@ enum ApprovalCase {
     Remember,
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_accept_dispatches_the_exact_journaled_intent_once() {
     let _deadline = deadline();
     approval_scenario(ApprovalCase::Accept, Executor::Tool).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_decline_invalid_and_client_error_deny() {
     let _deadline = deadline();
@@ -47,7 +45,6 @@ async fn approval_decline_invalid_and_client_error_deny() {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_cancel_interrupt_and_eof_deny() {
     let _deadline = deadline();
@@ -60,21 +57,18 @@ async fn approval_cancel_interrupt_and_eof_deny() {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_remains_answerable_after_the_former_deadline() {
     let _deadline = deadline();
     approval_scenario(ApprovalCase::LateAccept, Executor::Tool).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_duplicate_and_unknown_responses_cannot_resolve_another_intent() {
     let _deadline = deadline();
     approval_scenario(ApprovalCase::Duplicate, Executor::Tool).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_cancel_journals_while_outbound_is_full() {
     let _deadline = deadline();
@@ -86,7 +80,6 @@ async fn approval_cancel_journals_while_outbound_is_full() {
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn approval_never_delivered_is_unavailable_and_rejects_late_acceptance() {
     let _deadline = deadline();
@@ -283,12 +276,10 @@ async fn session_host_turn(
     assert_eq!(prompts, expected_prompts);
 }
 
-#[cfg(unix)]
 async fn approval_scenario(case: ApprovalCase, executor: Executor) {
     approval_scenario_channel(case, executor, server::ApprovalChannel::Human).await;
 }
 
-#[cfg(unix)]
 async fn approval_scenario_channel(
     case: ApprovalCase,
     executor: Executor,
@@ -304,7 +295,7 @@ async fn approval_scenario_channel(
     let state_root = StateRoot::admit(&state).unwrap();
     private_json(
         &state.join("tools.json"),
-        json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     private_json(
         &state.join("permissions.json"),

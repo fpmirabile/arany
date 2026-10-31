@@ -4,19 +4,20 @@ pub mod engine;
 pub mod git;
 pub mod goals;
 pub mod latency;
-#[cfg(unix)]
 pub mod process;
 pub mod routing;
 pub mod scenario;
 #[cfg(target_os = "linux")]
 pub use crate::session::selection_failure_session;
-#[cfg(unix)]
 pub mod worker_teams;
 
 pub use crate::provider::test_image;
 pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
 
 pub const MAX_SESSION_EVENTS: usize = crate::store::MAX_SESSION_EVENTS;
+pub const MAX_STEP_TOOL_CALLS: usize = crate::session::MAX_STEP_TOOL_CALLS as usize;
+pub const MAX_READ_LINE_CHARS: usize = crate::tools::types::MAX_READ_LINE_CHARS;
+pub const MIN_CONTEXT_WINDOW_TOKENS: u32 = crate::provider::MIN_CONTEXT_WINDOW_TOKENS;
 
 pub const fn max_changeset_bytes() -> usize {
     crate::tools::types::MAX_CHANGESET_BYTES
@@ -24,6 +25,20 @@ pub const fn max_changeset_bytes() -> usize {
 
 pub const fn max_changeset_files() -> usize {
     crate::tools::types::MAX_CHANGESET_FILES
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn private_file(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 pub async fn record_setup_edit_state(
@@ -73,8 +88,38 @@ pub async fn record_setup_edit_state(
     operation_id
 }
 
-pub fn payload_version(kind: &str) -> i64 {
-    crate::session::payload_version(kind).expect("known Event kind")
+// The Responses route `local` on a loopback port; struct update syntax derives the other protocols.
+pub fn local_custom_profile(port: u16) -> crate::CustomProfileDraft {
+    crate::CustomProfileDraft {
+        name: "local".into(),
+        protocol: crate::CustomProtocol::OpenaiResponses,
+        url: format!("http://127.0.0.1:{port}/v1/responses"),
+        auth: None,
+        model: "model-1".into(),
+        credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
+        efforts: Vec::new(),
+    }
+}
+
+// Saves custom routes through their owner, so fixtures always follow its current format.
+pub fn save_custom_profiles(state_dir: &std::path::Path, profiles: &[crate::CustomProfileDraft]) {
+    let state = crate::StateRoot::admit(state_dir).expect("private state root");
+    let expected = crate::CustomProfile::snapshot(&state).expect("profile snapshot");
+    crate::CustomProfile::write_profiles(&state, expected.as_deref(), profiles)
+        .expect("valid custom profiles");
+}
+
+pub fn with_additional_reads(mut call: crate::ToolCall, paths: &[&str]) -> crate::ToolCall {
+    if let crate::ToolCall::Command {
+        additional_reads, ..
+    } = &mut call
+    {
+        *additional_reads = Some(Box::new(crate::tools::types::ReadRequest {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            justification: "Read the shared folder".into(),
+        }));
+    }
+    call
 }
 
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
@@ -123,7 +168,6 @@ pub fn test_clock(now_ms: u64) -> TestClock {
 }
 
 static ACCOUNT_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-#[cfg(unix)]
 static ACCOUNT_LEASE: std::sync::OnceLock<cap_std::fs::File> = std::sync::OnceLock::new();
 
 #[cfg(all(test, target_os = "linux"))]
@@ -145,14 +189,12 @@ pub fn isolate_account_root() -> &'static std::path::Path {
             if let Some(path) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
                 let path = std::path::PathBuf::from(path);
                 assert!(path.is_absolute(), "absolute inherited test account root");
-                #[cfg(unix)]
                 if let Some(lease) = account_roots::inherit(&path).expect("inherited account lease")
                 {
                     ACCOUNT_LEASE.set(lease).expect("one account lease");
                 }
                 return path;
             }
-            #[cfg(unix)]
             {
                 // macOS `/tmp` is a symlink, which private admission refuses.
                 let parent = std::fs::canonicalize(std::env::temp_dir())
@@ -161,12 +203,15 @@ pub fn isolate_account_root() -> &'static std::path::Path {
                 let (path, lease) =
                     account_roots::create_in(&parent, 128).expect("private test account root");
                 ACCOUNT_LEASE.set(lease).expect("one account lease");
+                // Parallel tests share this root; default Guard capacity would queue them past short deadlines.
+                crate::private_fs::open_directory(&path.join("guard"), true)
+                    .expect("private test Guard directory");
+                private_file(
+                    &path.join("guard/limits.json"),
+                    br#"{"units":64,"queued":1024}"#,
+                );
                 path
             }
-            #[cfg(not(unix))]
-            tempfile::tempdir()
-                .expect("private test account root")
-                .keep()
         })
         .as_path()
 }
@@ -224,7 +269,6 @@ pub fn recorded_tool_failure(intent: uuid::Uuid) -> Option<String> {
         })
 }
 
-#[cfg(unix)]
 mod account_roots {
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
     use cap_std::fs::{
@@ -503,6 +547,7 @@ pub fn uncertain_hook_fixture() -> crate::ToolView {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     observation.disposition = crate::ToolDisposition::Uncertain;
     observation.cache_update = crate::CacheUpdate::NotAttempted;
@@ -601,27 +646,56 @@ fn host_admission_tool(
     }
 }
 
-pub async fn complete_chatgpt_probe_fixture(
-    check: &mut crate::ChatGptCheck,
-) -> Result<(), crate::StoreError> {
-    for kind in [
-        crate::CheckCallKind::Answer,
-        crate::CheckCallKind::Delegate,
-        crate::CheckCallKind::Compaction,
-    ] {
-        let token = check.journal.call_started(kind).await?;
-        check
-            .journal
-            .call_finished(
-                token,
-                crate::CheckDisposition::Succeeded,
-                Some(crate::CheckUsage {
-                    input_tokens: 12,
-                    output_tokens: 8,
-                }),
-                false,
-            )
-            .await?;
+pub fn run_config() -> crate::RunConfig {
+    crate::RunConfig {
+        supervisor: None,
+        worker_policy: None,
+        agent_definitions: None,
+        roster: None,
+        providers: None,
+        provider: crate::ProviderRecord::parse("openai").expect("Provider record"),
+        model: "gpt-5.4".into(),
+        effort: None,
+        custom_profile_provenance: None,
+        saved_api_account_id: None,
+        chatgpt_provenance: None,
+        output_token_bound: crate::OutputTokenBound::ProviderEnforced,
+        context_window_tokens: None,
+        effective_context_window_tokens: None,
+        policy: crate::CollaborationPolicy::Single,
+        output_token_cap: 4096,
+        provider_concurrency: 1,
+        workspace_device: 1,
+        workspace_inode: 2,
+        user_instruction_digest: None,
+        instruction_sources: Vec::new(),
+        prompts: crate::provider::EffectivePrompts::default().pins(),
+        launch_directory: String::new(),
+        include_sources: Vec::new(),
+        history_run_ids: Vec::new(),
+        excluded_history_runs: 0,
+        context_usage: None,
+        compaction_event_sequence: None,
+        compaction_content_digest: None,
+        tool_policy: None,
     }
-    Ok(())
+}
+
+pub fn provider_call_record() -> crate::ProviderCallRecord {
+    crate::ProviderCallRecord {
+        rate_limits: None,
+        delegation: None,
+        phase: crate::provider::AgentPhase::RootPlan,
+        disposition: crate::ProviderCallDisposition::Finished,
+        requested_tools: 0,
+        response_id: None,
+        input_tokens: None,
+        context_bytes: None,
+        output_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        wire_provenance: None,
+        failure_reason: None,
+        refusal: None,
+    }
 }

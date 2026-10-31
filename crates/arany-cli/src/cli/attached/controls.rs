@@ -10,21 +10,22 @@ use crate::terminal::{
     InteractiveCommand, NewlineShortcut, PointerSettings, Submission, TerminalInput, TerminalMode,
     transcript_agents,
 };
+use arany::{BuildCacheSize, RecordKind};
 use arany::{
     CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionId, SessionView, StateRoot,
     fork_session, rename_session, resume_session, validate_native_model_id,
 };
-use arany::{RecordFormat, RecordKind, RecordStep};
 use serde_json::Value;
 use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_BUSY: &str = "Build cache is in use; retry after its command finishes";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
+const BUILD_CACHE_LABEL: &str = "Build cache";
 mod build_cpu;
 mod build_jobs;
+mod guard;
 
-const UI_PREFERENCES_VERSION: u8 = 8;
 const SIZE_UNITS: &[(&str, u64)] = &[
     ("B", 1),
     ("KB", 1024),
@@ -33,85 +34,11 @@ const SIZE_UNITS: &[(&str, u64)] = &[
     ("TB", 1024_u64.pow(4)),
 ];
 
-pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
-    kind: RecordKind::UiPreferences,
-    field: "version",
-    floor: 3,
-    current: UI_PREFERENCES_VERSION as u64,
-    steps: &[
-        RecordStep {
-            from: 3,
-            transform: with_pointer_defaults,
-        },
-        RecordStep {
-            from: 4,
-            transform: with_newline_default,
-        },
-        RecordStep {
-            from: 5,
-            transform: without_mouse_preference,
-        },
-        RecordStep {
-            from: 6,
-            transform: build_jobs::with_default,
-        },
-        RecordStep {
-            from: 7,
-            transform: build_cpu::with_default,
-        },
-    ],
-    accepts: |bytes| decode_settings(bytes).is_ok(),
-};
-
-// Version 4 added Mouse and Copy on select; a version-3 record had no choice, so it gets the defaults.
-fn with_pointer_defaults(record: Value) -> Option<Value> {
-    let Value::Object(mut record) = record else {
-        return None;
-    };
-    let Some(Value::Object(preferences)) = record.get_mut("preferences") else {
-        return None;
-    };
-    if preferences.contains_key("mouse") || preferences.contains_key("copy_on_select") {
-        return None;
-    }
-    preferences.insert("mouse".into(), "wheel_and_clicks".into());
-    preferences.insert("copy_on_select".into(), true.into());
-    record.insert("version".into(), 4.into());
-    Some(Value::Object(record))
-}
-
-fn with_newline_default(mut record: Value) -> Option<Value> {
-    let preferences = record.get_mut("preferences")?.as_object_mut()?;
-    if preferences.contains_key("newline") {
-        return None;
-    }
-    preferences.insert("newline".into(), "shift_enter".into());
-    record.as_object_mut()?.insert("version".into(), 5.into());
-    Some(record)
-}
-
-fn without_mouse_preference(mut record: Value) -> Option<Value> {
-    let preferences = record.get_mut("preferences")?.as_object_mut()?;
-    let mouse = preferences.get("mouse")?.as_str()?;
-    if !["wheel_and_clicks", "wheel_only", "off"].contains(&mouse) {
-        return None;
-    }
-    preferences.remove("mouse")?;
-    record.as_object_mut()?.insert("version".into(), 6.into());
-    Some(record)
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
+// A tolerant record: only keys that differ from the binary's defaults; every other key follows them at read time.
+#[derive(Default, serde::Deserialize, serde::Serialize)]
 struct UiPreferences {
-    version: u8,
-    preferences: Preferences,
-}
-
-// Read first so an older record is refused by version rather than by its missing fields.
-#[derive(serde::Deserialize)]
-struct RecordVersion {
-    version: u8,
+    #[serde(default)]
+    preferences: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -123,6 +50,10 @@ pub(super) struct Preferences {
     pub resources: arany::ToolResourceSettings,
     pub copy_on_select: bool,
     pub newline: NewlineShortcut,
+    pub context_window: arany::ContextWindow,
+    // Saved in the account root's guard.json, never in ui-preferences.json.
+    #[serde(skip)]
+    pub guard: arany::GuardMode,
 }
 
 impl Default for Preferences {
@@ -138,6 +69,8 @@ impl Default for Preferences {
             },
             copy_on_select: PointerSettings::default().copy_on_select,
             newline: NewlineShortcut::default(),
+            context_window: arany::ContextWindow::default(),
+            guard: arany::GuardMode::default(),
         }
     }
 }
@@ -154,12 +87,43 @@ fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingInput {
+    Choice,
+    Typed,
+    Link,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Panel {
+    Settings,
+    Limits,
+}
+
+impl Panel {
+    fn table(self) -> &'static [Setting] {
+        match self {
+            Self::Settings => SETTINGS,
+            Self::Limits => LIMITS,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::Limits => "Limits",
+        }
+    }
+}
+
 struct Setting {
     label: &'static str,
     hint: &'static str,
+    input: SettingInput,
     value: fn(&Preferences) -> String,
     apply: fn(&mut Preferences, &str) -> Option<()>,
     cycle: fn(&mut Preferences, bool),
+    reset: fn(&mut Preferences, &Preferences),
     guidance: Option<fn(&AttachedTerminal) -> String>,
 }
 
@@ -167,6 +131,7 @@ const SETTINGS: &[Setting] = &[
     Setting {
         label: "Slash menu",
         hint: "tabs|combined",
+        input: SettingInput::Choice,
         value: |p| p.completion.label().into(),
         apply: |p, raw| {
             p.completion = [CompletionLayout::Tabs, CompletionLayout::Combined]
@@ -177,11 +142,13 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, _| {
             p.completion = p.completion.toggled();
         },
+        reset: |p, default| p.completion = default.completion,
         guidance: None,
     },
     Setting {
         label: "Chat view",
         hint: "fullscreen|classic",
+        input: SettingInput::Choice,
         value: |p| p.view.label().into(),
         apply: |p, raw| {
             p.view = [TerminalMode::Fullscreen, TerminalMode::Classic]
@@ -192,11 +159,66 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, _| {
             p.view = p.view.toggled();
         },
+        reset: |p, default| p.view = default.view,
         guidance: None,
     },
     Setting {
-        label: "Goal provider calls",
+        label: "Copy on select",
+        hint: "on|off",
+        input: SettingInput::Choice,
+        value: |p| on_off(p.copy_on_select).into(),
+        apply: |p, raw| {
+            p.copy_on_select = [true, false]
+                .into_iter()
+                .find(|value| on_off(*value) == raw)?;
+            Some(())
+        },
+        cycle: |p, _| {
+            p.copy_on_select = !p.copy_on_select;
+        },
+        reset: |p, default| p.copy_on_select = default.copy_on_select,
+        guidance: None,
+    },
+    Setting {
+        label: "Newline shortcut",
+        hint: "shift+enter|alt+enter|ctrl+enter",
+        input: SettingInput::Choice,
+        value: |p| p.newline.label().into(),
+        apply: |p, raw| {
+            p.newline = NewlineShortcut::ALL
+                .into_iter()
+                .find(|value| value.label().eq_ignore_ascii_case(raw))?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
+        },
+        reset: |p, default| p.newline = default.newline,
+        guidance: Some(AttachedTerminal::newline_shortcut_guidance),
+    },
+    guard::GUARD_MODE,
+    guard::GUARD_FOLDERS,
+    LIMITS_LINK,
+];
+
+// The settings panel's last row opens `/limits` and returns here when it closes.
+const LIMITS_LINK: Setting = Setting {
+    label: "Limits",
+    hint: "opens /limits",
+    input: SettingInput::Link,
+    value: |_| "opens /limits".into(),
+    apply: |_, _| None,
+    cycle: |_, _| {},
+    reset: |_, _| {},
+    guidance: None,
+};
+
+// `/limits` holds the bounds pinned into each Goal; `/settings` links to it.
+const LIMITS: &[Setting] = &[
+    Setting {
+        label: "Provider calls per task",
         hint: "number or unlimited",
+        input: SettingInput::Typed,
         value: |p| {
             show_limit(p.goal_budget.max_provider_calls.map(u64::from), |value| {
                 value.to_string()
@@ -212,15 +234,19 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, forward| {
             p.goal_budget.max_provider_calls = step(
                 p.goal_budget.max_provider_calls,
-                &[Some(64), Some(32), Some(16), None],
+                &[None, Some(256), Some(64), Some(16)],
                 forward,
             );
+        },
+        reset: |p, default| {
+            p.goal_budget.max_provider_calls = default.goal_budget.max_provider_calls
         },
         guidance: None,
     },
     Setting {
-        label: "Goal tokens",
+        label: "Tokens per task",
         hint: "number or unlimited",
+        input: SettingInput::Typed,
         value: |p| show_limit(p.goal_budget.max_tokens, |value| value.to_string()),
         apply: |p, raw| {
             p.goal_budget.max_tokens = parse_limit(raw, |value| value.parse().ok())?;
@@ -233,11 +259,13 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.goal_budget.max_tokens = default.goal_budget.max_tokens,
         guidance: None,
     },
     Setting {
-        label: "Goal active time",
+        label: "Active time per task",
         hint: "duration or unlimited",
+        input: SettingInput::Typed,
         value: |p| show_limit(p.goal_budget.max_active_ms, format_duration),
         apply: |p, raw| {
             p.goal_budget.max_active_ms = parse_limit(raw, parse_duration)?;
@@ -246,15 +274,22 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, forward| {
             p.goal_budget.max_active_ms = step(
                 p.goal_budget.max_active_ms,
-                &[Some(arany::MAX_GOAL_ACTIVE_MS), Some(15 * 60 * 1000), None],
+                &[
+                    None,
+                    Some(arany::MAX_GOAL_ACTIVE_MS),
+                    Some(60 * 60 * 1000),
+                    Some(15 * 60 * 1000),
+                ],
                 forward,
             );
         },
+        reset: |p, default| p.goal_budget.max_active_ms = default.goal_budget.max_active_ms,
         guidance: None,
     },
     Setting {
         label: "Default command timeout",
         hint: "duration, e.g. 30s",
+        input: SettingInput::Typed,
         value: |p| format_duration(u64::from(p.resources.default_command_timeout_ms)),
         apply: |p, raw| {
             p.resources.default_command_timeout_ms = parse_duration(raw)?.try_into().ok()?;
@@ -267,11 +302,15 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| {
+            p.resources.default_command_timeout_ms = default.resources.default_command_timeout_ms;
+        },
         guidance: None,
     },
     Setting {
         label: "Maximum command timeout",
         hint: "duration, e.g. 5m",
+        input: SettingInput::Typed,
         value: |p| format_duration(u64::from(p.resources.max_command_timeout_ms)),
         apply: |p, raw| {
             p.resources.max_command_timeout_ms = parse_duration(raw)?.try_into().ok()?;
@@ -284,11 +323,15 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| {
+            p.resources.max_command_timeout_ms = default.resources.max_command_timeout_ms;
+        },
         guidance: None,
     },
     Setting {
         label: "Build memory",
         hint: "size, e.g. 512MB",
+        input: SettingInput::Typed,
         value: |p| format_setting_size(p.resources.build_memory_bytes),
         apply: |p, raw| {
             p.resources.build_memory_bytes = parse_size(raw)?;
@@ -306,11 +349,13 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.resources.build_memory_bytes = default.resources.build_memory_bytes,
         guidance: None,
     },
     Setting {
         label: "Build processes/threads",
         hint: "number",
+        input: SettingInput::Typed,
         value: |p| p.resources.build_processes.to_string(),
         apply: |p, raw| {
             p.resources.build_processes = raw.parse().ok()?;
@@ -320,11 +365,13 @@ const SETTINGS: &[Setting] = &[
             p.resources.build_processes =
                 step(p.resources.build_processes, &[256, 128, 64, 32], forward);
         },
+        reset: |p, default| p.resources.build_processes = default.resources.build_processes,
         guidance: None,
     },
     Setting {
         label: "Build writable project",
         hint: "size, e.g. 1GB",
+        input: SettingInput::Typed,
         value: |p| format_setting_size(p.resources.build_project_bytes),
         apply: |p, raw| {
             p.resources.build_project_bytes = parse_size(raw)?;
@@ -342,58 +389,122 @@ const SETTINGS: &[Setting] = &[
                 forward,
             );
         },
+        reset: |p, default| p.resources.build_project_bytes = default.resources.build_project_bytes,
         guidance: None,
     },
     Setting {
-        label: "Build cache",
-        hint: "size, e.g. 8GB",
-        value: |p| format_setting_size(p.resources.build_cache_bytes),
+        label: BUILD_CACHE_LABEL,
+        hint: "size or unlimited, e.g. 8GB",
+        input: SettingInput::Typed,
+        value: |p| match p.resources.build_cache_bytes {
+            BuildCacheSize::Unlimited => "unlimited".into(),
+            BuildCacheSize::Bytes(bytes) => format_setting_size(bytes),
+        },
         apply: |p, raw| {
-            p.resources.build_cache_bytes = parse_size(raw)?;
+            p.resources.build_cache_bytes = match parse_limit(raw, parse_size)? {
+                None => BuildCacheSize::Unlimited,
+                Some(bytes) => BuildCacheSize::Bytes(bytes),
+            };
             Some(())
         },
         cycle: |p, forward| {
             p.resources.build_cache_bytes = step(
                 p.resources.build_cache_bytes,
-                &[8 * 1024_u64.pow(3), 4 * 1024_u64.pow(3), 1024_u64.pow(3), 0],
+                &[
+                    BuildCacheSize::Unlimited,
+                    BuildCacheSize::Bytes(8 * 1024_u64.pow(3)),
+                    BuildCacheSize::Bytes(4 * 1024_u64.pow(3)),
+                    BuildCacheSize::Bytes(1024_u64.pow(3)),
+                    BuildCacheSize::DISABLED,
+                ],
                 forward,
             );
         },
+        reset: |p, default| p.resources.build_cache_bytes = default.resources.build_cache_bytes,
         guidance: None,
-    },
-    Setting {
-        label: "Copy on select",
-        hint: "on|off",
-        value: |p| on_off(p.copy_on_select).into(),
-        apply: |p, raw| {
-            p.copy_on_select = [true, false]
-                .into_iter()
-                .find(|value| on_off(*value) == raw)?;
-            Some(())
-        },
-        cycle: |p, _| {
-            p.copy_on_select = !p.copy_on_select;
-        },
-        guidance: None,
-    },
-    Setting {
-        label: "Newline shortcut",
-        hint: "shift+enter|alt+enter|ctrl+enter",
-        value: |p| p.newline.label().into(),
-        apply: |p, raw| {
-            p.newline = NewlineShortcut::ALL
-                .into_iter()
-                .find(|value| value.label().eq_ignore_ascii_case(raw))?;
-            Some(())
-        },
-        cycle: |p, forward| {
-            p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
-        },
-        guidance: Some(AttachedTerminal::newline_shortcut_guidance),
     },
     build_jobs::SETTING,
     build_cpu::SETTING,
+    Setting {
+        label: "Context window",
+        hint: "percent or tokens, e.g. 80% or 500k",
+        input: SettingInput::Typed,
+        value: |p| p.context_window.to_string(),
+        apply: |p, raw| {
+            p.context_window = raw.parse().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.context_window = step(p.context_window, &CONTEXT_WINDOW_PRESETS, forward);
+        },
+        reset: |p, default| p.context_window = default.context_window,
+        guidance: None,
+    },
+    Setting {
+        label: "Editor changes: files",
+        hint: "number of files",
+        input: SettingInput::Typed,
+        value: |p| p.resources.editor_change_files.to_string(),
+        apply: |p, raw| {
+            p.resources.editor_change_files = raw.parse().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.editor_change_files = step(
+                p.resources.editor_change_files,
+                &[512, 1024, 2048, 128, 256],
+                forward,
+            );
+        },
+        reset: |p, default| p.resources.editor_change_files = default.resources.editor_change_files,
+        guidance: None,
+    },
+    Setting {
+        label: "Editor changes: size",
+        hint: "size, e.g. 64MB",
+        input: SettingInput::Typed,
+        value: |p| format_setting_size(p.resources.editor_change_bytes),
+        apply: |p, raw| {
+            p.resources.editor_change_bytes = parse_size(raw)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.editor_change_bytes = step(
+                p.resources.editor_change_bytes,
+                &[
+                    64 * 1024 * 1024,
+                    256 * 1024 * 1024,
+                    1024_u64.pow(3),
+                    16 * 1024 * 1024,
+                ],
+                forward,
+            );
+        },
+        reset: |p, default| p.resources.editor_change_bytes = default.resources.editor_change_bytes,
+        guidance: None,
+    },
 ];
+
+const CONTEXT_WINDOW_PRESETS: [arany::ContextWindow; 7] = {
+    use arany::ContextWindow::{Percent, Tokens};
+    [
+        Percent(100),
+        Percent(75),
+        Percent(50),
+        Tokens(1_000_000),
+        Tokens(500_000),
+        Tokens(256_000),
+        Tokens(128_000),
+    ]
+};
+const MAX_SETTING_VALUE_BYTES: usize = 64;
+
+fn fits_model_window(window: arany::ContextWindow, model_window: Option<u32>) -> bool {
+    match window {
+        arany::ContextWindow::Percent(_) => true,
+        arany::ContextWindow::Tokens(tokens) => model_window.is_none_or(|limit| tokens <= limit),
+    }
+}
 
 fn show_limit(value: Option<u64>, format: impl FnOnce(u64) -> String) -> String {
     value.map_or_else(|| "unlimited".into(), format)
@@ -506,46 +617,108 @@ fn format_setting_size(bytes: u64) -> String {
 }
 
 // Linear rows take `NUMBER VALUE`, numbered by the same table that renders them.
-fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
+fn apply_setting(table: &[Setting], preferences: &mut Preferences, value: &str) -> bool {
     let Some((number, raw)) = value.split_once(' ') else {
         return false;
     };
-    let Some(setting) = number
+    number
         .parse::<usize>()
         .ok()
         .and_then(|number| number.checked_sub(1))
-        .and_then(|index| SETTINGS.get(index))
-    else {
+        .is_some_and(|row| apply_row(table, preferences, row, raw))
+}
+
+// A linear bare row NUMBER selects a link row.
+fn linear_link<'a>(table: &'a [Setting], value: &str) -> Option<&'a Setting> {
+    value
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|row| table.get(row))
+        .filter(|setting| setting.input == SettingInput::Link)
+}
+
+// Linear `NUMBER VALUE` and the visual value field share this parser.
+fn apply_row(table: &[Setting], preferences: &mut Preferences, row: usize, raw: &str) -> bool {
+    let Some(setting) = table.get(row) else {
         return false;
     };
     let mut chosen = *preferences;
-    if (setting.apply)(&mut chosen, raw.trim()).is_none()
-        || chosen.goal_budget.validate().is_err()
-        || !chosen.resources.valid()
-    {
+    let raw = raw.trim();
+    if raw == "default" {
+        (setting.reset)(&mut chosen, &Preferences::default());
+    } else if (setting.apply)(&mut chosen, raw).is_none() {
+        return false;
+    }
+    if chosen.goal_budget.validate().is_err() || !chosen.resources.valid() {
         return false;
     }
     *preferences = chosen;
     true
 }
 
-fn setting_rows(preferences: Preferences) -> Vec<String> {
-    SETTINGS
+fn setting_value(setting: &Setting, preferences: &Preferences) -> String {
+    if setting.input == SettingInput::Link {
+        return (setting.value)(preferences);
+    }
+    let mut reset = *preferences;
+    (setting.reset)(&mut reset, &Preferences::default());
+    let value = (setting.value)(preferences);
+    if reset == *preferences {
+        format!("{value} (default)")
+    } else {
+        value
+    }
+}
+
+// `cache_used` is the private build caches' current size, shown beside the Build cache row.
+fn setting_value_used(
+    setting: &Setting,
+    preferences: &Preferences,
+    cache_used: Option<u64>,
+) -> String {
+    let value = setting_value(setting, preferences);
+    match cache_used {
+        Some(bytes) if setting.label == BUILD_CACHE_LABEL => {
+            format!("{value} · {} used", format_bytes(bytes))
+        }
+        _ => value,
+    }
+}
+
+fn setting_rows(
+    table: &[Setting],
+    preferences: Preferences,
+    cache_used: Option<u64>,
+) -> Vec<String> {
+    table
         .iter()
-        .map(|setting| format!("{}: {}", setting.label, (setting.value)(&preferences)))
+        .map(|setting| match setting.input {
+            SettingInput::Link => format!("{} ›", setting.label),
+            SettingInput::Choice | SettingInput::Typed => format!(
+                "{}: {}",
+                setting.label,
+                setting_value_used(setting, &preferences, cache_used)
+            ),
+        })
         .collect()
 }
 
-fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
-    SETTINGS
+fn linear_setting_rows(
+    table: &[Setting],
+    preferences: Preferences,
+    cache_used: Option<u64>,
+) -> Vec<String> {
+    table
         .iter()
-        .map(|setting| {
-            format!(
+        .map(|setting| match setting.input {
+            SettingInput::Link => format!("{}: {}", setting.label, setting.hint),
+            SettingInput::Choice | SettingInput::Typed => format!(
                 "{}: {} ({})",
                 setting.label,
-                (setting.value)(&preferences),
+                setting_value_used(setting, &preferences, cache_used),
                 setting.hint
-            )
+            ),
         })
         .collect()
 }
@@ -562,10 +735,31 @@ fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
     }]
 }
 
-fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
-    if let Some(setting) = SETTINGS.get(row) {
+fn reset_setting(table: &[Setting], preferences: &mut Preferences, row: usize) {
+    if let Some(setting) = table.get(row) {
+        (setting.reset)(preferences, &Preferences::default());
+    }
+}
+
+fn cycle_setting(
+    table: &[Setting],
+    preferences: &mut Preferences,
+    row: usize,
+    forward: bool,
+    model_window: Option<u32>,
+) {
+    if let Some(setting) = table.get(row) {
         let mut chosen = *preferences;
         (setting.cycle)(&mut chosen, forward);
+        // Token presets larger than the known model window are skipped; percentages always fit.
+        for _ in 0..CONTEXT_WINDOW_PRESETS.len() {
+            if chosen.context_window == preferences.context_window
+                || fits_model_window(chosen.context_window, model_window)
+            {
+                break;
+            }
+            (setting.cycle)(&mut chosen, forward);
+        }
         if chosen.goal_budget.validate().is_ok() && chosen.resources.valid() {
             *preferences = chosen;
         }
@@ -579,66 +773,122 @@ pub(super) async fn restore_settings(admission: &Admission) -> Result<Preference
 pub(super) async fn restore_settings_at(
     state_dir: &std::path::Path,
 ) -> Result<Preferences, String> {
-    Ok(saved_settings(state_dir).await??)
-}
-
-pub(in crate::cli) async fn execution_limits(
-    state_dir: &std::path::Path,
-) -> Result<(arany::GoalBudget, arany::ToolResourceSettings), String> {
-    let settings = restore_settings_at(state_dir).await?;
-    Ok((settings.goal_budget, settings.resources))
-}
-
-// An unsupported or invalid record leaves defaults in force until /settings replaces it.
-pub(super) async fn settings_or_defaults(admission: &Admission) -> Result<Preferences, String> {
-    Ok(saved_settings(&admission.state_dir)
-        .await?
-        .unwrap_or_default())
-}
-
-async fn saved_settings(
-    state_dir: &std::path::Path,
-) -> Result<Result<Preferences, &'static str>, String> {
     let path = state_dir.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let root = match StateRoot::open_existing(&path) {
-            Ok(root) => root,
-            Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
-                    return Ok(Ok(Preferences::default()));
-                }
-                return Err("display settings unavailable or unsafe".into());
-            }
-            Err(_) => return Err("display settings unavailable or unsafe".into()),
-        };
-        read_settings(&root)
+    tokio::task::spawn_blocking(move || match StateRoot::open_optional(&path) {
+        Ok(Some(root)) => read_settings(&root),
+        Ok(None) => Ok(Preferences::default()),
+        Err(_) => Err("display settings unavailable or unsafe".into()),
     })
     .await
     .map_err(|_| "display settings unavailable".to_owned())?
 }
 
-fn read_settings(root: &StateRoot) -> Result<Result<Preferences, &'static str>, String> {
-    let Some(record) = root
-        .read_current(&UI_PREFERENCES)
-        .map_err(|_| "display settings unavailable or unsafe")?
-    else {
-        return Ok(Ok(Preferences::default()));
-    };
-    Ok(decode_settings(&record))
+pub(in crate::cli) async fn execution_limits(
+    state_dir: &std::path::Path,
+) -> Result<
+    (
+        arany::GoalBudget,
+        arany::ToolResourceSettings,
+        arany::ContextWindow,
+    ),
+    String,
+> {
+    let settings = restore_settings_at(state_dir).await?;
+    Ok((
+        settings.goal_budget,
+        settings.resources,
+        settings.context_window,
+    ))
 }
 
-fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
-    let invalid = "invalid display settings; use /settings to replace them";
-    let unsupported = "unsupported settings; use /settings to replace them";
-    let version: RecordVersion = serde_json::from_slice(record).map_err(|_| invalid)?;
-    if version.version != UI_PREFERENCES_VERSION {
-        return Err(unsupported);
+fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
+    let record = root
+        .record(RecordKind::UiPreferences)
+        .read()
+        .map_err(|_| "display settings unavailable or unsafe")?;
+    Ok(record.map_or_else(Preferences::default, |record| decode_settings(&record)))
+}
+
+// Tolerant: unknown keys, malformed JSON and values that fail validation keep their defaults.
+fn decode_settings(record: &[u8]) -> Preferences {
+    let saved = Value::Object(
+        serde_json::from_slice::<UiPreferences>(record)
+            .unwrap_or_default()
+            .preferences,
+    );
+    let defaults =
+        serde_json::to_value(Preferences::default()).expect("typed preferences serialize");
+    // All known keys at once keep related limits together; only an invalid whole falls back to each key alone.
+    [false, true]
+        .into_iter()
+        .find_map(|checked| {
+            let mut resolved = defaults.clone();
+            overlay(&mut resolved, &mut Vec::new(), saved.clone(), checked);
+            decoded(&resolved)
+        })
+        .unwrap_or_default()
+}
+
+fn decoded(resolved: &Value) -> Option<Preferences> {
+    serde_json::from_value::<Preferences>(resolved.clone())
+        .ok()
+        .filter(|preferences| {
+            preferences.goal_budget.validate().is_ok() && preferences.resources.valid()
+        })
+}
+
+fn slot<'a>(resolved: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
+    path.iter()
+        .try_fold(resolved, |value, key| value.get_mut(key))
+}
+
+// Applies each saved leaf the defaults know; a checked leaf stays only if the whole record still decodes.
+fn overlay(resolved: &mut Value, path: &mut Vec<String>, saved: Value, checked: bool) {
+    let Some(current) = slot(resolved, path) else {
+        return;
+    };
+    match saved {
+        Value::Object(fields) if current.is_object() => {
+            for (key, value) in fields {
+                path.push(key);
+                overlay(resolved, path, value, checked);
+                path.pop();
+            }
+        }
+        saved => {
+            let previous = std::mem::replace(current, saved);
+            if checked
+                && decoded(resolved).is_none()
+                && let Some(current) = slot(resolved, path)
+            {
+                *current = previous;
+            }
+        }
     }
-    let record: UiPreferences = serde_json::from_slice(record).map_err(|_| invalid)?;
-    if record.preferences.goal_budget.validate().is_err() || !record.preferences.resources.valid() {
-        return Err(unsupported);
-    }
-    Ok(record.preferences)
+}
+
+// The keys of `chosen` that differ from `default`, so unchanged keys keep following the binary.
+fn changed(chosen: Value, default: &Value) -> Option<Value> {
+    let (Value::Object(chosen), Value::Object(default)) = (&chosen, default) else {
+        return (chosen != *default).then_some(chosen);
+    };
+    let fields: serde_json::Map<String, Value> = chosen
+        .iter()
+        .filter_map(|(key, value)| {
+            let changed = changed(value.clone(), default.get(key).unwrap_or(&Value::Null))?;
+            Some((key.clone(), changed))
+        })
+        .collect();
+    (!fields.is_empty()).then_some(Value::Object(fields))
+}
+
+fn encode_settings(preferences: Preferences) -> Option<Vec<u8>> {
+    let default = serde_json::to_value(Preferences::default()).ok()?;
+    let preferences = match changed(serde_json::to_value(preferences).ok()?, &default) {
+        Some(Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    serde_json::to_vec(&UiPreferences { preferences }).ok()
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -672,11 +922,8 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
     tokio::task::spawn_blocking(move || {
         let root = StateRoot::admit(&path)
             .map_err(|_| SaveError::Failed("display settings unavailable or unsafe"))?;
-        let record = serde_json::to_vec(&UiPreferences {
-            version: UI_PREFERENCES_VERSION,
-            preferences,
-        })
-        .map_err(|_| SaveError::Failed("display settings unavailable"))?;
+        let record = encode_settings(preferences)
+            .ok_or(SaveError::Failed("display settings unavailable"))?;
         root.with_account_replacement_lock(&workspace, || {
             root.record(RecordKind::UiPreferences).replace(&record)
         })
@@ -692,6 +939,7 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
 
 fn settings_notice(
     terminal: &AttachedTerminal,
+    table: &[Setting],
     selected_row: usize,
     invalid: &mut bool,
     linear_guidance: &mut bool,
@@ -709,53 +957,126 @@ fn settings_notice(
     } else if std::mem::take(linear_guidance) {
         Some("Modified newline shortcuts apply only to visual sessions; use backslash then Enter here".to_owned())
     } else {
-        SETTINGS
+        table
             .get(selected_row)
             .and_then(|setting| setting.guidance)
             .map(|guidance| guidance(terminal))
     }
 }
 
-async fn choose_settings(
+// The last Run on the selected model tells which token presets fit; without one all are offered.
+fn model_window(view: &SessionView) -> Option<u32> {
+    view.runs
+        .iter()
+        .rev()
+        .filter_map(|run| run.config.as_ref())
+        .find(|config| view.defaults.model.as_ref() == Some(&config.model))
+        .and_then(|config| config.context_window_tokens)
+}
+
+enum FieldKey {
+    Edited,
+    Cancel,
+    Submit,
+    Pass,
+}
+
+fn field_key(text: &mut String, input: TerminalInput) -> FieldKey {
+    match input {
+        TerminalInput::Character(character) => {
+            if text.len() + character.len_utf8() <= MAX_SETTING_VALUE_BYTES {
+                text.push(character);
+            }
+            FieldKey::Edited
+        }
+        TerminalInput::Backspace | TerminalInput::Delete => {
+            text.pop();
+            FieldKey::Edited
+        }
+        TerminalInput::Escape => FieldKey::Cancel,
+        TerminalInput::Submit => FieldKey::Submit,
+        TerminalInput::Interrupt
+        | TerminalInput::EndOfInput
+        | TerminalInput::Suspend
+        | TerminalInput::Shutdown(_) => FieldKey::Pass,
+        _ => FieldKey::Edited,
+    }
+}
+
+fn field_notice(setting: &Setting, invalid: &mut bool) -> String {
+    let lead = if std::mem::take(invalid) {
+        "Invalid value; type"
+    } else {
+        "Type"
+    };
+    format!(
+        "{lead} {}; Enter applies, empty Enter saves, Esc returns to the list",
+        setting.hint
+    )
+}
+
+fn visual_rows(
+    table: &[Setting],
+    chosen: Preferences,
+    cache_used: Option<u64>,
+    selected_row: usize,
+    field: Option<&str>,
+) -> Vec<String> {
+    let mut rows = setting_rows(table, chosen, cache_used);
+    if let (Some(text), Some(row), Some(setting)) =
+        (field, rows.get_mut(selected_row), table.get(selected_row))
+    {
+        *row = format!("{}: {text}▏", setting.label);
+    }
+    rows
+}
+
+// Boxed so the settings panel can open its `/limits` link and return to itself.
+fn choose_settings<'a>(
+    terminal: &'a mut AttachedTerminal,
+    chosen: Preferences,
+    cache_used: Option<u64>,
+    view: &'a SessionView,
+    panel: Panel,
+) -> std::pin::Pin<Box<dyn Future<Output = Result<Option<Preferences>, String>> + 'a>> {
+    Box::pin(choose_panel(terminal, chosen, cache_used, view, panel))
+}
+
+async fn choose_panel(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
+    cache_used: Option<u64>,
     view: &SessionView,
+    panel: Panel,
 ) -> Result<Option<Preferences>, String> {
     let linear = terminal.is_linear();
-    let mut selected_row = 0usize;
+    let mut dialog = SettingsDialog {
+        table: panel.table(),
+        panel,
+        cache_used,
+        linear,
+        model_window: model_window(view),
+        selected_row: 0,
+        field: None,
+        invalid: false,
+        linear_guidance: linear && panel == Panel::Settings,
+    };
     let mut answer = Composer::default();
-    let mut invalid = false;
-    let mut linear_guidance = linear;
     terminal.begin_dialog();
     loop {
-        let notice = settings_notice(terminal, selected_row, &mut invalid, &mut linear_guidance);
-        let rows = if linear {
-            linear_setting_rows(chosen)
-        } else {
-            setting_rows(chosen)
+        let input_kind = dialog.table[dialog.selected_row].input;
+        let Some((input, rows)) = dialog.read_key(terminal, chosen, view).await? else {
+            continue;
         };
-        terminal
-            .draw_settings(&rows, selected_row, notice.as_deref(), view)
-            .map_err(|error| error.to_string())?;
-        if terminal
-            .arm_dialog()
-            .await
-            .map_err(|error| error.to_string())?
-        {
+        match dialog.field_input(input, &mut chosen) {
+            FieldStep::Continue => continue,
+            FieldStep::Finish => return Ok(Some(chosen)),
+            FieldStep::Pass => {}
+        }
+        if !linear && dialog.visual_key(input, &mut chosen, rows) {
             continue;
         }
-        let input = terminal
-            .next_input()
-            .await
-            .map_err(|error| error.to_string())?;
         match input {
-            TerminalInput::Up if !linear => selected_row = selected_row.saturating_sub(1),
-            TerminalInput::Down if !linear => selected_row = (selected_row + 1).min(rows.len() - 1),
-            TerminalInput::Left if !linear => cycle_setting(&mut chosen, selected_row, false),
-            TerminalInput::Right if !linear => cycle_setting(&mut chosen, selected_row, true),
-            TerminalInput::Character(_) if !linear => {
-                selected_row = input.choice_index(rows.len()).unwrap_or(selected_row);
-            }
             TerminalInput::Character(character) => {
                 answer.apply(TerminalInput::Character(character));
             }
@@ -767,8 +1088,18 @@ async fn choose_settings(
                 match value.as_str() {
                     "" => return Ok(Some(chosen)),
                     "q" => return Ok(None),
-                    value => invalid = !apply_setting(&mut chosen, value),
+                    value if let Some(link) = linear_link(dialog.table, value) => {
+                        chosen = open_link(terminal, link, chosen, cache_used, view).await?;
+                    }
+                    value => dialog.invalid = !apply_setting(dialog.table, &mut chosen, value),
                 }
+            }
+            TerminalInput::Submit if input_kind == SettingInput::Typed => {
+                dialog.field = Some(String::new());
+            }
+            TerminalInput::Submit if input_kind == SettingInput::Link => {
+                let link = &dialog.table[dialog.selected_row];
+                chosen = open_link(terminal, link, chosen, cache_used, view).await?;
             }
             TerminalInput::Submit => return Ok(Some(chosen)),
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
@@ -782,27 +1113,207 @@ async fn choose_settings(
             }
             TerminalInput::LineRejected => {
                 answer.clear();
-                invalid = true;
+                dialog.invalid = true;
             }
             _ => {}
         }
     }
 }
 
-pub(super) async fn settings(
+async fn open_link(
     terminal: &mut AttachedTerminal,
-    admission: &Admission,
-    composer: &mut Composer,
-    saved_view: &mut TerminalMode,
+    link: &Setting,
+    chosen: Preferences,
+    cache_used: Option<u64>,
     view: &SessionView,
+) -> Result<Preferences, String> {
+    if link.label == guard::GUARD_FOLDERS.label {
+        guard::folders(terminal, view).await?;
+        terminal.begin_dialog();
+        return Ok(chosen);
+    }
+    open_limits(terminal, chosen, cache_used, view).await
+}
+
+// The Limits panel opened from Settings returns to the Settings dialog.
+async fn open_limits(
+    terminal: &mut AttachedTerminal,
+    chosen: Preferences,
+    cache_used: Option<u64>,
+    view: &SessionView,
+) -> Result<Preferences, String> {
+    let chosen = choose_settings(terminal, chosen, cache_used, view, Panel::Limits)
+        .await?
+        .unwrap_or(chosen);
+    terminal.begin_dialog();
+    Ok(chosen)
+}
+
+struct SettingsDialog {
+    table: &'static [Setting],
+    panel: Panel,
+    cache_used: Option<u64>,
+    linear: bool,
+    model_window: Option<u32>,
+    selected_row: usize,
+    field: Option<String>,
+    invalid: bool,
+    linear_guidance: bool,
+}
+
+enum FieldStep {
+    Continue,
+    Finish,
+    Pass,
+}
+
+impl SettingsDialog {
+    fn notice(&mut self, terminal: &AttachedTerminal) -> Option<String> {
+        let row = &self.table[self.selected_row];
+        match &self.field {
+            Some(_) => Some(field_notice(row, &mut self.invalid)),
+            None if row.input == SettingInput::Typed && !self.linear && !self.invalid => {
+                Some(format!("Enter types a value: {}", row.hint))
+            }
+            None if row.input == SettingInput::Link && !self.linear && !self.invalid => {
+                Some(format!("Enter {}", row.hint))
+            }
+            None => settings_notice(
+                terminal,
+                self.table,
+                self.selected_row,
+                &mut self.invalid,
+                &mut self.linear_guidance,
+            ),
+        }
+    }
+
+    // Draws the table and reads one key; None when the dialog was re-armed and must redraw.
+    async fn read_key(
+        &mut self,
+        terminal: &mut AttachedTerminal,
+        chosen: Preferences,
+        view: &SessionView,
+    ) -> Result<Option<(TerminalInput, usize)>, String> {
+        let notice = self.notice(terminal);
+        let rows = self.rows(chosen);
+        terminal
+            .draw_settings(
+                self.panel.title(),
+                &rows,
+                self.selected_row,
+                notice.as_deref(),
+                view,
+            )
+            .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(None);
+        }
+        let input = terminal
+            .next_input()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Some((input, rows.len())))
+    }
+
+    fn rows(&self, chosen: Preferences) -> Vec<String> {
+        if self.linear {
+            linear_setting_rows(self.table, chosen, self.cache_used)
+        } else {
+            visual_rows(
+                self.table,
+                chosen,
+                self.cache_used,
+                self.selected_row,
+                self.field.as_deref(),
+            )
+        }
+    }
+
+    // An open field takes edits; Enter applies a valid value or keeps the field open as invalid.
+    fn field_input(&mut self, input: TerminalInput, chosen: &mut Preferences) -> FieldStep {
+        let Some(text) = self.field.as_mut() else {
+            return FieldStep::Pass;
+        };
+        match field_key(text, input) {
+            FieldKey::Edited => FieldStep::Continue,
+            FieldKey::Cancel => {
+                self.field = None;
+                FieldStep::Continue
+            }
+            FieldKey::Submit if text.trim().is_empty() => FieldStep::Finish,
+            FieldKey::Submit => {
+                if apply_row(
+                    self.table,
+                    chosen,
+                    self.selected_row,
+                    &text.to_ascii_lowercase(),
+                ) {
+                    self.field = None;
+                } else {
+                    self.invalid = true;
+                }
+                FieldStep::Continue
+            }
+            FieldKey::Pass => FieldStep::Pass,
+        }
+    }
+
+    // Arrow, edit and digit keys of the visual table; false leaves the key to the dialog.
+    fn visual_key(&mut self, input: TerminalInput, chosen: &mut Preferences, rows: usize) -> bool {
+        match input {
+            TerminalInput::Up => self.selected_row = self.selected_row.saturating_sub(1),
+            TerminalInput::Down => self.selected_row = (self.selected_row + 1).min(rows - 1),
+            TerminalInput::Left | TerminalInput::Right => cycle_setting(
+                self.table,
+                chosen,
+                self.selected_row,
+                input == TerminalInput::Right,
+                self.model_window,
+            ),
+            TerminalInput::Backspace | TerminalInput::Delete => {
+                reset_setting(self.table, chosen, self.selected_row);
+            }
+            TerminalInput::Character(_) => {
+                self.selected_row = input.choice_index(rows).unwrap_or(self.selected_row);
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
+pub(super) async fn settings(
+    ui: super::run::RunUi<'_>,
+    admission: &Admission,
+    saved_view: &mut TerminalMode,
+    panel: Panel,
 ) -> Result<String, String> {
+    let super::run::RunUi {
+        terminal,
+        view,
+        composer,
+    } = ui;
+    let view: &SessionView = view;
     let linear = terminal.is_linear();
-    let mut current = settings_or_defaults(admission).await?;
+    let mut current = restore_settings(admission).await?;
     current.completion = composer.completion_layout();
     current.newline = composer.newline_shortcut();
     current.view = *saved_view;
-    let notice = match choose_settings(terminal, current, view).await? {
-        None => "Settings unchanged".to_owned(),
+    current.guard = guard::saved_mode();
+    let cache_used = build_cache_used(admission).await;
+    let notice = match choose_settings(terminal, current, cache_used, view, panel).await? {
+        None => format!("{} unchanged", panel.title()),
+        Some(chosen)
+            if chosen.guard != current.guard
+                && let Err(error) = guard::save_mode(chosen.guard) =>
+        {
+            error
+        }
         Some(chosen) => match save_settings(admission, chosen).await {
             Ok(()) => {
                 let view_changed = chosen.view != *saved_view;
@@ -817,7 +1328,8 @@ pub(super) async fn settings(
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
-                    "Settings saved · calls {} · active {} · command max {}{}",
+                    "{} saved · calls {} · active {} · command max {}{}",
+                    panel.title(),
                     chosen
                         .goal_budget
                         .max_provider_calls
@@ -978,23 +1490,12 @@ pub(super) fn handle_active_submission(
     view: &SessionView,
     starting_sequence: u64,
 ) -> ActiveSubmission {
-    let notice = match composer.submission() {
-        Ok(Submission::Command {
-            command: command @ (InteractiveCommand::Usage | InteractiveCommand::Status),
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenUsage {
-                status: command == InteractiveCommand::Status,
-            };
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Transcript,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenTranscript;
-        }
+    let submission = composer.submission();
+    if let Some(opened) = active_panel(&submission) {
+        composer.take();
+        return opened;
+    }
+    let notice = match submission {
         Ok(Submission::Command {
             command: InteractiveCommand::Transcript,
             argument: Some(argument),
@@ -1010,34 +1511,6 @@ pub(super) fn handle_active_submission(
             return ActiveSubmission::Rejected(format!(
                 "/{name} starts a new turn and cannot join the running one; wait for it or press Ctrl+C to cancel"
             ));
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Goal,
-            argument: Some("pause"),
-        }) => {
-            composer.take();
-            return ActiveSubmission::Pause;
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Paste,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::ReadClipboard;
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Agents,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenAgents;
-        }
-        Ok(Submission::Command {
-            command: InteractiveCommand::Help,
-            argument: None,
-        }) => {
-            composer.take();
-            return ActiveSubmission::OpenHelp;
         }
         Ok(Submission::Command {
             command: InteractiveCommand::Goal,
@@ -1064,6 +1537,28 @@ pub(super) fn handle_active_submission(
     ActiveSubmission::Notice(notice)
 }
 
+// Commands that open a panel or act during a Run consume the draft.
+fn active_panel(
+    submission: &Result<Submission<'_>, CommandParseError>,
+) -> Option<ActiveSubmission> {
+    let Ok(Submission::Command { command, argument }) = submission else {
+        return None;
+    };
+    Some(match (command, argument) {
+        (InteractiveCommand::Usage | InteractiveCommand::Status, None) => {
+            ActiveSubmission::OpenUsage {
+                status: *command == InteractiveCommand::Status,
+            }
+        }
+        (InteractiveCommand::Transcript, None) => ActiveSubmission::OpenTranscript,
+        (InteractiveCommand::Goal, Some("pause")) => ActiveSubmission::Pause,
+        (InteractiveCommand::Paste, None) => ActiveSubmission::ReadClipboard,
+        (InteractiveCommand::Agents, None) => ActiveSubmission::OpenAgents,
+        (InteractiveCommand::Help, None) => ActiveSubmission::OpenHelp,
+        _ => return None,
+    })
+}
+
 pub(super) fn validate_idle_command(
     view: &SessionView,
     command: InteractiveCommand,
@@ -1080,7 +1575,7 @@ pub(super) fn validate_idle_command(
         }
         InteractiveCommand::Rename if argument.is_none() => Err("Usage: /rename TITLE"),
         InteractiveCommand::Rename
-            if argument.is_some_and(|title| title.is_empty() || title.len() > 128) =>
+            if argument.is_some_and(|title| !arany::valid_session_title(title)) =>
         {
             Err("Title is empty or too long; use a shorter title")
         }
@@ -1089,7 +1584,9 @@ pub(super) fn validate_idle_command(
         {
             Err("Provider must be openai, anthropic, chatgpt, or custom:NAME")
         }
-        InteractiveCommand::Model if argument.is_some() => {
+        InteractiveCommand::Model
+            if argument.is_some_and(|argument| argument != super::models::REFRESH_ARGUMENT) =>
+        {
             typed_model_selection(view, argument.expect("model argument")).map(|_| ())
         }
         InteractiveCommand::Agents
@@ -1150,53 +1647,64 @@ pub(super) async fn handle_command(
             };
             return select_model(admission, *session_id, view, model, effort).await;
         }
-        InteractiveCommand::Agents => match argument {
-            Some(argument) => match parse_policy(argument) {
-                Ok(policy) => {
-                    let mut defaults = view.defaults.clone();
-                    defaults.policy = policy;
-                    if let Err(error) =
-                        update_defaults(admission, *session_id, view, defaults).await
-                    {
-                        return recover_defaults_change(error);
-                    }
-                    format!("Next-Run collaboration: {policy}")
-                }
-                Err(error) => error.into(),
-            },
-            None => format!("Next-Run collaboration: {}", view.defaults.policy),
-        },
+        InteractiveCommand::Agents => {
+            return agents_command(admission, *session_id, view, argument).await;
+        }
         InteractiveCommand::Usage | InteractiveCommand::Status => {
             return Err("Usage requires the terminal report".into());
         }
         InteractiveCommand::Help => {
             return Err("Help requires the terminal command registry".into());
         }
-        InteractiveCommand::Permissions => {
-            if admission.tools {
-                "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
-            } else if let Some(access) = admission
-                .workspace_permissions
-                .as_ref()
-                .filter(|access| access.is_trusted())
-            {
-                let profiles = access.selected_runtime_profiles();
-                format!(
-                    "Folder trusted; file Tools use the Workspace. Commands/MCP use a private selected-project copy without network or account state; only these selected read-only toolchains and caches are mounted: {}. Arany requests: selected Provider; OS TLS checks may connect separately.",
-                    if profiles.is_empty() {
-                        "none".into()
-                    } else {
-                        profiles.join("; ")
-                    }
-                )
-            } else {
-                "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
-            }
-        }
+        InteractiveCommand::Permissions => permissions_notice(admission),
         InteractiveCommand::Cache => return Ok(cache_command(admission, argument).await),
         _ => "Command is not available in this build".into(),
     };
     Ok(notice)
+}
+
+async fn agents_command(
+    admission: &Admission,
+    session_id: SessionId,
+    view: &mut SessionView,
+    argument: Option<&str>,
+) -> Result<String, LoopError> {
+    Ok(match argument {
+        Some(argument) => match parse_policy(argument) {
+            Ok(policy) => {
+                let mut defaults = view.defaults.clone();
+                defaults.policy = policy;
+                if let Err(error) = update_defaults(admission, session_id, view, defaults).await {
+                    return recover_defaults_change(error);
+                }
+                format!("Next-Run collaboration: {policy}")
+            }
+            Err(error) => error.into(),
+        },
+        None => format!("Next-Run collaboration: {}", view.defaults.policy),
+    })
+}
+
+fn permissions_notice(admission: &Admission) -> String {
+    if admission.tools {
+        "Tools requested from private tools.json; native protection must be admitted before a Run. File mutation requires the write grant; command changes are discarded. Primary only; commands/MCP have no network, host home or account state. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+    } else if let Some(access) = admission
+        .workspace_permissions
+        .as_ref()
+        .filter(|access| access.is_trusted())
+    {
+        let profiles = access.selected_runtime_profiles();
+        format!(
+            "Folder trusted; file Tools use the Workspace. Commands/MCP use a private selected-project copy without network or account state; only these selected read-only toolchains and caches are mounted: {}. Arany requests: selected Provider; OS TLS checks may connect separately.",
+            if profiles.is_empty() {
+                "none".into()
+            } else {
+                profiles.join("; ")
+            }
+        )
+    } else {
+        "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
+    }
 }
 
 async fn resume_command(
@@ -1281,7 +1789,7 @@ async fn rename_command(
     let Some(title) = argument else {
         return Ok("Usage: /rename TITLE".into());
     };
-    if title.is_empty() || title.len() > 128 {
+    if !arany::valid_session_title(title) {
         return Ok("Error: invalid Run request".into());
     }
     if view.created_sequence == 0 {
@@ -1354,6 +1862,19 @@ async fn provider_command(
     } else {
         format!("Provider: {profile}")
     })
+}
+
+async fn build_cache_used(admission: &Admission) -> Option<u64> {
+    let path = admission.state_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        StateRoot::open_existing(&path)
+            .ok()?
+            .build_cache_bytes()
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn cache_command(admission: &Admission, argument: Option<&str>) -> String {
@@ -1469,15 +1990,12 @@ fn parse_policy(argument: &str) -> Result<CollaborationPolicy, &'static str> {
         return Err("invalid collaboration policy");
     }
     match (mode, count) {
-        ("single", None) => Ok(CollaborationPolicy::Single),
-        ("auto", count) if count.unwrap_or(3) <= 8 => Ok(CollaborationPolicy::Auto {
-            max_active_children: count.unwrap_or(3),
-        }),
-        ("team", count) if (1..=8).contains(&count.unwrap_or(3)) => Ok(CollaborationPolicy::Team {
-            max_active_children: count.unwrap_or(3),
-        }),
-        _ => Err("invalid collaboration policy"),
+        ("single", None) => Some(CollaborationPolicy::Single),
+        ("auto", count) => CollaborationPolicy::auto(count),
+        ("team", count) => CollaborationPolicy::team(count),
+        _ => None,
     }
+    .ok_or("invalid collaboration policy")
 }
 
 #[cfg(test)]
@@ -1739,39 +2257,15 @@ mod tests {
                 .contains("Context left: unknown (not reported)")
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
-            supervisor: None,
-            worker_policy: None,
-            agent_definitions: None,
-            roster: None,
-            providers: None,
-            provider: arany::ProviderRecord::parse("openai").expect("Provider record"),
-            model: "gpt-5.4".into(),
-            effort: None,
-            custom_profile_provenance: None,
-            saved_api_account_id: None,
-            chatgpt_provenance: None,
-            output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-            context_window_tokens: None,
-            policy: CollaborationPolicy::Single,
             output_token_cap: 1024,
-            provider_concurrency: 1,
-            workspace_device: 1,
             workspace_inode: 1,
-            user_instruction_digest: None,
-            instruction_sources: Vec::new(),
-            launch_directory: String::new(),
-            include_digests: Vec::new(),
-            history_run_ids: Vec::new(),
-            excluded_history_runs: 0,
             context_usage: Some(ContextUsage {
                 used_bytes: 32_000,
                 budget_bytes: 65_536,
                 compactable_bytes: 20_000,
                 tool_history_bytes: 0,
             }),
-            compaction_event_sequence: None,
-            compaction_content_digest: None,
-            tool_policy: None,
+            ..arany::test_support::run_config()
         });
         let notice =
             crate::presentation::usage_pages(&view, true, Some(starting_sequence)).concat();
@@ -1912,64 +2406,64 @@ mod tests {
     fn linear_settings_take_number_value_and_reject_invalid_rows_unchanged() {
         let mut preferences = Preferences::default();
         let original = preferences;
-        for value in [
-            "",
-            "3",
-            "3 ",
-            "0 64",
-            "12 64",
-            "12 yes",
-            "12 wheel only",
-            "13 yes",
-            "14 on",
-            "x 64",
-            "calls=64",
-            "combined",
-            "1 fullscreen",
-            "2 tabs",
-            "3 0",
-            "3 4294967296",
-            "4 0",
-            "5 0s",
-            "6 600.001s",
-            "7 119.999s",
-            "6 unlimited",
-            "8 0B",
-            "9 257",
-            "10 1073741825B",
-            "10 1B",
-            "10 1073741823B",
-            "11 8589934593B",
-            "11 1B",
-            "11 8589934591B",
-            "5 60000",
-            "6 30000",
-            "8 512",
-            "5 2h",
-            "5 -1s",
-            "5 +1s",
-            "5 NaNs",
-            "5 1e3s",
-            "5 .5s",
-            "5 1.s",
-            "5 1..5s",
-            "5 1ms",
-            "5 0.0001s",
-            "5 1s 1m",
-            "5 1s 1s",
-            "5 1s junk",
-            "5 18446744073709551615h",
-            "5 18446744073709551.615s 1s",
-            "6 4294967.296s",
-            "8 unlimited",
-            "8 0.1B",
-            "8 1GB 1MB",
-            "8 1XB",
-            "8 18446744073709551616B",
-            "8 18446744073709551615TB",
-            "8 0.0000000000000000000000000000000000000001KB",
+        for (table, value) in [
+            (SETTINGS, ""),
+            (LIMITS, "1"),
+            (LIMITS, "1 "),
+            (LIMITS, "0 64"),
+            (SETTINGS, "3 64"),
+            (SETTINGS, "3 yes"),
+            (SETTINGS, "3 wheel only"),
+            (SETTINGS, "4 yes"),
+            (LIMITS, "10 on"),
+            (SETTINGS, "x 64"),
+            (SETTINGS, "calls=64"),
+            (SETTINGS, "combined"),
+            (SETTINGS, "1 fullscreen"),
+            (SETTINGS, "2 tabs"),
+            (LIMITS, "1 0"),
+            (LIMITS, "1 4294967296"),
+            (LIMITS, "2 0"),
+            (LIMITS, "3 0s"),
+            (LIMITS, "4 600.001s"),
+            (LIMITS, "5 119.999s"),
+            (LIMITS, "4 unlimited"),
+            (LIMITS, "6 0B"),
+            (LIMITS, "7 257"),
+            (LIMITS, "8 1073741825B"),
+            (LIMITS, "8 1B"),
+            (LIMITS, "8 1073741823B"),
+            (LIMITS, "9 8589934593B"),
+            (LIMITS, "9 1B"),
+            (LIMITS, "9 8589934591B"),
+            (LIMITS, "3 60000"),
+            (LIMITS, "4 30000"),
+            (LIMITS, "6 512"),
+            (LIMITS, "3 8.001h"),
+            (LIMITS, "3 -1s"),
+            (LIMITS, "3 +1s"),
+            (LIMITS, "3 NaNs"),
+            (LIMITS, "3 1e3s"),
+            (LIMITS, "3 .5s"),
+            (LIMITS, "3 1.s"),
+            (LIMITS, "3 1..5s"),
+            (LIMITS, "3 1ms"),
+            (LIMITS, "3 0.0001s"),
+            (LIMITS, "3 1s 1m"),
+            (LIMITS, "3 1s 1s"),
+            (LIMITS, "3 1s junk"),
+            (LIMITS, "3 18446744073709551615h"),
+            (LIMITS, "3 18446744073709551.615s 1s"),
+            (LIMITS, "4 4294967.296s"),
+            (LIMITS, "6 unlimited"),
+            (LIMITS, "6 0.1B"),
+            (LIMITS, "6 1GB 1MB"),
+            (LIMITS, "6 1XB"),
+            (LIMITS, "6 18446744073709551616B"),
+            (LIMITS, "6 18446744073709551615TB"),
+            (LIMITS, "6 0.0000000000000000000000000000000000000001KB"),
         ] {
-            assert!(!apply_setting(&mut preferences, value), "{value}");
+            assert!(!apply_setting(table, &mut preferences, value), "{value}");
             assert_eq!(
                 preferences, original,
                 "invalid value changed draft: {value}"
@@ -1981,40 +2475,140 @@ mod tests {
         let process_limit = preferences.resources.build_processes;
         let build_jobs = match cores {
             Some(cores) => format!(
-                "Build jobs: automatic; {} effective (cores {cores}, process limit {process_limit}) (automatic or 1..cores)",
+                "Build jobs: automatic; {} effective (cores {cores}, process limit {process_limit}) (default) (automatic or 1..cores)",
                 cores.min(process_limit)
             ),
-            None => "Build jobs: automatic; Build unavailable (automatic or 1..cores)".into(),
+            None => {
+                "Build jobs: automatic; Build unavailable (default) (automatic or 1..cores)".into()
+            }
         };
         let build_cpu = match cores {
             Some(cores) => format!(
-                "Build CPU cores: automatic; {cores} effective (1..{cores}) (automatic or 1..cores; Linux quota)"
+                "Build CPU cores: automatic; {cores} effective (1..{cores}) (default) (automatic or 1..cores; Linux quota)"
             ),
             None => {
-                "Build CPU cores: automatic; Build unavailable (automatic or 1..cores; Linux quota)"
+                "Build CPU cores: automatic; Build unavailable (default) (automatic or 1..cores; Linux quota)"
                     .into()
             }
         };
         assert_eq!(
-            linear_setting_rows(preferences),
+            linear_setting_rows(SETTINGS, preferences, None),
             [
-                "Slash menu: tabs (tabs|combined)",
-                "Chat view: fullscreen (fullscreen|classic)",
-                "Goal provider calls: unlimited (number or unlimited)",
-                "Goal tokens: unlimited (number or unlimited)",
-                "Goal active time: unlimited (duration or unlimited)",
-                "Default command timeout: 2 min (duration, e.g. 30s)",
-                "Maximum command timeout: 10 min (duration, e.g. 5m)",
-                "Build memory: 4.0 GB (size, e.g. 512MB)",
-                "Build processes/threads: 256 (number)",
-                "Build writable project: 1.0 GB (size, e.g. 1GB)",
-                "Build cache: 8.0 GB (size, e.g. 8GB)",
-                "Copy on select: on (on|off)",
-                "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)",
-                build_jobs.as_str(),
-                build_cpu.as_str(),
+                "Slash menu: tabs (default) (tabs|combined)",
+                "Chat view: fullscreen (default) (fullscreen|classic)",
+                "Copy on select: on (default) (on|off)",
+                "Newline shortcut: Shift+Enter (default) (shift+enter|alt+enter|ctrl+enter)",
+                "Guard: auto (default) (auto|required|off)",
+                "Guard folders: opens the folders every guarded command may read",
+                "Limits: opens /limits",
             ]
         );
+        assert_eq!(setting_rows(SETTINGS, preferences, None)[6], "Limits ›");
+        assert!(linear_link(SETTINGS, "7").is_some() && linear_link(SETTINGS, "5").is_none());
+        assert!(apply_setting(SETTINGS, &mut preferences, "5 off"));
+        assert_eq!(preferences.guard, arany::GuardMode::Off);
+        assert_eq!(
+            decode_settings(&encode_settings(preferences).expect("encoded settings")).guard,
+            arany::GuardMode::Auto
+        );
+        assert!(apply_setting(SETTINGS, &mut preferences, "5 default"));
+        assert!(!apply_setting(SETTINGS, &mut preferences, "7 on"));
+        assert_eq!(
+            linear_setting_rows(LIMITS, preferences, None),
+            [
+                "Provider calls per task: unlimited (default) (number or unlimited)",
+                "Tokens per task: unlimited (default) (number or unlimited)",
+                "Active time per task: unlimited (default) (duration or unlimited)",
+                "Default command timeout: 2 min (default) (duration, e.g. 30s)",
+                "Maximum command timeout: 10 min (default) (duration, e.g. 5m)",
+                "Build memory: 4.0 GB (default) (size, e.g. 512MB)",
+                "Build processes/threads: 256 (default) (number)",
+                "Build writable project: 1.0 GB (default) (size, e.g. 1GB)",
+                "Build cache: unlimited (default) (size or unlimited, e.g. 8GB)",
+                build_jobs.as_str(),
+                build_cpu.as_str(),
+                "Context window: 100% (default) (percent or tokens, e.g. 80% or 500k)",
+                "Editor changes: files: 512 (default) (number of files)",
+                "Editor changes: size: 64.0 MB (default) (size, e.g. 64MB)",
+            ]
+        );
+        for (raw, expected) in [
+            ("80%", arany::ContextWindow::Percent(80)),
+            ("500k", arany::ContextWindow::Tokens(500_000)),
+            ("500000", arany::ContextWindow::Tokens(500_000)),
+        ] {
+            assert!(apply_setting(
+                LIMITS,
+                &mut preferences,
+                &format!("12 {raw}")
+            ));
+            assert_eq!(preferences.context_window, expected);
+        }
+        for rejected in ["12 5%", "12 101%", "12 1000", "12 3m"] {
+            assert!(
+                !apply_setting(LIMITS, &mut preferences, rejected),
+                "{rejected}"
+            );
+        }
+        assert_eq!(
+            preferences.context_window,
+            arany::ContextWindow::Tokens(500_000)
+        );
+        let saved = encode_settings(preferences).expect("encoded settings");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&saved).unwrap()["preferences"],
+            serde_json::json!({"context_window": "500k"}),
+            "only the changed key is saved"
+        );
+        assert_eq!(decode_settings(&saved), preferences);
+        assert!(apply_setting(LIMITS, &mut preferences, "12 default"));
+        assert_eq!(preferences, Preferences::default());
+        assert!(apply_setting(LIMITS, &mut preferences, "13 300"));
+        assert!(apply_setting(LIMITS, &mut preferences, "14 128MB"));
+        assert_eq!(preferences.resources.editor_change_files, 300);
+        assert_eq!(preferences.resources.editor_change_bytes, 128 * 1024 * 1024);
+        for rejected in [
+            "13 0",
+            "13 2049",
+            "13 unlimited",
+            "14 1B",
+            "14 2GB",
+            "14 unlimited",
+        ] {
+            assert!(
+                !apply_setting(LIMITS, &mut preferences, rejected),
+                "{rejected}"
+            );
+        }
+        assert!(apply_setting(LIMITS, &mut preferences, "13 default"));
+        assert!(apply_setting(LIMITS, &mut preferences, "14 default"));
+        assert_eq!(preferences, Preferences::default());
+        let mut cycled = Vec::new();
+        for _ in 0..CONTEXT_WINDOW_PRESETS.len() {
+            cycle_setting(LIMITS, &mut preferences, 11, true, Some(400_000));
+            cycled.push(preferences.context_window.to_string());
+        }
+        assert_eq!(
+            cycled,
+            ["75%", "50%", "256k", "128k", "100%", "75%", "50%"],
+            "token presets above the model window are skipped"
+        );
+        preferences = Preferences::default();
+        cycle_setting(LIMITS, &mut preferences, 11, false, None);
+        assert_eq!(preferences.context_window.to_string(), "128k");
+        preferences = Preferences::default();
+        assert!(
+            SETTINGS
+                .iter()
+                .all(|setting| setting.input != SettingInput::Typed)
+        );
+        let typed = LIMITS
+            .iter()
+            .filter(|setting| setting.input == SettingInput::Typed)
+            .map(|setting| setting.label)
+            .collect::<Vec<_>>();
+        assert!(typed.contains(&"Context window") && typed.contains(&"Build memory"));
+        assert!(!typed.contains(&"Chat view") && !typed.contains(&"Newline shortcut"));
         for (raw, expected) in [
             ("30s", 30_000),
             ("5m", 300_000),
@@ -2024,7 +2618,7 @@ mod tests {
             ("0.001S", 1),
             ("0.0001m", 6),
         ] {
-            assert!(apply_setting(&mut preferences, &format!("5 {raw}")));
+            assert!(apply_setting(LIMITS, &mut preferences, &format!("3 {raw}")));
             assert_eq!(preferences.goal_budget.max_active_ms, Some(expected));
         }
         for (raw, expected) in [
@@ -2036,46 +2630,140 @@ mod tests {
             ("0.00390625KB", 4),
             ("4.0 GB", 4 * 1024_u64.pow(3)),
         ] {
-            assert!(apply_setting(&mut preferences, &format!("8 {raw}")));
+            assert!(apply_setting(LIMITS, &mut preferences, &format!("6 {raw}")));
             assert_eq!(preferences.resources.build_memory_bytes, expected);
         }
-        assert!(apply_setting(&mut preferences, "6 1.5s"));
+        assert!(apply_setting(LIMITS, &mut preferences, "4 1.5s"));
         assert_eq!(preferences.resources.default_command_timeout_ms, 1500);
-        assert!(apply_setting(&mut preferences, "10 512MB"));
+        assert!(apply_setting(LIMITS, &mut preferences, "8 512MB"));
         assert_eq!(preferences.resources.build_project_bytes, 512 * 1024 * 1024);
-        assert!(apply_setting(&mut preferences, "11 0B"));
-        assert_eq!(preferences.resources.build_cache_bytes, 0);
-        assert!(apply_setting(&mut preferences, "11 8gb"));
-        assert_eq!(preferences.resources.build_cache_bytes, 8 * 1024_u64.pow(3));
+        assert!(apply_setting(LIMITS, &mut preferences, "9 0B"));
+        assert_eq!(
+            preferences.resources.build_cache_bytes,
+            BuildCacheSize::DISABLED
+        );
+        assert!(apply_setting(LIMITS, &mut preferences, "9 8gb"));
+        assert_eq!(
+            preferences.resources.build_cache_bytes,
+            BuildCacheSize::Bytes(8 * 1024_u64.pow(3))
+        );
+        assert!(apply_setting(LIMITS, &mut preferences, "9 unlimited"));
+        assert_eq!(
+            preferences.resources.build_cache_bytes,
+            BuildCacheSize::Unlimited
+        );
+        assert_eq!(
+            setting_rows(LIMITS, preferences, Some(3_435_973_837))[8],
+            "Build cache: unlimited (default) · 3.2 GB used"
+        );
         for shortcut in NewlineShortcut::ALL {
             assert!(apply_setting(
+                SETTINGS,
                 &mut preferences,
-                &format!("13 {}", shortcut.label().to_ascii_lowercase())
+                &format!("4 {}", shortcut.label().to_ascii_lowercase())
             ));
             assert_eq!(preferences.newline, shortcut);
-            cycle_setting(&mut preferences, 12, true);
-            cycle_setting(&mut preferences, 12, false);
+            cycle_setting(SETTINGS, &mut preferences, 3, true, None);
+            cycle_setting(SETTINGS, &mut preferences, 3, false, None);
             assert_eq!(preferences.newline, shortcut);
         }
-        assert!(apply_setting(&mut preferences, "1 combined"));
-        assert!(apply_setting(&mut preferences, "2  fullscreen"));
-        assert!(apply_setting(&mut preferences, "3 8"));
+        assert!(apply_setting(SETTINGS, &mut preferences, "1 combined"));
+        assert!(apply_setting(SETTINGS, &mut preferences, "2  fullscreen"));
+        assert!(apply_setting(LIMITS, &mut preferences, "1 8"));
         assert_eq!(preferences.goal_budget.max_provider_calls, Some(8));
-        assert!(apply_setting(&mut preferences, "3 unlimited"));
-        assert!(apply_setting(&mut preferences, "5 1min"));
+        assert!(apply_setting(LIMITS, &mut preferences, "1 unlimited"));
+        assert!(apply_setting(LIMITS, &mut preferences, "3 1min"));
         assert_eq!(preferences.goal_budget.max_active_ms, Some(60_000));
-        assert!(apply_setting(&mut preferences, "5 unlimited"));
-        assert!(apply_setting(&mut preferences, "4 100000"));
-        assert!(apply_setting(&mut preferences, "7 5m"));
-        assert!(apply_setting(&mut preferences, "12 off"));
+        assert!(apply_setting(LIMITS, &mut preferences, "3 unlimited"));
+        assert!(apply_setting(LIMITS, &mut preferences, "2 100000"));
+        assert!(apply_setting(LIMITS, &mut preferences, "5 5m"));
+        assert!(apply_setting(SETTINGS, &mut preferences, "3 off"));
         assert!(!preferences.copy_on_select);
-        cycle_setting(&mut preferences, 11, true);
+        cycle_setting(SETTINGS, &mut preferences, 2, true, None);
         assert!(preferences.copy_on_select);
         assert_eq!(preferences.completion, CompletionLayout::Combined);
         assert_eq!(preferences.view, TerminalMode::Fullscreen);
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
         assert_eq!(preferences.goal_budget.max_tokens, Some(100_000));
         assert_eq!(preferences.resources.max_command_timeout_ms, 300_000);
+        assert!(
+            setting_rows(LIMITS, preferences, None).contains(&"Tokens per task: 100000".into())
+        );
+        assert!(apply_setting(LIMITS, &mut preferences, "2 default"));
+        assert!(
+            setting_rows(LIMITS, preferences, None)
+                .contains(&"Tokens per task: unlimited (default)".into())
+        );
+        assert!(apply_setting(LIMITS, &mut preferences, "1 64"));
+        reset_setting(LIMITS, &mut preferences, 0);
+        assert_eq!(preferences.goal_budget, Preferences::default().goal_budget);
+        for table in [SETTINGS, LIMITS] {
+            for row in 0..table.len() {
+                reset_setting(table, &mut preferences, row);
+            }
+        }
+        assert_eq!(preferences, Preferences::default());
+    }
+
+    #[test]
+    fn goal_budget_cycles_start_at_their_unlimited_default() {
+        let mut preferences = Preferences::default();
+        for (row, first) in [(0, Some(256)), (2, Some(arany::MAX_GOAL_ACTIVE_MS))] {
+            cycle_setting(LIMITS, &mut preferences, row, true, None);
+            let budget = preferences.goal_budget;
+            assert_eq!(
+                budget
+                    .max_provider_calls
+                    .map(u64::from)
+                    .or(budget.max_active_ms),
+                first
+            );
+            cycle_setting(LIMITS, &mut preferences, row, false, None);
+            assert_eq!(preferences, Preferences::default());
+        }
+    }
+
+    #[test]
+    fn saved_settings_keep_only_changed_keys_and_follow_current_defaults() {
+        assert_eq!(
+            encode_settings(Preferences::default()).unwrap(),
+            br#"{"preferences":{}}"#
+        );
+        let mut changed = Preferences::default();
+        changed.goal_budget.max_provider_calls = Some(64);
+        changed.resources.build_jobs = Some(2);
+        changed.view = TerminalMode::Classic;
+        let record = encode_settings(changed).unwrap();
+        assert_eq!(
+            record,
+            br#"{"preferences":{"goal_budget":{"max_provider_calls":64},"resources":{"build_jobs":2},"view":"classic"}}"#
+        );
+        assert_eq!(decode_settings(&record), changed);
+    }
+
+    #[test]
+    fn saved_settings_ignore_unknown_and_invalid_keys_and_default_missing_ones() {
+        let expected = Preferences {
+            view: TerminalMode::Classic,
+            ..Preferences::default()
+        };
+        for tolerated in [
+            br#"{"version":9,"preferences":{"view":"classic","unknown":1}}"#.as_slice(),
+            br#"{"preferences":{"view":"classic","goal_budget":{"unknown":1}},"other":true}"#,
+            br#"{"preferences":{"view":"classic","goal_budget":3}}"#,
+            br#"{"preferences":{"view":"classic","completion":"unknown"}}"#,
+            br#"{"preferences":{"view":"classic","goal_budget":{"max_provider_calls":0}}}"#,
+        ] {
+            assert_eq!(decode_settings(tolerated), expected);
+        }
+        for defaulted in [
+            br#"{}"#.as_slice(),
+            br#"{"preferences":3}"#,
+            br#"{"preferences":{"view":"classic""#,
+            b"not json",
+        ] {
+            assert_eq!(decode_settings(defaulted), Preferences::default());
+        }
     }
 
     #[test]
@@ -2098,13 +2786,20 @@ mod tests {
                 build_jobs: None,
                 build_cpu_cores: None,
                 build_project_bytes: 513 * 1024 * 1024,
-                build_cache_bytes: 1025 * 1024 * 1024,
+                build_cache_bytes: BuildCacheSize::Bytes(1025 * 1024 * 1024),
+                editor_change_files: 300,
+                editor_change_bytes: 33 * 1024 * 1024,
             },
             copy_on_select: false,
             newline: NewlineShortcut::AltEnter,
+            context_window: arany::ContextWindow::Tokens(123_456),
+            guard: arany::GuardMode::Required,
         };
-        assert!(setting_rows(custom).contains(&"Build memory: 1.0009765625 KB".into()));
-        assert!(setting_rows(custom).contains(&"Build cache: 1.0009765625 GB".into()));
+        let rows = setting_rows(LIMITS, custom, None);
+        assert!(rows.contains(&"Build memory: 1.0009765625 KB".into()));
+        assert!(rows.contains(&"Context window: 123456".into()));
+        assert!(rows.contains(&"Build cache: 1.0009765625 GB".into()));
+        assert!(rows.contains(&"Editor changes: size: 33.0 MB".into()));
         for mut original in [defaults, custom] {
             for memory in [
                 1,
@@ -2118,19 +2813,26 @@ mod tests {
             ] {
                 original.resources.build_memory_bytes = memory;
                 assert!(original.resources.valid());
-                for (index, setting) in SETTINGS.iter().enumerate() {
+                for (table, index, setting) in [SETTINGS, LIMITS].into_iter().flat_map(|table| {
+                    table
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, setting)| setting.input != SettingInput::Link)
+                        .map(move |(index, setting)| (table, index, setting))
+                }) {
                     let number = index + 1;
                     let rendered = (setting.value)(&original);
                     let mut chosen = original;
                     assert!(
-                        apply_setting(&mut chosen, &format!("{number} {rendered}")),
+                        apply_setting(table, &mut chosen, &format!("{number} {rendered}")),
                         "{}: {rendered}",
                         setting.label
                     );
                     assert_eq!(chosen, original, "{}: {rendered}", setting.label);
-                    let accepts_unlimited = matches!(number, 3..=5);
+                    let accepts_unlimited =
+                        std::ptr::eq(table, LIMITS) && matches!(number, 1..=3 | 9);
                     assert_eq!(
-                        apply_setting(&mut chosen, &format!("{number} unlimited")),
+                        apply_setting(table, &mut chosen, &format!("{number} unlimited")),
                         accepts_unlimited,
                         "{}",
                         setting.label
@@ -2213,6 +2915,15 @@ mod tests {
         assert_eq!(
             validate_idle_command(&view, InteractiveCommand::Model, Some("gpt-5.4 medium")),
             Err("Select /provider first")
+        );
+        // `/model refresh` opens the picker instead of selecting a model named refresh.
+        assert!(
+            validate_idle_command(
+                &view,
+                InteractiveCommand::Model,
+                Some(super::super::models::REFRESH_ARGUMENT)
+            )
+            .is_ok()
         );
         view.defaults.provider = Some("openai".into());
         assert!(
@@ -2324,25 +3035,14 @@ mod tests {
         let root = StateRoot::open_existing(&admission.state_dir).unwrap();
         for document in [
             br#"{"version":1,"completion":"tabs"}"#.as_slice(),
-            br#"{"version":2,"completion":"tabs","view":"classic"}"#.as_slice(),
-            br#"{"version":3,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
-            br#"{"version":5,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"unknown","view":"classic"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"unknown"}}"#.as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic","tools":true}}"#
-                .as_slice(),
-            br#"{"version":2,"preferences":{"completion":"tabs","view":"classic"},"tools":true}"#
-                .as_slice(),
-            br#"{"version":2}"#.as_slice(),
+            br#"{"preferences":{"newline":"enter"}}"#.as_slice(),
             b"malformed",
         ] {
             root.record(RecordKind::UiPreferences)
                 .replace(document)
                 .unwrap();
-            assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
-                settings_or_defaults(&admission).await.unwrap(),
+                restore_settings(&admission).await.unwrap(),
                 Preferences::default()
             );
             assert_eq!(
@@ -2350,7 +3050,8 @@ mod tests {
                     .read()
                     .unwrap()
                     .unwrap(),
-                document
+                document,
+                "reading never rewrites a record"
             );
         }
         save_settings(&admission, combined_classic).await.unwrap();
@@ -2361,93 +3062,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":8,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_jobs":null,"build_cpu_cores":null,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"copy_on_select":true,"newline":"shift_enter"}}"#
-        );
-        // A complete version-3 record upgrades in place, keeping its choices and adding newer defaults.
-        let finite = Preferences {
-            goal_budget: arany::GoalBudget {
-                max_provider_calls: Some(64),
-                max_active_ms: Some(1_800_000),
-                ..Default::default()
-            },
-            ..combined_classic
-        };
-        let version_three = br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
-        root.record(RecordKind::UiPreferences)
-            .replace(version_three)
-            .unwrap();
-        assert_eq!(restore_settings(&admission).await.unwrap(), finite);
-        let upgraded = root
-            .record(RecordKind::UiPreferences)
-            .read()
-            .unwrap()
-            .unwrap();
-        assert_eq!(decode_settings(&upgraded), Ok(finite));
-        for mouse in ["wheel_and_clicks", "wheel_only", "off"] {
-            let mut legacy: Value = serde_json::from_slice(&original).unwrap();
-            legacy["version"] = 5.into();
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_jobs");
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_cpu_cores");
-            legacy["preferences"]["mouse"] = mouse.into();
-            root.record(RecordKind::UiPreferences)
-                .replace(&serde_json::to_vec(&legacy).unwrap())
-                .unwrap();
-            assert_eq!(
-                restore_settings(&admission).await.unwrap(),
-                combined_classic
-            );
-            let migrated = root
-                .record(RecordKind::UiPreferences)
-                .read()
-                .unwrap()
-                .unwrap();
-            assert_eq!(decode_settings(&migrated), Ok(combined_classic));
-            assert!(!migrated.windows(5).any(|window| window == b"mouse"));
-        }
-        for mouse in [false.into(), Value::Null, "unknown".into()] {
-            let mut legacy: Value = serde_json::from_slice(&original).unwrap();
-            legacy["version"] = 5.into();
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_jobs");
-            legacy["preferences"]["resources"]
-                .as_object_mut()
-                .unwrap()
-                .remove("build_cpu_cores");
-            legacy["preferences"]["mouse"] = mouse;
-            let legacy = serde_json::to_vec(&legacy).unwrap();
-            root.record(RecordKind::UiPreferences)
-                .replace(&legacy)
-                .unwrap();
-            assert!(restore_settings(&admission).await.is_err());
-            assert_eq!(
-                root.record(RecordKind::UiPreferences)
-                    .read()
-                    .unwrap()
-                    .unwrap(),
-                legacy
-            );
-        }
-        let mut invalid_shortcut: Value = serde_json::from_slice(&original).unwrap();
-        invalid_shortcut["preferences"]["newline"] = "enter".into();
-        let invalid_shortcut = serde_json::to_vec(&invalid_shortcut).unwrap();
-        root.record(RecordKind::UiPreferences)
-            .replace(&invalid_shortcut)
-            .unwrap();
-        assert!(restore_settings(&admission).await.is_err());
-        assert_eq!(
-            root.record(RecordKind::UiPreferences)
-                .read()
-                .unwrap()
-                .unwrap(),
-            invalid_shortcut
+            br#"{"preferences":{"completion":"combined","view":"classic"}}"#
         );
         root.record(RecordKind::UiPreferences)
             .replace(&original)
@@ -2475,7 +3090,6 @@ mod tests {
                 .unwrap(),
             original
         );
-        #[cfg(unix)]
         {
             use std::os::unix::fs::{PermissionsExt, symlink};
             let pending = admission.state_dir.join("ui-preferences.pending");
@@ -2495,9 +3109,8 @@ mod tests {
             std::fs::remove_file(pending).unwrap();
             let file = admission.state_dir.join("ui-preferences.json");
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
-                settings_or_defaults(&admission).await.unwrap_err(),
+                restore_settings(&admission).await.unwrap_err(),
                 "display settings unavailable or unsafe"
             );
             assert!(
@@ -2740,27 +3353,14 @@ mod tests {
         .expect("provider change");
         assert_eq!(view.defaults.effort, None);
 
-        #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let file = admission.state_dir.join("provider-profiles.json");
-            let profile = serde_json::json!({
-                "version": 1,
-                "profiles": [{
-                    "name": "local",
-                    "protocol": "openai-responses",
-                    "endpoint": "http://127.0.0.1:9321/v1/responses",
-                    "model": "model-1",
-                    "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
-                    "outcome_encoding": "json_schema",
-                    "privacy": "user_authorized",
-                    "max_output_tokens": 4096,
-                    "capability_evidence_version": 2,
-                    "efforts": ["low", "high"]
-                }]
-            });
-            std::fs::write(&file, serde_json::to_vec(&profile).unwrap()).unwrap();
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            arany::test_support::save_custom_profiles(
+                &admission.state_dir,
+                &[arany::CustomProfileDraft {
+                    efforts: vec![Effort::Low, Effort::High],
+                    ..arany::test_support::local_custom_profile(9321)
+                }],
+            );
             for (command, argument) in [
                 (InteractiveCommand::Provider, "custom:local"),
                 (InteractiveCommand::Model, "model-1"),
@@ -2819,7 +3419,6 @@ mod tests {
         );
         assert_eq!(session_id, original_id);
 
-        #[cfg(unix)]
         {
             use rustix::fs::{FlockOperation, flock};
             let held = std::fs::File::open(

@@ -765,8 +765,7 @@ fn roster_resume_and_unused_candidates_cannot_widen_pinned_routing() {
             alternate.provenance =
                 crate::provider::Provenance::Custom(crate::provider::CustomProfileProvenance {
                     endpoint: "https://example.com/responses".into(),
-                    evidence_digest: [1; 32],
-                    capability_evidence_version: 2,
+                    profile_digest: [1; 32],
                 });
         } else {
             alternate.profile = "anthropic".into();
@@ -820,8 +819,8 @@ fn roster_resume_and_unused_candidates_cannot_widen_pinned_routing() {
                 recent_files: Vec::new(),
                 provider: "openai".into(),
                 model: if drifted { "different" } else { "gpt-5.4" }.into(),
-                prompt_version: 1,
-                schema_version: 1,
+                prompt: crate::provider::EffectivePrompts::default()
+                    .pin(crate::provider::PromptFile::Compaction),
                 compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,
                 source_tokens_estimate: 1,

@@ -79,6 +79,64 @@ pub(super) fn start(
     Ok(())
 }
 
+fn check_checkpoint(
+    view: &SessionView,
+    files: &[FilePlan],
+    record: &RewindFinished,
+) -> Result<(), ReplayError> {
+    let reached_go = record.attestation.is_some();
+    if matches!(
+        record.outcome,
+        RewindOutcome::Restored | RewindOutcome::Uncertain
+    ) {
+        if reached_go || record.outcome == RewindOutcome::Restored {
+            let c = record
+                .checkpoint
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            let needed = files.iter().any(|f| f.expected_current.is_some());
+            if (c.status == super::super::CheckpointStatus::NotNeeded) == needed
+                || c.pruned_before_run
+                    .is_some_and(|id| !view.runs.iter().any(|run| run.id == id))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        } else if record.checkpoint.is_some() {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    Ok(())
+}
+
+fn invalidate_restored(
+    goals: &mut [crate::session::GoalView],
+    runs: &mut [crate::session::RunView],
+    files: &[FilePlan],
+) {
+    let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+    for goal in goals {
+        if let Some(contract) = &goal.plan_contract
+            && invalidates(contract, files)
+        {
+            goal.success_state = contract.initial_success_state();
+            goal.success_criterion_satisfied = false;
+        }
+    }
+    for run in runs {
+        for agent in &mut run.agents {
+            if let Some(w) = &mut agent.assignment
+                && w.pins.request.lease.iter().any(|p| {
+                    paths
+                        .iter()
+                        .any(|q| *q == p || q.starts_with(&format!("{p}/")))
+                })
+            {
+                w.verification = None;
+            }
+        }
+    }
+}
+
 pub(super) fn finish(
     view: &mut SessionView,
     record: &RewindFinished,
@@ -109,50 +167,9 @@ pub(super) fn finish(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    let reached_go = record.attestation.is_some();
-    if matches!(
-        record.outcome,
-        RewindOutcome::Restored | RewindOutcome::Uncertain
-    ) {
-        if reached_go || record.outcome == RewindOutcome::Restored {
-            let c = record
-                .checkpoint
-                .as_ref()
-                .ok_or(ReplayError::InvalidTransition)?;
-            let needed = r.files.iter().any(|f| f.expected_current.is_some());
-            if (c.status == super::super::CheckpointStatus::NotNeeded) == needed
-                || c.pruned_before_run
-                    .is_some_and(|id| !view.runs.iter().any(|run| run.id == id))
-            {
-                return Err(ReplayError::InvalidTransition);
-            }
-        } else if record.checkpoint.is_some() {
-            return Err(ReplayError::InvalidTransition);
-        }
-    }
+    check_checkpoint(view, &r.files, record)?;
     if record.outcome == RewindOutcome::Restored {
-        let paths: Vec<_> = r.files.iter().map(|f| f.path.as_str()).collect();
-        for goal in &mut view.goals {
-            if let Some(contract) = &goal.plan_contract
-                && invalidates(contract, &r.files)
-            {
-                goal.success_state = contract.initial_success_state();
-                goal.success_criterion_satisfied = false;
-            }
-        }
-        for run in &mut view.runs {
-            for agent in &mut run.agents {
-                if let Some(w) = &mut agent.assignment
-                    && w.pins.request.lease.iter().any(|p| {
-                        paths
-                            .iter()
-                            .any(|q| *q == p || q.starts_with(&format!("{p}/")))
-                    })
-                {
-                    w.verification = None;
-                }
-            }
-        }
+        invalidate_restored(&mut view.goals, &mut view.runs, &r.files);
     }
     let r = view
         .rewinds

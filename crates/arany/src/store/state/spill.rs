@@ -400,6 +400,7 @@ mod tests {
                 cwd: String::new(),
                 resource_class: None,
                 timeout_ms: None,
+                additional_reads: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,
@@ -432,6 +433,7 @@ mod tests {
                 changeset: Default::default(),
                 selection: None,
                 network_refusals: Vec::new(),
+                hidden_grants: Vec::new(),
             })
             .unwrap(),
             approval_cause: None,

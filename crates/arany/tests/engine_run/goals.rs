@@ -151,14 +151,26 @@ async fn answer_summary_uses_the_first_nonempty_line_and_a_character_boundary() 
     }
 }
 
-pub(super) const READS: usize = 400;
+pub(super) const READS: usize = 80;
+// Small model windows shrink the Tool allowance so pressure arrives within a few dozen calls.
+// Only a native Anthropic or ChatGPT identity reports one.
+pub(super) const MIN_WINDOW_TOKENS: u32 = arany::test_support::MIN_CONTEXT_WINDOW_TOKENS;
+// The smallest window where a summary's reservation still fits.
+pub(super) const SMALL_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 3 / 2;
+// Pinned prose shrinks the allowance so clearing frees less than its floor; unpinned text still clears.
+pub(super) const PROSE_COMPACTION_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 9 / 4;
+// Clearing a page prefix passes its floor while the retained steps plus the next-turn reserve still
+// overflow, so a summary follows.
+pub(super) const GOAL_COMPACTION_WINDOW_TOKENS: u32 = MIN_WINDOW_TOKENS * 3;
 
+// Two lines at the Read line cut make each page most of its step, so pressure arrives in few calls.
 pub(super) fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
+    const LINE_BYTES: usize = arany::test_support::MAX_READ_LINE_CHARS;
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
         workspace.join("notes/data.txt"),
-        format!("{}\n", "x".repeat(31)).repeat(2 * READS),
+        format!("{}\n", "x".repeat(LINE_BYTES - 1)).repeat(2 * READS),
     )
     .expect("bounded fixture file");
     workspace
@@ -283,7 +295,7 @@ fn facts_engine_with_telemetry(
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
-        br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
@@ -795,6 +807,7 @@ async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_ref
             cwd: cwd.into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None,
         };
         let provider = Arc::new(ScriptedProvider::new(
             std::iter::once(crate::tool_outcome(facts_read()))
@@ -1080,9 +1093,11 @@ async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let workspace = facts_workspace(temp.path(), "original");
     let state_path = temp.path().join("state");
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    std::fs::write(state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
-    ).expect("write grant");
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
     let script = (0..4)
         .map(|_| crate::tool_outcome(facts_read()))
         .chain([crate::tool_outcome(arany::ToolCall::Write {
@@ -1094,7 +1109,7 @@ async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let provider = Arc::new(
         ScriptedProvider::new(script)
             .with_chatgpt_account(Uuid::now_v7(), [7; 32])
-            .with_context_window(32_768)
+            .with_context_window(MIN_WINDOW_TOKENS)
             .with_max_output_tokens(4096)
             .with_input_tokens_at(4, 30_000),
     );
@@ -1151,9 +1166,11 @@ async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file(
     }
     let state_path = temp.path().join("state");
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    std::fs::write(state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
-    ).expect("write grant");
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
     let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(
         arany::ToolCall::Write {
             path: "notes/facts.txt".into(),
@@ -1223,9 +1240,11 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
         finish_with("Unexpected continuation after context refusal"),
     ]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    std::fs::write(state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
-    ).expect("write grant");
+    std::fs::write(
+        state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("write grant");
     let mut input = request(&workspace, &"x".repeat(60 * 1024));
     input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
     input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
@@ -1633,6 +1652,15 @@ struct WindowRun {
 }
 
 async fn window_run(window: Option<u32>, reads: usize, reports: &[(usize, u32)]) -> WindowRun {
+    window_run_with(window, arany::ContextWindow::default(), reads, reports).await
+}
+
+async fn window_run_with(
+    window: Option<u32>,
+    setting: arany::ContextWindow,
+    reads: usize,
+    reports: &[(usize, u32)],
+) -> WindowRun {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), &format!("{}\n", "x".repeat(99)).repeat(150));
     let state_path = temp.path().join("state");
@@ -1658,6 +1686,7 @@ async fn window_run(window: Option<u32>, reads: usize, reports: &[(usize, u32)])
         max_runs: 2,
         ..Default::default()
     });
+    input.goal.context_window = setting;
     let result = run_with(
         &engine,
         &provider,
@@ -1706,71 +1735,11 @@ fn clearings(events: &[arany::EventEnvelope]) -> Vec<(usize, u32)> {
 }
 
 #[tokio::test]
-async fn anthropic_evidence_refreshes_between_runs_and_replays_each_window() {
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = facts_workspace(temp.path(), "facts\n");
-    let state_path = temp.path().join("state");
-    let provider = Arc::new(
-        ScriptedProvider::new(vec![
-            finish_with("Checked the facts"),
-            finish_with("Checked the facts again"),
-        ])
-        .with_profile("anthropic", "claude-sonnet-5")
-        .with_context_window_snapshots(vec![Some(100_000), None]),
-    );
-    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
-    let mut first_input = request(&workspace, "Check the facts");
-    first_input.include_paths.clear();
-    let first = run_with(&engine, &provider, first_input, RunControls::default())
-        .await
-        .expect("Anthropic context window admitted");
-    assert_eq!(first.run.status, RunStatus::Finished);
-    let mut second_input = request(&workspace, "Check the facts again");
-    second_input.include_paths.clear();
-    let second = run_with(&engine, &provider, second_input, RunControls::default())
-        .await
-        .expect("Anthropic context window revalidated");
-    assert_eq!(second.run.status, RunStatus::Finished);
-    {
-        let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests[0].input.context_window_tokens, Some(100_000));
-        assert_eq!(requests[1].input.context_window_tokens, None);
-    }
-    engine.close().await.expect("engine shutdown");
-
-    let (first_events, first_view) = replayed(&state_path, first.session_id).await;
-    let (second_events, second_view) = replayed(&state_path, second.session_id).await;
-    assert_eq!(
-        first_view.runs[0]
-            .config
-            .as_ref()
-            .unwrap()
-            .context_window_tokens,
-        Some(100_000)
-    );
-    assert_eq!(
-        second_view.runs[0]
-            .config
-            .as_ref()
-            .unwrap()
-            .context_window_tokens,
-        None
-    );
-    assert!(first_events.iter().any(|event| matches!(
-        &event.event,
-        Event::RunStarted { config, .. } if config.context_window_tokens == Some(100_000)
-    )));
-    assert!(second_events.iter().any(|event| matches!(
-        &event.event,
-        Event::RunStarted { config, .. } if config.context_window_tokens.is_none()
-    )));
-}
-
-#[tokio::test]
 async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_before_the_next_call() {
     let default = window_run(None, 8, &[(7, 244_800)]).await;
     let pressure = window_run(Some(272_000), 8, &[(7, 244_800)]).await;
-    let calm = window_run(Some(272_000), 8, &[(7, 244_799)]).await;
+    let clearing = window_run(Some(272_000), 8, &[(7, 190_400)]).await;
+    let calm = window_run(Some(272_000), 8, &[(7, 190_399)]).await;
 
     let (window, default_budget, default_tools) = window_pin(&default.view, 0);
     assert_eq!(
@@ -1790,11 +1759,15 @@ async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_befor
     assert!(clearings(&default.events).is_empty());
     assert!(
         clearings(&calm.events).is_empty(),
-        "89.99% does not trigger"
+        "69.99% does not trigger"
     );
-    for run in [&default, &pressure, &calm] {
+    for run in [&default, &pressure, &clearing, &calm] {
         assert_eq!(run.compactions, 0);
     }
+    let [(_, cleared)] = clearings(&clearing.events)[..] else {
+        panic!("one clearing after the 70% report");
+    };
+    assert_eq!(cleared, 5);
     let [(index, covered)] = clearings(&pressure.events)[..] else {
         panic!("one clearing after the 90% report");
     };
@@ -1883,6 +1856,54 @@ async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_befor
 }
 
 #[tokio::test]
+async fn context_window_setting_pins_the_effective_window_for_budgets_and_thresholds() {
+    let full = window_run(Some(272_000), 8, &[]).await;
+    // 70% of the effective 136,000 tokens clears, though it is only 35% of the model window.
+    let half = window_run_with(
+        Some(272_000),
+        arany::ContextWindow::Percent(50),
+        8,
+        &[(7, 95_200)],
+    )
+    .await;
+    let calm = window_run_with(
+        Some(272_000),
+        arany::ContextWindow::Tokens(136_000),
+        8,
+        &[(7, 95_199)],
+    )
+    .await;
+    let clamped =
+        window_run_with(Some(272_000), arany::ContextWindow::Tokens(500_000), 8, &[]).await;
+    let unknown = window_run_with(None, arany::ContextWindow::Tokens(136_000), 8, &[]).await;
+    let effective = |run: &WindowRun| {
+        let config = run.view.runs[0].config.as_ref().expect("pinned config");
+        (
+            config.context_window_tokens,
+            config.effective_context_window_tokens,
+        )
+    };
+    assert_eq!(effective(&full), (Some(272_000), Some(272_000)));
+    assert_eq!(effective(&half), (Some(272_000), Some(136_000)));
+    assert_eq!(effective(&calm), (Some(272_000), Some(136_000)));
+    assert_eq!(effective(&clamped), (Some(272_000), Some(272_000)));
+    assert_eq!(effective(&unknown), (None, None));
+    let (_, full_budget, _) = window_pin(&full.view, 0);
+    let (_, half_budget, _) = window_pin(&half.view, 0);
+    // 0.9 x 136,000 fewer tokens at 3 bytes each.
+    assert_eq!(full_budget - half_budget, 734_400 - 367_200);
+    assert_eq!(window_pin(&clamped.view, 0).1, full_budget);
+    assert!(clearings(&full.events).is_empty());
+    assert!(clearings(&calm.events).is_empty());
+    assert!(clearings(&clamped.events).is_empty());
+    assert_eq!(clearings(&half.events).len(), 1);
+    // Each primary call commits the content bytes its reported tokens calibrate against.
+    let calls = &half.view.runs[0].agents[0].provider_calls;
+    assert_eq!(calls.len(), 9);
+    assert!(calls.iter().all(|call| call.context_bytes.is_some()));
+}
+
+#[tokio::test]
 async fn each_pressured_report_maintains_context_once() {
     let repeated = window_run(Some(272_000), 9, &[(7, 244_800), (8, 244_800)]).await;
     let clearings = clearings(&repeated.events);
@@ -1891,20 +1912,22 @@ async fn each_pressured_report_maintains_context_once() {
             .iter()
             .map(|(_, covered)| *covered)
             .collect::<Vec<_>>(),
-        [5, 6],
-        "the second report clears the newly old result"
+        [5],
+        "clearing the newly old result alone would free less than the floor"
     );
-    // The second clearing frees less than one result budget, so one charged summary follows, then the Run ends.
+    // The second report skips clearing for one charged summary, then the Run ends.
     assert_eq!(repeated.compactions, 1);
-    assert_eq!(
-        repeated
-            .events
-            .iter()
-            .filter(|event| matches!(event.event, Event::GoalContextCompacted { .. }))
-            .count(),
-        1
-    );
-    let last_maintenance = clearings[1].0;
+    let summaries: Vec<_> = repeated
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event.event, Event::GoalContextCompacted { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    let [last_maintenance] = summaries[..] else {
+        panic!("one summary after the second report");
+    };
+    assert!(last_maintenance > clearings[0].0);
     assert_eq!(
         repeated.events[last_maintenance..]
             .iter()
@@ -1917,11 +1940,11 @@ async fn each_pressured_report_maintains_context_once() {
 
 #[tokio::test]
 async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
-    for (window, line_repeats, compaction_expected) in [
-        (None, 96, true),
-        (Some(32_768), 96, true),
-        (Some(272_000), 96, false),
-        (Some(32_768), 24, false),
+    for (window, line_repeats) in [
+        (None, 96),
+        (Some(MIN_WINDOW_TOKENS), 96),
+        (Some(272_000), 96),
+        (Some(MIN_WINDOW_TOKENS), 24),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(
@@ -1967,18 +1990,6 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         if let Some(window) = window {
             provider = provider.with_context_window(window);
         }
-        if compaction_expected {
-            provider = provider.with_compactions(vec![Ok(CompactionResponse {
-                summary: "Read 83 lines from notes/facts.txt.".into(),
-                response_id: None,
-                usage: arany::Usage {
-                    input_tokens: Some(12),
-                    output_tokens: Some(8),
-                    ..Default::default()
-                },
-                wire_provenance: None,
-            })]);
-        }
         let provider = Arc::new(provider);
         let mut input = request(&workspace, "Inspect the facts and answer");
         input.session_id = session;
@@ -2017,7 +2028,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
             .max_context_bytes;
         assert!(
             allowance
-                >= if window == Some(32_768) {
+                >= if window == Some(MIN_WINDOW_TOKENS) {
                     72 * 1024
                 } else {
                     192 * 1024
@@ -2026,17 +2037,13 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         );
         assert_successful_in_process_reads(run);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
-        assert_eq!(
-            provider.compact_requests.lock().expect("compactions").len(),
-            usize::from(compaction_expected),
-            "crowded default and small windows compact the large read"
-        );
         assert!(
             provider
-                .compact_responses
+                .compact_requests
                 .lock()
-                .expect("summaries")
-                .is_empty()
+                .expect("compactions")
+                .is_empty(),
+            "a read below two-thirds of the allowance leaves the worst-case reserve to admission"
         );
         if window != Some(272_000) {
             assert!(
@@ -2103,7 +2110,7 @@ async fn primary_fallback_chain_pins_its_smallest_window_or_none() {
 }
 
 #[tokio::test]
-async fn command_step_clears_old_results_with_a_small_context_allowance() {
+async fn worst_case_reserve_alone_neither_clears_nor_summarizes_before_a_command_step() {
     let temp = tempfile::tempdir().expect("temporary root");
     let page = format!("{}\n", "x".repeat(99)).repeat(125);
     let workspace = facts_workspace(temp.path(), &page);
@@ -2117,19 +2124,17 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         cwd: "notes".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
-    let provider = Arc::new(
-        ScriptedProvider::new(
-            (0..4)
-                .map(|_| crate::tool_outcome(facts_read()))
-                .chain([
-                    crate::tool_outcome(command.clone()),
-                    finish_with("Checked the Command refusal"),
-                ])
-                .collect(),
-        )
-        .with_compactions(vec![Err(ProviderError::Unavailable)]),
-    );
+    let provider = Arc::new(ScriptedProvider::new(
+        (0..4)
+            .map(|_| crate::tool_outcome(facts_read()))
+            .chain([
+                crate::tool_outcome(command.clone()),
+                finish_with("Checked the Command refusal"),
+            ])
+            .collect(),
+    ));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Inspect four pages then request a Command");
     input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
@@ -2172,60 +2177,24 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
             && request.input.previous_run_failure.is_none()
             && request.input.last_answer_refused.is_none()
     }));
-    assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
-    assert!(provider.compact_responses.lock().unwrap().is_empty());
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
     assert!(provider.responses.lock().unwrap().is_empty());
     let context = requests[4].input.tools.as_ref().unwrap();
     assert_eq!(context.observation_count(), 4);
-    assert!(context.steps[0].cleared);
-    let mut uncleared = context.clone();
-    uncleared.steps[0].cleared = false;
-    let used = arany::test_support::tool_context_bytes(&uncleared);
+    assert!(context.steps.iter().all(|step| !step.cleared));
+    let used = arany::test_support::tool_context_bytes(context);
     assert!((48 * 1024..=60 * 1024).contains(&used));
     let reserve = arany::test_support::tool_continuation_reserve(requests[4].max_output_tokens, 0);
-    let margin = 2 * 1024;
-    assert!(used + reserve > allowance as usize + margin);
     assert!(
-        arany::test_support::tool_context_bytes(context) + reserve + margin <= allowance as usize
+        used + reserve > allowance as usize,
+        "the worst-case next turn no longer triggers soft maintenance"
     );
-    let after_command = requests[5].input.tools.as_ref().unwrap();
-    assert_eq!(
-        after_command
-            .steps
-            .iter()
-            .filter(|step| step.cleared)
-            .count(),
-        1
-    );
-    assert!(
-        arany::test_support::tool_context_bytes(after_command) + reserve + margin
-            <= allowance as usize,
-        "the denied Command must leave continuation room on both platforms"
-    );
-    let clearing = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event.event,
-                Event::ToolResultsCleared {
-                    covered_tool_count: 1,
-                    ..
-                }
-            )
-        })
-        .expect("older result cleared");
-    assert!(matches!(
-        events[clearing + 1].event,
-        Event::GoalCompactionCallReserved { .. }
-    ));
-    let reservation = events[clearing + 1..]
-        .iter()
-        .position(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
-        .expect("next primary reservation")
-        + clearing
-        + 1;
-    assert!(events[..reservation].iter().all(|event| !matches!(
-        &event.event, Event::ToolStarted { intent, .. } if intent.call == command
+    assert!(used * 3 < allowance as usize * 2);
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolResultsCleared { .. }
+            | Event::GoalCompactionCallReserved { .. }
+            | Event::GoalContextCompacted { .. }
     )));
 }
 
@@ -2241,7 +2210,7 @@ async fn near_full_context_refuses_command_before_dispatch() {
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     std::fs::write(
         state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     )
     .expect("write grant");
     let command = arany::ToolCall::Command {
@@ -2250,6 +2219,7 @@ async fn near_full_context_refuses_command_before_dispatch() {
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(command)]));
     let mut input = request(&workspace, &"x".repeat(60 * 1024));
@@ -2282,7 +2252,7 @@ async fn near_full_context_refuses_command_before_dispatch() {
 }
 
 #[tokio::test]
-async fn insufficient_clearing_summarizes_and_uses_remaining_capacity_before_context_full() {
+async fn clearing_below_the_floor_summarizes_and_uses_remaining_capacity_before_context_full() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "");
     let state_path = temp.path().join("state");
@@ -2303,7 +2273,9 @@ async fn insufficient_clearing_summarizes_and_uses_remaining_capacity_before_con
                     })
                 })
                 .collect(),
-        ),
+        )
+        .with_context_window(MIN_WINDOW_TOKENS)
+        .with_chatgpt_account(uuid::Uuid::now_v7(), [7; 32]),
     );
     let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
     let mut input = request(
@@ -2340,24 +2312,15 @@ async fn insufficient_clearing_summarizes_and_uses_remaining_capacity_before_con
             .iter()
             .any(|tool| tool.intent.limits.result_bytes < 64 * 1024)
     );
-    let clearing = events
-        .iter()
-        .position(|event| matches!(event.event, Event::ToolResultsCleared { .. }))
-        .unwrap();
-    assert!(
-        matches!(events[clearing].event, Event::ToolResultsCleared { cleared_bytes, .. } if cleared_bytes < 64 * 1024)
-    );
-    let summary = events[clearing + 1..]
+    // Empty pages free too little to clear, so maintenance summarizes instead of breaking the cache.
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolResultsCleared { cleared_bytes, .. } if cleared_bytes < 64 * 1024
+    )));
+    let summary = events
         .iter()
         .position(|event| matches!(event.event, Event::GoalCompactionCallReserved { .. }))
-        .unwrap()
-        + clearing
-        + 1;
-    assert!(
-        events[clearing + 1..summary]
-            .iter()
-            .all(|event| !matches!(event.event, Event::GoalProviderCallReserved { .. }))
-    );
+        .unwrap();
     assert!(
         events[summary + 1..]
             .iter()
@@ -2393,7 +2356,11 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).expect("state");
         let config = state_path.join("tools.json");
-        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+        std::fs::write(
+            &config,
+            br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .expect("config");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private config");
         let engine = engine_support::open(
@@ -2404,40 +2371,47 @@ async fn skill_reads_continue_under_context_pressure_without_a_guard_executable(
             },
         )
         .expect("engine");
-        let provider = Arc::new(
-            ScriptedProvider::new(
-                (1..5)
-                    .map(|index| {
-                        tool_outcome(arany::ToolCall::Skill {
-                            name: format!("skill-{index}"),
-                            resource: None,
+        let provider = ScriptedProvider::new(
+            (1..5)
+                .map(|index| {
+                    tool_outcome(arany::ToolCall::Skill {
+                        name: format!("skill-{index}"),
+                        resource: None,
+                    })
+                })
+                .chain([finish_with("Skills read")])
+                .collect(),
+        )
+        .with_max_output_tokens(if compact { 4096 } else { 16384 })
+        .with_compactions(
+            (0..8)
+                .map(|_| {
+                    if compact {
+                        Ok(CompactionResponse {
+                            summary: "Earlier Skills were read; no scripts ran.".into(),
+                            response_id: None,
+                            usage: arany::Usage {
+                                input_tokens: Some(32),
+                                output_tokens: Some(12),
+                                ..Default::default()
+                            },
+                            wire_provenance: None,
                         })
-                    })
-                    .chain([finish_with("Skills read")])
-                    .collect(),
-            )
-            .with_max_output_tokens(if compact { 4096 } else { 16384 })
-            .with_compactions(
-                (0..8)
-                    .map(|_| {
-                        if compact {
-                            Ok(CompactionResponse {
-                                summary: "Earlier Skills were read; no scripts ran.".into(),
-                                response_id: None,
-                                usage: arany::Usage {
-                                    input_tokens: Some(32),
-                                    output_tokens: Some(12),
-                                    ..Default::default()
-                                },
-                                wire_provenance: None,
-                            })
-                        } else {
-                            Err(ProviderError::Rejected)
-                        }
-                    })
-                    .collect(),
-            ),
+                    } else {
+                        Err(ProviderError::Rejected)
+                    }
+                })
+                .collect(),
         );
+        // The summary follows reported pressure: clearing one Skill body alone would free too little.
+        let provider = Arc::new(if compact {
+            provider
+                .with_chatgpt_account(Uuid::now_v7(), [7; 32])
+                .with_context_window(272_000)
+                .with_input_tokens_at(3, 244_800)
+        } else {
+            provider
+        });
         let mut input = request(&workspace, "Apply the selected Skill");
         input.skill = Some("skill-0".into());
         let outcome = run_with(
@@ -2557,10 +2531,16 @@ async fn empty_tool_steps_fail_as_provider_calls_without_refusal() {
 async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() {
     for (case, count, invalid, duplicate, window) in [
         ("four reads", 4, false, false, None),
-        ("over cap", 5, false, false, None),
+        (
+            "over cap",
+            arany::test_support::MAX_STEP_TOOL_CALLS + 1,
+            false,
+            false,
+            None,
+        ),
         ("invalid third call", 4, true, false, None),
         ("duplicate id", 4, false, true, None),
-        ("context full", 4, false, false, Some(32_768)),
+        ("context full", 4, false, false, Some(MIN_WINDOW_TOKENS)),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "bounded facts");
@@ -2584,10 +2564,11 @@ async fn multi_call_steps_commit_all_intents_and_refuse_whole_invalid_batches() 
         let mut provider = ScriptedProvider::new(vec![
             ProviderOutcome::Tools(requests),
             finish_with("Read step settled"),
-        ])
-        .with_context_window_snapshots(vec![window]);
-        if window.is_some() {
-            provider = provider.with_chatgpt_account(Uuid::now_v7(), [7; 32]);
+        ]);
+        if let Some(window) = window {
+            provider = provider
+                .with_context_window(window)
+                .with_chatgpt_account(Uuid::now_v7(), [7; 32]);
         }
         let provider = Arc::new(provider);
         let mut input = request(&workspace, "Read the facts in one step");
@@ -2716,8 +2697,11 @@ async fn concurrent_reads_commit_in_completion_order_and_settle_before_effects()
         let workspace = facts_workspace(temp.path(), "first\nsecond\nthird\nfourth\n");
         let state = temp.path().join("state");
         let engine = facts_engine(StateRoot::admit(&state).unwrap(), &state);
-        std::fs::write(state.join("tools.json"),
-            br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::write(
+            state.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        )
+        .unwrap();
         let count = if case == "four reads" { 4 } else { 2 };
         let reads: Vec<_> = (1..=count)
             .map(|offset| arany::ToolCall::Read {

@@ -15,10 +15,11 @@ pub(crate) fn name_of(operation: &str) -> String {
     format!("{NAME_PREFIX}{operation}")
 }
 
+// `plan` carries the pinned Goal budget only when the primary is offered `arany_plan`.
 pub(crate) fn specs(
     catalog: &Value,
     role: PromptRole,
-    pinned: &crate::session::GoalBudget,
+    plan: Option<&crate::session::GoalBudget>,
 ) -> Vec<ToolSpec> {
     let mut calls = catalog_call_schemas(catalog);
     if role == PromptRole::Researcher {
@@ -28,11 +29,13 @@ pub(crate) fn specs(
             facts_of(call).is_some_and(|facts| facts.family == crate::tools::catalog::Family::File)
         });
     }
-    let plan = (role == PromptRole::Primary).then(|| ToolSpec {
-        name: name_of("plan"),
-        description: "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.".into(),
-        parameters: plan_schema(&calls, pinned),
-    });
+    let plan = plan
+        .filter(|_| role == PromptRole::Primary)
+        .map(|pinned| ToolSpec {
+            name: name_of("plan"),
+            description: "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.".into(),
+            parameters: plan_schema(&calls, pinned),
+        });
     let git_reads = crate::tools::catalog::has_git_reads(&calls);
     let mut specs: Vec<_> = calls
         .into_iter()
@@ -78,7 +81,7 @@ fn spec(mut parameters: Value, discriminator: &str) -> ToolSpec {
         .retain(|field| field != discriminator);
     let description = match operation.as_str() {
         "delegate" => {
-            "Delegate a bounded team of researchers and offered editor assignments in the next settled wave. The primary integrates private edits and verifies the criterion before completing."
+            "Delegate bounded read-only research or leased live-Workspace editor assignments, settled in waves. After an editor finishes, verify its criterion yourself with fresh Tool evidence before answering."
         }
         _ => by_name(&operation).expect("compiled operation").description,
     };
@@ -112,7 +115,7 @@ mod tests {
 
     #[test]
     fn tool_specs_cover_every_catalog_operation() {
-        let primary = specs(&catalog(), PromptRole::Primary, &Default::default());
+        let primary = specs(&catalog(), PromptRole::Primary, Some(&Default::default()));
         assert_eq!(
             names(&primary),
             [
@@ -147,7 +150,7 @@ mod tests {
 
     #[test]
     fn only_the_optional_plan_function_carries_the_contract() {
-        let primary = specs(&catalog(), PromptRole::Primary, &Default::default());
+        let primary = specs(&catalog(), PromptRole::Primary, Some(&Default::default()));
         for spec in &primary {
             assert!(spec.parameters["properties"].get("plan_contract").is_none());
         }
@@ -170,7 +173,11 @@ mod tests {
     fn the_catalog_filters_tools_and_pins_names_without_changing_the_order() {
         let read_only = json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "git": "unavailable"});
         assert_eq!(
-            names(&specs(&read_only, PromptRole::Primary, &Default::default())),
+            names(&specs(
+                &read_only,
+                PromptRole::Primary,
+                Some(&Default::default())
+            )),
             [
                 "arany_list",
                 "arany_read",
@@ -179,7 +186,7 @@ mod tests {
                 "arany_plan"
             ]
         );
-        let primary = specs(&catalog(), PromptRole::Primary, &Default::default());
+        let primary = specs(&catalog(), PromptRole::Primary, Some(&Default::default()));
         let command = primary
             .iter()
             .find(|spec| spec.name == "arany_command")
@@ -206,11 +213,24 @@ mod tests {
             names(&specs(
                 &Value::Null,
                 PromptRole::Primary,
-                &Default::default()
+                Some(&Default::default())
             ))
             .len()
                 <= 5
         );
+    }
+
+    #[test]
+    fn plain_chat_primary_is_not_offered_the_plan() {
+        let offered = names(&specs(
+            &catalog(),
+            PromptRole::Primary,
+            Some(&Default::default()),
+        ))
+        .len();
+        let plain = specs(&catalog(), PromptRole::Primary, None);
+        assert!(!names(&plain).contains(&"arany_plan"));
+        assert_eq!(names(&plain).len() + 1, offered);
     }
 
     #[test]
@@ -229,7 +249,7 @@ mod tests {
             let mut catalog = catalog();
             catalog["git"] = git;
             catalog["operations"] = operations;
-            let specs = specs(&catalog, PromptRole::Primary, &Default::default());
+            let specs = specs(&catalog, PromptRole::Primary, Some(&Default::default()));
             let description = &specs
                 .iter()
                 .find(|s| s.name == "arany_command")
@@ -246,10 +266,15 @@ mod tests {
     fn researchers_get_only_read_only_research_tools_without_plan_contracts() {
         for role in [PromptRole::Researcher, PromptRole::Editor] {
             assert!(
-                !names(&specs(&catalog(), role, &Default::default())).contains(&"arany_git_branch")
+                !names(&specs(&catalog(), role, Some(&Default::default())))
+                    .contains(&"arany_git_branch")
             );
         }
-        let researcher = specs(&catalog(), PromptRole::Researcher, &Default::default());
+        let researcher = specs(
+            &catalog(),
+            PromptRole::Researcher,
+            Some(&Default::default()),
+        );
         assert_eq!(
             names(&researcher),
             [

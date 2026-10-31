@@ -77,13 +77,7 @@ impl Event {
                 }
                 report.validate()
             }
-            Self::GoalProviderCallReserved { goal_id, .. } => {
-                if goal_id.valid() {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
+            Self::GoalProviderCallReserved { goal_id, .. } => checked(goal_id.valid()),
             _ => Err(ReplayError::InvalidPayload),
         }
     }

@@ -14,7 +14,7 @@ A test owns one claim: the observable behavior or failure it protects. State the
 
 ### Test support in the crate
 
-- Unit tests live in `#[cfg(test)] mod tests` beside the code (private access through `use super::*`); integration tests in `tests/` see only the public surface, each file its own crate, shared helpers under `crates/arany/src/test_support/`.
+- Unit tests live in `#[cfg(test)] mod tests` beside the code (private access through `use super::*`); integration tests in `tests/` see only the public surface, each file its own crate, shared helpers in one test-support module.
 - Hooks a test needs on a production type (fault injection, gates, scripted peers) go behind a Cargo feature, conventionally `test-support`, enabled for the crate's own tests through `[dev-dependencies] crate = { path = ".", features = ["test-support"] }`. `#[cfg(test)]` on a production type is invisible to integration tests and other crates, and it makes the type's shape differ between `cargo build` and `cargo test`. Keep the feature additive and the hooks few: one fault plan, not one method per fault.
 - A fake that mirrors a renderer (an inverse parser) lives next to the renderer with a round-trip test, so a format change fails there rather than in a distant journey.
 
@@ -49,7 +49,7 @@ Every task, channel and shared value has an owner, a lifetime, a capacity and a 
 - **No `std::sync::MutexGuard` or `RefCell` borrow across `.await`.** The guard makes the future `!Send` (spawn fails to compile) and, on a single-threaded runtime, deadlocks. Scope the lock in a block or in a sync method that returns the value (`await_holding_lock`, `await_holding_refcell_ref`).
 - **`select!` branches are cancel-safe or own their progress.** Cancel-safe but lose fair-queue position when cancelled: `Mutex::lock`, `Semaphore::acquire`, `Notify::notified`. Not cancel-safe (partial progress is lost): `read_exact`/`read_to_end`/`read_to_string`/`write_all`; a future from this group in a loop is pinned outside the loop and passed as `&mut`. `biased;` makes polling order explicit (shutdown first); default order is random.
 - **Cancellation is dropping the future.** Completed side effects remain; a dropped Tokio future runs no code afterwards. A value that must be settled on cancellation is a guard with `Drop`, not a line after the `.await`. Use the project's cancellation type rather than adding `tokio-util`.
-- **`async fn` in traits** (Rust 1.75) for traits used only generically; `#[async_trait]` (boxes each future, one allocation per call) for a trait used as `dyn Trait` or whose futures must be `Send` from generic code. Arany's `Provider` is `Arc<dyn Provider>`, so it stays on `async-trait`.
+- **`async fn` in traits** (Rust 1.75) for traits used only generically; `#[async_trait]` (boxes each future, one allocation per call) for a trait used as `dyn Trait` or whose futures must be `Send` from generic code. A trait held as `Arc<dyn Trait>` therefore stays on `async-trait`.
 - **Deadlines wrap awaits**: `tokio::time::timeout(d, fut)` at the boundary that owns the budget, never a sleep-and-poll. Paused test time auto-advances when the runtime is idle, so pause only after real I/O finishes.
 - An `async fn` with no `.await` is a sync function (`unused_async`); a future over 16 KiB on the stack (`large_futures`) is boxed at its spawn site.
 

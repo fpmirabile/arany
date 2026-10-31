@@ -42,7 +42,7 @@ pub struct FileState {
     pub executable: bool,
 }
 impl FileState {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         crate::validate::valid_digest(&self.sha256) && self.bytes <= 1024 * 1024
     }
 }
@@ -69,6 +69,7 @@ pub struct RewindPlan {
 #[serde(rename_all = "snake_case")]
 pub enum NonRewindable {
     Host,
+    Git,
     UnguardedCommand,
     Mcp,
     Cache,
@@ -347,10 +348,10 @@ pub(crate) struct RemovedFileResult {
     pub removed: FileState,
 }
 
-fn removed_file(output: &str, expected: &str) -> Result<FileState, ReplayError> {
+fn removed_file(output: &str, expected: &Option<String>) -> Result<FileState, ReplayError> {
     let result: RemovedFileResult =
         serde_json::from_str(output).map_err(|_| ReplayError::InvalidPayload)?;
-    if !result.removed.valid() || result.removed.sha256 != expected {
+    if !result.removed.valid() || Some(&result.removed.sha256) != expected.as_ref() {
         return Err(ReplayError::InvalidPayload);
     }
     Ok(result.removed)
@@ -360,30 +361,13 @@ pub(crate) fn publication_files(
     _run: &super::RunView,
     o: &crate::tools::ToolObservation,
 ) -> Result<Vec<FilePlan>, ReplayError> {
-    let file = |path: String, before, after| FilePlan {
-        path,
-        restore_to: before,
-        expected_current: after,
-        history_drift: false,
-        unavailable: false,
-    };
-    let version = |v: &crate::tools::FileVersion| -> Result<FileState, ReplayError> {
-        let bytes = v
-            .bytes_with_limit(1024 * 1024)
-            .ok_or(ReplayError::InvalidPayload)?;
-        Ok(FileState {
-            sha256: v.sha256.clone(),
-            bytes: bytes.len() as u32,
-            executable: v.executable,
-        })
-    };
     match &o.intent.call {
         ToolCall::Delete {
             path,
             expected_digest,
         } => {
             let removed = removed_file(&o.output, expected_digest)?;
-            Ok(vec![file(path.clone(), Some(removed), None)])
+            Ok(vec![file_plan(path.clone(), Some(removed), None)])
         }
         ToolCall::Move {
             source,
@@ -392,57 +376,86 @@ pub(crate) fn publication_files(
         } => {
             let removed = removed_file(&o.output, expected_digest)?;
             Ok(vec![
-                file(source.clone(), Some(removed.clone()), None),
-                file(destination.clone(), None, Some(removed)),
+                file_plan(source.clone(), Some(removed.clone()), None),
+                file_plan(destination.clone(), None, Some(removed)),
             ])
         }
         ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
         | ToolCall::MultiEdit {
             file_path: path, ..
-        } => {
-            let p: FilePublicationResult =
-                serde_json::from_str(&o.output).map_err(|_| ReplayError::InvalidPayload)?;
-            let expected = match &o.intent.call {
-                ToolCall::Write {
-                    expected_digest, ..
-                } => expected_digest.as_deref(),
-                ToolCall::Edit {
-                    expected_digest, ..
-                }
-                | ToolCall::MultiEdit {
-                    expected_digest, ..
-                } => Some(expected_digest.as_str()),
-                _ => unreachable!(),
-            };
-            let after = FileState {
-                sha256: p.sha256,
-                bytes: p.bytes,
-                executable: p.executable,
-            };
-            if !after.valid()
-                || p.before.as_ref().is_some_and(|v| !v.valid())
-                || p.before.as_ref().map(|v| v.sha256.as_str()) != expected
-            {
-                return Err(ReplayError::InvalidPayload);
-            }
-            Ok(vec![file(path.clone(), p.before, Some(after))])
-        }
+        } => Ok(vec![written_file(o, path)?]),
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt { changeset, .. },
         } => changeset
             .files
             .iter()
             .map(|f| {
-                Ok(file(
+                Ok(file_plan(
                     f.path.clone(),
-                    f.before.as_ref().map(version).transpose()?,
-                    f.after.as_ref().map(version).transpose()?,
+                    f.before.as_ref().map(version_state).transpose()?,
+                    f.after.as_ref().map(version_state).transpose()?,
                 ))
             })
             .collect(),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::EditorWorkspace { files },
+        } => Ok(files
+            .iter()
+            .map(|f| file_plan(f.path.clone(), f.before.clone(), f.after.clone()))
+            .collect()),
         _ => Err(ReplayError::InvalidTransition),
     }
+}
+
+fn file_plan(path: String, before: Option<FileState>, after: Option<FileState>) -> FilePlan {
+    FilePlan {
+        path,
+        restore_to: before,
+        expected_current: after,
+        history_drift: false,
+        unavailable: false,
+    }
+}
+
+fn version_state(v: &crate::tools::FileVersion) -> Result<FileState, ReplayError> {
+    let bytes = v
+        .bytes_with_limit(crate::tools::types::MAX_FILE_BYTES)
+        .ok_or(ReplayError::InvalidPayload)?;
+    Ok(FileState {
+        sha256: v.sha256.clone(),
+        bytes: bytes.len() as u32,
+        executable: v.executable,
+    })
+}
+
+fn written_file(o: &crate::tools::ToolObservation, path: &str) -> Result<FilePlan, ReplayError> {
+    let p: FilePublicationResult =
+        serde_json::from_str(&o.output).map_err(|_| ReplayError::InvalidPayload)?;
+    let expected = match &o.intent.call {
+        ToolCall::Write {
+            expected_digest, ..
+        }
+        | ToolCall::Edit {
+            expected_digest, ..
+        }
+        | ToolCall::MultiEdit {
+            expected_digest, ..
+        } => expected_digest.as_deref(),
+        _ => unreachable!(),
+    };
+    let after = FileState {
+        sha256: p.sha256,
+        bytes: p.bytes,
+        executable: p.executable,
+    };
+    if !after.valid()
+        || p.before.as_ref().is_some_and(|v| !v.valid())
+        || p.before.as_ref().map(|v| v.sha256.as_str()) != expected
+    {
+        return Err(ReplayError::InvalidPayload);
+    }
+    Ok(file_plan(path.to_owned(), p.before, Some(after)))
 }
 
 enum Publication<'a> {
@@ -490,8 +503,53 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
     if !view.rewinds.checkpoints.contains(target) || target.sequence() > view.last_sequence {
         return Err(ReplayError::InvalidTransition);
     }
-    let pruned_through = view
-        .runs
+    let pruned_through = pruned_through(view);
+    let mut scan = PlanScan::default();
+    for run in &view.runs {
+        let started = view.rewinds.checkpoints.iter().find_map(|c| match c {
+            CheckpointTarget::Run { run_id, sequence } if *run_id == run.id => Some(*sequence),
+            _ => None,
+        });
+        let Some(started) = started.filter(|s| *s >= target.sequence()) else {
+            continue;
+        };
+        for t in run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|a| &a.tools))
+        {
+            scan.tool(run, t, started)?;
+        }
+    }
+    scan.operations(view, target)?;
+    let PlanScan {
+        mut steps,
+        mut blockers,
+        mut non_rewindable,
+    } = scan;
+    if steps.len() + blockers.len() > MAX_PLANNER_PUBLICATIONS
+        || non_rewindable.len() > 3 * MAX_PLANNER_PUBLICATIONS
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    steps.sort_by_key(|s| s.0);
+    let files = file_plans(steps, pruned_through)?;
+    blockers.sort_unstable();
+    blockers.dedup();
+    non_rewindable.sort_by_key(|s| s.0);
+    let p = RewindPlan {
+        files,
+        blockers,
+        non_rewindable,
+    };
+    if !p.within_limits() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    Ok(p)
+}
+
+fn pruned_through(view: &SessionView) -> u64 {
+    view.runs
         .iter()
         .flat_map(|run| {
             run.tools
@@ -518,83 +576,95 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
                     _ => None,
                 })
         })
-        .unwrap_or(0);
-    let mut steps = Vec::new();
-    let mut blockers = Vec::new();
-    let mut non_rewindable = Vec::new();
-    for run in &view.runs {
-        let started = view.rewinds.checkpoints.iter().find_map(|c| match c {
-            CheckpointTarget::Run { run_id, sequence } if *run_id == run.id => Some(*sequence),
-            _ => None,
-        });
-        let Some(started) = started.filter(|s| *s >= target.sequence()) else {
-            continue;
+        .unwrap_or(0)
+}
+
+#[derive(Default)]
+struct PlanScan<'a> {
+    steps: Vec<(u64, Publication<'a>)>,
+    blockers: Vec<u64>,
+    non_rewindable: Vec<(u64, NonRewindable)>,
+}
+
+impl<'a> PlanScan<'a> {
+    fn tool(
+        &mut self,
+        run: &'a super::RunView,
+        t: &'a super::ToolView,
+        started: u64,
+    ) -> Result<(), ReplayError> {
+        if t.started_sequence.is_some() && super::checkpoint::publication(&t.intent) {
+            match &t.observation {
+                None => self.blockers.push(t.finished_sequence.unwrap_or(started)),
+                Some(o) if o.disposition == ToolDisposition::Uncertain => {
+                    self.blockers.push(t.finished_sequence.unwrap_or(started))
+                }
+                Some(o) if o.disposition == ToolDisposition::Succeeded => {
+                    self.steps.push((
+                        t.finished_sequence.ok_or(ReplayError::InvalidTransition)?,
+                        Publication::Tool(run, t),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let seq = t.finished_sequence.unwrap_or(started);
+        if t.ran_host() {
+            self.non_rewindable.push((seq, NonRewindable::Host));
+        }
+        if t.ran_unguarded() {
+            self.non_rewindable
+                .push((seq, NonRewindable::UnguardedCommand));
+        }
+        if t.ran_git_write() {
+            self.non_rewindable.push((seq, NonRewindable::Git));
+        }
+        let Some(o) = &t.observation else {
+            return Ok(());
         };
-        for t in run
-            .tools
-            .iter()
-            .chain(run.agents.iter().flat_map(|a| &a.tools))
-        {
-            if t.started_sequence.is_some() && super::checkpoint::publication(&t.intent) {
-                match &t.observation {
-                    None => blockers.push(t.finished_sequence.unwrap_or(started)),
-                    Some(o) if o.disposition == ToolDisposition::Uncertain => {
-                        blockers.push(t.finished_sequence.unwrap_or(started))
-                    }
-                    Some(o) if o.disposition == ToolDisposition::Succeeded => {
-                        steps.push((
-                            t.finished_sequence.ok_or(ReplayError::InvalidTransition)?,
-                            Publication::Tool(run, t),
-                        ));
-                    }
-                    _ => {}
-                }
+        if o.attestation.is_some() || o.disposition == ToolDisposition::Uncertain {
+            match o.intent.call {
+                ToolCall::McpCall { .. } => self.non_rewindable.push((seq, NonRewindable::Mcp)),
+                ToolCall::Mkdir { .. } => self.non_rewindable.push((seq, NonRewindable::Directory)),
+                _ => {}
             }
-            let seq = t.finished_sequence.unwrap_or(started);
-            if t.ran_host() {
-                non_rewindable.push((seq, NonRewindable::Host));
-            }
-            if t.ran_unguarded() {
-                non_rewindable.push((seq, NonRewindable::UnguardedCommand));
-            }
-            let Some(o) = &t.observation else {
+        }
+        if matches!(
+            o.cache_update,
+            crate::tools::CacheUpdate::Published | crate::tools::CacheUpdate::Uncertain
+        ) {
+            self.non_rewindable.push((seq, NonRewindable::Cache));
+        }
+        Ok(())
+    }
+
+    fn operations(
+        &mut self,
+        view: &'a SessionView,
+        target: &CheckpointTarget,
+    ) -> Result<(), ReplayError> {
+        for r in &view.rewinds.operations {
+            if r.started_sequence < target.sequence() {
                 continue;
-            };
-            if o.attestation.is_some() || o.disposition == ToolDisposition::Uncertain {
-                match o.intent.call {
-                    ToolCall::McpCall { .. } => non_rewindable.push((seq, NonRewindable::Mcp)),
-                    ToolCall::Mkdir { .. } => non_rewindable.push((seq, NonRewindable::Directory)),
-                    _ => {}
-                }
             }
-            if matches!(
-                o.cache_update,
-                crate::tools::CacheUpdate::Published | crate::tools::CacheUpdate::Uncertain
-            ) {
-                non_rewindable.push((seq, NonRewindable::Cache));
+            if r.outcome() == RewindOutcome::Uncertain {
+                self.blockers.push(r.started_sequence);
+            }
+            if r.outcome() == RewindOutcome::Restored {
+                self.steps.push((
+                    r.finished_sequence.ok_or(ReplayError::InvalidTransition)?,
+                    Publication::Rewind(r),
+                ));
             }
         }
+        Ok(())
     }
-    for r in &view.rewinds.operations {
-        if r.started_sequence < target.sequence() {
-            continue;
-        }
-        if r.outcome() == RewindOutcome::Uncertain {
-            blockers.push(r.started_sequence);
-        }
-        if r.outcome() == RewindOutcome::Restored {
-            steps.push((
-                r.finished_sequence.ok_or(ReplayError::InvalidTransition)?,
-                Publication::Rewind(r),
-            ));
-        }
-    }
-    if steps.len() + blockers.len() > MAX_PLANNER_PUBLICATIONS
-        || non_rewindable.len() > 3 * MAX_PLANNER_PUBLICATIONS
-    {
-        return Err(ReplayError::InvalidTransition);
-    }
-    steps.sort_by_key(|s| s.0);
+}
+
+fn file_plans(
+    steps: Vec<(u64, Publication<'_>)>,
+    pruned_through: u64,
+) -> Result<Vec<FilePlan>, ReplayError> {
     let mut files: BTreeMap<String, FilePlan> = BTreeMap::new();
     for (_, publication) in steps {
         let (changes, unavailable) = publication.changes(pruned_through)?;
@@ -621,18 +691,7 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
         .into_values()
         .filter(|f| f.restore_to != f.expected_current)
         .collect();
-    blockers.sort_unstable();
-    blockers.dedup();
-    non_rewindable.sort_by_key(|s| s.0);
-    let p = RewindPlan {
-        files,
-        blockers,
-        non_rewindable,
-    };
-    if !p.within_limits() {
-        return Err(ReplayError::InvalidTransition);
-    }
-    Ok(p)
+    Ok(files)
 }
 
 pub(crate) fn workspace(start: &RewindStarted) -> WorkspaceIdentity {

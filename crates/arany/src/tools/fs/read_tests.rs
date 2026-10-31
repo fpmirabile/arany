@@ -13,7 +13,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     std::fs::write(temp.path().join("outside.txt"), "outside-canary").unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let read = |path: &str| ToolCall::Read {
         path: path.into(),
@@ -44,8 +44,9 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         std::time::Duration::ZERO
     );
     assert!(
-        runtime.reservation_overhead(&ToolCall::GitStatus { path: "src".into() })
-            > std::time::Duration::ZERO
+        runtime.reservation_overhead(&ToolCall::McpList {
+            server: "local".into()
+        }) > std::time::Duration::ZERO
     );
 
     assert_eq!(
@@ -55,16 +56,19 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
             cwd: "".into(),
             resource_class: None,
             timeout_ms: None,
+            additional_reads: None
         }),
         super::guard::RESERVATION_OVERHEAD,
     );
 
     for pin in ["grant", "enforcement"] {
-        let intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            read("src/main.rs"),
-        );
+        let intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                read("src/main.rs"),
+            )
+            .unwrap();
         let presented = intent.clone();
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(3600)).await;
@@ -124,11 +128,13 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     assert!(!escape.output.contains("outside-canary"));
     assert!(escape.valid());
 
-    let mut invalid_intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        read("src/main.rs"),
-    );
+    let mut invalid_intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            read("src/main.rs"),
+        )
+        .unwrap();
     let control = runtime
         .execute(invalid_intent.clone(), super::Cancellation::new())
         .await;
@@ -168,18 +174,20 @@ async fn in_process_results_fit_their_budget_before_serialization() {
     std::fs::write(workspace.join("src/big.txt"), &text).unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     for result_bytes in [256, 4096, MAX_TOOL_RESULT_BYTES as u32] {
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Read {
-                path: "src/big.txt".into(),
-                offset: None,
-                limit: None,
-            },
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Read {
+                    path: "src/big.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+            )
+            .unwrap();
         intent.limits.result_bytes = result_bytes;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
@@ -195,19 +203,21 @@ async fn in_process_results_fit_their_budget_before_serialization() {
                 .collect::<String>()
         );
     }
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        ToolCall::Search {
-            path: "src".into(),
-            query: "quoted".into(),
-            regex: false,
-            include: None,
-            case_sensitive: true,
-            offset: 0,
-            limit: 100,
-        },
-    );
+    let mut intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Search {
+                path: "src".into(),
+                query: "quoted".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
+            },
+        )
+        .unwrap();
     intent.limits.result_bytes = 1024;
     let observation = inspect_read(&runtime, intent).await;
     assert_eq!(observation.disposition, ToolDisposition::Succeeded);
@@ -215,28 +225,21 @@ async fn in_process_results_fit_their_budget_before_serialization() {
     let rows: Value = serde_json::from_str(&observation.output).unwrap();
     assert_eq!(rows["may_be_truncated"], true);
     assert!(!rows["entries"].as_array().unwrap().is_empty());
-    let mut intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        ToolCall::Read {
-            path: "src/big.txt".into(),
-            offset: None,
-            limit: Some(1),
-        },
-    );
+    let mut intent = runtime
+        .intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Read {
+                path: "src/big.txt".into(),
+                offset: None,
+                limit: Some(1),
+            },
+        )
+        .unwrap();
     intent.limits.result_bytes = 128;
     let observation = inspect_read(&runtime, intent).await;
     assert_eq!(observation.disposition, ToolDisposition::Limit);
     assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
-}
-
-#[test]
-fn the_primary_prompt_states_the_read_page_limit() {
-    assert!(
-        include_str!("../../provider/prompts/primary.txt").contains(&format!(
-            "a nullable line limit from 1 to {MAX_READ_PAGE_LINES},"
-        ))
-    );
 }
 
 #[tokio::test]
@@ -249,7 +252,7 @@ async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
     std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n".repeat(4096)).unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let mut elapsed = [Duration::ZERO; 40];
     for sample in &mut elapsed {
@@ -286,7 +289,7 @@ async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() 
     std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").unwrap();
     let runtime = in_process_runtime(
         &workspace,
-        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
     let slots = std::sync::Arc::clone(&runtime.reads.as_ref().unwrap().slots);
     let held = slots

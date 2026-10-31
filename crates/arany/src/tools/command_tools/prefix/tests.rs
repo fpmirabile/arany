@@ -33,9 +33,13 @@ fn prefix_preserves_script_and_cwd_and_dispatch_drift_never_degrades() {
         cwd: "src".into(),
         resource_class: Some(crate::tools::ToolResourceClass::Build),
         timeout_ms: Some(crate::tools::types::DEFAULT_COMMAND_TIMEOUT_MS),
+        additional_reads: None,
     };
-    let intent =
-        runtime.wrap_command(runtime.intent(RunId::new(), AgentRunId::new(), original.clone()));
+    let intent = runtime.wrap_command(
+        runtime
+            .intent(RunId::new(), AgentRunId::new(), original.clone())
+            .unwrap(),
+    );
     assert_eq!(
         intent.call,
         ToolCall::Command {
@@ -44,6 +48,7 @@ fn prefix_preserves_script_and_cwd_and_dispatch_drift_never_degrades() {
             cwd: "src".into(),
             resource_class: Some(crate::tools::ToolResourceClass::Build),
             timeout_ms: Some(crate::tools::types::DEFAULT_COMMAND_TIMEOUT_MS),
+            additional_reads: None
         }
     );
     assert!(runtime.verify_wrap(&intent).is_ok());
@@ -53,24 +58,29 @@ fn prefix_preserves_script_and_cwd_and_dispatch_drift_never_degrades() {
         runtime.verify_wrap(&intent),
         Err(ToolError::ChangedInput)
     ));
-    let degraded =
-        runtime.wrap_command(runtime.intent(intent.run_id, intent.agent_run_id, original.clone()));
+    let degraded = runtime.wrap_command(
+        runtime
+            .intent(intent.run_id, intent.agent_run_id, original.clone())
+            .unwrap(),
+    );
     assert_eq!(degraded.call, original);
     assert_eq!(degraded.wrap.unwrap().stage, WrapStage::PinRefused);
 }
 
 fn assert_direct_wrapper_policy(runtime: &ToolRuntime, tool: &CommandTool, prior: &EffectIntent) {
-    let mut direct = runtime.intent(
-        prior.run_id,
-        prior.agent_run_id,
-        ToolCall::CommandUnguarded {
-            program: tool.executable.clone(),
-            args: vec!["sudo id".into()],
-            cwd: String::new(),
-            justification: "Inspect the wrapper".into(),
-            prefix_rule: None,
-        },
-    );
+    let mut direct = runtime
+        .intent(
+            prior.run_id,
+            prior.agent_run_id,
+            ToolCall::CommandUnguarded {
+                program: tool.executable.clone(),
+                args: vec!["sudo id".into()],
+                cwd: String::new(),
+                justification: "Inspect the wrapper".into(),
+                prefix_rule: None,
+            },
+        )
+        .unwrap();
     let mut pin = crate::tools::types::test_host_pin();
     pin.executable = tool.executable.clone();
     pin.sha256 = tool.sha256.clone();
@@ -101,12 +111,12 @@ fn prefix_payload_and_replay_facts_refuse_a_different_final_command() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut other = tool.clone();
     other.executable = "/programs/other".into();
     other.selected_path = other.executable.clone();
     let record = CommandTools {
-        version: VERSION,
         tools: vec![tool.clone(), other],
     };
     assert!(CommandTools::parse(&serde_json::to_vec(&record).unwrap()).is_err());
@@ -123,6 +133,7 @@ fn prefix_payload_and_replay_facts_refuse_a_different_final_command() {
         cwd: String::new(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     assert!(!wrap.valid(&forged));
 }

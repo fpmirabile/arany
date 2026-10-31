@@ -1,10 +1,8 @@
-use crate::loopback::{check_profile, read_request, send_response, wait_product, write_profile};
+use crate::loopback::{wait_product, write_profile};
 use arany::{Event, StateRoot, Store, create_session, rename_session};
 use std::{
     net::TcpListener,
     process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 #[test]
@@ -19,43 +17,6 @@ fn limited_exec_reports_store_failure_without_an_answer() {
         &state,
         listener.local_addr().expect("listener address").port(),
     );
-
-    let conformance = thread::spawn(move || {
-        listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..3 {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "synthetic probe {index} missing");
-                        thread::yield_now();
-                    }
-                    Err(error) => panic!("synthetic accept failed: {error}"),
-                }
-            };
-            let body = read_request(&mut stream);
-            let body: serde_json::Value =
-                serde_json::from_slice(&body).expect("synthetic request JSON");
-            let input: serde_json::Value = crate::semantic::input(&body);
-            assert!(
-                input
-                    .get("workspace_guidance")
-                    .is_none_or(serde_json::Value::is_null)
-            );
-            let response = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
-                }
-                _ => serde_json::json!(r#"synthetic summary"#),
-            };
-            send_response(&mut stream, index, response);
-        }
-        listener
-    });
-    check_profile(&workspace, &state);
-    let listener = conformance.join().expect("three data-free probes");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()

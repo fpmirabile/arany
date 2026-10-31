@@ -8,7 +8,10 @@ async fn budget_incident_failed_reads_then_next_action_has_distinct_terminal_fee
         let workspace = facts_workspace(temp.path(), "facts");
         let state_path = temp.path().join("state");
         let state = StateRoot::admit(&state_path).unwrap();
-        private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state_path.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         let provider = Arc::new(
             ScriptedProvider::new(
                 (0..3)
@@ -149,6 +152,7 @@ impl Provider for InProcessReads {
             _ => crate::tool_outcome(ToolCall::Glob {
                 pattern: "**".into(),
                 path: "src".into(),
+                offset: 0,
                 limit: 100,
             }),
         };
@@ -175,17 +179,10 @@ fn assert_read_observations(run: &arany::RunView) {
     for tool in &run.tools {
         let observation = tool.observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        if matches!(tool.intent.call, ToolCall::Read { .. }) {
-            assert!(matches!(
-                observation.attestation,
-                Some(arany::Attestation::InProcess { .. })
-            ));
-        } else {
-            assert!(matches!(
-                observation.attestation,
-                Some(arany::Attestation::Guard(_))
-            ));
-        }
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::InProcess { .. })
+        ));
         assert!(!observation.output.contains("secret-canary"));
         assert!(!observation.output.contains(".env"));
         if matches!(tool.intent.call, ToolCall::Search { .. }) {
@@ -204,7 +201,7 @@ fn assert_read_observations(run: &arany::RunView) {
     for tool in globbed {
         assert_eq!(
             tool.observation.as_ref().unwrap().output,
-            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false}"#
+            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false,"next_offset":null}"#
         );
     }
 }
@@ -223,7 +220,7 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
     let state = StateRoot::admit(&state_path).unwrap();
     private_file(
         &state_path.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
     let provider = Arc::new(InProcessReads);
     let engine = arany::test_support::engine::open(
@@ -294,7 +291,10 @@ async fn unknown_spill_is_an_attested_failed_read_outside_workspace_path_scopes(
     std::fs::create_dir_all(workspace.join("notes")).unwrap();
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
-    private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(
+        &state_path.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    );
     let provider = Arc::new(ScriptedProvider::new(vec![
         crate::tool_outcome(ToolCall::Read {
             path: format!("spill:{}", "a".repeat(64)),

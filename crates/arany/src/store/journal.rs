@@ -1,4 +1,6 @@
-use super::replay::{MAX_SESSION_EVENTS, replay_through, resolve_open_view, resolve_view};
+use super::replay::{
+    MAX_SESSION_EVENTS, ReplayMode, replay_through, resolve_open_view, resolve_view,
+};
 use super::{
     AdmissionKind, DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit,
 };
@@ -26,49 +28,14 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
                 run_id TEXT,
                 agent_run_id TEXT,
                 kind TEXT NOT NULL,
-                event_version INTEGER NOT NULL CHECK (event_version >= 1),
                 payload TEXT NOT NULL CHECK (json_valid(payload)),
                 created_at_ms INTEGER NOT NULL
             ) STRICT;
             CREATE INDEX events_by_session ON events (session_id, sequence);
             CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
-            CREATE TABLE provider_evidence (
-                profile_name TEXT PRIMARY KEY,
-                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
-                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL,
-                check_id TEXT NOT NULL
-            ) STRICT;
-            CREATE TABLE native_provider_evidence (
-                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL,
-                context_window_tokens INTEGER CHECK(context_window_tokens IS NULL OR context_window_tokens BETWEEN 32768 AND 2000000),
-                check_id TEXT NOT NULL
-            ) STRICT;
-            CREATE TABLE provider_check_events (
-                sequence INTEGER PRIMARY KEY,
-                check_id TEXT NOT NULL,
-                target_key BLOB NOT NULL CHECK(length(target_key) = 32),
-                kind TEXT NOT NULL,
-                event_version INTEGER NOT NULL CHECK(event_version >= 1),
-                payload TEXT NOT NULL CHECK(json_valid(payload) AND length(CAST(payload AS BLOB)) <= 4096),
-                created_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE INDEX provider_checks_by_id ON provider_check_events (check_id, sequence);
-            CREATE INDEX provider_checks_by_target ON provider_check_events (target_key, sequence);
-            CREATE TABLE migrations (
-                id TEXT PRIMARY KEY CHECK (length(id) = 36),
-                from_schema INTEGER NOT NULL,
-                to_schema INTEGER NOT NULL,
-                rewritten_events INTEGER NOT NULL CHECK (rewritten_events >= 0),
-                backup TEXT NOT NULL,
-                recorded_at_ms INTEGER NOT NULL
-            ) STRICT;
-            PRAGMA user_version=7;
+            PRAGMA user_version=15;
             COMMIT;";
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 15;
 
 pub(super) struct HotSession {
     session_id: SessionId,
@@ -160,10 +127,7 @@ fn admit_in_transaction(
         0
     };
     if MAX_DATABASE_BYTES - page_count * page_size
-        < ADMISSION_HEADROOM_BYTES
-            + event_bytes
-            + run_start_extra
-            + super::check::reserved_bytes(transaction, page_size)?
+        < ADMISSION_HEADROOM_BYTES + event_bytes + run_start_extra
     {
         return Err(StoreError::StorageFull);
     }
@@ -251,7 +215,6 @@ pub(super) fn open_database(
         SCHEMA_VERSION => {}
         _ => return Err(StoreError::InvalidHistory),
     }
-    super::check::validate(&connection)?;
     Ok(connection)
 }
 
@@ -278,7 +241,7 @@ fn append_in_transaction(
     event: Event,
 ) -> Result<(EventEnvelope, Option<HotSession>), StoreError> {
     let payload = event.payload()?;
-    if payload.len() > event_payload_limit(event.kind(), event.version()) {
+    if payload.len() > event_payload_limit(event.kind()) {
         return Err(StoreError::StorageFull);
     }
     let data_version: i64 = transaction.query_row("PRAGMA data_version", [], |row| row.get(0))?;
@@ -315,15 +278,7 @@ fn append_in_transaction(
     }
     let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    let check_reserve = super::check::reserved_bytes(transaction, page_size)?;
-    let append_bytes = if check_reserve > 0 {
-        payload.len() as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size
-    } else {
-        0
-    };
-    if MAX_DATABASE_BYTES - page_count * page_size
-        < ADMISSION_HEADROOM_BYTES + check_reserve + append_bytes
-    {
+    if MAX_DATABASE_BYTES - page_count * page_size < ADMISSION_HEADROOM_BYTES {
         return Err(StoreError::StorageFull);
     }
     let created_at_ms = SystemTime::now()
@@ -372,7 +327,14 @@ fn append_in_transaction(
     ) {
         let mut candidate = existing.ok_or(StoreError::InvalidHistory)?;
         candidate.push(envelope.clone());
-        prior_view = replay_through(transaction, session_id, &candidate, 0, &mut 0, false, None)?;
+        prior_view = replay_through(
+            transaction,
+            session_id,
+            &candidate,
+            0,
+            &mut 0,
+            ReplayMode::Open,
+        )?;
     } else if let Some(view) = &mut prior_view {
         view.apply_committed(&envelope)?;
         if matches!(envelope.event, Event::RunStarted { .. }) {
@@ -382,15 +344,14 @@ fn append_in_transaction(
         prior_view = SessionView::replay_open(session_id, std::slice::from_ref(&envelope))?;
     }
     transaction.execute(
-        "INSERT INTO events (sequence, session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO events (sequence, session_id, run_id, agent_run_id, kind, payload, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             i64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
             session_id.to_string(),
             envelope.run_id.map(|id| id.to_string()),
             envelope.agent_run_id.map(|id| id.to_string()),
             envelope.event.kind(),
-            envelope.event.version(),
             payload,
             envelope.created_at_ms,
         ],
@@ -496,7 +457,7 @@ fn validate_fork(transaction: &Transaction<'_>, boundary: ForkLineage) -> Result
         event,
         created_at_ms: 0,
     };
-    replay_through(transaction, id, &[envelope], 0, &mut 1, false, None)?;
+    replay_through(transaction, id, &[envelope], 0, &mut 1, ReplayMode::Open)?;
     Ok(())
 }
 

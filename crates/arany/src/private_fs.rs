@@ -7,6 +7,11 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod acl;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod clone;
+#[cfg(target_os = "macos")]
+pub(crate) use clone::clone_at;
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -24,7 +29,6 @@ impl From<io::Error> for Error {
 pub(crate) struct PrivateDirectory {
     pub path: PathBuf,
     pub dir: Dir,
-    #[cfg(unix)]
     pub ancestors: Vec<(u64, u64)>,
 }
 
@@ -46,10 +50,6 @@ pub(crate) fn open_workspace_directory(path: &Path) -> Result<Dir, Error> {
             dir = dir.open_dir_nofollow(name)?;
         }
         Ok(dir)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Err(Error::InvalidPath)
     }
 }
 
@@ -117,7 +117,6 @@ pub(crate) fn open_directory_checked(
         return Err(Error::InvalidPath);
     }
     let mut dir = Dir::open_ambient_dir(Path::new("/"), ambient_authority())?;
-    #[cfg(unix)]
     let mut ancestors = vec![identity(&dir)?];
     for (index, name) in names.iter().enumerate() {
         check()?;
@@ -125,7 +124,6 @@ pub(crate) fn open_directory_checked(
             Ok(next) => dir = next,
             Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
                 let mut builder = DirBuilder::new();
-                #[cfg(unix)]
                 {
                     use cap_std::fs::DirBuilderExt;
                     builder.mode(0o700);
@@ -140,25 +138,21 @@ pub(crate) fn open_directory_checked(
             Err(error) => return Err(Error::Io(error)),
         }
         check_directory(&dir, index + 1 == names.len())?;
-        #[cfg(unix)]
         ancestors.push(identity(&dir)?);
     }
     Ok(PrivateDirectory {
         path: normalized,
         dir,
-        #[cfg(unix)]
         ancestors,
     })
 }
 
-#[cfg(unix)]
 fn identity(dir: &Dir) -> Result<(u64, u64), Error> {
     use cap_std::fs::MetadataExt;
     let metadata = dir.dir_metadata()?;
     Ok((metadata.dev(), metadata.ino()))
 }
 
-#[cfg(unix)]
 pub(crate) fn check_directory(dir: &Dir, leaf: bool) -> Result<(), Error> {
     check_acl(dir, leaf)?;
     use cap_std::fs::MetadataExt;
@@ -178,12 +172,6 @@ pub(crate) fn check_directory(dir: &Dir, leaf: bool) -> Result<(), Error> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub(crate) fn check_directory(_dir: &Dir, _leaf: bool) -> Result<(), Error> {
-    Err(Error::InvalidPath)
-}
-
-#[cfg(unix)]
 pub(crate) fn check_acl(file: &impl std::os::fd::AsFd, private: bool) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     {
@@ -193,10 +181,5 @@ pub(crate) fn check_acl(file: &impl std::os::fd::AsFd, private: bool) -> Result<
     {
         let _ = (file, private);
         Ok(())
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (file, private);
-        Err(Error::NotPrivate)
     }
 }

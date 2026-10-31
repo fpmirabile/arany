@@ -16,7 +16,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     use std::path::PathBuf;
 
     let config = Config {
-        version: 1,
         workspace_paths: vec![".agents/skills".into()],
         write: false,
         child_unguarded: crate::tools::UnguardedGrant::Denied,
@@ -35,7 +34,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
-        git_identity: None,
         locale: Default::default(),
         environment_sha256: None,
         network: None,
@@ -45,14 +43,18 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         host_settings_admitted: true,
         host_settings_saved: Default::default(),
         guard_available: true,
-        git_writes_available: false,
-        host_authentication: Default::default(),
+        guard_mode: crate::tools::GuardMode::Auto,
+        once_reads: Default::default(),
+        git_environment: None,
+        git_hooks: None,
+        repository: None,
+        human_approvals: false,
         handover: None,
         definitions: Default::default(),
         permissions: None,
         result_filter: None,
         unguarded_rules: None,
-        context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
+        context_limit_bytes: std::sync::Arc::new(MAX_TOOL_CONTEXT_BYTES.into()),
         cache_state: None,
         command_tools: Default::default(),
         command_environment: std::sync::Arc::new(crate::tools::CommandEnvironment::for_path(
@@ -102,7 +104,6 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     assert!(!runtime.allows_goal_contract(&contract_for("undeclared", None)));
 }
 
-#[cfg(unix)]
 #[test]
 fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
     for layout in [
@@ -179,25 +180,6 @@ fn project_skill_discovery_preserves_grants_and_reports_missing_installation() {
             }
         }
         let discovery = super::project_skills(&workspace);
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        if !matches!(layout, "absent" | "lock") {
-            assert!(
-                matches!(&discovery, Err(super::ToolError::ProtectionUnavailable)),
-                "{layout}: {:?}",
-                discovery.as_ref().err()
-            );
-            let mut value = config_value();
-            value["workspace_paths"] = json!(["."]);
-            let mut config: Config = serde_json::from_value(value).unwrap();
-            assert!(
-                matches!(
-                    config.discover_skills(&workspace),
-                    Err(super::ToolError::ProtectionUnavailable)
-                ),
-                "{layout}"
-            );
-            continue;
-        }
         if matches!(
             layout,
             "linked-directory" | "linked-file" | "oversized" | "too-many"
@@ -278,7 +260,7 @@ async fn an_unavailable_skill_root_does_not_disable_other_tools_or_renew_its_pin
     std::fs::write(workspace.join("note.txt"), "workspace fact").unwrap();
     std::fs::write(good.join("SKILL.md"), "good instructions").unwrap();
     let config = serde_json::from_value(json!({
-        "version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],
+        "workspace_paths":["."],"write":false,"commands":[],"mcp":[],
         "skills":[
             {"name":"good","description":"available","directory":good,"files":{"SKILL.md":hex_digest(b"good instructions")}},
             {"name":"missing","description":"unavailable","directory":unavailable,"files":{"SKILL.md":hex_digest(b"late instructions")}}
@@ -351,7 +333,7 @@ async fn skill_text_reads_are_bounded_inert_and_pinned_without_guard_execution()
     let runtime = in_process_runtime(
         &workspace,
         json!({
-            "version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],
+            "workspace_paths":["."],"write":false,"commands":[],"mcp":[],
             "skills":[{"name":"review","description":"Reviewed guidance","directory":directory,
                 "files":{"SKILL.md":hex_digest(body.as_bytes()),"references/note.txt":hex_digest(b"reference")}}]
         }),
@@ -361,8 +343,9 @@ async fn skill_text_reads_are_bounded_inert_and_pinned_without_guard_execution()
         resource: None,
     };
     for limit in [128, 1024, MAX_TOOL_RESULT_BYTES] {
-        let mut intent =
-            runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+        let mut intent = runtime
+            .intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone())
+            .unwrap();
         intent.limits.result_bytes = limit as u32;
         let observation = inspect_read(&runtime, intent).await;
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);

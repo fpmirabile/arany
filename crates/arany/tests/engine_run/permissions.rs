@@ -1,10 +1,6 @@
 use super::*;
+use arany::test_support::private_file;
 use std::os::unix::fs::PermissionsExt;
-
-fn private_file(path: &Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-}
 
 #[tokio::test]
 async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider() {
@@ -13,7 +9,10 @@ async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider()
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
         let state = temp.path().join("state");
         let root = StateRoot::admit(&state).unwrap();
-        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         let engine = engine_support::open(
             root,
             EngineConfig {
@@ -101,14 +100,17 @@ async fn inactive_host_rules_archive_private_bytes_without_admitting_authority()
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
         let state = temp.path().join("state");
         let root = StateRoot::admit(&state).unwrap();
-        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         let path = state.join("unguarded-commands.json");
         let entry = serde_json::json!({
             "workspace": {"path":workspace, "device":1, "inode":2},
             "program":"sh", "args":["-c", "cargo test"], "cwd":"",
             "created_unix_ms":1
         });
-        let mut record = serde_json::json!({"version":1, "commands":[entry.clone()]});
+        let mut record = serde_json::json!({"commands":[entry.clone()]});
         match case {
             "unknown" => record["commands"][0]["extra"] = serde_json::json!(true),
             "duplicate" => record["commands"] = serde_json::json!([entry.clone(), entry]),
@@ -204,9 +206,12 @@ async fn inactive_host_archive_never_pins_authority_and_recreated_sources_refuse
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
     let state = temp.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(
+        &state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    );
     let path = state.join("unguarded-commands.json");
-    let original = br#"{"version":1,"commands":[]}"#;
+    let original = br#"{"commands":[]}"#;
     let edited = b"malformed inactive rules";
     private_file(&path, original);
     let engine = engine_support::open(
@@ -297,7 +302,10 @@ async fn agent_definition_unsafe_sources_refuse_before_provider() {
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
         let state = temp.path().join("state");
         let root = StateRoot::admit(&state).unwrap();
-        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state.join("tools.json"),
+            br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         let agents = state.join("agents");
         std::fs::create_dir(&agents).unwrap();
         std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -380,7 +388,7 @@ async fn a_read_denied_skill_resource_is_denied_before_any_guard_task() {
     let root = StateRoot::admit(&state).unwrap();
     private_file(
         &state.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
     private_file(
         &state.join("permissions.json"),
@@ -459,7 +467,10 @@ async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drif
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
         let state = temp.path().join("state");
         let root = StateRoot::admit(&state).unwrap();
-        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state.join("tools.json"),
+            br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        );
         private_file(
             &state.join("permissions.json"),
             br#"{"permissions":{"ask":["Read"]}}"#,
@@ -678,7 +689,10 @@ async fn declined_tool_summaries_preserve_other_facts_across_compactions() {
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
     let state = temp.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(
+        &state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    );
     private_file(
         &state.join("permissions.json"),
         br#"{"permissions":{"ask":["Read"]}}"#,
@@ -822,7 +836,10 @@ async fn hook_free_permission_step_commits_four_events_and_replays_its_verdict()
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
     let state = temp.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+    private_file(
+        &state.join("tools.json"),
+        br#"{"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    );
     private_file(&state.join("permissions.json"), b"{}");
     let engine = engine_support::open(
         root,
@@ -1588,9 +1605,5 @@ fn assert_concurrent_preflight_refusal(
     let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&run.tools[1].intent).unwrap()).into();
     assert_eq!(record.intent_digest, digest);
     assert!(record.verdict.as_ref().unwrap().approved);
-    assert_eq!(
-        refused.event.version(),
-        arany::test_support::payload_version("ToolPreflightRefused")
-    );
     assert!(run.tools[0].finished_sequence.unwrap() < refused.sequence);
 }

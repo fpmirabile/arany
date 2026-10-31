@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 const MAX_RECORDS: usize = 10_000;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+// Labels from later Events reach only the Run's most recent records.
+const RECENT_RECORDS: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CorpusError {
@@ -83,7 +85,7 @@ impl Corpus {
             key: hmac::Key::new(hmac::HMAC_SHA256, &salt),
             records: Vec::new(),
             count: 0,
-            recent: VecDeque::with_capacity(4),
+            recent: VecDeque::with_capacity(RECENT_RECORDS),
             last_run: None,
             run_step: 0,
         })
@@ -103,6 +105,11 @@ impl Corpus {
 
     pub(crate) fn observe(&mut self, view: &SessionView, envelope: &EventEnvelope) {
         self.evaluator.decide_verdict(view, envelope);
+        self.label_recent(view, envelope);
+        self.record_boundary(view, envelope);
+    }
+
+    fn label_recent(&mut self, view: &SessionView, envelope: &EventEnvelope) {
         match &envelope.event {
             Event::SupervisorVerdictRecorded { verdict, .. } => {
                 if let Some((_, sequence, index)) = self.recent.back()
@@ -149,6 +156,9 @@ impl Corpus {
             }
             _ => {}
         }
+    }
+
+    fn record_boundary(&mut self, view: &SessionView, envelope: &EventEnvelope) {
         let Some(run) = view.runs.last() else { return };
         let Some(actor) = envelope.agent_run_id else {
             return;
@@ -212,7 +222,7 @@ impl Corpus {
             relative_step: self.run_step,
             labels: Labels::default(),
         });
-        if self.recent.len() == 4 {
+        if self.recent.len() == RECENT_RECORDS {
             self.recent.pop_front();
         }
         self.recent

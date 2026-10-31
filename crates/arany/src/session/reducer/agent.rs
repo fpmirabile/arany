@@ -129,6 +129,9 @@ impl SessionView {
         {
             return Err(ReplayError::InvalidTransition);
         }
+        if !super::worker::editor_changes_fit(&intent.call, &goal.resource_settings) {
+            return Err(ReplayError::InvalidTransition);
+        }
         let run = active_run(self, run_id)?;
         if !child_tool_is_admissible(run, agent_run_id, intent) {
             return Err(ReplayError::InvalidTransition);

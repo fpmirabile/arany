@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(unix)]
 #[test]
 #[cfg_attr(not(arany_ci), ignore)]
 fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_blocks_uncertain() {
@@ -45,7 +44,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         .unwrap();
         private_json(
             &state.join("tools.json"),
-            json!({"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+            json!({"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
         );
         let digest = Sha256::digest(b"original")
             .iter()

@@ -24,11 +24,11 @@ impl ToolRuntime {
             && intent.limits.build_cpu_cores == ToolLimits::default().build_cpu_cores
             && intent.limits.network == NetworkGrant::None
         {
-            return Ok(self.process_enforcement_digest);
+            return self.process_digest(&intent.call);
         }
         super::guard::intent_enforcement_digest(
             true,
-            &self.config.runtime_grants,
+            &self.process_config(&intent.call)?.runtime_grants,
             &intent.limits,
             #[cfg(target_os = "macos")]
             self.system_programs.as_deref(),
@@ -38,6 +38,8 @@ impl ToolRuntime {
 
 pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
 pub(super) const MAX_COMMAND_ARGS: usize = 64;
+pub(super) const MAX_JUSTIFICATION_BYTES: usize = 512;
+pub(crate) const MAX_ADDITIONAL_READS_PER_CALL: usize = 4;
 
 #[derive(Clone, Copy)]
 pub(super) enum Truncation {
@@ -52,10 +54,19 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             args,
             cwd,
             timeout_ms,
+            additional_reads,
             ..
         } => {
             (valid_name(program) || super::config::valid_absolute(program))
                 && valid_command("command", args, cwd)
+                && additional_reads.as_ref().is_none_or(|request| {
+                    (1..=MAX_ADDITIONAL_READS_PER_CALL).contains(&request.paths.len())
+                        && request.paths.iter().enumerate().all(|(index, path)| {
+                            super::config::valid_absolute(path)
+                                && !request.paths[..index].contains(path)
+                        })
+                        && valid_justification(&request.justification)
+                })
                 && timeout_ms.is_none_or(|timeout| {
                     (super::types::MIN_COMMAND_TIMEOUT_MS..=super::types::MAX_COMMAND_TIMEOUT_MS)
                         .contains(&timeout)
@@ -80,13 +91,17 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                     && program.len() <= MAX_PATH_BYTES
                     && !program.chars().any(char::is_control)))
                 && valid_command("host", args, cwd)
-                && (1..=512).contains(&justification.len())
-                && !justification
-                    .chars()
-                    .any(|character| character.is_control() && character != '\t')
+                && valid_justification(justification)
         }
         _ => false,
     }
+}
+
+fn valid_justification(justification: &str) -> bool {
+    (1..=MAX_JUSTIFICATION_BYTES).contains(&justification.len())
+        && !justification
+            .chars()
+            .any(|character| character.is_control() && character != '\t')
 }
 
 pub(super) fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
@@ -107,6 +122,7 @@ pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
     if name == "command" {
         fields.push(("resource_class", json!({"type":["string","null"], "enum":["default","build",null], "description":"Optional resource sizing: build for compile and test commands; null inherits the plan or default class. Never widens a recorded plan or grants access."})));
         fields.push(("timeout_ms", json!({"type":["integer","null"], "description":format!("Optional command timeout in milliseconds, {} through {} inclusive; null inherits the plan or pinned default. The pinned maximum and any recorded plan remain ceilings.", super::types::MIN_COMMAND_TIMEOUT_MS, super::types::MAX_COMMAND_TIMEOUT_MS)})));
+        fields.push(("additional_reads", json!({"type":["object","null"], "properties":{"paths":{"type":"array","items":{"type":"string"}},"justification":{"type":"string"}}, "required":["paths","justification"], "additionalProperties":false, "description":format!("Optional request, needing the user's approval, to read and execute up to {MAX_ADDITIONAL_READS_PER_CALL} absolute host directories outside the granted set, with a short reason; null for none. Never writable. Directories the user already allowed need no request.")})));
     }
     if name == "command_unguarded" {
         fields.push(("justification", string()));
@@ -168,9 +184,11 @@ fn prepare_command(site: &GuardContext<'_>) -> Result<tokio::process::Command, T
         args,
         cwd,
         site.root,
-        &site.config.runtime_grants,
-        site.intent.limits.cache_bytes > 0,
-        &site.intent.limits,
+        super::guard::PayloadEnvironment {
+            runtime_grants: &site.config.runtime_grants,
+            cache_enabled: site.intent.limits.cache_bytes > 0,
+            limits: &site.intent.limits,
+        },
     )?;
     set_proxy_environment(&mut command, site);
     command.current_dir(site.workspace.join(cwd));
@@ -187,45 +205,8 @@ fn prepare_command(site: &GuardContext<'_>) -> Result<tokio::process::Command, T
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let mut command = prepare_command(site)?;
     let deadline = tokio::time::Instant::now() + site.remaining_runtime();
-    let mut child = spawn_before(&mut command, deadline)?;
-    let mut writer = None;
-    if let (Some(input), Some(mut stdin)) = (site.hook_stdin, child.stdin.take()) {
-        let input = input.to_owned();
-        // Aborted below once capture ends, so a hook that never reads cannot outlive the deadline.
-        writer = Some(tokio::spawn(async move {
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await;
-        }));
-    }
-    // Hook output is control data: a cut deny verdict must still fail closed.
-    let captured = if site.hook_stdin.is_some() {
-        match capture(
-            child,
-            (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
-        .await
-        {
-            Ok((status, stdout, stderr)) => {
-                let mut out = super::output::Window::new(site.intent.limits.result_bytes as usize);
-                let mut err = super::output::Window::new(site.intent.limits.result_bytes as usize);
-                out.push(&stdout, super::output::DRAIN_BYTES)?;
-                err.push(&stderr, super::output::DRAIN_BYTES)?;
-                Ok((Some(status), out, err))
-            }
-            Err(error) => Err(error),
-        }
-    } else {
-        capture_command(
-            child,
-            site.intent.limits.result_bytes as usize,
-            deadline.saturating_duration_since(tokio::time::Instant::now()),
-        )
-        .await
-    };
-    if let Some(writer) = writer {
-        writer.abort();
-    }
-    let (status, out, err) = captured?;
+    let child = spawn_before(&mut command, deadline)?;
+    let (status, out, err, disk_stopped) = capture_payload(site, child, deadline).await?;
     let timed_out = status.is_none();
     let exit_code = status.and_then(|status| status.code());
     #[cfg(target_os = "linux")]
@@ -288,17 +269,104 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         super::types::CommandChangeset::default(),
         Default::default(),
     );
-    command_output(site, exit_code, timed_out, out, err, changeset, selection)
+    command_output(
+        site,
+        exit_code,
+        (timed_out, disk_stopped),
+        (out, err),
+        (changeset, selection),
+    )
+}
+
+type Captured = (
+    Option<std::process::ExitStatus>,
+    super::output::Window,
+    super::output::Window,
+    bool,
+);
+
+async fn capture_payload(
+    site: &GuardContext<'_>,
+    mut child: tokio::process::Child,
+    deadline: tokio::time::Instant,
+) -> Result<Captured, ToolError> {
+    let mut writer = None;
+    if let (Some(input), Some(mut stdin)) = (site.hook_stdin, child.stdin.take()) {
+        let input = input.to_owned();
+        // Aborted below once capture ends, so a hook that never reads cannot outlive the deadline.
+        writer = Some(tokio::spawn(async move {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await;
+        }));
+    }
+    let disk_stopped = std::sync::atomic::AtomicBool::new(false);
+    // Hook output is control data: a cut deny verdict must still fail closed.
+    let captured = if site.hook_stdin.is_some() {
+        match capture(
+            child,
+            (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await
+        {
+            Ok((status, stdout, stderr)) => {
+                let mut out = super::output::Window::new(site.intent.limits.result_bytes as usize);
+                let mut err = super::output::Window::new(site.intent.limits.result_bytes as usize);
+                out.push(&stdout, super::output::DRAIN_BYTES)?;
+                err.push(&stderr, super::output::DRAIN_BYTES)?;
+                Ok((Some(status), out, err))
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        capture_command(
+            child,
+            site.intent.limits.result_bytes as usize,
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            async {
+                disk_floor_reached(site).await;
+                disk_stopped.store(true, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .await
+    };
+    if let Some(writer) = writer {
+        writer.abort();
+    }
+    let (status, out, mut err) = captured?;
+    let disk_stopped = disk_stopped.into_inner();
+    if disk_stopped {
+        err.push(disk_stopped_line().as_bytes(), super::output::DRAIN_BYTES)?;
+    }
+    Ok((status, out, err, disk_stopped))
+}
+
+// Linux payloads write sized tmpfs uppers; macOS unit storage shares the host volume, so its worker watches the reserve.
+async fn disk_floor_reached(site: &GuardContext<'_>) {
+    #[cfg(target_os = "macos")]
+    super::guard::disk_floor_reached(site.workspace).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = site;
+        std::future::pending::<()>().await;
+    }
+}
+
+pub(super) fn disk_stopped_line() -> String {
+    format!(
+        "\n[arany] Command stopped: the disk holding its private copy fell below {} MiB free. Free disk space, then retry.\n",
+        super::types::GUARD_DISK_RESERVE_BYTES / super::types::BYTES_PER_MEBIBYTE
+    )
 }
 
 fn command_output(
     site: &GuardContext<'_>,
     exit_code: Option<i32>,
-    timed_out: bool,
-    out: super::output::Window,
-    err: super::output::Window,
-    changeset: super::types::CommandChangeset,
-    selection: super::types::CommandSelectionSummary,
+    (timed_out, disk_stopped): (bool, bool),
+    (out, err): (super::output::Window, super::output::Window),
+    (changeset, selection): (
+        super::types::CommandChangeset,
+        super::types::CommandSelectionSummary,
+    ),
 ) -> Result<String, ToolError> {
     let budget = site.intent.limits.command_result_budget();
     let truncation = if site.hook_stdin.is_some() {
@@ -310,63 +378,59 @@ fn command_output(
         *site.captured.lock().map_err(|_| ToolError::Operation)? =
             Some(super::spill::streams(&out, &err));
     }
+    let output = fit_selected_command(
+        CommandRun {
+            exit_code,
+            stdout: &out,
+            stderr: &err,
+        },
+        changeset,
+        budget,
+        truncation,
+        selection,
+    )?;
     #[cfg(target_os = "macos")]
-    {
-        let output = fit_selected_command(
-            exit_code, &out, &err, changeset, budget, truncation, selection,
-        )?;
-        super::output::CommandWindows {
-            stdout: out,
-            stderr: err,
-        }
-        .send()?;
-        if timed_out {
-            Err(ToolError::Timeout(output))
-        } else {
-            Ok(output)
-        }
+    super::output::CommandWindows {
+        stdout: out,
+        stderr: err,
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let output = fit_selected_command(
-            exit_code, &out, &err, changeset, budget, truncation, selection,
-        )?;
-        if timed_out {
-            Err(ToolError::Timeout(output))
-        } else {
-            Ok(output)
-        }
+    .send()?;
+    if disk_stopped {
+        Err(ToolError::DiskSpace(output))
+    } else if timed_out {
+        Err(ToolError::Timeout(output))
+    } else {
+        Ok(output)
     }
 }
 
+pub(super) struct CommandRun<'a> {
+    pub(super) exit_code: Option<i32>,
+    pub(super) stdout: &'a super::output::Window,
+    pub(super) stderr: &'a super::output::Window,
+}
+
 pub(super) fn fit_command(
-    exit_code: Option<i32>,
-    stdout: &super::output::Window,
-    stderr: &super::output::Window,
+    run: CommandRun<'_>,
     changeset: super::types::CommandChangeset,
     budget: usize,
     truncation: Truncation,
 ) -> Result<String, ToolError> {
-    fit_selected_command(
-        exit_code,
-        stdout,
-        stderr,
-        changeset,
-        budget,
-        truncation,
-        Default::default(),
-    )
+    fit_selected_command(run, changeset, budget, truncation, Default::default())
 }
 
 pub(super) fn fit_selected_command(
-    exit_code: Option<i32>,
-    stdout: &super::output::Window,
-    stderr: &super::output::Window,
+    run: CommandRun<'_>,
     changeset: super::types::CommandChangeset,
     budget: usize,
     truncation: Truncation,
     selection: super::types::CommandSelectionSummary,
 ) -> Result<String, ToolError> {
+    let CommandRun {
+        exit_code,
+        stdout,
+        stderr,
+    } = run;
     if !changeset.valid() || !selection.valid() {
         return Err(ToolError::Limit);
     }
@@ -374,6 +438,7 @@ pub(super) fn fit_selected_command(
         serde_json::to_string(&CommandResult {
             selection: Some(selection),
             network_refusals: Vec::new(),
+            hidden_grants: Vec::new(),
             exit_code,
             stdout: out.into(),
             stderr: err.into(),
@@ -411,24 +476,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut runtime = super::super::tests::in_process_runtime(
             directory.path(),
-            json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
+            json!({"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}),
         );
         runtime.config.commands = serde_json::from_value(json!([{"name":"sh","executable":"/unavailable","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}])).unwrap();
         let version = "1.98.1-x86_64-unknown-linux-gnu";
         runtime.config.runtime_grants = serde_json::from_value(json!([{"kind":"rust","manager":"rustup","version":version,"path":directory.path().join(".rustup/toolchains").join(version),"device":1,"inode":1}])).unwrap();
         runtime.process_enforcement_digest =
             super::super::guard::enforcement_digest(&runtime.config.runtime_grants).unwrap();
-        let mut intent = runtime.intent(
-            crate::session::RunId::new(),
-            crate::session::AgentRunId::new(),
-            ToolCall::Command {
-                program: "sh".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-                resource_class: None,
-                timeout_ms: None,
-            },
-        );
+        let mut intent = runtime
+            .intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                    resource_class: None,
+                    timeout_ms: None,
+                    additional_reads: None,
+                },
+            )
+            .unwrap();
         intent.limits.resource_class = super::super::ToolResourceClass::Build;
         intent.limits.build_jobs = 2;
         intent.limits.cache_bytes = 0;
@@ -470,9 +538,11 @@ mod tests {
             .unwrap();
         let err = super::super::output::Window::default();
         let text = fit_command(
-            Some(0),
-            &out,
-            &err,
+            CommandRun {
+                exit_code: Some(0),
+                stdout: &out,
+                stderr: &err,
+            },
             changeset.clone(),
             4096,
             Truncation::Allow,
@@ -483,9 +553,11 @@ mod tests {
         assert_eq!(result.changeset, changeset);
         assert!(matches!(
             fit_command(
-                Some(0),
-                &out,
-                &err,
+                CommandRun {
+                    exit_code: Some(0),
+                    stdout: &out,
+                    stderr: &err
+                },
                 Default::default(),
                 4096,
                 Truncation::Refuse
@@ -496,7 +568,16 @@ mod tests {
         assert!(result.stdout.contains(" bytes, 1 lines total]"));
         assert!(result.valid());
         assert!(matches!(
-            fit_command(Some(0), &out, &err, changeset, 512, Truncation::Allow),
+            fit_command(
+                CommandRun {
+                    exit_code: Some(0),
+                    stdout: &out,
+                    stderr: &err
+                },
+                changeset,
+                512,
+                Truncation::Allow
+            ),
             Err(ToolError::Limit)
         ));
     }

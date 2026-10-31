@@ -3,7 +3,7 @@ use super::*;
 fn multiedit() -> arany::ToolCall {
     arany::ToolCall::MultiEdit {
         file_path: "notes/facts.txt".into(),
-        expected_digest: hash(b"Fact"),
+        expected_digest: Some(hash(b"Fact")),
         edits: vec![
             arany::LiteralEdit {
                 old_string: "Fact".into(),
@@ -24,12 +24,12 @@ fn removal(move_file: bool) -> arany::ToolCall {
         arany::ToolCall::Move {
             source: "notes/facts.txt".into(),
             destination: "notes/nested/moved.txt".into(),
-            expected_digest: hash(b"Fact"),
+            expected_digest: Some(hash(b"Fact")),
         }
     } else {
         arany::ToolCall::Delete {
             path: "notes/facts.txt".into(),
-            expected_digest: hash(b"Fact"),
+            expected_digest: Some(hash(b"Fact")),
         }
     }
 }
@@ -74,7 +74,7 @@ async fn removal_journey(move_file: bool, case: &str) {
             }
             | arany::ToolCall::Move {
                 expected_digest, ..
-            } => *expected_digest = hash(b"stale"),
+            } => *expected_digest = Some(hash(b"stale")),
             _ => unreachable!(),
         }
     }
@@ -219,7 +219,7 @@ async fn multiedit_guard_publication_denials_late_failure_and_closed_replay() {
                 edits[1].old_string = "missing".into();
             }
             if case == "stale" {
-                *expected_digest = hash(b"stale");
+                *expected_digest = Some(hash(b"stale"));
             }
         }
         let outcomes = if case == "success" {
@@ -539,7 +539,7 @@ async fn multiedit_content_ceiling_and_full_hook_input_refuse_overflow_without_p
         std::fs::write(fixture.workspace.join("notes/facts.txt"), &old).unwrap();
         let call = arany::ToolCall::MultiEdit {
             file_path: "notes/facts.txt".into(),
-            expected_digest: hash(old.as_bytes()),
+            expected_digest: Some(hash(old.as_bytes())),
             edits: vec![arany::LiteralEdit {
                 old_string: old.clone(),
                 new_string: new.clone(),
@@ -642,8 +642,7 @@ async fn timed_out_command(maximum: u32) -> (Fixture, arany::RunOutcome) {
         args: vec!["-c".into(), "printf 'head\\n'; printf '%100000s' ''; printf 'tail\\n'; printf 'partial error\\n' >&2; printf changed > notes/new.txt; sleep 20".into()],
         cwd: "".into(),
         resource_class: None,
-        timeout_ms: None,
-    };
+        timeout_ms: None, additional_reads: None };
     let mut plan = plan(&call);
     plan.command_timeout_ms = Some(maximum);
     let (result, _, _) = fixture
@@ -737,6 +736,7 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
         cwd: "".into(),
         resource_class: None,
         timeout_ms: None,
+        additional_reads: None,
     };
     let mut plan = plan(&call);
     plan.command_timeout_ms = Some(10_000);
@@ -799,7 +799,7 @@ async fn a_64_kib_write_and_edit_publish_unhooked_and_a_hook_that_cannot_receive
     };
     let edit = arany::ToolCall::Edit {
         path: path.into(),
-        expected_digest: hash(written.as_bytes()),
+        expected_digest: Some(hash(written.as_bytes())),
         old: "b".repeat(ceiling / 2),
         new: "c".repeat(ceiling / 2),
     };
@@ -898,13 +898,13 @@ async fn maximum_size_stale_or_ambiguous_edits_are_refused_with_the_file_preserv
         },
         arany::ToolCall::Edit {
             path: path.into(),
-            expected_digest: stale,
+            expected_digest: Some(stale),
             old: "x".repeat(half),
             new: "y".repeat(half),
         },
         arany::ToolCall::Edit {
             path: path.into(),
-            expected_digest: hash(original.as_bytes()),
+            expected_digest: Some(hash(original.as_bytes())),
             old: "x".repeat(half),
             new: "y".repeat(half),
         },

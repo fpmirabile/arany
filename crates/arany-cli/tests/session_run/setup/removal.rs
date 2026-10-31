@@ -11,8 +11,13 @@ use std::time::{Duration, Instant};
 const REMOVED_CLIENT: &str = "oaiapp_removed_account";
 
 // Local: this module also compiles in the binary unit tests, which lack `crate::setup`.
-fn legacy_chatgpt_slot(client_id: &str) -> String {
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(client_id.as_bytes());
+fn chatgpt_slot(client_id: &str, id: uuid::Uuid) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::new()
+        .chain_update(client_id)
+        .chain_update([0])
+        .chain_update(id.as_bytes())
+        .finalize();
     format!(
         "chatgpt-{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
@@ -110,7 +115,7 @@ fn failed_nonselected_cleanup_can_be_retried_in_a_fresh_manager() {
     let deleted: Vec<_> = deleted.lines().collect();
     assert_eq!(deleted.len(), 2);
     assert_eq!(deleted[0], deleted[1]);
-    assert_eq!(deleted[0], legacy_chatgpt_slot(REMOVED_CLIENT));
+    assert_eq!(deleted[0], chatgpt_slot(REMOVED_CLIENT, removed));
 }
 
 fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
@@ -120,16 +125,20 @@ fn seed_accounts(root: &StateRoot) -> (uuid::Uuid, uuid::Uuid) {
     let entry = |id, client| {
         serde_json::json!({
             "id":id,"host_id":host,"client_id":client,"subject":"synthetic-subject",
-            "chatgpt_account_id":null,"keyring_slot":legacy_chatgpt_slot(client),
+            "chatgpt_account_id":"synthetic-account","keyring_slot":chatgpt_slot(client, id),
             "storage":"keyring","renewal_pending":false,"signout_pending":false,
-            "disconnected":false,"slot_client_id":client,"token":null
+            "disconnected":false,"token":null
         })
     };
-    root.record(RecordKind::ChatgptAccounts).replace(&serde_json::to_vec(&serde_json::json!({
-        "schema":4,"selected":selected,
-        "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)],
-        "model_checks":[]
-    })).unwrap()).unwrap();
+    root.record(RecordKind::ChatgptAccounts)
+        .replace(
+            &serde_json::to_vec(&serde_json::json!({
+                "selected":selected,
+                "accounts":[entry(selected,"oaiapp_selected_removal"),entry(removed,REMOVED_CLIENT)]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     (selected, removed)
 }
 

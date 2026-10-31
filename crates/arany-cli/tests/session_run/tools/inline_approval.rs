@@ -45,9 +45,17 @@ fn run_case(case: &'static str) {
     std::fs::create_dir(&workspace).unwrap();
     let state = root.join("state");
     StateRoot::admit(&state).unwrap();
-    crate::private_file(&state.join("permissions.json"), br#"{"permissions":{}}"#);
+    // Sandboxed commands ask nothing; an ask rule keeps the guarded prompt these cases answer.
+    crate::private_file(
+        &state.join("permissions.json"),
+        if case.starts_with("unguarded") {
+            br#"{"permissions":{}}"#
+        } else {
+            br#"{"permissions":{"ask":["Bash"]}}"#
+        },
+    );
     crate::private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
-        "version":1,"workspace_paths":["."],"write":true,
+        "workspace_paths":["."],"write":true,
         "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":crate::hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
         "skills":[],"mcp":[]
     })).unwrap());
@@ -80,18 +88,19 @@ fn run_case(case: &'static str) {
     let flags = rustix::fs::fcntl_getfl(&peer_out).unwrap();
     rustix::fs::fcntl_setfl(&peer_out, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
     let mut peer_in = server.child().stdin.take().unwrap();
-    let mut product = Command::new("/usr/bin/script");
-    product.env_clear().env("PATH", "/usr/bin:/bin").env("SHELL", "/bin/sh")
-        .env("TERM", if case.starts_with("linear") { "dumb" } else { "xterm" })
-        .env("LD_PRELOAD", &tls.shim).env("ARANY_TEST_TLS_PORT", port.to_string())
-        .env("SSL_CERT_FILE", &tls.ca).env("OPENAI_API_KEY", "synthetic-native-key")
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_TEST_ROWS", if case == "unguarded-page-up" { "50" } else { "24" })
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", "stty rows \"$ARANY_TEST_ROWS\" cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval", "/dev/null"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = crate::loopback::ChildGuard::new(product.spawn().unwrap());
+    let mut child = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Caller,
+        "stty rows \"$ARANY_TEST_ROWS\" cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval",
+    )
+    .session(&state, &workspace)
+    .env("PATH", "/usr/bin:/bin")
+    .term(if case.starts_with("linear") { "dumb" } else { "xterm" })
+    .env("LD_PRELOAD", &tls.shim)
+    .env("ARANY_TEST_TLS_PORT", port.to_string())
+    .env("SSL_CERT_FILE", &tls.ca)
+    .env("OPENAI_API_KEY", "synthetic-native-key")
+    .env("ARANY_TEST_ROWS", if case == "unguarded-page-up" { "50" } else { "24" })
+    .spawn();
     let input = Arc::new(Mutex::new(child.child().stdin.take().unwrap()));
     let peer_input = input.clone();
     let (typeahead_delivered, delivery) = mpsc::sync_channel(1);
@@ -377,7 +386,7 @@ impl Driver {
             "APPROVAL_FINAL",
             "Action denied",
             "Run cancelled",
-            "Goal paused",
+            "Interrupted. Send a message to continue.",
             "Run failed",
         ];
         // Ctrl+D does not end active work, so wait until the Run has returned to the idle composer.
@@ -472,6 +481,16 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
                 observation.attestation,
                 Some(arany::Attestation::Guard(_))
             ));
+            assert_eq!(
+                run.tools
+                    .last()
+                    .unwrap()
+                    .permission_verdict
+                    .as_ref()
+                    .unwrap()
+                    .source,
+                arany::permissions::PermissionSource::Human
+            );
         }
         store.close().await.unwrap();
     });

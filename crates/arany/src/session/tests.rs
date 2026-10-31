@@ -305,7 +305,88 @@ fn uncovered_run_file_hints_append_with_or_without_a_summary() {
     }
 }
 
-#[cfg(unix)]
+#[test]
+fn oversized_file_includes_attach_a_head_or_a_reference_never_a_refusal() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let line = format!("{}\n", "x".repeat(99));
+    let large = line.repeat(2000);
+    std::fs::write(workspace.join("large.rs"), &large).unwrap();
+    std::fs::write(workspace.join("small.rs"), "fn small() {}\n").unwrap();
+    std::fs::write(workspace.join("one-line.txt"), "y".repeat(200 * 1024)).unwrap();
+    std::fs::create_dir(workspace.join("docs")).unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let paths: Vec<std::path::PathBuf> = ["large.rs", "small.rs", "large.rs", "large.rs", "docs"]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let loaded = input::WorkspaceInputs::load(&workspace, &state, None, &paths).unwrap();
+    let whole_digest = <[u8; 32]>::from(Sha256::digest(&large));
+    let head = &loaded.includes[0];
+    assert_eq!(head.content, line.repeat(1310));
+    assert_eq!(head.digest, whole_digest);
+    assert_eq!(
+        head.fit,
+        input::IncludeFit::Head {
+            total_bytes: 200_000,
+            next_line: 1311
+        }
+    );
+    let rendered = head.model_include();
+    assert!(rendered.contains(&format!("SHA-256: {}", crate::validate::hex(&whole_digest))));
+    assert!(rendered.contains(
+        "Truncated: lines 1-1310 of a 200000-byte file; Read from line 1311 for the rest"
+    ));
+    assert_eq!(loaded.includes[1].fit, input::IncludeFit::Whole);
+    // The second head fills the rest of the aggregate budget; then only references remain.
+    assert!(matches!(
+        loaded.includes[2].fit,
+        input::IncludeFit::Head { .. }
+    ));
+    let used: usize = loaded
+        .includes
+        .iter()
+        .map(|include| include.content.len())
+        .sum();
+    assert!(used <= 256 * 1024);
+    assert_eq!(
+        loaded.includes[3].fit,
+        input::IncludeFit::Reference {
+            total_bytes: Some(200_000)
+        }
+    );
+    assert!(loaded.includes[3].content.is_empty());
+    assert!(
+        loaded.includes[3]
+            .model_include()
+            .contains("Size: 200000 bytes\nNot attached")
+    );
+    assert_eq!(loaded.includes[4].path, "docs/");
+    assert_eq!(
+        loaded.includes[4].fit,
+        input::IncludeFit::Reference { total_bytes: None }
+    );
+    // A head needs a whole line within the budget.
+    let single =
+        input::WorkspaceInputs::load(&workspace, &state, None, &["one-line.txt".into()]).unwrap();
+    assert_eq!(
+        single.includes[0].fit,
+        input::IncludeFit::Reference {
+            total_bytes: Some(200 * 1024)
+        }
+    );
+    let too_many = vec![std::path::PathBuf::from("small.rs"); input::MAX_INCLUDES + 1];
+    assert_eq!(
+        input::WorkspaceInputs::load(&workspace, &state, None, &too_many)
+            .err()
+            .expect("count bound")
+            .to_string(),
+        "too many explicit includes; a message takes at most 16 @ files or directories"
+    );
+}
+
 #[test]
 fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
     use sha2::{Digest, Sha256};
@@ -535,7 +616,6 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     .ok()
     .expect("instructions fit");
     assert_eq!(context.context_usage.used_bytes, 4 + 89);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let global = temp.path().join("state/AGENTS.md");
@@ -566,7 +646,6 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     use crate::session::InstructionFile;
@@ -665,7 +744,7 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     assert!(load(None).is_ok(), "the root alone fits");
     std::fs::write(workspace.join("crates/cli/AGENTS.md"), "cli").unwrap();
 
-    // An override wins in its directory, as in Codex.
+    // An override wins in its directory.
     std::fs::write(
         workspace.join("crates/AGENTS.override.md"),
         "crates override",
@@ -736,7 +815,6 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     assert!(matches!(load(Some(&deep)), Err(InputError::NotRegular)));
 }
 
-#[cfg(unix)]
 #[test]
 fn user_instructions_have_an_independent_budget_and_fixed_label() {
     use input::{InputError, WorkspaceInputs};

@@ -20,61 +20,43 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
     let (request_sender, request_ready) = mpsc::channel();
     let (response_sender, response_ready) = mpsc::channel();
     let server = thread::spawn(move || {
-        for index in 0..4 {
-            let mut stream = crate::process::accept_with_deadline(
-                &listener,
-                Duration::from_secs(30),
-                "Provider request",
-            );
-            let body = read_request(&mut stream);
-            assert!(
-                !body
-                    .windows(b"OMITTED_CANARY".len())
-                    .any(|part| part == b"OMITTED_CANARY")
-            );
-            let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                }
-                2 => serde_json::json!(r#"synthetic summary"#),
-                _ => {
-                    request_sender.send(()).expect("active Provider gate");
-                    response_ready
-                        .recv_timeout(Duration::from_secs(10))
-                        .expect("response release");
-                    serde_json::json!("A".repeat(32 * 1024))
-                }
-            };
-            super::super::loopback::send_response_for(&mut stream, index, text, index != 2);
-        }
+        let mut stream = crate::process::accept_with_deadline(
+            &listener,
+            Duration::from_secs(30),
+            "Provider request",
+        );
+        let body = read_request(&mut stream);
+        assert!(
+            !body
+                .windows(b"OMITTED_CANARY".len())
+                .any(|part| part == b"OMITTED_CANARY")
+        );
+        request_sender.send(()).expect("active Provider gate");
+        response_ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("response release");
+        let text = serde_json::json!("A".repeat(32 * 1024));
+        super::super::loopback::send_response_for(&mut stream, 0, text, true);
     });
-    check_profile(&workspace, &state);
 
     let command = "trap ':' INT; stty rows 24 cols 80; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 finish; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
-    let mut attached =
-        crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
-    attached
-        .env_clear()
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", command, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+    let mut attached = crate::product::PtyLaunch::new(
+        crate::product::Isolation::Passwd(crate::isolation::account_wrapper(
+            state.parent().expect("fixture root"),
+        )),
+        command,
+    )
+    .session(&state, &workspace)
+    .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+    .term("xterm")
+    .spawn();
     let input = Arc::new(Mutex::new(
         attached.child().stdin.take().expect("PTY input"),
     ));
     let reader_input = Arc::clone(&input);
-    let mut output = attached.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(attached.child().stdout.take().expect("PTY output"));
     assert_eq!(
-        rustix::pipe::fcntl_setpipe_size(&output, 4096).expect("bounded output pipe"),
+        rustix::pipe::fcntl_setpipe_size(&output.0, 4096).expect("bounded output pipe"),
         4096
     );
     let (stage_sender, stages) = mpsc::channel();

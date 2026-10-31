@@ -1,11 +1,10 @@
 use super::active_terminal::{ProductGuard, product_child_of};
-use super::loopback::{ChildGuard, wait_product};
+use super::loopback::wait_product;
 use super::*;
 use std::{
     io::{Read, Write},
     net::TcpListener,
     os::unix::fs::PermissionsExt,
-    process::Stdio,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -20,7 +19,7 @@ enum CompactionCase {
 
 const COMPACTION_SUMMARY_MARKER: &str = "DERIVED_SUMMARY_CANARY";
 const INITIAL_OBJECTIVE_BYTES: usize = 8 * 1024;
-const INITIAL_ANSWER_BYTES: usize = 24 * 1024;
+const INITIAL_ANSWER_BYTES: usize = 32 * 1024;
 const GUIDANCE_BYTES: usize = 20 * 1024;
 const INCLUDE_BYTES: usize = 120 * 1024;
 const PRODUCT_START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,8 +67,8 @@ fn synthetic_server(
     workspace_path: std::path::PathBuf,
 ) {
     listener.set_nonblocking(true).expect("bounded accept");
-    let request_count = 6;
-    for index in 0..request_count {
+    // The second Run (3), its automatic compaction (4), then the third Run or a manual compaction (5).
+    for index in 3..6 {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
             match listener.accept() {
@@ -98,30 +97,12 @@ fn synthetic_server(
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
         assert_eq!(wire["model"], "model-1");
         assert!(wire.get("text").is_none());
-        if index == 2
-            || index == 4
-            || (index == 5 && matches!(case, CompactionCase::ProviderFailure))
-        {
+        if index == 4 || (index == 5 && matches!(case, CompactionCase::ProviderFailure)) {
             crate::loopback::assert_compaction_request(&wire);
         }
-        assert_eq!(
-            wire["max_output_tokens"],
-            match index {
-                0 | 3 | 4 | 5 => 4096,
-                1 | 2 => 128,
-                _ => unreachable!("bounded synthetic request index"),
-            }
-        );
+        assert_eq!(wire["max_output_tokens"], 4096);
         let input: serde_json::Value = crate::semantic::input(&wire);
         match index {
-            0 | 1 => {
-                assert!(
-                    input
-                        .get("workspace_guidance")
-                        .is_none_or(serde_json::Value::is_null)
-                );
-            }
-            2 => {}
             3 => {
                 assert_eq!(input["objective"], "second");
                 assert_large_workspace_inputs(&input);
@@ -235,11 +216,6 @@ fn synthetic_server(
             continue;
         }
         let text = match index {
-            0 => serde_json::json!("ok"),
-            1 => {
-                serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-            }
-            2 => serde_json::json!(r#"synthetic summary"#),
             3 => {
                 let result = if matches!(case, CompactionCase::Success) {
                     format!(
@@ -254,15 +230,8 @@ fn synthetic_server(
             5 if matches!(case, CompactionCase::Success) => serde_json::json!("third answer"),
             _ => serde_json::json!(compaction_summary()),
         };
-        if index == 2
-            || index == 4
-            || (index == 5 && matches!(case, CompactionCase::ProviderFailure))
-        {
-            if index == 2 {
-                assert_eq!(text, "synthetic summary", "plain-text compaction reply");
-            } else {
-                assert_eq!(text, compaction_summary());
-            }
+        if index == 4 || (index == 5 && matches!(case, CompactionCase::ProviderFailure)) {
+            assert_eq!(text, compaction_summary());
         }
         super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }
@@ -361,7 +330,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     StateRoot::admit(&state).expect("state root");
     private_file(
         &state.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
     );
     private_file(
         &state.join("permissions.json"),
@@ -370,28 +339,15 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let session_id = commit_initial_write(&workspace, &state);
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
-    let profile = serde_json::json!({
-        "version": 1,
-        "profiles": [{
-            "name": "local",
-            "protocol": "openai-responses",
-            "endpoint": format!("http://127.0.0.1:{port}/v1/responses"),
-            "model": "model-1",
-            "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
-            "outcome_encoding": "json_schema",
-            "privacy": "user_authorized",
-            "max_output_tokens": 4096,
-            "capability_evidence_version": 2, "efforts": []
-        }]
-    });
+    arany::test_support::save_custom_profiles(
+        &state,
+        &[arany::test_support::local_custom_profile(port)],
+    );
     let profile_path = state.join("provider-profiles.json");
-    std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("profile");
-    std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
-        .expect("private profile");
     let (request_sender, request_ready) = mpsc::channel();
     let (release_compaction, compaction_release) = mpsc::sync_channel(1);
     let roster_path = state.join("provider-roster.json");
-    let roster_bytes = serde_json::to_vec(&serde_json::json!({"version":2,"profiles":[{"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
+    let roster_bytes = serde_json::to_vec(&serde_json::json!({"profiles":[{"name":"main","routes":[{"provider":{"kind":"custom","custom_name":"local"},"model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap();
     if matches!(case, CompactionCase::Success) {
         private_file(&roster_path, &roster_bytes);
     }
@@ -410,24 +366,6 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         )
     });
 
-    let mut check = Command::new(env!("CARGO_BIN_EXE_arany"));
-    check
-        .env_clear()
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .current_dir(&workspace)
-        .args(["provider", "check", "local", "--state-dir"])
-        .arg(&state)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let check = check.spawn().expect("check process");
-    let checked = wait_product(check);
-    assert!(checked.status.success());
-    assert_eq!(
-        check_output(&checked.stdout, &state, arany::CheckDisposition::Succeeded),
-        b"Provider: local\nStatus: custom verified\n"
-    );
-    assert_eq!(checked.stderr, b"");
-
     let shell = if matches!(case, CompactionCase::Interrupted) {
         "trap ':' INT; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 --include a.txt --include b.txt second; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\""
     } else {
@@ -441,25 +379,16 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     } else {
         shell.to_owned()
     };
-    let mut attached = Command::new("/usr/bin/script");
-    attached
-        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+    let mut attached = crate::product::PtyLaunch::new(crate::product::Isolation::Caller, &shell)
+        .session(&state, &workspace)
         .env("ARANY_TEST_SESSION", session_id.to_string())
         .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
-        .env("SHELL", "/bin/sh")
-        .env("TERM", "dumb")
-        .current_dir(&workspace)
-        .args(["-q", "-e", "-c", &shell, "/dev/null"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut attached = ChildGuard::new(attached.spawn().expect("attached PTY process"));
+        .piped_stderr()
+        .spawn();
     let mut input = attached.child().stdin.take().expect("PTY input");
-    let mut output = attached.child().stdout.take().expect("PTY output");
+    let mut output = crate::product::Blocking(attached.child().stdout.take().expect("PTY output"));
     assert_eq!(
-        rustix::pipe::fcntl_setpipe_size(&output, 4096).expect("bounded output pipe"),
+        rustix::pipe::fcntl_setpipe_size(&output.0, 4096).expect("bounded output pipe"),
         4096
     );
     let (sender, receiver) = mpsc::channel();

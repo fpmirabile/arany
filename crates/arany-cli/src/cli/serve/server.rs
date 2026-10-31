@@ -33,6 +33,12 @@ pub(in crate::cli) enum ClientMessage {
 }
 pub(in crate::cli) type ServerMessage = Message;
 
+pub(in crate::cli) struct ServerIo {
+    pub(in crate::cli) inbound: mpsc::Receiver<ClientMessage>,
+    pub(in crate::cli) outbound: mpsc::Sender<ServerMessage>,
+    pub(in crate::cli) stopping: watch::Sender<bool>,
+}
+
 #[derive(Debug)]
 pub(super) struct Fault {
     code: i64,
@@ -125,14 +131,7 @@ impl DisplayFollower {
         tokio::select! {
             preview = self.previews.changed() => {
                 let run = preview.as_ref().map(|preview| preview.run_id);
-                let preview = preview.map(|preview| DisplayPreview {
-                    agent_run_id: preview.agent_run_id,
-                    call_index: preview.call_index,
-                    answer: preview.text.answer.clone(),
-                    commentary: preview.text.commentary.clone(),
-                    commentary_limited: preview.text.commentary_limited,
-                    tentative: preview.text.tentative,
-                });
+                let preview = preview.as_ref().map(DisplayPreview::from);
                 (run, DisplayUpdate::Preview { preview })
             }
             intent_id = self.waiting.waiting_changed() => (None, DisplayUpdate::Waiting { intent_id }),
@@ -295,10 +294,12 @@ pub(in crate::cli) async fn run(
     run_configured(
         engine,
         state,
-        inbound,
-        outbound,
+        ServerIo {
+            inbound,
+            outbound,
+            stopping: shutdown,
+        },
         Threads::default(),
-        shutdown,
     )
     .await
 }
@@ -314,7 +315,16 @@ pub(in crate::cli) async fn run_with_threads(
     let (shutdown, receiver) = watch::channel(false);
     super::shutdown_grace(
         receiver,
-        run_configured(engine, state, inbound, outbound, threads, shutdown),
+        run_configured(
+            engine,
+            state,
+            ServerIo {
+                inbound,
+                outbound,
+                stopping: shutdown,
+            },
+            threads,
+        ),
     )
     .await
 }
@@ -418,30 +428,7 @@ async fn complete(
         .await
         .map_err(|e| e.message)?;
     if finalizing && let Some(id) = turn.pending_start.take() {
-        let run = view
-            .runs
-            .iter()
-            .find(|run| {
-                turn.state
-                    .first_sequence
-                    .is_some_and(|first| run.accepted_sequence >= first)
-            })
-            .ok_or("submission has no accepted Run")?;
-        let goal = view
-            .goals
-            .iter()
-            .find(|goal| goal.run_ids.contains(&run.id))
-            .ok_or("Run has no Goal")?;
-        send(
-            outbound,
-            response(
-                id,
-                TurnResult {
-                    turn: items::turn_summary(&view, run, goal, false),
-                },
-            ),
-        )
-        .await?;
+        answer_turn_start(turn, &view, outbound, id).await?;
     }
     for run in &view.runs {
         if !finalizing && Some(run.id) != turn.state.run_id {
@@ -461,37 +448,7 @@ async fn complete(
         {
             continue;
         }
-        let goal = view
-            .goals
-            .iter()
-            .find(|goal| goal.run_ids.contains(&run.id))
-            .ok_or("Run has no Goal")?;
-        let mut summary = items::turn_summary(&view, run, goal, false);
-        if let Some(refused) = refused.filter(|refused| refused.run == run.id)
-            && let Some(goal) = &mut summary.goal
-        {
-            goal.stopped = Some(GoalStop::NotAdmitted {
-                refusal: refused.reason.clone(),
-            });
-            summary.error = Some(TurnError {
-                message: refused.message.clone(),
-            });
-        }
-        if !finalizing {
-            summary.stop_reason = None;
-            summary.goal = Some(GoalSummary {
-                status: if matches!(
-                    run.status,
-                    arany::RunStatus::Cancelled | arany::RunStatus::StoppedByHook
-                ) {
-                    GoalStatus::Interrupted
-                } else {
-                    GoalStatus::Running
-                },
-                stopped: None,
-                budget_refusal: None,
-            });
-        }
+        let summary = completed_turn(&view, run, refused, finalizing)?;
         emit(
             outbound,
             opt_out,
@@ -508,6 +465,79 @@ async fn complete(
     }
     turn.state.pending_completion = false;
     Ok(())
+}
+
+async fn answer_turn_start(
+    turn: &ActiveTurn,
+    view: &arany::SessionView,
+    outbound: &mpsc::Sender<Message>,
+    id: RequestId,
+) -> Result<(), String> {
+    let run = view
+        .runs
+        .iter()
+        .find(|run| {
+            turn.state
+                .first_sequence
+                .is_some_and(|first| run.accepted_sequence >= first)
+        })
+        .ok_or("submission has no accepted Run")?;
+    let goal = view
+        .goals
+        .iter()
+        .find(|goal| goal.run_ids.contains(&run.id))
+        .ok_or("Run has no Goal")?;
+    send(
+        outbound,
+        response(
+            id,
+            TurnResult {
+                turn: items::turn_summary(view, run, goal, false),
+            },
+        ),
+    )
+    .await
+}
+
+// A refused Run reports its admission refusal; a Run completed mid-submission keeps its Goal open.
+fn completed_turn(
+    view: &arany::SessionView,
+    run: &arany::RunView,
+    refused: Option<&Refused>,
+    finalizing: bool,
+) -> Result<Turn, String> {
+    let goal = view
+        .goals
+        .iter()
+        .find(|goal| goal.run_ids.contains(&run.id))
+        .ok_or("Run has no Goal")?;
+    let mut summary = items::turn_summary(view, run, goal, false);
+    if let Some(refused) = refused.filter(|refused| refused.run == run.id)
+        && let Some(goal) = &mut summary.goal
+    {
+        goal.stopped = Some(GoalStop::NotAdmitted {
+            refusal: refused.reason.clone(),
+        });
+        summary.error = Some(TurnError {
+            message: refused.message.clone(),
+        });
+    }
+    if !finalizing {
+        summary.stop_reason = None;
+        summary.goal = Some(GoalSummary {
+            status: if matches!(
+                run.status,
+                arany::RunStatus::Cancelled | arany::RunStatus::StoppedByHook
+            ) {
+                GoalStatus::Interrupted
+            } else {
+                GoalStatus::Running
+            },
+            stopped: None,
+            budget_refusal: None,
+        });
+    }
+    Ok(summary)
 }
 
 pub(super) fn params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, Fault> {

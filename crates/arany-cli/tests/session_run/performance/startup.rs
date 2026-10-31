@@ -1,5 +1,5 @@
 use super::report;
-use crate::loopback::{ChildGuard, check_profile, send_response_for, wait_product, write_profile};
+use crate::loopback::{ChildGuard, send_response_for, wait_product, write_profile};
 use arany::{
     CollaborationPolicy, Event, RunId, RunStatus, SessionId, SessionView, StateRoot, Store,
 };
@@ -46,7 +46,7 @@ fn startup_upper_bound_two_files_on_named_host() {
     );
     let (accepted_sender, accepted_receiver) = mpsc::sync_channel(1);
     let server = thread::spawn(move || {
-        for index in 0..3 + WARMUPS + SAMPLES {
+        for index in 0..WARMUPS + SAMPLES {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -58,11 +58,9 @@ fn startup_upper_bound_two_files_on_named_host() {
                     Err(error) => panic!("loopback accept failed: {error}"),
                 }
             };
-            if index >= 3 {
-                accepted_sender
-                    .send((Instant::now(), SystemTime::now()))
-                    .expect("startup observation receiver");
-            }
+            accepted_sender
+                .send((Instant::now(), SystemTime::now()))
+                .expect("startup observation receiver");
             let body = crate::loopback::read_request_within(
                 &mut stream,
                 "/v1/responses",
@@ -73,17 +71,7 @@ fn startup_upper_bound_two_files_on_named_host() {
                 serde_json::from_slice(&body).expect("synthetic Responses request");
             assert_eq!(wire["model"], "model-1");
             let input: serde_json::Value = crate::semantic::input(&wire);
-            let text = if index < 3 {
-                match index {
-                    0 => {
-                        serde_json::json!("ok")
-                    }
-                    1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
-                    }
-                    _ => serde_json::json!(r#"synthetic summary"#),
-                }
-            } else {
+            let text = {
                 assert_eq!(input["phase"], "root_plan");
                 assert_eq!(input["objective"], "Synthetic startup question");
                 let includes = input["includes"].as_array().expect("included input");
@@ -108,7 +96,6 @@ fn startup_upper_bound_two_files_on_named_host() {
             send_response_for(&mut stream, index, text, wire["stream"] == true);
         }
     });
-    check_profile(&workspace, &state);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -173,7 +160,7 @@ fn startup_upper_bound_two_files_on_named_host() {
             .parse::<RunId>()
             .expect("Run ID");
         assert_eq!(lines[2], "Status: finished");
-        assert_eq!(lines[3], "Provider: custom verified");
+        assert_eq!(lines[3], "Provider: custom");
         let events = runtime
             .block_on(observer.load_session(session_id))
             .expect("committed Events");
@@ -218,7 +205,7 @@ fn startup_upper_bound_two_files_on_named_host() {
         );
         let config = view.runs[0].config.as_ref().expect("pinned Run");
         assert_eq!(config.policy, CollaborationPolicy::Single);
-        assert_eq!(config.include_digests.len(), 2);
+        assert_eq!(config.include_sources.len(), 2);
     }
     server.join().expect("synthetic Provider completed");
     runtime.block_on(observer.close()).expect("close observer");

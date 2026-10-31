@@ -14,73 +14,32 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, Paragraph},
 };
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "dialog content and its explicit rendering bounds stay together"
-)]
-pub(super) fn draw_rewind_frame(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    lines: &[String],
-    choices: &[String],
-    selected: usize,
-    page: usize,
-    palette: view::Palette,
-) -> bool {
+#[derive(Clone, Copy)]
+pub(super) struct RewindFrame<'a> {
+    pub title: &'a str,
+    pub lines: &'a [String],
+    pub choices: &'a [String],
+    pub selected: usize,
+    pub page: usize,
+    pub palette: view::Palette,
+}
+
+pub(super) fn draw_rewind_frame(frame: &mut Frame, area: Rect, state: RewindFrame<'_>) -> bool {
+    let RewindFrame {
+        title,
+        lines,
+        choices,
+        selected,
+        palette,
+        ..
+    } = state;
     frame.render_widget(Clear, area);
-    if area.width < 16 || area.height < 8 {
+    if !view::dialog_fits(area) {
         frame.render_widget(Paragraph::new("Resize; Esc closes"), area);
         return true;
     }
     if !lines.is_empty() {
-        let labels: Vec<_> = choices
-            .iter()
-            .map(|choice| {
-                if area.width < 50 {
-                    match choice.as_str() {
-                        "Restore code and conversation" => "Code + chat",
-                        "Restore conversation" => "Conversation",
-                        "Restore code" => "Code",
-                        crate::presentation::rewind::KEEP => "Keep files",
-                        crate::presentation::rewind::OVERWRITE | "Overwrite after saving" => {
-                            "Overwrite"
-                        }
-                        "Resolve listed files" => "Resolve files",
-                        "Reset checkpoint storage" => "Reset storage",
-                        other => other,
-                    }
-                } else {
-                    choice.as_str()
-                }
-            })
-            .collect();
-        return view::draw_permission_frame(
-            frame,
-            area,
-            lines,
-            view::PermissionFrameState {
-                choices: &labels,
-                page,
-                focus: selected,
-                profile_start: None,
-                profile_count: 0,
-                focused_profile: None,
-                profile_selection_enabled: None,
-                footer: Some(if area.width >= 80 {
-                    "Rewind · ↑↓ choose · Enter/PgDn review · PgUp back · Esc cancel"
-                } else if area.width >= 50 {
-                    "↑↓ choose · Enter/PgDn review · Esc cancel"
-                } else if area.width >= 24 {
-                    "↑↓ Enter/PgDn Esc"
-                } else {
-                    "↑↓ Enter Esc"
-                }),
-                palette,
-                boxed: false,
-            },
-        )
-        .more;
+        return draw_rewind_review(frame, area, &state);
     }
     frame.render_widget(
         Paragraph::new(title).style(palette.selection()),
@@ -112,11 +71,104 @@ pub(super) fn draw_rewind_frame(
     false
 }
 
+// With action lines, the rewind dialog reuses the paged permission frame and short choice labels.
+fn draw_rewind_review(frame: &mut Frame, area: Rect, state: &RewindFrame<'_>) -> bool {
+    let RewindFrame {
+        lines,
+        choices,
+        selected,
+        page,
+        palette,
+        ..
+    } = *state;
+    let labels: Vec<_> = choices
+        .iter()
+        .map(|choice| {
+            if area.width < 50 {
+                match choice.as_str() {
+                    "Restore code and conversation" => "Code + chat",
+                    "Restore conversation" => "Conversation",
+                    "Restore code" => "Code",
+                    crate::presentation::rewind::KEEP => "Keep files",
+                    crate::presentation::rewind::OVERWRITE | "Overwrite after saving" => {
+                        "Overwrite"
+                    }
+                    "Resolve listed files" => "Resolve files",
+                    "Reset checkpoint storage" => "Reset storage",
+                    other => other,
+                }
+            } else {
+                choice.as_str()
+            }
+        })
+        .collect();
+    view::draw_permission_frame(
+        frame,
+        area,
+        lines,
+        view::PermissionFrameState {
+            choices: &labels,
+            page,
+            focus: selected,
+            profile_start: None,
+            profile_count: 0,
+            focused_profile: None,
+            profile_selection_enabled: None,
+            footer: Some(if area.width >= 80 {
+                "Rewind · ↑↓ choose · Enter/PgDn review · PgUp back · Esc cancel"
+            } else if area.width >= 50 {
+                "↑↓ choose · Enter/PgDn review · Esc cancel"
+            } else if area.width >= 24 {
+                "↑↓ Enter/PgDn Esc"
+            } else {
+                "↑↓ Enter Esc"
+            }),
+            palette,
+            boxed: false,
+        },
+    )
+    .more
+}
+
 impl AttachedTerminal {
     pub fn show_rewind_draft(&mut self, composer: &Composer) -> Result<(), super::TerminalError> {
         if let Some(linear) = &mut self.linear {
             linear.write_clipboard_draft(&mut std::io::stderr(), composer)?;
         }
+        Ok(())
+    }
+
+    fn draw_rewind(&mut self, state: RewindFrame<'_>) -> Result<bool, RewindPanelError> {
+        let mut more = true;
+        self.draw_frame(12, |frame, area| {
+            more = draw_rewind_frame(frame, area, state);
+        })?;
+        Ok(more)
+    }
+
+    fn draw_linear_rewind(
+        &mut self,
+        id: uuid::Uuid,
+        title: &str,
+        lines: &[String],
+        choices: &[String],
+    ) -> Result<(), RewindPanelError> {
+        let linear = self.linear.as_mut().expect("linear terminal");
+        let mut rows = vec![format!("Rewind: {}", escape_terminal(title))];
+        rows.extend(lines.iter().cloned());
+        rows.extend(
+            choices
+                .iter()
+                .enumerate()
+                .map(|(i, label)| format!("{}. {label}", i + 1)),
+        );
+        linear
+            .draw_permission_prompt(
+                id,
+                &rows,
+                "Type a number or visible choice name; empty Enter cancels; q cancels:",
+            )
+            .map_err(super::TerminalError::Io)?;
         Ok(())
     }
 
@@ -128,45 +180,26 @@ impl AttachedTerminal {
         initial: usize,
     ) -> Result<Option<usize>, RewindPanelError> {
         self.cancel_clipboard_paste();
-        let lines: Vec<_> = if lines.is_empty() {
-            Vec::new()
-        } else {
-            std::iter::once(escape_terminal(title))
-                .chain(lines.iter().map(|line| escape_terminal(line)))
-                .collect()
-        };
+        let lines = escaped_rewind_lines(title, lines);
         let choices: Vec<_> = choices.iter().map(|line| escape_terminal(line)).collect();
         let mut selected = initial.min(choices.len().saturating_sub(1));
         let mut page = 0usize;
         let mut answer = Composer::default();
         let mut id = uuid::Uuid::now_v7();
         loop {
-            let more = if let Some(linear) = &mut self.linear {
-                let mut rows = vec![format!("Rewind: {}", escape_terminal(title))];
-                rows.extend(lines.iter().cloned());
-                rows.extend(
-                    choices
-                        .iter()
-                        .enumerate()
-                        .map(|(i, label)| format!("{}. {label}", i + 1)),
-                );
-                linear
-                    .draw_permission_prompt(
-                        id,
-                        &rows,
-                        "Type a number or visible choice name; empty Enter cancels; q cancels:",
-                    )
-                    .map_err(super::TerminalError::Io)?;
+            let more = if self.linear.is_some() {
+                self.draw_linear_rewind(id, title, &lines, &choices)?;
                 false
             } else {
                 let palette = self.palette();
-                let mut more = true;
-                self.draw_frame(12, |frame, area| {
-                    more = draw_rewind_frame(
-                        frame, area, title, &lines, &choices, selected, page, palette,
-                    );
-                })?;
-                more
+                self.draw_rewind(RewindFrame {
+                    title,
+                    lines: &lines,
+                    choices: &choices,
+                    selected,
+                    page,
+                    palette,
+                })?
             };
             let linear = self.is_linear();
             match self.next_input().await? {
@@ -204,31 +237,51 @@ impl AttachedTerminal {
                     id = uuid::Uuid::now_v7();
                 }
                 TerminalInput::Submit if linear => {
-                    let value = answer.take();
-                    let value = value.trim();
-                    if value.is_empty()
-                        || value.eq_ignore_ascii_case("q")
-                        || value.eq_ignore_ascii_case("cancel")
-                    {
-                        return Ok(None);
-                    }
-                    let choice = value
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|n| n.checked_sub(1))
-                        .filter(|i| *i < choices.len())
-                        .or_else(|| {
-                            choices
-                                .iter()
-                                .position(|choice| choice.eq_ignore_ascii_case(value))
-                        });
-                    if let Some(choice) = choice {
-                        return Ok(Some(choice));
+                    match linear_rewind_answer(&answer.take(), &choices) {
+                        LinearAnswer::Cancel => return Ok(None),
+                        LinearAnswer::Choice(choice) => return Ok(Some(choice)),
+                        LinearAnswer::Invalid => {}
                     }
                     id = uuid::Uuid::now_v7();
                 }
                 _ => {}
             }
         }
+    }
+}
+
+enum LinearAnswer {
+    Cancel,
+    Choice(usize),
+    Invalid,
+}
+
+// Empty, q or cancel cancels; a number or a choice name picks it.
+fn linear_rewind_answer(value: &str, choices: &[String]) -> LinearAnswer {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("q") || value.eq_ignore_ascii_case("cancel") {
+        return LinearAnswer::Cancel;
+    }
+    value
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|i| *i < choices.len())
+        .or_else(|| {
+            choices
+                .iter()
+                .position(|choice| choice.eq_ignore_ascii_case(value))
+        })
+        .map_or(LinearAnswer::Invalid, LinearAnswer::Choice)
+}
+
+// Action lines lead with the escaped title; without them the list draws its own title.
+fn escaped_rewind_lines(title: &str, lines: &[String]) -> Vec<String> {
+    if lines.is_empty() {
+        Vec::new()
+    } else {
+        std::iter::once(escape_terminal(title))
+            .chain(lines.iter().map(|line| escape_terminal(line)))
+            .collect()
     }
 }

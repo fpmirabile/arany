@@ -9,7 +9,6 @@ fn child_steering_event_round_trips_with_exact_scope() {
         agent_run_id,
         text: "literal /grant all".into(),
     };
-    assert_eq!(event.version(), 1);
     assert_eq!(event.scope(), (Some(run_id), Some(agent_run_id)));
     let payload = event.payload().unwrap();
     assert_eq!(
@@ -17,7 +16,7 @@ fn child_steering_event_round_trips_with_exact_scope() {
         format!(r#"{{"goal_id":"{goal_id}","text":"literal /grant all"}}"#)
     );
     assert_eq!(
-        Event::decode(event.kind(), 1, &payload, Some(run_id), Some(agent_run_id)).unwrap(),
+        Event::decode(event.kind(), &payload, Some(run_id), Some(agent_run_id)).unwrap(),
         event
     );
     for (run, actor) in [
@@ -25,7 +24,7 @@ fn child_steering_event_round_trips_with_exact_scope() {
         (Some(run_id), None),
         (None, Some(agent_run_id)),
     ] {
-        assert!(Event::decode(event.kind(), 1, &payload, run, actor).is_err());
+        assert!(Event::decode(event.kind(), &payload, run, actor).is_err());
     }
     for payload in [
         serde_json::json!({"goal_id":goal_id,"text":null}),
@@ -38,7 +37,6 @@ fn child_steering_event_round_trips_with_exact_scope() {
         assert!(
             Event::decode(
                 event.kind(),
-                1,
                 &payload.to_string(),
                 Some(run_id),
                 Some(agent_run_id)
@@ -72,38 +70,10 @@ fn goal_steering_note_round_trips_and_rejects_bad_scope_and_bounds() {
 
     let kind = event.kind();
     let agent_run_id = Some(AgentRunId::new());
-    assert!(
-        Event::decode(
-            kind,
-            payload_version(kind).expect("payload version") - 1,
-            &payload,
-            Some(run_id),
-            agent_run_id
-        )
-        .is_err()
-    );
-    assert!(
-        Event::decode(
-            kind,
-            payload_version(kind).expect("payload version"),
-            &payload,
-            None,
-            None
-        )
-        .is_err()
-    );
-    assert!(Event::decode(kind, 3, &payload, Some(run_id), None).is_err());
+    assert!(Event::decode(kind, &payload, Some(run_id), agent_run_id).is_err());
+    assert!(Event::decode(kind, &payload, None, None).is_err());
 
     let mut extra: serde_json::Value = serde_json::from_str(&payload).unwrap();
     extra["unexpected"] = serde_json::Value::Bool(true);
-    assert!(
-        Event::decode(
-            kind,
-            payload_version(kind).expect("payload version"),
-            &extra.to_string(),
-            Some(run_id),
-            None
-        )
-        .is_err()
-    );
+    assert!(Event::decode(kind, &extra.to_string(), Some(run_id), None).is_err());
 }

@@ -8,8 +8,9 @@ pub(in crate::tools) struct Session {
     pub(super) upper: Option<Dir>,
 }
 
+// Primary and editor commands both take the Workspace's build cache.
 pub(super) fn selected(intent: &EffectIntent) -> bool {
-    selection_phase::primary_command(intent)
+    matches!(intent.call, crate::tools::ToolCall::Command { .. })
 }
 
 pub(super) async fn session(
@@ -22,7 +23,7 @@ pub(super) async fn session(
     }
     if intent.limits.cache_bytes == 0 {
         return if selected(intent)
-            && intent.limits.cache_requested_bytes > 0
+            && intent.limits.cache_requested_bytes.enabled()
             && runtime.cache_state.is_some()
         {
             Err(ToolError::Limit)
@@ -50,6 +51,11 @@ fn prepare(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<Option<BuildCacheSession>, ToolError> {
+    if let Some(state) = &runtime.cache_state {
+        state
+            .evict_build_caches(crate::tools::types::GUARD_DISK_EVICTION_BYTES)
+            .map_err(map_cache_error)?;
+    }
     let mut cache = super::build_cache_session(runtime, intent)?;
     if selected(intent)
         && let Some(cache) = &mut cache
@@ -78,7 +84,11 @@ pub(super) fn publish(cache: BuildCacheSession) -> CacheUpdate {
     let Some(upper) = session.upper else {
         return CacheUpdate::Failed;
     };
-    let changes = match super::super::fs::command::overlay::cache::capture(
+    #[cfg(target_os = "linux")]
+    let capture = super::super::fs::command::overlay::cache::capture;
+    #[cfg(target_os = "macos")]
+    let capture = super::super::fs::command::clone_cache::capture;
+    let changes = match capture(
         &session.lower,
         &upper,
         &cache.transfer.exclusions,
@@ -89,14 +99,18 @@ pub(super) fn publish(cache: BuildCacheSession) -> CacheUpdate {
         Err(ToolError::Limit | ToolError::Timeout(_)) => return CacheUpdate::Rejected,
         Err(_) => return CacheUpdate::Failed,
     };
-    let update =
-        match lease.publish_directory(&session.lower, &upper, &changes, &cache.transfer.exclusions)
-        {
-            Ok(()) => CacheUpdate::Published,
-            Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
-            Err(StoreError::StorageFull) => CacheUpdate::Rejected,
-            Err(_) => CacheUpdate::Failed,
-        };
+    let update = match lease.publish_directory(
+        &session.lower,
+        &upper,
+        &changes,
+        &cache.transfer.exclusions,
+        crate::tools::types::GUARD_DISK_RESERVE_BYTES,
+    ) {
+        Ok(()) => CacheUpdate::Published,
+        Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
+        Err(StoreError::StorageFull) => CacheUpdate::Rejected,
+        Err(_) => CacheUpdate::Failed,
+    };
     drop(upper);
     drop(session.lower);
     drop(lease);

@@ -66,7 +66,6 @@ mod hooks;
 #[path = "engine_run/permissions.rs"]
 mod permissions;
 
-#[cfg(unix)]
 pub use arany::test_support::process;
 
 use arany::test_support::engine as engine_support;
@@ -90,7 +89,7 @@ fn account_path_uses_the_private_binary_fixture() {
         return;
     }
     assert_eq!(StateRoot::account_path().unwrap(), root);
-    #[cfg(all(unix, debug_assertions))]
+    #[cfg(debug_assertions)]
     {
         use process::BoundedOutput;
 
@@ -122,7 +121,6 @@ fn account_path_uses_the_private_binary_fixture() {
     }
 }
 
-#[cfg(unix)]
 #[path = "engine_run/workspace_security.rs"]
 mod workspace_security;
 
@@ -158,7 +156,7 @@ fn pad_capacity_history(path: &Path, session: SessionId, prefix: i64, branch: bo
         (first, prefix)
     };
     for sequence in first_padding_sequence..=last_padding_sequence {
-        transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
+        transaction.execute("INSERT INTO events (sequence,session_id,kind,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed','{\"title\":\"x\"}',0)", rusqlite::params![sequence, session.to_string()]).unwrap();
     }
     transaction.commit().unwrap();
 }
@@ -664,7 +662,6 @@ fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation(
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn user_instructions_lead_the_project_files_and_are_pinned_by_digest() {
     use std::os::unix::fs::PermissionsExt;
@@ -721,7 +718,68 @@ fn user_instructions_lead_the_project_files_and_are_pinned_by_digest() {
     });
 }
 
-#[cfg(unix)]
+#[test]
+fn prompt_overrides_are_pinned_rendered_and_unsafe_ones_refuse_admission() {
+    use arany::{PromptFile, PromptOverrideError, PromptSource};
+    use std::os::unix::fs::PermissionsExt;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).expect("private state");
+        let prompts = state_path.join("prompts");
+        std::fs::create_dir(&prompts).expect("prompt directory");
+        std::fs::set_permissions(&prompts, std::fs::Permissions::from_mode(0o700))
+            .expect("prompt directory mode");
+        let primary = prompts.join("primary.md");
+        std::fs::write(&primary, "Work tersely.").expect("override");
+        std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o600))
+            .expect("override mode");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "Done".into(),
+        })]);
+        let requests = Arc::clone(&provider.requests);
+        let provider = Arc::new(provider);
+        let engine = engine_support::open(state, EngineConfig::default()).expect("engine");
+        let outcome = run_to_end(&engine, &provider, request(&workspace, "Question"))
+            .await
+            .expect("run completes");
+        assert_eq!(
+            requests.lock().expect("requests lock")[0]
+                .input
+                .prompts
+                .text(PromptFile::Primary),
+            "Work tersely."
+        );
+        let config = outcome.run.config.expect("pinned config");
+        let mut expected = arany::EffectivePrompts::default().pins();
+        expected[0].source = PromptSource::Override;
+        expected[0].digest = Sha256::digest(b"Work tersely.").into();
+        assert_eq!(expected[0].file, PromptFile::Primary);
+        assert_eq!(config.prompts, expected);
+
+        std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o644))
+            .expect("unsafe mode");
+        let error = run_to_end(&engine, &provider, request(&workspace, "Again"))
+            .await
+            .expect_err("unsafe override refuses admission");
+        assert!(matches!(
+            error,
+            EngineError::PromptOverride(PromptOverrideError::NotPrivate { .. })
+        ));
+        assert!(error.to_string().contains(&primary.display().to_string()));
+        assert_eq!(requests.lock().expect("requests lock").len(), 1);
+        engine.close().await.expect("engine shutdown");
+    });
+}
+
 #[test]
 fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     use std::os::unix::fs::symlink;
@@ -864,7 +922,6 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -921,18 +978,6 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
             }
         }
         std::fs::remove_file(&user_file).expect("clear user instruction");
-
-        std::fs::write(
-            workspace.join("notes/facts.txt"),
-            vec![b'f'; 128 * 1024 + 1],
-        )
-        .expect("oversized include");
-        assert!(matches!(
-            run_to_end(&engine, &provider, request(&workspace, "Question")).await,
-            Err(EngineError::InputPath { source, .. })
-                if matches!(source.as_ref(), EngineError::InputTooLarge)
-        ));
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("restore include");
 
         let mut too_many = request(&workspace, "Question");
         too_many.include_paths = vec!["notes/facts.txt".into(); 17];
@@ -1059,7 +1104,6 @@ async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn preview_checkpoint_survives_abrupt_process_death() {
     const CASE: &str = "ARANY_TEST_PREVIEW_CRASH_ROOT";

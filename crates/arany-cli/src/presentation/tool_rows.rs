@@ -9,10 +9,65 @@ mod summary;
 const SUMMARY_TEXT_WIDTH: usize = 160;
 
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
+    let operation = summary::operation(&tool.intent.call);
+    let result = tool_result(tool);
+    let mut summary = format!(
+        "⏺ {}\n  ⎿ {result}",
+        safe_truncate(&operation, SUMMARY_TEXT_WIDTH)
+    );
+    if let Some(label) = tool
+        .observation
+        .as_ref()
+        .and_then(|observation| cache_update_label(observation.cache_update))
+    {
+        summary.push_str(" · ");
+        summary.push_str(label);
+    }
+    push_execution_notes(&mut summary, tool);
+    if tool.ran_unguarded() {
+        summary.push_str(" · UNGUARDED");
+    }
+    if let Some(cause) = tool
+        .observation
+        .as_ref()
+        .and_then(|value| value.enforcement_diagnostic())
+    {
+        summary.push_str(" · ");
+        summary.push_str(cause);
+    }
+    if let Some(stage) = tool
+        .observation
+        .as_ref()
+        .and_then(|value| value.guard_stage_diagnostic())
+    {
+        summary.push_str(" · ");
+        summary.push_str(&stage);
+    }
+    if let Some(note) = deny_note(tool) {
+        summary.push_str(note);
+    }
+    if let Some(note) = hook_note(tool) {
+        summary.push_str(note);
+    }
+    if let Some(spill) = tool
+        .observation
+        .as_ref()
+        .and_then(|observation| observation.spill.as_ref())
+    {
+        summary.push_str(&format!(
+            "\n  Output spill: spill:{}; {}; truncated: {}",
+            safe_truncate(&spill.r#ref, SUMMARY_TEXT_WIDTH),
+            format_bytes(spill.bytes),
+            spill.truncated
+        ));
+    }
+    summary
+}
+
+fn tool_result(tool: &arany::ToolView) -> String {
     use arany::ToolDisposition;
     use summary::ResultKind;
-    let operation = summary::operation(&tool.intent.call);
-    let result = match tool.observation.as_ref() {
+    match tool.observation.as_ref() {
         None => "pending".into(),
         Some(observation) => match observation.disposition {
             ToolDisposition::Limit => format!("limit: {}", limit_summary(observation)),
@@ -26,71 +81,65 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ResultKind::Host => safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH),
                 ResultKind::Read => read_result_summary(std::slice::from_ref(tool)),
             },
-            disposition => {
-                let state = match disposition {
-                    ToolDisposition::Denied => "denied",
-                    ToolDisposition::Failed => "Error",
-                    ToolDisposition::Conflict => "conflict",
-                    ToolDisposition::Limit => "limit",
-                    ToolDisposition::Cancelled => "cancelled",
-                    ToolDisposition::Uncertain => "uncertain",
-                    ToolDisposition::Succeeded => {
-                        unreachable!("success has its own result projection")
-                    }
-                };
-                if disposition == ToolDisposition::Denied {
-                    match tool.model_denial_label() {
-                        Some(label) => format!("{state}: {label}"),
-                        None if observation.output.is_empty() => state.into(),
-                        None => format!(
-                            "{state}: {}",
-                            safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
-                        ),
-                    }
-                } else if observation.output.is_empty() {
-                    state.into()
-                } else {
-                    match disposition {
-                        ToolDisposition::Failed
-                            if matches!(
-                                summary::result_kind(&tool.intent.call),
-                                ResultKind::Command
-                            ) =>
-                        {
-                            format!(
-                                "{state}: {}",
-                                command_result_summary(observation).unwrap_or_else(|| {
-                                    safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
-                                })
-                            )
-                        }
-                        // An uncertain Git write may lead with locks the owner must remove by hand.
-                        ToolDisposition::Uncertain
-                            if summary::uncertain_git_write(&tool.intent.call) =>
-                        {
-                            format!("{state}: {}", wrapped_rows(&observation.output))
-                        }
-                        _ => format!(
-                            "{state}: {}",
-                            safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
-                        ),
-                    }
-                }
-            }
+            disposition => unsuccessful_result(tool, observation, disposition),
         },
-    };
-    let mut summary = format!(
-        "⏺ {}\n  ⎿ {result}",
-        safe_truncate(&operation, SUMMARY_TEXT_WIDTH)
-    );
-    if let Some(label) = tool
-        .observation
-        .as_ref()
-        .and_then(|observation| cache_update_label(observation.cache_update))
-    {
-        summary.push_str(" · ");
-        summary.push_str(label);
     }
+}
+
+fn unsuccessful_result(
+    tool: &arany::ToolView,
+    observation: &arany::ToolObservation,
+    disposition: arany::ToolDisposition,
+) -> String {
+    use arany::ToolDisposition;
+    use summary::ResultKind;
+    let state = match disposition {
+        ToolDisposition::Denied => "denied",
+        ToolDisposition::Failed => "Error",
+        ToolDisposition::Conflict => "conflict",
+        ToolDisposition::Limit => "limit",
+        ToolDisposition::Cancelled => "cancelled",
+        ToolDisposition::Uncertain => "uncertain",
+        ToolDisposition::Succeeded => {
+            unreachable!("success has its own result projection")
+        }
+    };
+    if disposition == ToolDisposition::Denied {
+        match tool.model_denial_label() {
+            Some(label) => format!("{state}: {label}"),
+            None if observation.output.is_empty() => state.into(),
+            None => format!(
+                "{state}: {}",
+                safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
+            ),
+        }
+    } else if observation.output.is_empty() {
+        state.into()
+    } else {
+        match disposition {
+            ToolDisposition::Failed
+                if matches!(summary::result_kind(&tool.intent.call), ResultKind::Command) =>
+            {
+                format!(
+                    "{state}: {}",
+                    command_result_summary(observation).unwrap_or_else(|| {
+                        safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
+                    })
+                )
+            }
+            // An uncertain Git write may lead with locks the owner must remove by hand.
+            ToolDisposition::Uncertain if summary::uncertain_git_write(&tool.intent.call) => {
+                format!("{state}: {}", wrapped_rows(&observation.output))
+            }
+            _ => format!(
+                "{state}: {}",
+                safe_truncate(&observation.output, SUMMARY_TEXT_WIDTH)
+            ),
+        }
+    }
+}
+
+fn push_execution_notes(summary: &mut String, tool: &arany::ToolView) {
     if let Some(checkpoint) = &tool.checkpoint {
         if let Some(notice) = checkpoint.notice() {
             summary.push_str(" · ");
@@ -117,37 +166,25 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · ");
         summary.push_str(&escape_terminal(&wrap.tool.executable));
     }
-    if tool.ran_unguarded() {
-        summary.push_str(" · UNGUARDED");
-    }
-    if let Some(cause) = tool
-        .observation
+}
+
+fn deny_note(tool: &arany::ToolView) -> Option<&'static str> {
+    let verdict = tool
+        .permission_verdict
         .as_ref()
-        .and_then(|value| value.enforcement_diagnostic())
-    {
-        summary.push_str(" · ");
-        summary.push_str(cause);
-    }
-    if let Some(stage) = tool
-        .observation
-        .as_ref()
-        .and_then(|value| value.guard_stage_diagnostic())
-    {
-        summary.push_str(" · ");
-        summary.push_str(&stage);
-    }
-    if let Some(verdict) = &tool.permission_verdict
-        && verdict.decision == arany::permissions::Decision::Deny
-    {
-        summary.push_str(match verdict.source {
-            arany::permissions::PermissionSource::Rule => " · permission deny rule",
-            arany::permissions::PermissionSource::TypedPrefixRule => " · typed Git deny rule",
-            arany::permissions::PermissionSource::HostPrefixRule => " · host command deny rule",
-            arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
-            arany::permissions::PermissionSource::Hook => " · hook denial",
-            _ => " · permission mode denial",
-        });
-    }
+        .filter(|verdict| verdict.decision == arany::permissions::Decision::Deny)?;
+    Some(match verdict.source {
+        arany::permissions::PermissionSource::Rule => " · permission deny rule",
+        arany::permissions::PermissionSource::TypedPrefixRule => " · typed Git deny rule",
+        arany::permissions::PermissionSource::HostPrefixRule => " · host command deny rule",
+        arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
+        arany::permissions::PermissionSource::Hook => " · hook denial",
+        _ => " · permission mode denial",
+    })
+}
+
+// Any hook with an unknown outcome outranks a hook that failed without blocking.
+fn hook_note(tool: &arany::ToolView) -> Option<&'static str> {
     let hook_results = tool.hooks.iter().filter_map(|hook| hook.outcome.as_ref());
     let (mut unknown, mut failed) = (false, false);
     for outcome in hook_results {
@@ -170,26 +207,15 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         }
     }
     if unknown {
-        summary.push_str(" · hook outcome unknown");
+        Some(" · hook outcome unknown")
     } else if failed {
-        summary.push_str(" · hook failed (non-blocking)");
+        Some(" · hook failed (non-blocking)")
+    } else {
+        None
     }
-    if let Some(spill) = tool
-        .observation
-        .as_ref()
-        .and_then(|observation| observation.spill.as_ref())
-    {
-        summary.push_str(&format!(
-            "\n  Output spill: spill:{}; {}; truncated: {}",
-            safe_truncate(&spill.r#ref, SUMMARY_TEXT_WIDTH),
-            format_bytes(spill.bytes),
-            spill.truncated
-        ));
-    }
-    summary
 }
 
-fn limit_summary(observation: &arany::ToolObservation) -> String {
+pub(super) fn limit_summary(observation: &arany::ToolObservation) -> String {
     use arany::LimitCause;
     match observation.limit_cause.unwrap_or(LimitCause::Resource) {
         LimitCause::Timeout => format!(
@@ -327,6 +353,17 @@ fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
 
 pub(crate) const HOST_SENSITIVE_PATH_WARNING: &str = "SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.";
 
+const UNGUARDED_RISK: [&str; 8] = [
+    "Risk: it runs as you, with your home directory, network and every file you can reach.",
+    "Changes land directly in the project without changeset validation, and Arany cannot",
+    "guarantee that processes it leaves behind are stopped. This run is recorded as unguarded.",
+    "It can execute repository configuration, modify Arany permissions, Store and journal, and disclose private data to the Provider.",
+    "Host effects cannot be rewound; same-user state tampering is not prevented or reliably detected.",
+    "Shell/interpreter inline programs are opaque beyond a lexical privilege-tool check; it is not a security boundary.",
+    "File scripts, obfuscation and other payloads remain uninspected. Host children have no controlling terminal, so terminal privilege prompts cannot appear.",
+    "Allow only if you would type this exact command yourself.",
+];
+
 pub fn unguarded_approval_lines(
     intent: &arany::EffectIntent,
     prompt: &arany::UnguardedPrompt,
@@ -342,6 +379,9 @@ pub fn unguarded_approval_lines(
         return tool_approval_lines(intent);
     };
     let mut lines = Vec::new();
+    if prompt.sandbox_off {
+        lines.push(super::model::SANDBOX_OFF_NOTICE.into());
+    }
     if prompt.sensitive {
         lines.push(HOST_SENSITIVE_PATH_WARNING.into());
     }
@@ -363,24 +403,7 @@ pub fn unguarded_approval_lines(
                 .map(|argument| format!("  {}", escape_terminal(argument))),
         );
     }
-    lines.push(if let Some(pin) = &intent.host_command {
-        format!(
-            "Directory: {}",
-            escape_terminal(
-                &std::path::Path::new(&pin.workspace)
-                    .join(cwd)
-                    .display()
-                    .to_string()
-            )
-        )
-    } else if cwd.is_empty() {
-        "Directory: ./ (the real project folder)".into()
-    } else {
-        format!(
-            "Directory: ./{} (inside the real project folder)",
-            escape_terminal(cwd)
-        )
-    });
+    lines.push(host_directory(intent, cwd));
     lines.push(format!(
         "Model's reason: {}",
         escape_terminal(justification)
@@ -403,25 +426,39 @@ pub fn unguarded_approval_lines(
             "Host access requires explicit authority; no prior Guard failure is required.".into()
         }
     });
-    lines.extend(
-        [
-            "Risk: it runs as you, with your home directory, network and every file you can reach.",
-            "Changes land directly in the project without changeset validation, and Arany cannot",
-            "guarantee that processes it leaves behind are stopped. This run is recorded as unguarded.",
-            "It can execute repository configuration, modify Arany permissions, Store and journal, and disclose private data to the Provider.",
-            "Host effects cannot be rewound; same-user state tampering is not prevented or reliably detected.",
-            "Shell/interpreter inline programs are opaque beyond a lexical privilege-tool check; it is not a security boundary.",
-            "File scripts, obfuscation and other payloads remain uninspected. Host children have no controlling terminal, so terminal privilege prompts cannot appear.",
-            "Allow only if you would type this exact command yourself.",
-        ]
-        .map(String::from),
-    );
+    lines.extend(UNGUARDED_RISK.map(String::from));
     lines
+}
+
+// A pinned host command names its absolute directory; otherwise the directory is project-relative.
+fn host_directory(intent: &arany::EffectIntent, cwd: &str) -> String {
+    if let Some(pin) = &intent.host_command {
+        format!(
+            "Directory: {}",
+            escape_terminal(
+                &std::path::Path::new(&pin.workspace)
+                    .join(cwd)
+                    .display()
+                    .to_string()
+            )
+        )
+    } else if cwd.is_empty() {
+        "Directory: ./ (the real project folder)".into()
+    } else {
+        format!(
+            "Directory: ./{} (inside the real project folder)",
+            escape_terminal(cwd)
+        )
+    }
 }
 
 pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
     let mut lines = approval_header(intent);
     lines.extend(approval_call_lines(&intent.call));
+    // Git pushes to the URL the user's insteadOf/pushInsteadOf rewrites produce, pinned at proposal.
+    if let (arany::ToolCall::GitPush { .. }, Some(host)) = (&intent.call, &intent.host) {
+        lines.push(format!("Pushes to: {}", escape_terminal(&host.destination)));
+    }
     lines.extend(approval_footer(intent));
     lines
 }
@@ -753,6 +790,8 @@ pub enum ToolApprovalChoice {
     ExactCommand,
     HostPrefix,
     GitPrefix(arany::permissions::TypedGitPrefix),
+    AlwaysReads,
+    PinRepository,
     No,
 }
 
@@ -763,6 +802,8 @@ impl ToolApprovalChoice {
             Self::AutoEdits => "Yes, and don't ask again for: file edits",
             Self::ExactCommand => "Yes, for this session",
             Self::HostPrefix => "Yes, and allow this host prefix in this folder from the next Run",
+            Self::AlwaysReads => "Yes, and always allow these folders in every trusted folder",
+            Self::PinRepository => "Yes, and treat this destination as this folder's repository",
             Self::GitPrefix(prefix) => match prefix {
                 arany::permissions::TypedGitPrefix::Commit => {
                     "Yes, and allow git commit in this folder from the next Run"
@@ -790,7 +831,9 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
             Self::ExactCommand => arany::ApprovalReply::AllowForSession,
-            Self::GitPrefix(_) | Self::HostPrefix => arany::ApprovalReply::AllowPrefixInFolder,
+            Self::GitPrefix(_) | Self::HostPrefix | Self::AlwaysReads | Self::PinRepository => {
+                arany::ApprovalReply::AllowPrefixInFolder
+            }
             Self::No => arany::ApprovalReply::Deny,
         }
     }
@@ -830,6 +873,12 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         if let Some(prefix) = approval.remember_prefix {
             choices.push(ToolApprovalChoice::GitPrefix(prefix));
         }
+        if approval.save_reads {
+            choices.push(ToolApprovalChoice::AlwaysReads);
+        }
+    }
+    if approval.pin_repository {
+        choices.push(ToolApprovalChoice::PinRepository);
     }
     if approval
         .unguarded

@@ -1,5 +1,5 @@
 use super::{
-    ConfigError, Decision, MAX_RULE_PATTERN_BYTES, PermissionMode, compile, peer_name, valid_call,
+    ConfigError, Decision, MAX_RULE_PATTERN_BYTES, PermissionMode, compile, rule_name, valid_call,
 };
 use crate::tools::{EffectIntent, ToolCall, ToolObservation};
 use regex::Regex;
@@ -163,7 +163,7 @@ impl HookGroup {
                 "ambiguous MCP server delimiter; block the pending action",
             ));
         }
-        self.matches(&peer_name(call))
+        self.matches(&rule_name(call))
     }
 
     pub fn commands(&self) -> &[CommandHook] {
@@ -404,18 +404,31 @@ fn bounded_reason(text: &str) -> Option<String> {
     (!reason.is_empty()).then_some(reason)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct HookHeader<S> {
+    pub(crate) session_id: S,
+    pub(crate) mode: PermissionMode,
+}
+
+pub(crate) struct LifecycleSubject<'a> {
+    pub(crate) event: HookEvent,
+    pub(crate) active: bool,
+    pub(crate) message: &'a str,
+    pub(crate) trigger: &'a str,
+}
+
 pub(crate) fn pre_tool_use_input(
-    session_id: impl std::fmt::Display,
-    mode: PermissionMode,
+    header: HookHeader<impl std::fmt::Display>,
     call: &ToolCall,
     tool_use_id: uuid::Uuid,
 ) -> Result<String, ConfigError> {
+    let HookHeader { session_id, mode } = header;
     let input = serde_json::json!({
         "session_id": session_id.to_string(),
         "cwd": "/workspace",
         "permission_mode": mode,
         "hook_event_name": "PreToolUse",
-        "tool_name": peer_name(call),
+        "tool_name": rule_name(call),
         "tool_input": call,
         "tool_use_id": tool_use_id,
     })
@@ -428,13 +441,13 @@ pub(crate) fn pre_tool_use_input(
 
 // A `tool_response` over `budget` bytes of input is cut to the room the rest leaves and marked truncated.
 pub(crate) fn post_tool_use_input(
-    session_id: impl std::fmt::Display,
-    mode: PermissionMode,
+    header: HookHeader<impl std::fmt::Display>,
     call: &ToolCall,
     tool_use_id: uuid::Uuid,
     tool_response: Value,
     budget: usize,
 ) -> Result<String, ConfigError> {
+    let HookHeader { session_id, mode } = header;
     let budget = budget.min(MAX_HOOK_INPUT_BYTES);
     let build = |response: Value| {
         serde_json::json!({
@@ -442,7 +455,7 @@ pub(crate) fn post_tool_use_input(
             "cwd": "/workspace",
             "permission_mode": mode,
             "hook_event_name": "PostToolUse",
-            "tool_name": peer_name(call),
+            "tool_name": rule_name(call),
             "tool_input": call,
             "tool_use_id": tool_use_id,
             "tool_response": response,
@@ -643,14 +656,17 @@ pub(crate) fn compact_subject(trigger: &str, call_index: usize) -> [u8; 32] {
 }
 
 pub(crate) fn lifecycle_input(
-    session_id: impl std::fmt::Display,
-    mode: PermissionMode,
-    event: HookEvent,
-    active: bool,
-    message: &str,
-    trigger: &str,
+    header: HookHeader<impl std::fmt::Display>,
+    subject: LifecycleSubject<'_>,
     budget: usize,
 ) -> String {
+    let HookHeader { session_id, mode } = header;
+    let LifecycleSubject {
+        event,
+        active,
+        message,
+        trigger,
+    } = subject;
     let mut input = serde_json::json!({
         "session_id": session_id.to_string(), "cwd": "/workspace",
         "permission_mode": mode, "hook_event_name": event,

@@ -73,7 +73,12 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
         Item::ToolCall { call, .. } => Some(serde_json::from_value::<ToolCall>(call.clone()).ok()?),
         _ => None,
     };
-    let tool = match item {
+    let tool = tool_item(item, typed.as_ref())?;
+    Some(tool_update(tool, cwd, session, started))
+}
+
+fn tool_item<'a>(item: &'a Item, typed: Option<&'a ToolCall>) -> Option<ToolItem<'a>> {
+    Some(match item {
         Item::CommandExecution {
             id,
             command,
@@ -92,9 +97,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             status,
             disposition,
             output,
-            raw: Some(
-                json!({"operation":"command", "program":command,"args":args,"cwd":command_cwd}),
-            ),
+            raw: Some(command_input(command, args, command_cwd)),
         },
         Item::FileChange {
             id,
@@ -104,12 +107,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             output,
         } => ToolItem {
             id,
-            kind: if !changes.is_empty() && changes.iter().all(|c| c.kind == FileChangeKind::Delete)
-            {
-                "delete"
-            } else {
-                "edit"
-            },
+            kind: change_kind(changes),
             label: "Change files",
             detail: changes.first().map_or("", |c| c.path.as_str()).into(),
             paths: changes.iter().map(|c| c.path.as_str()).collect(),
@@ -143,7 +141,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             disposition,
             output,
         } => {
-            let display = projection::project(typed.as_ref()?);
+            let display = projection::project(typed?);
             ToolItem {
                 id,
                 kind: display.kind,
@@ -157,7 +155,22 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             }
         }
         _ => return None,
-    };
+    })
+}
+
+fn command_input(command: &str, args: &[String], cwd: &str) -> Value {
+    json!({"operation":"command", "program":command,"args":args,"cwd":cwd})
+}
+
+fn change_kind(changes: &[FileChange]) -> &'static str {
+    if !changes.is_empty() && changes.iter().all(|c| c.kind == FileChangeKind::Delete) {
+        "delete"
+    } else {
+        "edit"
+    }
+}
+
+fn tool_update(tool: ToolItem<'_>, cwd: &str, session: SessionId, started: bool) -> Value {
     let uncertain = *tool.status == ItemStatus::Uncertain;
     let mut update = json!({
         "sessionUpdate": if started {"tool_call"} else {"tool_call_update"},
@@ -191,7 +204,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
             update["_meta"]["arany.status"] = json!("uncertain");
         }
     }
-    Some(update)
+    update
 }
 
 fn display_path(cwd: &str, path: &str) -> String {
