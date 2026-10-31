@@ -795,9 +795,10 @@ pub(super) fn classify_response(
     Usage,
     Option<crate::provider::ProviderWireProvenance>,
 ) {
-    let valid_id = response.response_id.as_ref().is_none_or(|value| {
-        !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())
-    });
+    let valid_id = response
+        .response_id
+        .as_deref()
+        .is_none_or(crate::provider::valid_wire_id);
     let reported = response.usage;
     let valid_input_tokens = reported
         .input_tokens

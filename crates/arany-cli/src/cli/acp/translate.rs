@@ -10,6 +10,10 @@ use std::{
 };
 use tokio::sync::{Notify, mpsc};
 
+const MAX_PENDING_TRANSLATIONS: usize = 64;
+// Control, plan subscription and reconciliation each keep a slot clients cannot take.
+const RESERVED_TRANSLATIONS: usize = 3;
+
 pub(super) type Shared = Arc<Mutex<State>>;
 
 fn locked(state: &Shared) -> MutexGuard<'_, State> {
@@ -108,7 +112,7 @@ async fn send_request(
 ) -> Result<(), String> {
     let message = {
         let mut state = locked(state);
-        if state.pending.len() >= 64 {
+        if state.pending.len() >= MAX_PENDING_TRANSLATIONS {
             return Err("ACP pending request bound exceeded".into());
         }
         state.next_id = state
@@ -161,7 +165,7 @@ fn request_refusal(state: &Shared, id: &RequestId, method: &str) -> Option<Value
             "Initialize first",
             "notInitialized",
         ))
-    } else if state.pending.len() >= 61 {
+    } else if state.pending.len() >= MAX_PENDING_TRANSLATIONS - RESERVED_TRANSLATIONS {
         Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
     } else {
         None

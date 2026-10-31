@@ -84,8 +84,8 @@ fn valid_hook_start(
         && hook
             .command_subject
             .is_none_or(|id| id.get_version() == Some(uuid::Version::SortRand))
-        && hook.group < 64
-        && hook.handler < 128
+        && usize::from(hook.group) < crate::tools::permissions::MAX_HOOK_GROUPS
+        && usize::from(hook.handler) < crate::tools::permissions::MAX_HOOKS
         && hook.intent.valid()
         && matches!(hook.intent.call, crate::tools::ToolCall::Command { .. })
         && hook.intent.run_id == run_id

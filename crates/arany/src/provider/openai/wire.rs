@@ -666,9 +666,7 @@ fn provider_usage(usage: Option<&WireUsage>) -> Usage {
 impl WireItem {
     pub(super) fn completed_id(&self) -> Option<&str> {
         self.id.as_deref().filter(|id| {
-            !id.is_empty()
-                && id.len() <= 128
-                && id.bytes().all(|byte| byte.is_ascii_graphic())
+            crate::provider::valid_wire_id(id)
                 && (!matches!(self.kind.as_str(), "message" | "function_call")
                     || self.status.as_deref() == Some("completed"))
         })
@@ -782,11 +780,10 @@ impl WireResponse {
                         || item.phase.is_some()
                         || item.role.is_some()
                         || !item.completed_id().is_some_and(|id| ids.insert(id))
-                        || item.call_id.as_deref().is_none_or(|id| {
-                            id.is_empty()
-                                || id.len() > 128
-                                || !id.bytes().all(|byte| byte.is_ascii_graphic())
-                        })
+                        || item
+                            .call_id
+                            .as_deref()
+                            .is_none_or(|id| !crate::provider::valid_wire_id(id))
                     {
                         return Err(ResponseError::Message);
                     }
@@ -831,10 +828,7 @@ impl WireResponse {
         if self.model != model {
             return Err(ResponseError::Model);
         }
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
-        {
+        if !crate::provider::valid_wire_id(&self.id) {
             return Err(ResponseError::Identifier);
         }
         Ok(())

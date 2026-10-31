@@ -431,28 +431,7 @@ impl RunLoop<'_> {
         };
         let ledger = self.ledger();
         let context_limit = runtime.context_limit_bytes();
-        let context = request
-            .input
-            .tools
-            .as_ref()
-            .ok_or(EngineError::InvalidRequest)?;
-        let pressure = self.unhandled_window_pressure()?;
-        let (_, boundaries) = self.tool_context_boundaries()?;
-        if boundaries.len() != context.observation_count() {
-            return Err(EngineError::InvalidHistory);
-        }
-        let decision = context_decision(
-            context,
-            context_limit,
-            pressure.map_or(WindowPressure::Low, |(_, pressure)| pressure),
-            byte_rule,
-            &boundaries,
-        );
-        if let Some((sequence, _)) = pressure {
-            self.window_pressure_handled
-                .store(sequence, std::sync::atomic::Ordering::Relaxed);
-        }
-        match decision {
+        match self.tool_context_decision(request, context_limit, byte_rule)? {
             ContextDecision::Ready => return Ok(Ok(())),
             ContextDecision::Summarize => {}
             ContextDecision::Clear(clear) => {
@@ -500,6 +479,37 @@ impl RunLoop<'_> {
         }
         self.run_tool_compaction(request, window, summary_limit, deadline)
             .await
+    }
+
+    // Consumes the newest window pressure signal, so each signal is handled once.
+    fn tool_context_decision(
+        &self,
+        request: &ProviderRequest,
+        context_limit: usize,
+        byte_rule: ByteRule,
+    ) -> Result<ContextDecision, EngineError> {
+        let context = request
+            .input
+            .tools
+            .as_ref()
+            .ok_or(EngineError::InvalidRequest)?;
+        let pressure = self.unhandled_window_pressure()?;
+        let (_, boundaries) = self.tool_context_boundaries()?;
+        if boundaries.len() != context.observation_count() {
+            return Err(EngineError::InvalidHistory);
+        }
+        let decision = context_decision(
+            context,
+            context_limit,
+            pressure.map_or(WindowPressure::Low, |(_, pressure)| pressure),
+            byte_rule,
+            &boundaries,
+        );
+        if let Some((sequence, _)) = pressure {
+            self.window_pressure_handled
+                .store(sequence, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(decision)
     }
 
     async fn run_tool_compaction(
@@ -673,18 +683,7 @@ impl RunLoop<'_> {
                 + crate::session::COMPACTION_SUMMARY_SEPARATOR_BYTES,
         );
         let previous_summary = context.history_summary.clone();
-        let last_attempted = events
-            .iter()
-            .filter_map(|envelope| match envelope.event {
-                Event::GoalContextCompacted {
-                    run_id,
-                    covered_tool_count,
-                    ..
-                } if run_id == self.run_id => Some(covered_tool_count),
-                _ => None,
-            })
-            .next_back()
-            .unwrap_or(previously_covered);
+        let last_attempted = last_compacted(&events, self.run_id).unwrap_or(previously_covered);
         let candidates = compaction_candidates(context, &boundaries, last_attempted);
         let plan_contract = self.ledger().plan_contract()?;
         let budget = self.ledger().effective_budget()?;
@@ -721,14 +720,7 @@ impl RunLoop<'_> {
         let covered_tool_count =
             u32::try_from(boundaries[prefix_count - 1].ok_or(EngineError::InvalidHistory)?)
                 .map_err(|_| EngineError::InvalidHistory)?;
-        let covered_sequence = self.ledger().view(|view| {
-            view.runs
-                .iter()
-                .find(|run| run.id == self.run_id)
-                .and_then(|run| run.tools.get(covered_tool_count as usize - 1))
-                .and_then(|tool| tool.finished_sequence)
-                .ok_or(EngineError::InvalidHistory)
-        })??;
+        let covered_sequence = self.tool_finished_sequence(covered_tool_count)?;
         let source_digest = crate::session::prefix_digest(&events, covered_sequence)
             .map_err(|_| EngineError::InvalidHistory)?;
         Ok(Some(CompactionWindow {
@@ -740,6 +732,17 @@ impl RunLoop<'_> {
             previous_summary,
             observations,
         }))
+    }
+
+    fn tool_finished_sequence(&self, covered_tool_count: u32) -> Result<u64, EngineError> {
+        self.ledger().view(|view| {
+            view.runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .and_then(|run| run.tools.get(covered_tool_count as usize - 1))
+                .and_then(|tool| tool.finished_sequence)
+                .ok_or(EngineError::InvalidHistory)
+        })?
     }
 
     async fn summarize(
@@ -783,33 +786,7 @@ impl RunLoop<'_> {
                 limits.clone(),
             )
             .await?;
-        let failed = |reason| {
-            (
-                CompactionStatus::Failed { reason },
-                None,
-                Usage::default(),
-                None,
-            )
-        };
-        let (mut status, response_id, usage, wire_provenance) = match response {
-            None => failed(CompactionFailure::Cancelled),
-            Some(CompactionOutcome {
-                response: Ok(response),
-                provider,
-            }) => classify_response(response, provider.identity().limits.output_token_bound),
-            Some(CompactionOutcome {
-                response: Err(crate::provider::ProviderError::CallTimedOut),
-                ..
-            }) => failed(CompactionFailure::TimedOut),
-            Some(CompactionOutcome {
-                response: Err(error),
-                ..
-            }) => failed(match error.failure_class() {
-                ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
-                ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
-                ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
-            }),
-        };
+        let (mut status, response_id, usage, wire_provenance) = compaction_status(response);
         if let CompactionStatus::Succeeded { summary, .. } = &status {
             let context = request
                 .input
@@ -891,34 +868,103 @@ impl RunLoop<'_> {
         })
         .await?;
         if let CompactionStatus::Succeeded { summary, .. } = &record.status {
-            let input = &mut request.input;
-            let context = input.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
-            context.history_summary = Some(
-                crate::session::render_recent_files(&record.recent_files).map_or_else(
-                    || summary.clone(),
-                    |files| crate::session::join_recent_files(Some(summary.clone()), files),
-                ),
-            );
-            for feedback in &mut input.stop_hook_feedback {
-                feedback.after_step = feedback.after_step.saturating_sub(window.prefix_steps);
-                feedback.turn.without_thinking();
-            }
-            for step in context.steps.drain(..window.prefix_steps) {
-                input.steering_notes.extend(step.steering_notes);
-            }
-            for step in &mut context.steps {
-                step.turn.without_thinking();
-            }
-            // Compacted steps may be the only carriers of the current contract and budget, so reintroduce both.
-            input.goal_plan_contract = self.ledger().plan_contract()?;
-            input.goal_budget = if self.ledger().autonomous() || input.goal_plan_contract.is_some()
-            {
-                Some(self.ledger().effective_budget()?)
-            } else {
-                None
-            };
+            self.replace_compacted_steps(
+                request,
+                window.prefix_steps,
+                summary,
+                &record.recent_files,
+            )?;
         }
         Ok(())
+    }
+
+    fn replace_compacted_steps(
+        &self,
+        request: &mut ProviderRequest,
+        prefix_steps: usize,
+        summary: &str,
+        recent_files: &[crate::session::RecentFile],
+    ) -> Result<(), EngineError> {
+        let input = &mut request.input;
+        let context = input.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
+        context.history_summary = Some(
+            crate::session::render_recent_files(recent_files).map_or_else(
+                || summary.to_owned(),
+                |files| crate::session::join_recent_files(Some(summary.to_owned()), files),
+            ),
+        );
+        for feedback in &mut input.stop_hook_feedback {
+            feedback.after_step = feedback.after_step.saturating_sub(prefix_steps);
+            feedback.turn.without_thinking();
+        }
+        for step in context.steps.drain(..prefix_steps) {
+            input.steering_notes.extend(step.steering_notes);
+        }
+        for step in &mut context.steps {
+            step.turn.without_thinking();
+        }
+        // Compacted steps may be the only carriers of the current contract and budget, so reintroduce both.
+        input.goal_plan_contract = self.ledger().plan_contract()?;
+        input.goal_budget = if self.ledger().autonomous() || input.goal_plan_contract.is_some() {
+            Some(self.ledger().effective_budget()?)
+        } else {
+            None
+        };
+        Ok(())
+    }
+}
+
+fn last_compacted(
+    events: &[crate::session::EventEnvelope],
+    run: crate::session::RunId,
+) -> Option<u32> {
+    events
+        .iter()
+        .filter_map(|envelope| match envelope.event {
+            Event::GoalContextCompacted {
+                run_id,
+                covered_tool_count,
+                ..
+            } if run_id == run => Some(covered_tool_count),
+            _ => None,
+        })
+        .next_back()
+}
+
+type CompactionResult = (
+    CompactionStatus,
+    Option<String>,
+    Usage,
+    Option<crate::provider::ProviderWireProvenance>,
+);
+
+fn compaction_status(response: Option<CompactionOutcome>) -> CompactionResult {
+    let failed = |reason| {
+        (
+            CompactionStatus::Failed { reason },
+            None,
+            Usage::default(),
+            None,
+        )
+    };
+    match response {
+        None => failed(CompactionFailure::Cancelled),
+        Some(CompactionOutcome {
+            response: Ok(response),
+            provider,
+        }) => classify_response(response, provider.identity().limits.output_token_bound),
+        Some(CompactionOutcome {
+            response: Err(crate::provider::ProviderError::CallTimedOut),
+            ..
+        }) => failed(CompactionFailure::TimedOut),
+        Some(CompactionOutcome {
+            response: Err(error),
+            ..
+        }) => failed(match error.failure_class() {
+            ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
+            ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
+            ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
+        }),
     }
 }
 

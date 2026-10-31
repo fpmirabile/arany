@@ -1891,82 +1891,12 @@ impl ToolObservation {
                 || self.disposition != ToolDisposition::Succeeded
                 || matches!(&self.attestation, Some(Attestation::InProcess { receipt: Some(receipt), .. })
                     if super::fs::file_receipt(&self.intent, &self.output).is_ok_and(|expected| expected == *receipt)))
-            && match self.enforcement_cause {
-                None => true,
-                Some(EnforcementCause::FilesystemDenied) => {
-                    self.disposition == ToolDisposition::Denied && self.attestation.is_some()
-                }
-                Some(EnforcementCause::GuardBootstrap) => {
-                    self.disposition == ToolDisposition::Failed
-                        && self.attestation.is_none()
-                        && !super::fs::in_process_mutation(&self.intent)
-                        && (self.intent.call.facts().site == super::catalog::Site::Guard
-                            || self.intent.call.facts().family == super::catalog::Family::File
-                                && self.intent.call.facts().mutates)
-                }
-            }
-            && (!self.intent.call.is_host()
-                || self.cache_update == CacheUpdate::NotApplicable
-                    && self.enforcement_cause.is_none()
-                    && match &self.attestation {
-                        Some(Attestation::Host(receipt)) => {
-                            receipt.pid > 0
-                                && (self.disposition == ToolDisposition::Uncertain
-                                    || self.disposition == ToolDisposition::Failed
-                                        && self.intent.call.is_host_pr_read()
-                                        && receipt.descendants_confirmed_stopped
-                                        && valid_host_pr_read_failure(self, receipt)
-                                    || self.disposition == ToolDisposition::Failed
-                                        && matches!(self.intent.call, ToolCall::GitPush { .. })
-                                        && receipt.exit_code == Some(1)
-                                        && receipt.descendants_confirmed_stopped
-                                        && self.output == super::git::host::NON_FAST_FORWARD
-                                    || self.disposition == ToolDisposition::Succeeded
-                                        && receipt.exit_code == Some(0)
-                                        && receipt.descendants_confirmed_stopped
-                                        && match self.intent.call {
-                                            ToolCall::GhPrList { limit, .. } => {
-                                                super::git::host::valid_pr_list_output(
-                                                    &self.output,
-                                                    limit,
-                                                )
-                                            }
-                                            ToolCall::GhPrView {
-                                                ref repository,
-                                                number,
-                                            } => super::git::host::valid_pr_view_output(
-                                                &self.output,
-                                                super::git::host::PrViewIdentity {
-                                                    repository: repository.clone(),
-                                                    number,
-                                                },
-                                            ),
-                                            _ => true,
-                                        })
-                        }
-                        None => {
-                            self.disposition != ToolDisposition::Succeeded
-                                && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
-                                    && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
-                        }
-                        _ => false,
-                    })
+            && self.valid_enforcement()
+            && self.valid_host()
             && (!self.intent.call.is_unguarded()
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
-            && (self.intent.call.facts().site != Site::Git
-                || self.cache_update == CacheUpdate::NotApplicable
-                    && self.enforcement_cause.is_none()
-                    && match &self.attestation {
-                        Some(Attestation::Git(receipt)) => {
-                            self.disposition != ToolDisposition::Uncertain
-                                && (self.disposition != ToolDisposition::Succeeded
-                                    || !self.intent.call.mutates()
-                                    || receipt.exit_code == Some(0))
-                        }
-                        None => self.disposition != ToolDisposition::Succeeded,
-                        _ => false,
-                    })
+            && self.valid_git()
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
@@ -1974,6 +1904,88 @@ impl ToolObservation {
                     self.cache_publication_eligible()
                 }
             }
+    }
+
+    fn valid_enforcement(&self) -> bool {
+        match self.enforcement_cause {
+            None => true,
+            Some(EnforcementCause::FilesystemDenied) => {
+                self.disposition == ToolDisposition::Denied && self.attestation.is_some()
+            }
+            Some(EnforcementCause::GuardBootstrap) => {
+                self.disposition == ToolDisposition::Failed
+                    && self.attestation.is_none()
+                    && !super::fs::in_process_mutation(&self.intent)
+                    && (self.intent.call.facts().site == super::catalog::Site::Guard
+                        || self.intent.call.facts().family == super::catalog::Family::File
+                            && self.intent.call.facts().mutates)
+            }
+        }
+    }
+
+    fn valid_host(&self) -> bool {
+        !self.intent.call.is_host()
+            || self.cache_update == CacheUpdate::NotApplicable
+                && self.enforcement_cause.is_none()
+                && match &self.attestation {
+                    Some(Attestation::Host(receipt)) => {
+                        receipt.pid > 0
+                            && (self.disposition == ToolDisposition::Uncertain
+                                || self.disposition == ToolDisposition::Failed
+                                    && self.intent.call.is_host_pr_read()
+                                    && receipt.descendants_confirmed_stopped
+                                    && valid_host_pr_read_failure(self, receipt)
+                                || self.disposition == ToolDisposition::Failed
+                                    && matches!(self.intent.call, ToolCall::GitPush { .. })
+                                    && receipt.exit_code == Some(1)
+                                    && receipt.descendants_confirmed_stopped
+                                    && self.output == super::git::host::NON_FAST_FORWARD
+                                || self.disposition == ToolDisposition::Succeeded
+                                    && receipt.exit_code == Some(0)
+                                    && receipt.descendants_confirmed_stopped
+                                    && match self.intent.call {
+                                        ToolCall::GhPrList { limit, .. } => {
+                                            super::git::host::valid_pr_list_output(
+                                                &self.output,
+                                                limit,
+                                            )
+                                        }
+                                        ToolCall::GhPrView {
+                                            ref repository,
+                                            number,
+                                        } => super::git::host::valid_pr_view_output(
+                                            &self.output,
+                                            super::git::host::PrViewIdentity {
+                                                repository: repository.clone(),
+                                                number,
+                                            },
+                                        ),
+                                        _ => true,
+                                    })
+                    }
+                    None => {
+                        self.disposition != ToolDisposition::Succeeded
+                            && !(matches!(self.intent.call, ToolCall::GhPrView { .. })
+                                && self.output == super::git::host::PR_VIEW_RESULT_BUDGET)
+                    }
+                    _ => false,
+                }
+    }
+
+    fn valid_git(&self) -> bool {
+        self.intent.call.facts().site != Site::Git
+            || self.cache_update == CacheUpdate::NotApplicable
+                && self.enforcement_cause.is_none()
+                && match &self.attestation {
+                    Some(Attestation::Git(receipt)) => {
+                        self.disposition != ToolDisposition::Uncertain
+                            && (self.disposition != ToolDisposition::Succeeded
+                                || !self.intent.call.mutates()
+                                || receipt.exit_code == Some(0))
+                    }
+                    None => self.disposition != ToolDisposition::Succeeded,
+                    _ => false,
+                }
     }
 }
 

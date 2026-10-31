@@ -976,10 +976,7 @@ impl<'a> WireResponse<'a> {
             return Err(ProviderError::InvalidOutcome);
         }
         *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseIdentifier;
-        if self.id.is_empty()
-            || self.id.len() > 128
-            || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
-        {
+        if !crate::provider::valid_wire_id(&self.id) {
             return Err(ProviderError::InvalidOutcome);
         }
         *stage = crate::provider::diagnostics::SubscriptionFailureStage::ResponseContent;

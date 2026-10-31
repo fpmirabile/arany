@@ -254,7 +254,7 @@ fn decode_function_call(
     }
     let id = call["id"]
         .as_str()
-        .filter(|id| valid_id(id))
+        .filter(|id| crate::provider::valid_wire_id(id))
         .ok_or(ProviderError::InvalidResponseContract)?;
     let arguments = call
         .pointer("/function/arguments")
@@ -357,7 +357,7 @@ fn admit(value: &Value, model: &str, cap: u32) -> Result<AdmittedResponse, Provi
         .ok_or(ProviderError::InvalidResponseContract)?;
     let id = value["id"]
         .as_str()
-        .filter(|id| valid_id(id))
+        .filter(|id| crate::provider::valid_wire_id(id))
         .ok_or(ProviderError::InvalidResponseContract)?
         .to_owned();
     if value["model"] != model
@@ -378,10 +378,6 @@ fn admit(value: &Value, model: &str, cap: u32) -> Result<AdmittedResponse, Provi
         },
         choice: choices[0].clone(),
     })
-}
-
-fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[cfg(test)]

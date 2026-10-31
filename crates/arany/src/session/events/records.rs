@@ -116,6 +116,25 @@ pub enum CollaborationPolicy {
 }
 
 impl CollaborationPolicy {
+    pub const MAX_ACTIVE_CHILDREN: u8 = 8;
+    pub const DEFAULT_ACTIVE_CHILDREN: u8 = 3;
+
+    pub fn auto(max_active_children: Option<u8>) -> Option<Self> {
+        let max_active_children = max_active_children.unwrap_or(Self::DEFAULT_ACTIVE_CHILDREN);
+        (max_active_children <= Self::MAX_ACTIVE_CHILDREN).then_some(Self::Auto {
+            max_active_children,
+        })
+    }
+
+    pub fn team(max_active_children: Option<u8>) -> Option<Self> {
+        let max_active_children = max_active_children.unwrap_or(Self::DEFAULT_ACTIVE_CHILDREN);
+        (1..=Self::MAX_ACTIVE_CHILDREN)
+            .contains(&max_active_children)
+            .then_some(Self::Team {
+                max_active_children,
+            })
+    }
+
     // Only autonomous Goals and an explicit team are offered the binding plan contract.
     pub(crate) fn offers_plan(self, autonomous: bool) -> bool {
         autonomous || matches!(self, Self::Team { .. })
@@ -136,10 +155,10 @@ impl CollaborationPolicy {
             Self::Single => Ok(()),
             Self::Auto {
                 max_active_children,
-            } if max_active_children <= 8 => Ok(()),
+            } if max_active_children <= Self::MAX_ACTIVE_CHILDREN => Ok(()),
             Self::Team {
                 max_active_children,
-            } if (1..=8).contains(&max_active_children) => Ok(()),
+            } if (1..=Self::MAX_ACTIVE_CHILDREN).contains(&max_active_children) => Ok(()),
             _ => Err(ReplayError::InvalidPayload),
         }
     }
@@ -823,11 +842,10 @@ impl CompactionRecord {
                 .output_tokens
                 .is_some_and(|value| value > crate::provider::MAX_REPORTED_OUTPUT_TOKENS)
             || !self.usage().cache_consistent()
-            || self.response_id.as_ref().is_some_and(|value| {
-                value.is_empty()
-                    || value.len() > 128
-                    || !value.bytes().all(|byte| byte.is_ascii_graphic())
-            })
+            || self
+                .response_id
+                .as_ref()
+                .is_some_and(|value| !crate::provider::valid_wire_id(value))
             || self.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     self.response_id.as_deref(),
@@ -962,9 +980,10 @@ impl ProviderCallRecord {
             || self.requested_tools > MAX_STEP_TOOL_CALLS
             || (self.disposition == ProviderCallDisposition::ToolRequested)
                 != (self.requested_tools > 0)
-            || self.response_id.as_ref().is_some_and(|id| {
-                id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
-            })
+            || self
+                .response_id
+                .as_ref()
+                .is_some_and(|id| !crate::provider::valid_wire_id(id))
             || self
                 .input_tokens
                 .is_some_and(|count| count > crate::provider::MAX_REPORTED_INPUT_TOKENS)

@@ -471,27 +471,7 @@ impl RunLoop<'_> {
     ) -> Result<WorkerCompletion, EngineError> {
         let id = child.agent_run_id;
         let stopped = self.observe_worker_stop().await?;
-        let (unknown, changed) = self.ledger().view(|v| {
-            let a = v
-                .runs
-                .last()
-                .expect("Run")
-                .agents
-                .iter()
-                .find(|a| a.id == id)
-                .expect("editor");
-            (
-                a.tools
-                    .iter()
-                    .any(crate::session::ToolView::outcome_unknown),
-                a.tools.iter().any(|t| {
-                    crate::session::editor_integration(&t.intent.call)
-                        && t.observation.as_ref().is_some_and(|o| {
-                            o.disposition == ToolDisposition::Succeeded && o.attested_for(&t.intent)
-                        })
-                }),
-            )
-        })?;
+        let (unknown, changed) = self.editor_effects(id)?;
         let terminal = editor_terminal(
             end.failure,
             &EditorFacts {
@@ -716,6 +696,54 @@ impl RunLoop<'_> {
     }
 
     // Integrates an answered editor's workspace once; returns why it was not integrated, if so.
+    // Whether the editor left an unknown outcome, and whether it changed its workspace.
+    fn editor_effects(&self, id: AgentRunId) -> Result<(bool, bool), EngineError> {
+        self.ledger().view(|v| {
+            let a = v
+                .runs
+                .last()
+                .expect("Run")
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .expect("editor");
+            (
+                a.tools
+                    .iter()
+                    .any(crate::session::ToolView::outcome_unknown),
+                a.tools.iter().any(|t| {
+                    crate::session::editor_integration(&t.intent.call)
+                        && t.observation.as_ref().is_some_and(|o| {
+                            o.disposition == ToolDisposition::Succeeded && o.attested_for(&t.intent)
+                        })
+                }),
+            )
+        })
+    }
+
+    fn outside_lease(
+        &self,
+        id: AgentRunId,
+        call: &crate::tools::ToolCall,
+    ) -> Result<Vec<String>, EngineError> {
+        self.ledger().view(|v| {
+            let run = v.runs.last().expect("active Run");
+            let foreign = crate::session::validate_tool_lease(run, id, call).is_err();
+            let lease = run
+                .agents
+                .iter()
+                .find(|a| a.id == id)
+                .and_then(|a| a.assignment.as_ref())
+                .map(|w| w.pins.request.lease.clone())
+                .unwrap_or_default();
+            call.changeset_paths()
+                .into_iter()
+                .filter(|path| foreign || !within(path, &lease))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    }
+
     pub(super) async fn integrate_editor(
         &self,
         child: &mut ChildWork,
@@ -751,22 +779,7 @@ impl RunLoop<'_> {
                 ),
             )));
         }
-        let outside = self.ledger().view(|v| {
-            let run = v.runs.last().expect("active Run");
-            let foreign = crate::session::validate_tool_lease(run, id, &call).is_err();
-            let lease = run
-                .agents
-                .iter()
-                .find(|a| a.id == id)
-                .and_then(|a| a.assignment.as_ref())
-                .map(|w| w.pins.request.lease.clone())
-                .unwrap_or_default();
-            call.changeset_paths()
-                .into_iter()
-                .filter(|path| foreign || !within(path, &lease))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })?;
+        let outside = self.outside_lease(id, &call)?;
         if !outside.is_empty() {
             return Ok(Some(refused(
                 WorkerCause::IntegrationConflict,

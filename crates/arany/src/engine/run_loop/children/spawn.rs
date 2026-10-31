@@ -239,11 +239,13 @@ impl RunLoop<'_> {
             let _provider_work = provider_activity.start();
             crate::engine::routing::invoke_attempt(
                 provider.as_ref(),
-                request,
-                deadline,
-                cancellation,
-                preview,
-                limits,
+                crate::engine::routing::AttemptInput {
+                    request,
+                    deadline,
+                    cancellation,
+                    preview,
+                    limits,
+                },
                 crate::fault::LatencyReceipt::default(),
             )
             .await

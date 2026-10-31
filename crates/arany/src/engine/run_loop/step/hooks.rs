@@ -160,6 +160,60 @@ fn hook_plan(
 }
 
 impl HookFold {
+    // Returns true when this hook's result ends the PreToolUse fold.
+    fn add_pre_hook(&mut self, run: HookRun, hook: &PreHook<'_, '_>) -> bool {
+        let HookRun {
+            result,
+            stops,
+            exhausted,
+            ..
+        } = run;
+        self.count += 1;
+        if stops {
+            self.stop = HookStop::Uncertain;
+            self.restriction = Some(Decision::Deny);
+            return true;
+        }
+        if exhausted {
+            self.stop = HookStop::ActiveTime;
+            self.restriction = Some(Decision::Deny);
+            return true;
+        }
+        match result {
+            HookResult::Stopped { .. } => {
+                self.stop = HookStop::Requested;
+                self.restriction = Some(Decision::Deny);
+                return true;
+            }
+            HookResult::Restricted {
+                decision: Decision::Deny,
+                reason,
+            } => {
+                self.restriction = Some(Decision::Deny);
+                self.reason = reason;
+                return true;
+            }
+            HookResult::Narrowed { call } if call == hook.intent.call => {}
+            HookResult::Narrowed { call } => {
+                self.narrow_pre_hook(hook, call);
+                return true;
+            }
+            HookResult::Restricted {
+                decision: Decision::Ask,
+                ..
+            } => self.restriction = Some(Decision::Ask),
+            HookResult::Passed
+            | HookResult::Restricted {
+                decision: Decision::Allow,
+                ..
+            }
+            | HookResult::Blocked { .. }
+            | HookResult::Feedback { .. }
+            | HookResult::Ignored { .. } => {}
+        }
+        false
+    }
+
     pub(super) fn none() -> Self {
         Self {
             restriction: None,
@@ -488,54 +542,8 @@ impl RunLoop<'_> {
                     return Ok(fold);
                 }
             };
-            let HookRun {
-                result,
-                stops,
-                exhausted,
-                ..
-            } = run;
-            fold.count += 1;
-            if stops {
-                fold.stop = HookStop::Uncertain;
-                fold.restriction = Some(Decision::Deny);
+            if fold.add_pre_hook(run, &hook) {
                 return Ok(fold);
-            }
-            if exhausted {
-                fold.stop = HookStop::ActiveTime;
-                fold.restriction = Some(Decision::Deny);
-                return Ok(fold);
-            }
-            match result {
-                HookResult::Stopped { .. } => {
-                    fold.stop = HookStop::Requested;
-                    fold.restriction = Some(Decision::Deny);
-                    return Ok(fold);
-                }
-                HookResult::Restricted {
-                    decision: Decision::Deny,
-                    reason,
-                } => {
-                    fold.restriction = Some(Decision::Deny);
-                    fold.reason = reason;
-                    return Ok(fold);
-                }
-                HookResult::Narrowed { call } if call == hook.intent.call => {}
-                HookResult::Narrowed { call } => {
-                    fold.narrow_pre_hook(&hook, call);
-                    return Ok(fold);
-                }
-                HookResult::Restricted {
-                    decision: Decision::Ask,
-                    ..
-                } => fold.restriction = Some(Decision::Ask),
-                HookResult::Passed
-                | HookResult::Restricted {
-                    decision: Decision::Allow,
-                    ..
-                }
-                | HookResult::Blocked { .. }
-                | HookResult::Feedback { .. }
-                | HookResult::Ignored { .. } => {}
             }
         }
         Ok(fold)
@@ -1149,16 +1157,7 @@ impl RunLoop<'_> {
             fixed_ms,
             ..
         } = timing;
-        // The Goal ledger refuses a start that does not fit, so a shortfall never runs the hook.
-        let active_ms = if let Some(deadline) = deadline {
-            duration_ms(deadline.saturating_duration_since(tokio::time::Instant::now()))
-                .saturating_sub(fixed_ms)
-        } else {
-            self.ledger()
-                .active_remaining_ms()
-                .map_or(u64::MAX, |remaining| remaining.saturating_sub(fixed_ms))
-                .max(u64::from(MIN_HOOK_RUNTIME_MS))
-        };
+        let active_ms = self.hook_active_ms(deadline, fixed_ms);
         if active_ms < u64::from(MIN_HOOK_RUNTIME_MS) {
             return Ok(HookStart::Exhausted);
         }
@@ -1178,20 +1177,8 @@ impl RunLoop<'_> {
             hook: HookInvocation {
                 active_ceiling_ms: if boundary {
                     boundary_ceiling
-                } else if matches!(
-                    event,
-                    HookEvent::CommandRewrite
-                        | HookEvent::Stop
-                        | HookEvent::SubagentStop
-                        | HookEvent::PreCompact
-                ) {
-                    Some(self.lifecycle_ceiling(if deadline.is_some() {
-                        0
-                    } else {
-                        fixed_ms.saturating_add(u64::from(runtime_ms))
-                    })?)
                 } else {
-                    None
+                    self.idle_hook_ceiling(*event, deadline, fixed_ms, runtime_ms)?
                 },
                 event: *event,
                 group: plan.group,
@@ -1212,6 +1199,42 @@ impl RunLoop<'_> {
         }
         self.record_hook_finished(occurrence, &timing, observation, exhausted)
             .await
+    }
+
+    // The Goal ledger refuses a start that does not fit, so a shortfall never runs the hook.
+    fn hook_active_ms(&self, deadline: Option<tokio::time::Instant>, fixed_ms: u64) -> u64 {
+        if let Some(deadline) = deadline {
+            duration_ms(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .saturating_sub(fixed_ms)
+        } else {
+            self.ledger()
+                .active_remaining_ms()
+                .map_or(u64::MAX, |remaining| remaining.saturating_sub(fixed_ms))
+                .max(u64::from(MIN_HOOK_RUNTIME_MS))
+        }
+    }
+
+    fn idle_hook_ceiling(
+        &self,
+        event: HookEvent,
+        deadline: Option<tokio::time::Instant>,
+        fixed_ms: u64,
+        runtime_ms: u32,
+    ) -> Result<Option<u64>, EngineError> {
+        if !matches!(
+            event,
+            HookEvent::CommandRewrite
+                | HookEvent::Stop
+                | HookEvent::SubagentStop
+                | HookEvent::PreCompact
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(self.lifecycle_ceiling(if deadline.is_some() {
+            0
+        } else {
+            fixed_ms.saturating_add(u64::from(runtime_ms))
+        })?))
     }
 
     fn hook_intent(

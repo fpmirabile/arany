@@ -618,140 +618,161 @@ fn refusal_cause(
 
 // One arm per refusal keeps the observation mapping exhaustive.
 pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservation {
-    // Every other Limit here, including a hook's delegation deadline, stays a Resource limit.
-    let timed = match reason {
-        NotDispatched::TimeoutLimit { .. } => Some(crate::tools::LimitCause::RequestedTime),
-        NotDispatched::DelegationDeadline => Some(crate::tools::LimitCause::Timeout),
-        NotDispatched::HookDenied(_)
-        | NotDispatched::DenyRule
-        | NotDispatched::OutsideGrant
-        | NotDispatched::HostSourceUnavailable
-        | NotDispatched::ModeDenied
-        | NotDispatched::HumanOnlyUnavailable
-        | NotDispatched::UnguardedNotOffered(_)
-        | NotDispatched::OutsidePlan
-        | NotDispatched::ActiveTime
-        | NotDispatched::Paused
-        | NotDispatched::Cancelled
-        | NotDispatched::TokenBudget
-        | NotDispatched::UnsavedRule
-        | NotDispatched::SaveUnconfirmed
-        | NotDispatched::UnguardedNeedsHuman
-        | NotDispatched::ApprovalUnavailable
-        | NotDispatched::ApprovalRefused => None,
-    };
-    let (disposition, output) = match reason {
-        NotDispatched::TimeoutLimit { requested, maximum } => (
-            ToolDisposition::Limit,
-            crate::tools::types::command_timeout_limit_message(*requested, *maximum),
-        ),
-        NotDispatched::ActiveTime => (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
-        NotDispatched::DelegationDeadline => (ToolDisposition::Limit, DELEGATION_DEADLINE.into()),
-        NotDispatched::TokenBudget => (
-            ToolDisposition::Limit,
-            "Goal token budget exhausted; no operation was dispatched".into(),
-        ),
-        NotDispatched::HookDenied(denial) => hook_denial(denial),
-        NotDispatched::SaveUnconfirmed => (
-            ToolDisposition::Uncertain,
-            "rule save not confirmed; no operation was dispatched".into(),
-        ),
-        NotDispatched::DenyRule => (
-            ToolDisposition::Denied,
-            DenialFeedback::RuleDenied.output().into(),
-        ),
-        NotDispatched::OutsideGrant => (
-            ToolDisposition::Denied,
-            "Tool operation is outside the pinned grant".into(),
-        ),
-        NotDispatched::HostSourceUnavailable => (
-            ToolDisposition::Denied,
-            "Host source data is unavailable; no operation was dispatched".into(),
-        ),
-        NotDispatched::ModeDenied => (
-            ToolDisposition::Denied,
-            DenialFeedback::ModeDenied.output().into(),
-        ),
-        NotDispatched::HumanOnlyUnavailable => (
-            ToolDisposition::Denied,
-            DenialFeedback::ChannelUnavailable.output().into(),
-        ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::SettingsChanged) => (
-            ToolDisposition::Denied,
-            "Host command refused: permission settings changed outside admission; use /permissions to re-admit them. Nothing ran".into(),
-        ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::UnavailableProgram) => (
-            ToolDisposition::Denied,
-            "Host program could not be pinned through an absolute PATH outside the Workspace; nothing ran".into(),
-        ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::InterpreterNotAdmitted) => (
-            ToolDisposition::Denied,
-            "Host interpreter requires a matching tools.json command with interpreter: true, executable path and digest; nothing ran".into(),
-        ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::GuardAlias) => (
-            ToolDisposition::Denied,
-            "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched".into(),
-        ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool) => (
-            ToolDisposition::Denied, crate::tools::unguarded::manual_handoff(&intent.call),
-        ),
-        NotDispatched::OutsidePlan => (
-            ToolDisposition::Denied,
-            "The effect is outside the active Goal plan; no operation was dispatched".into(),
-        ),
-        NotDispatched::Cancelled => (
-            ToolDisposition::Denied,
-            DenialFeedback::Cancelled.output().into(),
-        ),
-        NotDispatched::Paused => (
-            ToolDisposition::Denied,
-            DenialFeedback::Paused.output().into(),
-        ),
-        NotDispatched::UnsavedRule => (
-            ToolDisposition::Denied,
-            "The always-allow rule could not be saved; no operation was dispatched".into(),
-        ),
-        NotDispatched::UnguardedNeedsHuman => (
-            ToolDisposition::Denied,
-            DenialFeedback::ChannelUnavailable.output().into(),
-        ),
-        NotDispatched::ApprovalUnavailable => (
-            ToolDisposition::Denied,
-            DenialFeedback::ChannelUnavailable.output().into(),
-        ),
-        NotDispatched::ApprovalRefused => (
-            ToolDisposition::Denied,
-            DenialFeedback::UserDeclined.output().into(),
-        ),
-    };
+    let timed = reason.limit_cause();
+    let (disposition, output) = reason.feedback(&intent.call);
     let mut observation = undispatched(intent, disposition, output);
-    observation.approval_cause = match reason {
-        NotDispatched::Cancelled => Some(crate::tools::ApprovalCause::Cancelled),
-        NotDispatched::Paused => Some(crate::tools::ApprovalCause::Paused),
-        NotDispatched::ApprovalUnavailable
-        | NotDispatched::HumanOnlyUnavailable
-        | NotDispatched::UnguardedNeedsHuman => {
-            Some(crate::tools::ApprovalCause::ChannelUnavailable)
-        }
-        NotDispatched::ApprovalRefused => Some(crate::tools::ApprovalCause::Declined),
-        NotDispatched::HostSourceUnavailable
-        | NotDispatched::TimeoutLimit { .. }
-        | NotDispatched::HookDenied(_)
-        | NotDispatched::DelegationDeadline
-        | NotDispatched::DenyRule
-        | NotDispatched::OutsideGrant
-        | NotDispatched::ModeDenied
-        | NotDispatched::UnguardedNotOffered(_)
-        | NotDispatched::OutsidePlan
-        | NotDispatched::ActiveTime
-        | NotDispatched::TokenBudget
-        | NotDispatched::UnsavedRule
-        | NotDispatched::SaveUnconfirmed => None,
-    };
+    observation.approval_cause = reason.approval_cause();
     if timed.is_some() {
         observation.limit_cause = timed;
     }
     observation
+}
+
+impl NotDispatched {
+    // Every other Limit here, including a hook's delegation deadline, stays a Resource limit.
+    fn limit_cause(&self) -> Option<crate::tools::LimitCause> {
+        match self {
+            Self::TimeoutLimit { .. } => Some(crate::tools::LimitCause::RequestedTime),
+            Self::DelegationDeadline => Some(crate::tools::LimitCause::Timeout),
+            Self::HookDenied(_)
+            | Self::DenyRule
+            | Self::OutsideGrant
+            | Self::HostSourceUnavailable
+            | Self::ModeDenied
+            | Self::HumanOnlyUnavailable
+            | Self::UnguardedNotOffered(_)
+            | Self::OutsidePlan
+            | Self::ActiveTime
+            | Self::Paused
+            | Self::Cancelled
+            | Self::TokenBudget
+            | Self::UnsavedRule
+            | Self::SaveUnconfirmed
+            | Self::UnguardedNeedsHuman
+            | Self::ApprovalUnavailable
+            | Self::ApprovalRefused => None,
+        }
+    }
+
+    fn feedback(&self, call: &crate::tools::ToolCall) -> (ToolDisposition, String) {
+        match self {
+            Self::TimeoutLimit { requested, maximum } => (
+                ToolDisposition::Limit,
+                crate::tools::types::command_timeout_limit_message(*requested, *maximum),
+            ),
+            Self::ActiveTime => (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
+            Self::DelegationDeadline => (ToolDisposition::Limit, DELEGATION_DEADLINE.into()),
+            Self::TokenBudget => (
+                ToolDisposition::Limit,
+                "Goal token budget exhausted; no operation was dispatched".into(),
+            ),
+            Self::HookDenied(denial) => hook_denial(denial),
+            Self::SaveUnconfirmed => (
+                ToolDisposition::Uncertain,
+                "rule save not confirmed; no operation was dispatched".into(),
+            ),
+            Self::DenyRule => (
+                ToolDisposition::Denied,
+                DenialFeedback::RuleDenied.output().into(),
+            ),
+            Self::OutsideGrant => (
+                ToolDisposition::Denied,
+                "Tool operation is outside the pinned grant".into(),
+            ),
+            Self::HostSourceUnavailable => (
+                ToolDisposition::Denied,
+                "Host source data is unavailable; no operation was dispatched".into(),
+            ),
+            Self::ModeDenied => (
+                ToolDisposition::Denied,
+                DenialFeedback::ModeDenied.output().into(),
+            ),
+            Self::HumanOnlyUnavailable => (
+                ToolDisposition::Denied,
+                DenialFeedback::ChannelUnavailable.output().into(),
+            ),
+            Self::UnguardedNotOffered(refusal) => refusal.feedback(call),
+            Self::OutsidePlan => (
+                ToolDisposition::Denied,
+                "The effect is outside the active Goal plan; no operation was dispatched".into(),
+            ),
+            Self::Cancelled => (
+                ToolDisposition::Denied,
+                DenialFeedback::Cancelled.output().into(),
+            ),
+            Self::Paused => (
+                ToolDisposition::Denied,
+                DenialFeedback::Paused.output().into(),
+            ),
+            Self::UnsavedRule => (
+                ToolDisposition::Denied,
+                "The always-allow rule could not be saved; no operation was dispatched".into(),
+            ),
+            Self::UnguardedNeedsHuman => (
+                ToolDisposition::Denied,
+                DenialFeedback::ChannelUnavailable.output().into(),
+            ),
+            Self::ApprovalUnavailable => (
+                ToolDisposition::Denied,
+                DenialFeedback::ChannelUnavailable.output().into(),
+            ),
+            Self::ApprovalRefused => (
+                ToolDisposition::Denied,
+                DenialFeedback::UserDeclined.output().into(),
+            ),
+        }
+    }
+
+    fn approval_cause(&self) -> Option<crate::tools::ApprovalCause> {
+        match self {
+            Self::Cancelled => Some(crate::tools::ApprovalCause::Cancelled),
+            Self::Paused => Some(crate::tools::ApprovalCause::Paused),
+            Self::ApprovalUnavailable | Self::HumanOnlyUnavailable | Self::UnguardedNeedsHuman => {
+                Some(crate::tools::ApprovalCause::ChannelUnavailable)
+            }
+            Self::ApprovalRefused => Some(crate::tools::ApprovalCause::Declined),
+            Self::HostSourceUnavailable
+            | Self::TimeoutLimit { .. }
+            | Self::HookDenied(_)
+            | Self::DelegationDeadline
+            | Self::DenyRule
+            | Self::OutsideGrant
+            | Self::ModeDenied
+            | Self::UnguardedNotOffered(_)
+            | Self::OutsidePlan
+            | Self::ActiveTime
+            | Self::TokenBudget
+            | Self::UnsavedRule
+            | Self::SaveUnconfirmed => None,
+        }
+    }
+}
+
+impl UnguardedRefusal {
+    fn feedback(&self, call: &crate::tools::ToolCall) -> (ToolDisposition, String) {
+        match self {
+            Self::SettingsChanged => (
+                ToolDisposition::Denied,
+                "Host command refused: permission settings changed outside admission; use /permissions to re-admit them. Nothing ran".into(),
+            ),
+            Self::UnavailableProgram => (
+                ToolDisposition::Denied,
+                "Host program could not be pinned through an absolute PATH outside the Workspace; nothing ran".into(),
+            ),
+            Self::InterpreterNotAdmitted => (
+                ToolDisposition::Denied,
+                "Host interpreter requires a matching tools.json command with interpreter: true, executable path and digest; nothing ran".into(),
+            ),
+            Self::GuardAlias => (
+                ToolDisposition::Denied,
+                "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched".into(),
+            ),
+            Self::PrivilegeTool => (
+                ToolDisposition::Denied,
+                crate::tools::unguarded::manual_handoff(call),
+            ),
+        }
+    }
 }
 
 const DELEGATION_DEADLINE: &str = "Delegation deadline reached; no operation was dispatched";

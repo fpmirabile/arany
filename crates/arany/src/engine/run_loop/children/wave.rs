@@ -73,11 +73,13 @@ impl RunLoop<'_> {
             }
             crate::engine::routing::invoke_attempt(
                 provider.as_ref(),
-                request,
-                deadline,
-                cancellation,
-                preview,
-                limits,
+                crate::engine::routing::AttemptInput {
+                    request,
+                    deadline,
+                    cancellation,
+                    preview,
+                    limits,
+                },
                 crate::fault::LatencyReceipt::default(),
             )
             .await
@@ -243,8 +245,10 @@ impl RunLoop<'_> {
                 scope,
                 role,
                 decide_attempt(result.transient, facts),
-                &active.request,
-                &active.limits,
+                crate::engine::routing::AttemptCharge {
+                    request: Some(&active.request),
+                    limits: &active.limits,
+                },
                 || self.routing.provider(role, active.request.agent_run_id),
             )
             .await

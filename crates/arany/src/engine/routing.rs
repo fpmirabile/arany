@@ -219,13 +219,7 @@ impl CallRouter<'_> {
             run_id: request.run_id,
             agent_run_id: request.agent_run_id,
         };
-        // A private observer guards a fallback chain against visible output.
-        let preview = match preview {
-            None if self.chain(role, request.agent_run_id)?.len() > 1 => {
-                Some(ResponsePreview::new().0)
-            }
-            preview => preview,
-        };
+        let preview = self.chain_preview(role, request.agent_run_id, preview)?;
         loop {
             let provider = self.bind(
                 role,
@@ -235,11 +229,13 @@ impl CallRouter<'_> {
             )?;
             let attempt = invoke_attempt(
                 provider.as_ref(),
-                request.clone(),
-                deadline,
-                cancellation.clone(),
-                preview.clone(),
-                limits.clone(),
+                AttemptInput {
+                    request: request.clone(),
+                    deadline,
+                    cancellation: cancellation.clone(),
+                    preview: preview.clone(),
+                    limits: limits.clone(),
+                },
                 crate::fault::LatencyReceipt::new(&self.journal.tool_latency, &request, || {
                     self.recorded_calls(scope.agent_run_id)
                 }),
@@ -260,7 +256,16 @@ impl CallRouter<'_> {
                 preview.clear();
             }
             let Some(delay) = self
-                .continue_attempt(scope, role, decision, &request, &limits, || Ok(provider))
+                .continue_attempt(
+                    scope,
+                    role,
+                    decision,
+                    AttemptCharge {
+                        request: Some(&request),
+                        limits: &limits,
+                    },
+                    || Ok(provider),
+                )
                 .await?
             else {
                 return Ok(attempt.result);
@@ -281,25 +286,37 @@ impl CallRouter<'_> {
         }
     }
 
+    // A private observer guards a fallback chain against visible output.
+    fn chain_preview(
+        &self,
+        role: ProviderRole,
+        actor: AgentRunId,
+        preview: Option<ResponsePreview>,
+    ) -> Result<Option<ResponsePreview>, EngineError> {
+        Ok(match preview {
+            None if self.chain(role, actor)?.len() > 1 => Some(ResponsePreview::new().0),
+            preview => preview,
+        })
+    }
+
     pub(super) async fn continue_attempt(
         &self,
         scope: CallScope,
         role: ProviderRole,
         decision: AttemptDecision,
-        request: &ProviderRequest,
-        limits: &RateLimitSlot,
+        charge: AttemptCharge<'_>,
         provider: impl FnOnce() -> Result<Arc<dyn Provider>, EngineError>,
     ) -> Result<Option<Duration>, EngineError> {
         Ok(match decision {
             AttemptDecision::Accept => None,
             AttemptDecision::Retry { cause, delay } => self
-                .retry(scope, role, cause, delay, Some(request), limits)
+                .retry(scope, role, cause, delay, charge)
                 .await?
                 .then_some(delay),
             AttemptDecision::Switch => {
                 // The wave resolves its provider only after deciding to switch.
                 let provider = provider()?;
-                self.switch(scope, role, provider.identity(), Some(request), limits)
+                self.switch(scope, role, provider.identity(), charge)
                     .await?
                     .then_some(Duration::ZERO)
             }
@@ -447,7 +464,16 @@ impl CallRouter<'_> {
             AttemptDecision::Accept => false,
             AttemptDecision::Retry { cause, delay } => {
                 if !self
-                    .retry(scope, ProviderRole::Compaction, cause, delay, None, limits)
+                    .retry(
+                        scope,
+                        ProviderRole::Compaction,
+                        cause,
+                        delay,
+                        AttemptCharge {
+                            request: None,
+                            limits,
+                        },
+                    )
                     .await?
                 {
                     false
@@ -466,8 +492,16 @@ impl CallRouter<'_> {
                 }
             }
             AttemptDecision::Switch => {
-                self.switch(scope, ProviderRole::Compaction, identity, None, limits)
-                    .await?
+                self.switch(
+                    scope,
+                    ProviderRole::Compaction,
+                    identity,
+                    AttemptCharge {
+                        request: None,
+                        limits,
+                    },
+                )
+                .await?
             }
         }))
     }
@@ -502,9 +536,9 @@ impl CallRouter<'_> {
         scope: CallScope,
         role: ProviderRole,
         from: &ProviderIdentity,
-        request: Option<&ProviderRequest>,
-        limits: &RateLimitSlot,
+        charge: AttemptCharge<'_>,
     ) -> Result<bool, EngineError> {
+        let AttemptCharge { request, limits } = charge;
         let CallScope {
             run_id,
             agent_run_id,
@@ -583,9 +617,9 @@ impl CallRouter<'_> {
         role: ProviderRole,
         cause: RetryCause,
         delay: Duration,
-        request: Option<&ProviderRequest>,
-        limits: &RateLimitSlot,
+        charge: AttemptCharge<'_>,
     ) -> Result<bool, EngineError> {
+        let AttemptCharge { request, limits } = charge;
         let retry = self.ledger.view(|view| {
             let run = view.runs.last()?;
             let agent = run
@@ -756,25 +790,27 @@ async fn compaction_attempt(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct AttemptCharge<'a> {
+    pub(super) request: Option<&'a ProviderRequest>,
+    pub(super) limits: &'a RateLimitSlot,
+}
+
+pub(crate) struct AttemptInput {
+    pub(crate) request: ProviderRequest,
+    pub(crate) deadline: Instant,
+    pub(crate) cancellation: RunCancellation,
+    pub(crate) preview: Option<ResponsePreview>,
+    pub(crate) limits: RateLimitSlot,
+}
+
 pub(super) async fn invoke_attempt(
     provider: &dyn Provider,
-    request: ProviderRequest,
-    deadline: Instant,
-    cancellation: RunCancellation,
-    preview: Option<ResponsePreview>,
-    limits: RateLimitSlot,
+    input: AttemptInput,
     receipt: crate::fault::LatencyReceipt<'_>,
 ) -> AttemptResult {
-    let (result, transient) = invoke_bounded_with_preview(
-        provider,
-        request,
-        deadline,
-        cancellation,
-        preview.clone(),
-        limits,
-        receipt,
-    )
-    .await;
+    let preview = input.preview.clone();
+    let (result, transient) = invoke_bounded_with_preview(provider, input, receipt).await;
     AttemptResult {
         result,
         transient,

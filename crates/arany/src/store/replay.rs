@@ -243,8 +243,7 @@ fn project_inspected_prefix(
         &prefix,
         0,
         &mut total_events,
-        true,
-        None,
+        ReplayMode::Closed,
     ) {
         Ok(view) => Ok(view),
         Err(error) => inspection_rejection(error).map(|_| None),
@@ -304,8 +303,7 @@ fn canonical_replay_failure(
         events,
         0,
         &mut total_events,
-        true,
-        None,
+        ReplayMode::Closed,
     );
     let error = match replayed {
         Ok(_) => return Ok(None),
@@ -319,8 +317,7 @@ fn canonical_replay_failure(
         &events[..index],
         0,
         &mut total_events,
-        false,
-        None,
+        ReplayMode::Open,
     );
     let cause = match prefix_replay {
         Err(error) => inspection_rejection(error)?,
@@ -355,8 +352,7 @@ fn first_rejecting_prefix(
             &events[..middle],
             0,
             &mut total_events,
-            false,
-            None,
+            ReplayMode::Open,
         ) {
             inspection_rejection(error)?;
             high = middle;
@@ -944,10 +940,25 @@ fn resolve_view_with_mode(
         &events,
         depth,
         total_events,
-        close_history,
-        None,
+        ReplayMode::history(close_history),
     )?;
     Ok((events, view))
+}
+
+pub(super) enum ReplayMode<'a> {
+    Open,
+    Closed,
+    Corpus(&'a mut crate::supervisor::corpus::Corpus),
+}
+
+impl ReplayMode<'_> {
+    fn history(close_history: bool) -> Self {
+        if close_history {
+            Self::Closed
+        } else {
+            Self::Open
+        }
+    }
 }
 
 pub(super) fn replay_through(
@@ -956,8 +967,7 @@ pub(super) fn replay_through(
     events: &[EventEnvelope],
     depth: usize,
     total_events: &mut usize,
-    close_history: bool,
-    corpus: Option<&mut crate::supervisor::corpus::Corpus>,
+    mode: ReplayMode<'_>,
 ) -> Result<Option<SessionView>, StoreError> {
     let lineage = match events.first().map(|envelope| &envelope.event) {
         Some(Event::SessionForked {
@@ -973,12 +983,12 @@ pub(super) fn replay_through(
             prefix_digest: *prefix_digest,
         },
         _ => {
-            let view = if let Some(corpus) = corpus {
-                SessionView::replay_for_corpus(session_id, events, None, corpus)?
-            } else if close_history {
-                SessionView::replay(session_id, events)?
-            } else {
-                SessionView::replay_open(session_id, events)?
+            let view = match mode {
+                ReplayMode::Corpus(corpus) => {
+                    SessionView::replay_for_corpus(session_id, events, None, corpus)?
+                }
+                ReplayMode::Closed => SessionView::replay(session_id, events)?,
+                ReplayMode::Open => SessionView::replay_open(session_id, events)?,
             };
             if let Some(view) = &view {
                 validate_compaction_references(view)?;
@@ -987,10 +997,12 @@ pub(super) fn replay_through(
         }
     };
     let (inherited, source) = fork_projection(connection, lineage, depth, total_events)?;
-    let mut view = if let Some(corpus) = corpus {
-        SessionView::replay_for_corpus(session_id, events, Some(&inherited), corpus)?
-    } else {
-        SessionView::replay_forked(session_id, events, close_history, &inherited)?
+    let mut view = match mode {
+        ReplayMode::Corpus(corpus) => {
+            SessionView::replay_for_corpus(session_id, events, Some(&inherited), corpus)?
+        }
+        ReplayMode::Closed => SessionView::replay_forked(session_id, events, true, &inherited)?,
+        ReplayMode::Open => SessionView::replay_forked(session_id, events, false, &inherited)?,
     }
     .ok_or(StoreError::InvalidHistory)?;
     if view
@@ -1043,8 +1055,7 @@ fn fork_projection(
         &source_events,
         depth + 1,
         total_events,
-        false,
-        None,
+        ReplayMode::Open,
     )?
     .ok_or(StoreError::InvalidHistory)?;
     let inherited = ForkInheritance {
@@ -1341,8 +1352,7 @@ pub(super) fn supervisor_corpus(
         &events,
         0,
         &mut total,
-        true,
-        Some(&mut corpus),
+        ReplayMode::Corpus(&mut corpus),
     )?
     .ok_or(crate::supervisor::CorpusError::NotFound)?;
     corpus.finish(&view)

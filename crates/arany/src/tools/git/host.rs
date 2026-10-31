@@ -1706,6 +1706,22 @@ struct HostOutcome {
 
 type CapturedProcessResult = Result<(std::process::ExitStatus, Vec<u8>), ToolError>;
 
+fn succeeded_output(intent: &EffectIntent, completed: &Option<CapturedProcessResult>) -> String {
+    let bytes = completed
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|(_, bytes)| bytes);
+    match &intent.call {
+        ToolCall::GhPrList { limit, .. } => bytes
+            .and_then(|bytes| pr_list_result(bytes, *limit, intent.limits.result_bytes as usize))
+            .unwrap_or_else(|| PR_LIST_INVALID.into()),
+        ToolCall::GhPrView { .. } => bytes
+            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+            .unwrap_or_else(|| PR_VIEW_INVALID.into()),
+        _ => "host: remote operation completed.".into(),
+    }
+}
+
 fn classify_outcome(
     intent: &EffectIntent,
     completed: &Option<CapturedProcessResult>,
@@ -1740,21 +1756,7 @@ fn classify_outcome(
             PR_LIST_CAPTURE_LIMIT.into()
         }
     } else if succeeded {
-        match &intent.call {
-            ToolCall::GhPrList { limit, .. } => completed
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .and_then(|(_, bytes)| {
-                    pr_list_result(bytes, *limit, intent.limits.result_bytes as usize)
-                })
-                .unwrap_or_else(|| PR_LIST_INVALID.into()),
-            ToolCall::GhPrView { .. } => completed
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .and_then(|(_, bytes)| String::from_utf8(bytes.clone()).ok())
-                .unwrap_or_else(|| PR_VIEW_INVALID.into()),
-            _ => "host: remote operation completed.".into(),
-        }
+        succeeded_output(intent, completed)
     } else if pr_read_confirmed_failure {
         if matches!(intent.call, ToolCall::GhPrView { .. }) {
             PR_VIEW_FAILED.into()

@@ -408,24 +408,17 @@ fn check_selection(provider: &ProviderArg, params: &ThreadStartParams) -> Result
 }
 
 fn thread_policy(params: &ThreadStartParams) -> Result<CollaborationPolicy, Fault> {
-    Ok(
-        match (
-            params
-                .collaboration
-                .as_ref()
-                .unwrap_or(&Collaboration::Single),
-            params.max_active_children,
-        ) {
-            (Collaboration::Single, None) => CollaborationPolicy::Single,
-            (Collaboration::Auto, count) if count.unwrap_or(3) <= 8 => CollaborationPolicy::Auto {
-                max_active_children: count.unwrap_or(3),
-            },
-            (Collaboration::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
-                CollaborationPolicy::Team {
-                    max_active_children: count.unwrap_or(3),
-                }
-            }
-            _ => return Err(Fault::params()),
-        },
-    )
+    match (
+        params
+            .collaboration
+            .as_ref()
+            .unwrap_or(&Collaboration::Single),
+        params.max_active_children,
+    ) {
+        (Collaboration::Single, None) => Some(CollaborationPolicy::Single),
+        (Collaboration::Single, Some(_)) => None,
+        (Collaboration::Auto, count) => CollaborationPolicy::auto(count),
+        (Collaboration::Team, count) => CollaborationPolicy::team(count),
+    }
+    .ok_or_else(Fault::params)
 }

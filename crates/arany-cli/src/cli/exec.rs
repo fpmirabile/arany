@@ -26,17 +26,12 @@ impl CollaborationArg {
         max_active_children: Option<u8>,
     ) -> Result<CollaborationPolicy, &'static str> {
         match (self, max_active_children) {
-            (Self::Single, None) => Ok(CollaborationPolicy::Single),
-            (Self::Auto, count) if count.unwrap_or(3) <= 8 => Ok(CollaborationPolicy::Auto {
-                max_active_children: count.unwrap_or(3),
-            }),
-            (Self::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
-                Ok(CollaborationPolicy::Team {
-                    max_active_children: count.unwrap_or(3),
-                })
-            }
-            _ => Err("invalid collaboration policy"),
+            (Self::Single, None) => Some(CollaborationPolicy::Single),
+            (Self::Single, Some(_)) => None,
+            (Self::Auto, count) => CollaborationPolicy::auto(count),
+            (Self::Team, count) => CollaborationPolicy::team(count),
         }
+        .ok_or("invalid collaboration policy")
     }
 }
 

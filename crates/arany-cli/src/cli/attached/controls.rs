@@ -1990,15 +1990,12 @@ fn parse_policy(argument: &str) -> Result<CollaborationPolicy, &'static str> {
         return Err("invalid collaboration policy");
     }
     match (mode, count) {
-        ("single", None) => Ok(CollaborationPolicy::Single),
-        ("auto", count) if count.unwrap_or(3) <= 8 => Ok(CollaborationPolicy::Auto {
-            max_active_children: count.unwrap_or(3),
-        }),
-        ("team", count) if (1..=8).contains(&count.unwrap_or(3)) => Ok(CollaborationPolicy::Team {
-            max_active_children: count.unwrap_or(3),
-        }),
-        _ => Err("invalid collaboration policy"),
+        ("single", None) => Some(CollaborationPolicy::Single),
+        ("auto", count) => CollaborationPolicy::auto(count),
+        ("team", count) => CollaborationPolicy::team(count),
+        _ => None,
     }
+    .ok_or("invalid collaboration policy")
 }
 
 #[cfg(test)]

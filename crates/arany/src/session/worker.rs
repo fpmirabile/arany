@@ -230,7 +230,8 @@ pub struct WorkerPolicy {
 impl WorkerPolicy {
     pub(crate) fn valid(&self) -> bool {
         self.parent_grant.valid()
-            && (1..=8).contains(&self.concurrency)
+            && (1..=crate::session::CollaborationPolicy::MAX_ACTIVE_CHILDREN)
+                .contains(&self.concurrency)
             && (1..=17).contains(&self.max_turns)
             && self.max_tools <= 16
     }

@@ -325,7 +325,7 @@ fn check_restore_request(threads: &Threads, input: &ThreadRewindParams) -> Resul
     if threads.approval_channel != super::server::ApprovalChannel::Human {
         return Err(Fault::state(Reason::HumanConfirmationRequired));
     }
-    if input.kept.len() + input.overwrite.len() > 64
+    if input.kept.len() + input.overwrite.len() > arany::rewind::MAX_REWIND_SELECTIONS
         || input.kept.iter().any(|p| input.overwrite.contains(p))
     {
         return Err(Fault::params());

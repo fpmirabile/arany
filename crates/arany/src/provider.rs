@@ -46,7 +46,7 @@ pub use catalog::{
     MAX_CATALOG_MODELS, ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
-pub(crate) use conversation::{MAX_HARNESS_FEEDBACK_BYTES, max_turn_bytes};
+pub(crate) use conversation::{MAX_HARNESS_FEEDBACK_BYTES, max_turn_bytes, valid_wire_id};
 pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
@@ -648,7 +648,8 @@ impl ProviderIdentity {
             && self
                 .custom_provenance()
                 .is_none_or(CustomProfileProvenance::valid)
-            && (1..=8).contains(&limits.concurrency)
+            && (1..=crate::session::CollaborationPolicy::MAX_ACTIVE_CHILDREN)
+                .contains(&limits.concurrency)
             && (1..=MAX_OUTPUT_TOKEN_CAP).contains(&limits.max_output_tokens)
     }
 }

@@ -21,10 +21,6 @@ impl Engine {
             })
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "turn admission keeps pinned context and Skill validation together"
-    )]
     pub(super) async fn prepare_turn(
         &self,
         submission: &AdmittedSubmission,
@@ -37,6 +33,81 @@ impl Engine {
         if let Some(permissions) = submission.permissions() {
             permissions.verify(&request.workspace)?;
         }
+        let mut tools = self.turn_tools(submission, request, admitted).await?;
+        let tool_context = tools
+            .as_ref()
+            .map(crate::tools::ToolRuntime::context)
+            .transpose()?;
+        let (prompts, inputs) = self.turn_inputs(request, goal, tools.as_ref())?;
+        if goal.entry == GoalEntry::New {
+            goal_started_fits(goal, objective, workspace_identity)?;
+        }
+        let root_identity = inputs.root_identity()?;
+        if root_identity != workspace_identity {
+            return Err(crate::tools::ToolError::ChangedInput.into());
+        }
+        if let Some(view) = &history {
+            ensure_session_workspace(view, root_identity)?;
+        }
+        let context_started = SystemTime::now();
+        let (context, context_window_tokens) =
+            compile_turn_context(submission, request, admitted, &inputs, tools.as_ref())?;
+        if let Some(runtime) = &mut tools {
+            runtime.set_context_limit(context.tool_context_budget_bytes)?;
+        }
+        if !context.images.is_empty()
+            && submission.providers.agent_chains().iter().any(|chain| {
+                chain
+                    .iter()
+                    .any(|provider| provider.identity().custom_provenance().is_some())
+            })
+        {
+            return Err(EngineError::ImagesNotAdmitted);
+        }
+        let context_ended = SystemTime::now();
+        let provider_concurrency = if budget.max_tokens.is_some() {
+            1
+        } else {
+            submission.providers.agent_concurrency()
+        };
+        let config = self.run_config(
+            submission,
+            request,
+            identity,
+            admitted.session_id,
+            ConfigSources {
+                tools: tools.as_ref(),
+                inputs: &inputs,
+                prompts: &prompts,
+                context: &context,
+                context_window_tokens,
+                provider_concurrency,
+                root_identity,
+            },
+        )?;
+        Ok(PreparedTurn {
+            tools,
+            tool_context,
+            inputs,
+            images: context.images,
+            history: context.history,
+            summary: context.summary,
+            prompts,
+            config,
+            context_window_tokens,
+            context_started,
+            context_ended,
+            provider_concurrency,
+        })
+    }
+
+    async fn turn_tools(
+        &self,
+        submission: &AdmittedSubmission,
+        request: &RunRequest,
+        admitted: &AdmittedTurn,
+    ) -> Result<Option<crate::tools::ToolRuntime>, EngineError> {
+        let (workspace_identity, goal) = (admitted.workspace_identity, &admitted.goal);
         let mut tools = submission
             .tools
             .as_ref()
@@ -101,10 +172,15 @@ impl Engine {
         }) {
             return Err(EngineError::InvalidRequest);
         }
-        let tool_context = tools
-            .as_ref()
-            .map(crate::tools::ToolRuntime::context)
-            .transpose()?;
+        Ok(tools)
+    }
+
+    fn turn_inputs(
+        &self,
+        request: &RunRequest,
+        goal: &GoalAdmission,
+        tools: Option<&crate::tools::ToolRuntime>,
+    ) -> Result<(crate::provider::EffectivePrompts, WorkspaceInputs), EngineError> {
         let include_paths = goal
             .include_paths
             .as_ref()
@@ -113,7 +189,7 @@ impl Engine {
             .map(PathBuf::from)
             .collect::<Vec<_>>();
         let prompts = crate::provider::EffectivePrompts::load(&self.state)?;
-        let inputs = match &tools {
+        let inputs = match tools {
             Some(runtime) => WorkspaceInputs::load_pinned(
                 &request.workspace,
                 &self.state,
@@ -128,97 +204,35 @@ impl Engine {
                 &include_paths,
             )?,
         };
-        if goal.entry == GoalEntry::New {
-            let event = goal.started_event(objective, workspace_identity);
-            if event
-                .payload()
-                .map_err(|_| EngineError::InvalidRequest)?
-                .len()
-                > crate::store::MAX_GOAL_STARTED_BYTES
-            {
-                return Err(EngineError::GoalInputTooLarge);
-            }
-        }
-        let root_identity = inputs.root_identity()?;
-        if root_identity != workspace_identity {
-            return Err(crate::tools::ToolError::ChangedInput.into());
-        }
-        if let Some(view) = &history {
-            ensure_session_workspace(view, root_identity)?;
-        }
-        let context_started = SystemTime::now();
-        let feedback_reserved = usize::from(submission.steering.is_some())
-            * MAX_STEERING_CONTEXT_BYTES
-            + tools
-                .as_ref()
-                .map_or(0, crate::tools::ToolRuntime::stop_feedback_reserve);
-        let goal_metadata_reserved = goal_context_metadata_reservation(
-            goal.plan_contract
-                .as_ref()
-                .map_or(&goal.budget, |plan| &plan.budget),
-            goal.plan_contract.as_ref(),
-        )?
-        .checked_add(feedback_reserved)
-        .ok_or(EngineError::ContextTooLarge)?;
-        let model_context_window_tokens = submission.providers.context_window_tokens();
-        let context_window_tokens = request
-            .goal
-            .context_window
-            .resolve(model_context_window_tokens);
-        let context = CompiledContext::compile(
-            history.as_ref(),
-            objective,
-            &request.images,
-            &inputs,
-            request.policy,
-            tools.as_ref().map_or(0, |_| {
-                crate::tools::types::MAX_TOOL_CATALOG_BYTES
-                    + crate::tools::ToolRuntime::continuation_reserve(
-                        submission
-                            .providers
-                            .primary
-                            .iter()
-                            .map(|provider| {
-                                crate::provider::max_turn_bytes(
-                                    provider.identity().limits.max_output_tokens,
-                                )
-                            })
-                            .max()
-                            .unwrap_or(0),
-                        feedback_reserved,
-                    )
-            }),
-            goal_metadata_reserved,
+        Ok((prompts, inputs))
+    }
+
+    fn run_config(
+        &self,
+        submission: &AdmittedSubmission,
+        request: &RunRequest,
+        identity: &crate::provider::ProviderIdentity,
+        session_id: SessionId,
+        sources: ConfigSources<'_>,
+    ) -> Result<RunConfig, EngineError> {
+        let ConfigSources {
+            tools,
+            inputs,
+            prompts,
+            context,
             context_window_tokens,
-        )
-        .map_err(|_| EngineError::ContextTooLarge)?;
-        if let Some(runtime) = &mut tools {
-            runtime.set_context_limit(context.tool_context_budget_bytes)?;
-        }
-        if !context.images.is_empty()
-            && submission.providers.agent_chains().iter().any(|chain| {
-                chain
-                    .iter()
-                    .any(|provider| provider.identity().custom_provenance().is_some())
-            })
-        {
-            return Err(EngineError::ImagesNotAdmitted);
-        }
-        let context_ended = SystemTime::now();
-        let provider_concurrency = if budget.max_tokens.is_some() {
-            1
-        } else {
-            submission.providers.agent_concurrency()
-        };
+            provider_concurrency,
+            root_identity,
+        } = sources;
         let routes = submission.providers.identities();
         let inherited = routes
             .values()
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
-            supervisor: supervisor_policy(admitted.session_id, tools.is_some()),
-            worker_policy: self.worker_policy(tools.as_ref(), request.policy, provider_concurrency),
-            agent_definitions: tools.as_ref().and_then(|tools| tools.definitions.pin()),
+            supervisor: supervisor_policy(session_id, tools.is_some()),
+            worker_policy: self.worker_policy(tools, request.policy, provider_concurrency),
+            agent_definitions: tools.and_then(|tools| tools.definitions.pin()),
             roster: submission
                 .providers
                 .roster
@@ -233,7 +247,7 @@ impl Engine {
             saved_api_account_id: identity.saved_api_account_id(),
             chatgpt_provenance: identity.chatgpt_provenance().cloned(),
             output_token_bound: identity.limits.output_token_bound,
-            context_window_tokens: model_context_window_tokens,
+            context_window_tokens: submission.providers.context_window_tokens(),
             effective_context_window_tokens: context_window_tokens,
             policy: request.policy,
             output_token_cap: identity.limits.max_output_tokens,
@@ -244,36 +258,18 @@ impl Engine {
                 .user_instructions
                 .as_ref()
                 .map(|snapshot| snapshot.digest),
-            instruction_sources: inputs
-                .instructions
-                .iter()
-                .map(|snapshot| InstructionSource {
-                    directory: snapshot.directory().to_owned(),
-                    file: snapshot.instruction_file(),
-                    digest: snapshot.digest,
-                })
-                .collect(),
+            instruction_sources: instruction_sources(inputs),
             prompts: prompts.pins(),
             launch_directory: inputs.launch_directory.clone(),
-            include_sources: inputs
-                .includes
-                .iter()
-                .filter(|snapshot| {
-                    !matches!(snapshot.fit, crate::session::IncludeFit::Reference { .. })
-                })
-                .map(|snapshot| crate::session::IncludeSource {
-                    path: snapshot.path.clone(),
-                    digest: snapshot.digest,
-                })
-                .collect(),
-            history_run_ids: context.history_run_ids,
+            include_sources: include_sources(inputs),
+            history_run_ids: context.history_run_ids.clone(),
             excluded_history_runs: context.excluded_history_runs,
-            context_usage: Some(context.context_usage),
+            context_usage: Some(context.context_usage.clone()),
             compaction_event_sequence: context.compaction_event_sequence,
             compaction_content_digest: context.compaction_content_digest,
-            tool_policy: tools.as_ref().map(|tools| {
+            tool_policy: tools.map(|tools| {
                 let mut receipt = tools.receipt();
-                receipt.host_epoch = Some(self.host_epoch(admitted.session_id));
+                receipt.host_epoch = Some(self.host_epoch(session_id));
                 Box::new(receipt)
             }),
         };
@@ -281,21 +277,114 @@ impl Engine {
         if !crate::session::run_started_fits(&config) {
             return Err(EngineError::InputTooLarge);
         }
-        Ok(PreparedTurn {
-            tools,
-            tool_context,
-            inputs,
-            images: context.images,
-            history: context.history,
-            summary: context.summary,
-            prompts,
-            config,
-            context_window_tokens,
-            context_started,
-            context_ended,
-            provider_concurrency,
-        })
+        Ok(config)
     }
+}
+
+fn goal_started_fits(
+    goal: &GoalAdmission,
+    objective: &str,
+    workspace_identity: WorkspaceIdentity,
+) -> Result<(), EngineError> {
+    let event = goal.started_event(objective, workspace_identity);
+    if event
+        .payload()
+        .map_err(|_| EngineError::InvalidRequest)?
+        .len()
+        > crate::store::MAX_GOAL_STARTED_BYTES
+    {
+        return Err(EngineError::GoalInputTooLarge);
+    }
+    Ok(())
+}
+
+fn instruction_sources(inputs: &WorkspaceInputs) -> Vec<InstructionSource> {
+    inputs
+        .instructions
+        .iter()
+        .map(|snapshot| InstructionSource {
+            directory: snapshot.directory().to_owned(),
+            file: snapshot.instruction_file(),
+            digest: snapshot.digest,
+        })
+        .collect()
+}
+
+fn include_sources(inputs: &WorkspaceInputs) -> Vec<crate::session::IncludeSource> {
+    inputs
+        .includes
+        .iter()
+        .filter(|snapshot| !matches!(snapshot.fit, crate::session::IncludeFit::Reference { .. }))
+        .map(|snapshot| crate::session::IncludeSource {
+            path: snapshot.path.clone(),
+            digest: snapshot.digest,
+        })
+        .collect()
+}
+
+struct ConfigSources<'a> {
+    tools: Option<&'a crate::tools::ToolRuntime>,
+    inputs: &'a WorkspaceInputs,
+    prompts: &'a crate::provider::EffectivePrompts,
+    context: &'a CompiledContext,
+    context_window_tokens: Option<u32>,
+    provider_concurrency: u8,
+    root_identity: WorkspaceIdentity,
+}
+
+fn compile_turn_context(
+    submission: &AdmittedSubmission,
+    request: &RunRequest,
+    admitted: &AdmittedTurn,
+    inputs: &WorkspaceInputs,
+    tools: Option<&crate::tools::ToolRuntime>,
+) -> Result<(CompiledContext, Option<u32>), EngineError> {
+    let (goal, history) = (&admitted.goal, &admitted.history);
+    let feedback_reserved = usize::from(submission.steering.is_some()) * MAX_STEERING_CONTEXT_BYTES
+        + tools
+            .as_ref()
+            .map_or(0, |tools| tools.stop_feedback_reserve());
+    let goal_metadata_reserved = goal_context_metadata_reservation(
+        goal.plan_contract
+            .as_ref()
+            .map_or(&goal.budget, |plan| &plan.budget),
+        goal.plan_contract.as_ref(),
+    )?
+    .checked_add(feedback_reserved)
+    .ok_or(EngineError::ContextTooLarge)?;
+    let model_context_window_tokens = submission.providers.context_window_tokens();
+    let context_window_tokens = request
+        .goal
+        .context_window
+        .resolve(model_context_window_tokens);
+    let context = CompiledContext::compile(
+        history.as_ref(),
+        &admitted.objective,
+        &request.images,
+        inputs,
+        request.policy,
+        tools.map_or(0, |_| {
+            crate::tools::types::MAX_TOOL_CATALOG_BYTES
+                + crate::tools::ToolRuntime::continuation_reserve(
+                    submission
+                        .providers
+                        .primary
+                        .iter()
+                        .map(|provider| {
+                            crate::provider::max_turn_bytes(
+                                provider.identity().limits.max_output_tokens,
+                            )
+                        })
+                        .max()
+                        .unwrap_or(0),
+                    feedback_reserved,
+                )
+        }),
+        goal_metadata_reserved,
+        context_window_tokens,
+    )
+    .map_err(|_| EngineError::ContextTooLarge)?;
+    Ok((context, context_window_tokens))
 }
 
 pub(super) fn root_request(

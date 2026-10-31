@@ -11,8 +11,8 @@ pub use hooks::{
     MAX_STOP_FEEDBACK_BYTES,
 };
 pub(crate) use hooks::{
-    MAX_TIMEOUT_SECONDS, compact_subject, feedback_lines, lifecycle_input, post_tool_use_input,
-    pre_tool_use_input, stop_feedback, stop_subject,
+    MAX_HOOK_GROUPS, MAX_HOOKS, MAX_TIMEOUT_SECONDS, compact_subject, feedback_lines,
+    lifecycle_input, post_tool_use_input, pre_tool_use_input, stop_feedback, stop_subject,
 };
 pub use prefix::{
     HostPrefixEdit, NetworkDomainEdit, NetworkDomainEntry, PermissionSettings, SettingsError,

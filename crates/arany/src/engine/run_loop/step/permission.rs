@@ -234,6 +234,16 @@ pub(super) struct Permission {
 }
 
 impl Permission {
+    fn ask_unless(&mut self, dont_ask: bool, approval: ApprovalMode) {
+        if dont_ask {
+            self.decision = Decision::Deny;
+            self.approval = None;
+        } else {
+            self.decision = Decision::Ask;
+            self.approval = Some(approval);
+        }
+    }
+
     fn narrow_host_rule(self, rule: Option<Decision>) -> Self {
         match rule {
             Some(Decision::Deny) => Self {
@@ -560,44 +570,31 @@ impl RunLoop<'_> {
                 approval: None,
             };
         }
-        let (mut decision, mut basis, mut approval) = runtime.permissions().map_or(
-            (Decision::Allow, PermissionSource::Mode, None),
-            |config| {
-                config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref())
-            },
-        );
-        let unguarded = call.is_unguarded();
-        let researcher = matches!(grant, Grant::Researcher { .. });
-        let git_write = call.is_git() && call.facts().mutates;
-        if (runtime.permissions().is_some() || unguarded || git_write)
-            && (!runtime.allows(call)
-                || researcher && unguarded && !runtime.host_fallback()
-                || researcher
-                    && !call.is_child_research()
-                    && !matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor() && child.definition.as_ref().is_some_and(|definition| definition.allows_worker(call))))
-        {
-            decision = decision.narrow(Decision::Deny);
-            basis = PermissionSource::PinnedGrant;
-            approval = None;
-        }
-        // Claude Code's WebFetch asks per domain: only a listed host or an explicit allow rule skips the prompt.
-        if matches!(call, ToolCall::WebFetch { .. })
-            && decision == Decision::Allow
-            && basis != PermissionSource::Rule
-            && !runtime.lists_web_host(call)
-        {
-            if runtime.permissions().map(|config| config.mode())
-                == Some(crate::tools::permissions::PermissionMode::DontAsk)
-            {
-                decision = Decision::Deny;
-                approval = None;
-            } else {
-                decision = Decision::Ask;
-                approval = Some(ApprovalMode::Request);
+        let mut permission = rule_permission(grant, runtime, call);
+        self.ask_outside_sandbox(&mut permission, runtime, intent);
+        limit_child(&mut permission, grant, runtime, call);
+        match grant {
+            Grant::Researcher { child, .. } => {
+                child.definition.as_ref().map_or(permission, |definition| {
+                    permission.narrow_definition(definition, call)
+                })
             }
+            Grant::Primary { .. } => permission,
         }
+    }
+
+    fn ask_outside_sandbox(
+        &self,
+        permission: &mut Permission,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+    ) {
+        let call = &intent.call;
+        let unguarded = call.is_unguarded();
+        let git_write = call.is_git() && call.facts().mutates;
         // Outside the sandbox user rules resolve first; then auto mode's review, otherwise a human.
-        let ask_rule = decision == Decision::Ask && basis == PermissionSource::Rule;
+        let ask_rule =
+            permission.decision == Decision::Ask && permission.basis == PermissionSource::Rule;
         let reviewed = if !ask_rule
             && runtime.permissions().is_some_and(|config| {
                 config.mode() == crate::tools::permissions::PermissionMode::Auto
@@ -613,93 +610,126 @@ impl RunLoop<'_> {
         // A remote MCP call leaves the Guard, so only a user allow rule skips its question.
         if matches!(call, ToolCall::McpCall { .. })
             && runtime.is_remote_mcp(call)
-            && decision == Decision::Allow
-            && basis == PermissionSource::Mode
+            && permission.decision == Decision::Allow
+            && permission.basis == PermissionSource::Mode
         {
-            if dont_ask {
-                decision = Decision::Deny;
-                approval = None;
-            } else {
-                decision = Decision::Ask;
-                approval = Some(
-                    if runtime.permissions().is_none()
-                        && self.terminal_mode() == Some(ApprovalMode::Auto)
-                    {
-                        ApprovalMode::Auto
-                    } else {
-                        reviewed
-                    },
-                );
-            }
+            permission.ask_unless(
+                dont_ask,
+                if runtime.permissions().is_none()
+                    && self.terminal_mode() == Some(ApprovalMode::Auto)
+                {
+                    ApprovalMode::Auto
+                } else {
+                    reviewed
+                },
+            );
         }
         if call.is_host()
-            && decision != Decision::Deny
-            && !(decision == Decision::Allow && basis == PermissionSource::TypedPrefixRule)
+            && permission.decision != Decision::Deny
+            && !(permission.decision == Decision::Allow
+                && permission.basis == PermissionSource::TypedPrefixRule)
         {
-            if dont_ask {
-                decision = Decision::Deny;
-                approval = None;
-            } else {
-                decision = Decision::Ask;
-                // Only auto reviews a push or PR, and only to the folder's pinned repository.
-                approval = Some(if same_repository {
+            // Only auto reviews a push or PR, and only to the folder's pinned repository.
+            permission.ask_unless(
+                dont_ask,
+                if same_repository {
                     reviewed
                 } else {
                     ApprovalMode::Request
-                });
-            }
+                },
+            );
         }
-        if unguarded && decision != Decision::Deny {
+        if unguarded && permission.decision != Decision::Deny {
             // Ordinary allow rules never cover host commands; their remembered prefixes resolve later.
-            decision = Decision::Ask;
-            approval = Some(reviewed);
+            permission.decision = Decision::Ask;
+            permission.approval = Some(reviewed);
         }
         if git_write
             && runtime.git_hooks_pinned()
-            && decision != Decision::Deny
-            && !(decision == Decision::Allow
+            && permission.decision != Decision::Deny
+            && !(permission.decision == Decision::Allow
                 && matches!(
-                    basis,
+                    permission.basis,
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule
                 ))
         {
-            decision = Decision::Ask;
-            approval = Some(reviewed);
+            permission.decision = Decision::Ask;
+            permission.approval = Some(reviewed);
         }
-        // New read directories come only from a human; a child may reuse the Run's but never ask.
-        match runtime.reads_need_approval(call) {
-            _ if decision == Decision::Deny => {}
-            Ok(false) => {}
-            Ok(true) if !researcher => {
-                decision = Decision::Ask;
-                approval = Some(ApprovalMode::Request);
-            }
-            Ok(true) | Err(_) => {
-                decision = Decision::Deny;
-                basis = PermissionSource::PinnedGrant;
-                approval = None;
-            }
-        }
-        if researcher
-            && (call.is_web() && !runtime.allows_research_web(call) || runtime.is_remote_mcp(call))
+    }
+}
+
+fn rule_permission(grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
+    let (decision, basis, approval) = runtime
+        .permissions()
+        .map_or((Decision::Allow, PermissionSource::Mode, None), |config| {
+            config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref())
+        });
+    let mut permission = Permission {
+        decision,
+        basis,
+        approval,
+    };
+    let unguarded = call.is_unguarded();
+    let researcher = matches!(grant, Grant::Researcher { .. });
+    let git_write = call.is_git() && call.facts().mutates;
+    if (runtime.permissions().is_some() || unguarded || git_write)
+        && (!runtime.allows(call)
+            || researcher && unguarded && !runtime.host_fallback()
+            || researcher
+                && !call.is_child_research()
+                && !matches!(grant, Grant::Researcher { child, .. } if child.kind.is_editor() && child.definition.as_ref().is_some_and(|definition| definition.allows_worker(call))))
+    {
+        permission.decision = permission.decision.narrow(Decision::Deny);
+        permission.basis = PermissionSource::PinnedGrant;
+        permission.approval = None;
+    }
+    // Claude Code's WebFetch asks per domain: only a listed host or an explicit allow rule skips the prompt.
+    if matches!(call, ToolCall::WebFetch { .. })
+        && permission.decision == Decision::Allow
+        && permission.basis != PermissionSource::Rule
+        && !runtime.lists_web_host(call)
+    {
+        if runtime.permissions().map(|config| config.mode())
+            == Some(crate::tools::permissions::PermissionMode::DontAsk)
         {
-            decision = Decision::Deny;
-            basis = PermissionSource::PinnedGrant;
-            approval = None;
+            permission.decision = Decision::Deny;
+            permission.approval = None;
+        } else {
+            permission.decision = Decision::Ask;
+            permission.approval = Some(ApprovalMode::Request);
         }
-        let permission = Permission {
-            decision,
-            basis,
-            approval,
-        };
-        match grant {
-            Grant::Researcher { child, .. } => {
-                child.definition.as_ref().map_or(permission, |definition| {
-                    permission.narrow_definition(definition, call)
-                })
-            }
-            Grant::Primary { .. } => permission,
+    }
+    permission
+}
+
+fn limit_child(
+    permission: &mut Permission,
+    grant: &Grant<'_>,
+    runtime: &ToolRuntime,
+    call: &ToolCall,
+) {
+    let researcher = matches!(grant, Grant::Researcher { .. });
+    // New read directories come only from a human; a child may reuse the Run's but never ask.
+    match runtime.reads_need_approval(call) {
+        _ if permission.decision == Decision::Deny => {}
+        Ok(false) => {}
+        Ok(true) if !researcher => {
+            permission.decision = Decision::Ask;
+            permission.approval = Some(ApprovalMode::Request);
         }
+        Ok(true) | Err(_) => {
+            permission.decision = Decision::Deny;
+            permission.basis = PermissionSource::PinnedGrant;
+            permission.approval = None;
+        }
+    }
+    if researcher
+        && (call.is_web() && !runtime.allows_research_web(call) || runtime.is_remote_mcp(call))
+    {
+        permission.decision = Decision::Deny;
+        permission.basis = PermissionSource::PinnedGrant;
+        permission.approval = None;
     }
 }
 

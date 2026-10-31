@@ -123,7 +123,38 @@ pub(crate) enum McpAuth {
     Oauth,
 }
 
+impl Skill {
+    fn valid_entry(&self) -> bool {
+        valid_name(&self.name)
+            && !self.description.trim().is_empty()
+            && self.description.len() <= 1024
+            && valid_absolute(&self.directory)
+            && self.files.contains_key("SKILL.md")
+            && self.files.len() <= 32
+            && self
+                .files
+                .iter()
+                .all(|(path, hash)| valid_relative(path, false) && valid_digest(hash))
+    }
+}
+
 impl Server {
+    fn valid_entry(&self) -> bool {
+        valid_name(&self.name)
+            && !self.tools.is_empty()
+            && self.tools.len() <= 64
+            && self.tools.iter().collect::<BTreeSet<_>>().len() == self.tools.len()
+            && self.tools.iter().all(|tool| {
+                !tool.is_empty() && tool.len() <= 128 && !tool.chars().any(char::is_control)
+            })
+            && self.valid_transport()
+            && self.args.len() <= 64
+            && self
+                .args
+                .iter()
+                .all(|arg| arg.len() <= MAX_ARGUMENT_BYTES && !arg.contains('\0'))
+    }
+
     // Local servers run a pinned program; remote ones speak streamable HTTP through the egress proxy, which is Linux-only.
     fn valid_transport(&self) -> bool {
         match (&self.program, &self.url) {
@@ -256,14 +287,7 @@ impl Config {
         {
             return Err(ToolError::Configuration);
         }
-        let roots: BTreeSet<_> = self.workspace_paths.iter().collect();
-        if roots.len() != self.workspace_paths.len()
-            || roots.iter().any(|left| {
-                roots
-                    .iter()
-                    .any(|right| left != right && std::path::Path::new(left).starts_with(right))
-            })
-        {
+        if !disjoint_roots(&self.workspace_paths) {
             return Err(ToolError::Configuration);
         }
         for program in self
@@ -279,38 +303,9 @@ impl Config {
                 return Err(ToolError::Configuration);
             }
         }
-        for server in &self.mcp {
-            if !valid_name(&server.name)
-                || server.tools.is_empty()
-                || server.tools.len() > 64
-                || server.tools.iter().collect::<BTreeSet<_>>().len() != server.tools.len()
-                || server.tools.iter().any(|tool| {
-                    tool.is_empty() || tool.len() > 128 || tool.chars().any(char::is_control)
-                })
-                || !server.valid_transport()
-                || server.args.len() > 64
-                || server
-                    .args
-                    .iter()
-                    .any(|arg| arg.len() > MAX_ARGUMENT_BYTES || arg.contains('\0'))
-            {
-                return Err(ToolError::Configuration);
-            }
-        }
-        for skill in &self.skills {
-            if !valid_name(&skill.name)
-                || skill.description.trim().is_empty()
-                || skill.description.len() > 1024
-                || !valid_absolute(&skill.directory)
-                || !skill.files.contains_key("SKILL.md")
-                || skill.files.len() > 32
-                || skill
-                    .files
-                    .iter()
-                    .any(|(path, hash)| !valid_relative(path, false) || !valid_digest(hash))
-            {
-                return Err(ToolError::Configuration);
-            }
+        if !self.mcp.iter().all(Server::valid_entry) || !self.skills.iter().all(Skill::valid_entry)
+        {
+            return Err(ToolError::Configuration);
         }
         for names in [
             self.commands
@@ -439,7 +434,7 @@ impl Config {
             | ToolCall::Delete { path, .. }
             | ToolCall::MultiEdit {
                 file_path: path, ..
-            } => Some(path),
+            } => path,
             ToolCall::Move {
                 source,
                 destination,
@@ -472,11 +467,9 @@ impl Config {
             ToolCall::McpList { server } => {
                 return self.mcp.iter().any(|value| &value.name == server);
             }
-            ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
-                return self.git_available()
-                    && self.write
-                    && (!matches!(call, ToolCall::GhPrCreate { .. })
-                        || self.pinned_gh().is_some());
+            ToolCall::GitPush { .. } => return self.git_available() && self.write,
+            ToolCall::GhPrCreate { .. } => {
+                return self.git_available() && self.write && self.pinned_gh().is_some();
             }
             ToolCall::GhPrList { .. } | ToolCall::GhPrView { .. } => {
                 return self.git_available() && self.pinned_gh().is_some();
@@ -486,9 +479,7 @@ impl Config {
             | ToolCall::GitLog { .. }
             | ToolCall::GitCommit { .. }
             | ToolCall::GitBranch { .. }
-            | ToolCall::GitSwitch { .. } => {
-                return self.git_available();
-            }
+            | ToolCall::GitSwitch { .. } => return self.git_available(),
             ToolCall::McpCall { server, tool, .. } => {
                 return self
                     .mcp
@@ -499,12 +490,21 @@ impl Config {
                 return self.admits_web(call);
             }
         };
-        let path = path.expect("file operation has path");
         if matches!(call, ToolCall::Read { .. }) && super::spill::read_reference(path).is_some() {
             return true;
         }
         (path.is_empty() || path == ".") && !call.mutates() || self.in_workspace_scope(path)
     }
+}
+
+fn disjoint_roots(paths: &[String]) -> bool {
+    let roots: BTreeSet<_> = paths.iter().collect();
+    roots.len() == paths.len()
+        && !roots.iter().any(|left| {
+            roots
+                .iter()
+                .any(|right| left != right && std::path::Path::new(left).starts_with(right))
+        })
 }
 
 pub(super) const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;

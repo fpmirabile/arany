@@ -212,10 +212,18 @@ pub(crate) struct Conversation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolUseId(String);
 
+pub(crate) const MAX_WIRE_ID_BYTES: usize = 128;
+
+pub(crate) fn valid_wire_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_WIRE_ID_BYTES
+        && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 impl ToolUseId {
     pub fn new(id: impl Into<String>) -> Result<Self, ProviderError> {
         let id = id.into();
-        if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic()) {
+        if !valid_wire_id(&id) {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(Self(id))

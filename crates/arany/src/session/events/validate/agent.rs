@@ -61,7 +61,8 @@ impl Event {
                 Ok(())
             }
             (AgentRole::Child, Some(_))
-                if (1..=8).contains(ordinal)
+                if (1..=crate::session::CollaborationPolicy::MAX_ACTIVE_CHILDREN)
+                    .contains(ordinal)
                     && definition.as_ref().is_none_or(|name| {
                         name.len() <= 64 && crate::validate::valid_name(name)
                     }) =>

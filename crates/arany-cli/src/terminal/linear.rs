@@ -694,7 +694,12 @@ impl LinearState {
             return Ok(());
         }
         writeln!(writer, "Resume: {} in this Workspace", items.len())?;
-        for (index, item) in items.iter().skip(start).take(10).enumerate() {
+        for (index, item) in items
+            .iter()
+            .skip(start)
+            .take(super::SELECTOR_ROWS)
+            .enumerate()
+        {
             writeln!(
                 writer,
                 "Choice {}: {}",
@@ -784,7 +789,13 @@ impl LinearState {
                 (state, _) => writeln!(writer, "Catalog: {}", state.label())?,
             }
         }
-        for (index, item) in picker.items.iter().skip(start).take(10).enumerate() {
+        for (index, item) in picker
+            .items
+            .iter()
+            .skip(start)
+            .take(super::SELECTOR_ROWS)
+            .enumerate()
+        {
             let status = super::model_catalog_status(item, picker.exact_custom);
             let effort = picker
                 .efforts

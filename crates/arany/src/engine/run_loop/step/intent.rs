@@ -20,6 +20,8 @@ use crate::tools::{
     ToolResourceClass, ToolRuntime, ToolStep,
 };
 use std::time::Duration;
+
+const INTEGRATION_RESULT_BYTES: u32 = 128;
 use tokio::time::Instant;
 
 pub(super) const MAX_INTENT_RECORDS_PER_TOOL: usize = 2;
@@ -424,33 +426,10 @@ impl RunLoop<'_> {
         crate::tools::permissions::fill_host_prefix(&mut call);
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
-            Grant::Researcher {
-                child,
-                deadline,
-                active_deadline,
-            } => {
-                let deadline_refusal = sizing_deadline_refusal(
-                    active_deadline
-                        .as_ref()
-                        .filter(|deadline| deadline.reached())
-                        .map(|deadline| deadline.cause),
-                );
-                let deadline = grant.deadline().unwrap_or(*deadline);
-                let intent = if child.kind.is_editor()
-                    && matches!(
-                        call,
-                        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
-                    ) {
-                    self.editor_command_intent(runtime, child.agent_run_id, call, deadline)
-                        .await?
-                } else {
-                    self.researcher_intent(runtime, child, call, deadline)?
-                };
-                let Some(intent) = intent else {
-                    return Ok(Err(deadline_refusal));
-                };
-                Some(intent)
-            }
+            Grant::Researcher { .. } => match self.child_intent(grant, runtime, call).await? {
+                Ok(intent) => Some(intent),
+                Err(refusal) => return Ok(Err(refusal)),
+            },
         };
         let Some(mut intent) = intent else {
             return Ok(Err(SizingRefusal::ActiveTime));
@@ -482,24 +461,45 @@ impl RunLoop<'_> {
         let Some(capacity) = runtime.result_capacity(overhead, reserve) else {
             return Ok(Err(SizingRefusal::ContextFull));
         };
-        intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
-            128
-        } else if matches!(
-            intent.call,
-            ToolCall::Read { .. }
-                | ToolCall::List { .. }
-                | ToolCall::Search { .. }
-                | ToolCall::Glob { .. }
-                | ToolCall::Skill { .. }
-        ) || intent.call.is_git() && !intent.call.mutates()
-        {
-            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
-        } else if capacity >= MAX_TOOL_RESULT_BYTES {
-            MAX_TOOL_RESULT_BYTES as u32
-        } else {
+        let Some(result_bytes) = result_bytes(&intent.call, capacity) else {
             return Ok(Err(SizingRefusal::ContextFull));
         };
+        intent.limits.result_bytes = result_bytes;
         Ok(Ok(intent))
+    }
+
+    async fn child_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        call: ToolCall,
+    ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
+        let Grant::Researcher {
+            child,
+            deadline,
+            active_deadline,
+        } = grant
+        else {
+            return Ok(Err(SizingRefusal::ActiveTime));
+        };
+        let deadline_refusal = sizing_deadline_refusal(
+            active_deadline
+                .as_ref()
+                .filter(|deadline| deadline.reached())
+                .map(|deadline| deadline.cause),
+        );
+        let deadline = grant.deadline().unwrap_or(*deadline);
+        let intent = if child.kind.is_editor()
+            && matches!(
+                call,
+                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+            ) {
+            self.editor_command_intent(runtime, child.agent_run_id, call, deadline)
+                .await?
+        } else {
+            self.researcher_intent(runtime, child, call, deadline)?
+        };
+        Ok(intent.ok_or(deadline_refusal))
     }
 
     pub(super) async fn propose_tool(&self, intent: &EffectIntent) -> Result<(), EngineError> {
@@ -896,6 +896,26 @@ fn command_limits(
         intent.limits.project_bytes = resource_settings.build_project_bytes;
     }
     Ok(())
+}
+
+fn result_bytes(call: &ToolCall, capacity: usize) -> Option<u32> {
+    if matches!(call, ToolCall::ApplyChangeset { .. }) {
+        Some(INTEGRATION_RESULT_BYTES)
+    } else if matches!(
+        call,
+        ToolCall::Read { .. }
+            | ToolCall::List { .. }
+            | ToolCall::Search { .. }
+            | ToolCall::Glob { .. }
+            | ToolCall::Skill { .. }
+    ) || call.is_git() && !call.mutates()
+    {
+        Some(capacity.min(MAX_TOOL_RESULT_BYTES) as u32)
+    } else if capacity >= MAX_TOOL_RESULT_BYTES {
+        Some(MAX_TOOL_RESULT_BYTES as u32)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

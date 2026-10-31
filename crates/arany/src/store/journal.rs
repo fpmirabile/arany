@@ -1,4 +1,6 @@
-use super::replay::{MAX_SESSION_EVENTS, replay_through, resolve_open_view, resolve_view};
+use super::replay::{
+    MAX_SESSION_EVENTS, ReplayMode, replay_through, resolve_open_view, resolve_view,
+};
 use super::{
     AdmissionKind, DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit,
 };
@@ -325,7 +327,14 @@ fn append_in_transaction(
     ) {
         let mut candidate = existing.ok_or(StoreError::InvalidHistory)?;
         candidate.push(envelope.clone());
-        prior_view = replay_through(transaction, session_id, &candidate, 0, &mut 0, false, None)?;
+        prior_view = replay_through(
+            transaction,
+            session_id,
+            &candidate,
+            0,
+            &mut 0,
+            ReplayMode::Open,
+        )?;
     } else if let Some(view) = &mut prior_view {
         view.apply_committed(&envelope)?;
         if matches!(envelope.event, Event::RunStarted { .. }) {
@@ -448,7 +457,7 @@ fn validate_fork(transaction: &Transaction<'_>, boundary: ForkLineage) -> Result
         event,
         created_at_ms: 0,
     };
-    replay_through(transaction, id, &[envelope], 0, &mut 1, false, None)?;
+    replay_through(transaction, id, &[envelope], 0, &mut 1, ReplayMode::Open)?;
     Ok(())
 }
 

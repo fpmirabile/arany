@@ -156,9 +156,7 @@ impl<'a> StreamDecoder<'a> {
         if let Some(response) = created.response {
             if self.response_id.is_some()
                 || !self.done_items.is_empty()
-                || response.id.is_empty()
-                || response.id.len() > 128
-                || !response.id.bytes().all(|byte| byte.is_ascii_graphic())
+                || !crate::provider::valid_wire_id(&response.id)
             {
                 return Err(ProviderError::InvalidResponseContract);
             }

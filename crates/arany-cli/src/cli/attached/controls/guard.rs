@@ -90,59 +90,73 @@ pub(super) async fn folders(
             .next_input()
             .await
             .map_err(|error| error.to_string())?;
-        let remove = match input {
-            TerminalInput::Up => {
-                selected = selected.saturating_sub(1);
-                None
-            }
-            TerminalInput::Down => {
-                selected += 1;
-                None
-            }
-            TerminalInput::Character(character) if linear => {
-                answer.push(character);
-                None
-            }
-            TerminalInput::Backspace if linear => {
-                answer.pop();
-                None
-            }
-            TerminalInput::Submit if linear => {
-                let value = std::mem::take(&mut answer);
-                if value.trim().is_empty() || value.trim() == "q" {
-                    return Ok(());
-                }
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|number| number.checked_sub(1))
-            }
-            TerminalInput::Submit => Some(selected),
-            TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
-                return Ok(());
-            }
-            TerminalInput::Shutdown(signal) => {
-                return Err(format!("terminated by {}", signal.name()));
-            }
-            _ => None,
+        let remove = match folder_input(input, linear, &mut selected, &mut answer) {
+            std::ops::ControlFlow::Continue(remove) => remove,
+            std::ops::ControlFlow::Break(result) => return result,
         };
         let Some(path) =
             remove.and_then(|row| saved.reads().nth(row).map(std::path::Path::to_owned))
         else {
             continue;
         };
-        notice = Some(
-            match GuardSettings::update(|settings| {
-                settings.remove_read(&path);
-                Ok(())
-            }) {
-                Ok(_) => format!(
-                    "Removed {}; it applies from the next Run",
-                    crate::presentation::escape_terminal(&path.display().to_string())
-                ),
-                Err(_) => "Error: guard.json could not be saved; folders unchanged".into(),
-            },
-        );
+        notice = Some(remove_folder(&path));
+    }
+}
+
+fn folder_input(
+    input: TerminalInput,
+    linear: bool,
+    selected: &mut usize,
+    answer: &mut String,
+) -> std::ops::ControlFlow<Result<(), String>, Option<usize>> {
+    std::ops::ControlFlow::Continue(match input {
+        TerminalInput::Up => {
+            *selected = selected.saturating_sub(1);
+            None
+        }
+        TerminalInput::Down => {
+            *selected += 1;
+            None
+        }
+        TerminalInput::Character(character) if linear => {
+            answer.push(character);
+            None
+        }
+        TerminalInput::Backspace if linear => {
+            answer.pop();
+            None
+        }
+        TerminalInput::Submit if linear => {
+            let value = std::mem::take(answer);
+            if value.trim().is_empty() || value.trim() == "q" {
+                return std::ops::ControlFlow::Break(Ok(()));
+            }
+            value
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+        }
+        TerminalInput::Submit => Some(*selected),
+        TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
+            return std::ops::ControlFlow::Break(Ok(()));
+        }
+        TerminalInput::Shutdown(signal) => {
+            return std::ops::ControlFlow::Break(Err(format!("terminated by {}", signal.name())));
+        }
+        _ => None,
+    })
+}
+
+fn remove_folder(path: &std::path::Path) -> String {
+    match GuardSettings::update(|settings| {
+        settings.remove_read(path);
+        Ok(())
+    }) {
+        Ok(_) => format!(
+            "Removed {}; it applies from the next Run",
+            crate::presentation::escape_terminal(&path.display().to_string())
+        ),
+        Err(_) => "Error: guard.json could not be saved; folders unchanged".into(),
     }
 }

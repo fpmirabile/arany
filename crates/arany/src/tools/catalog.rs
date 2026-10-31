@@ -549,7 +549,41 @@ fn goal_success_call_schema(calls: &[Value]) -> Option<Value> {
 }
 
 fn plan_contract_schema(call_schema: Option<&Value>, pinned: &crate::session::GoalBudget) -> Value {
-    let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
+    json!({
+        "type": "object",
+        "properties": {
+            "mission": {"type":"string", "description": "Non-empty UTF-8 Goal mission, at most 2048 bytes."},
+            "paths": {"type":"array", "description": "Up to 64 distinct Workspace-relative paths in ascending order, each at most 512 bytes. Use \".\" alone for the whole Workspace; nested paths are rejected.", "items":{"type":"string"}},
+            "commands": {"type":"array", "description": "Up to 8 distinct admitted command names in ascending order; each uses lowercase letters, digits, '-' or '_', at most 64 bytes.", "items":{"type":"string"}},
+            "resource_class": {"type":"string", "enum":["default","build"]},
+            "command_timeout_ms": {"type":["integer","null"], "description": format!("Integer {} through {} inclusive, or null for the pinned default.", super::types::MIN_COMMAND_TIMEOUT_MS, super::types::MAX_COMMAND_TIMEOUT_MS)},
+            "skills": {"type":"array", "description": "Up to 64 distinct admitted Skill bindings in ascending name and resource order. Names use lowercase letters, digits, '-' or '_', at most 64 bytes; resource is null for SKILL.md or a relative path of at most 512 bytes.", "items":{
+                "type":"object",
+                "properties": {
+                    "name":{"type":"string"},
+                    "resource":{"type":["string", "null"]}
+                },
+                "required":["name","resource"],
+                "additionalProperties":false
+            }},
+            "mcp_tools": {"type":"array", "description": "Up to 64 distinct admitted MCP bindings in ascending server and tool order. Server names are at most 64 bytes and tool names at most 128 bytes, each using lowercase letters, digits, '-' or '_'.", "items":{
+                "type":"object",
+                "properties": {
+                    "server":{"type":"string"},
+                    "tool":{"type":"string"}
+                },
+                "required":["server","tool"],
+                "additionalProperties":false
+            }},
+            "success_criterion": {"anyOf": success_criteria(call_schema)},
+            "budget": budget_schema(pinned)
+        },
+        "required":["mission","paths","commands","resource_class","command_timeout_ms","skills","mcp_tools","success_criterion","budget"],
+        "additionalProperties":false
+    })
+}
+
+fn budget_schema(pinned: &crate::session::GoalBudget) -> Value {
     let ceiling = |limit: Option<u64>, unit: &str| match limit {
         Some(limit) => {
             json!({"type":"integer", "description": format!("Positive integer {unit}, at most {limit}; the Goal pins this ceiling and null is refused.")})
@@ -568,6 +602,21 @@ fn plan_contract_schema(call_schema: Option<&Value>, pinned: &crate::session::Go
         "Integer 1 through {} inclusive; the Goal pins this ceiling.",
         pinned.max_runs
     );
+    json!({
+        "type":"object",
+        "properties": {
+            "max_provider_calls": calls,
+            "max_tokens": tokens,
+            "max_active_ms": active_ms,
+            "max_runs": {"type":"integer", "description": runs}
+        },
+        "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
+        "additionalProperties":false
+    })
+}
+
+fn success_criteria(call_schema: Option<&Value>) -> Vec<Value> {
+    let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
     let mut criteria = Vec::with_capacity(3);
     if let Some(call_schema) = call_schema {
         criteria.push(json!({
@@ -600,48 +649,7 @@ fn plan_contract_schema(call_schema: Option<&Value>, pinned: &crate::session::Go
         "required":["kind","path","content"],
         "additionalProperties":false
     }));
-    json!({
-        "type": "object",
-        "properties": {
-            "mission": {"type":"string", "description": "Non-empty UTF-8 Goal mission, at most 2048 bytes."},
-            "paths": {"type":"array", "description": "Up to 64 distinct Workspace-relative paths in ascending order, each at most 512 bytes. Use \".\" alone for the whole Workspace; nested paths are rejected.", "items":{"type":"string"}},
-            "commands": {"type":"array", "description": "Up to 8 distinct admitted command names in ascending order; each uses lowercase letters, digits, '-' or '_', at most 64 bytes.", "items":{"type":"string"}},
-            "resource_class": {"type":"string", "enum":["default","build"]},
-            "command_timeout_ms": {"type":["integer","null"], "description": format!("Integer {} through {} inclusive, or null for the pinned default.", super::types::MIN_COMMAND_TIMEOUT_MS, super::types::MAX_COMMAND_TIMEOUT_MS)},
-            "skills": {"type":"array", "description": "Up to 64 distinct admitted Skill bindings in ascending name and resource order. Names use lowercase letters, digits, '-' or '_', at most 64 bytes; resource is null for SKILL.md or a relative path of at most 512 bytes.", "items":{
-                "type":"object",
-                "properties": {
-                    "name":{"type":"string"},
-                    "resource":{"type":["string", "null"]}
-                },
-                "required":["name","resource"],
-                "additionalProperties":false
-            }},
-            "mcp_tools": {"type":"array", "description": "Up to 64 distinct admitted MCP bindings in ascending server and tool order. Server names are at most 64 bytes and tool names at most 128 bytes, each using lowercase letters, digits, '-' or '_'.", "items":{
-                "type":"object",
-                "properties": {
-                    "server":{"type":"string"},
-                    "tool":{"type":"string"}
-                },
-                "required":["server","tool"],
-                "additionalProperties":false
-            }},
-            "success_criterion": {"anyOf": criteria},
-            "budget": {
-                "type":"object",
-                "properties": {
-                    "max_provider_calls": calls,
-                    "max_tokens": tokens,
-                    "max_active_ms": active_ms,
-                    "max_runs": {"type":"integer", "description": runs}
-                },
-                "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
-                "additionalProperties":false
-            }
-        },
-        "required":["mission","paths","commands","resource_class","command_timeout_ms","skills","mcp_tools","success_criterion","budget"],
-        "additionalProperties":false
-    })
+    criteria
 }
 
 #[cfg(test)]

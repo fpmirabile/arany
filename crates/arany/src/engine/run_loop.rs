@@ -1082,6 +1082,19 @@ impl<'a> RunLoop<'a> {
             self.settle_result(&result)?;
             return Ok(Admission::Reserved((result, active_segment)));
         };
+        let result = self
+            .invoke_with_preview(request, deadline, limits, context)
+            .await?;
+        Ok(Admission::Reserved((result, active_segment)))
+    }
+
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        deadline: tokio::time::Instant,
+        limits: RateLimitSlot,
+        context: super::hints::PreviewContext,
+    ) -> Result<CallResult, EngineError> {
         let call_index = context.call_index;
         let (preview, mut receiver) = ResponsePreview::new();
         let mut checkpoint = DisplayCheckpoint {
@@ -1148,7 +1161,7 @@ impl<'a> RunLoop<'a> {
         self.hints
             .expect("preview owner")
             .publish_preview(self.primary_id, call_index, None);
-        Ok(Admission::Reserved((result, active_segment)))
+        Ok(result)
     }
 
     async fn checkpoint(
@@ -1558,13 +1571,16 @@ impl<'a> RunLoop<'a> {
 // A failure before a decoded outcome also returns its retry cause and any server Retry-After.
 pub(super) async fn invoke_bounded_with_preview(
     provider: &dyn Provider,
-    request: ProviderRequest,
-    run_deadline: Instant,
-    mut cancellation: RunCancellation,
-    preview: Option<ResponsePreview>,
-    limits: RateLimitSlot,
+    input: super::routing::AttemptInput,
     receipt: crate::fault::LatencyReceipt<'_>,
 ) -> (CallResult, Option<super::routing::Transient>) {
+    let super::routing::AttemptInput {
+        request,
+        deadline: run_deadline,
+        mut cancellation,
+        preview,
+        limits,
+    } = input;
     if cancellation.is_cancelled() {
         return (CallResult::Cancelled, None);
     }
@@ -1582,7 +1598,21 @@ pub(super) async fn invoke_bounded_with_preview(
         result = tokio::time::timeout(timeout, invocation) => result,
     };
     receipt.received(&result);
-    let transient = match &result {
+    let transient = call_transient(provider, &result);
+    let result = classify_call(result, output_bound, output_cap);
+    (result, transient)
+}
+
+type TimedResponse = Result<
+    Result<crate::provider::ProviderResponse, crate::provider::ProviderError>,
+    tokio::time::error::Elapsed,
+>;
+
+fn call_transient(
+    provider: &dyn Provider,
+    result: &TimedResponse,
+) -> Option<super::routing::Transient> {
+    match result {
         Ok(Err(error)) => error
             .retry_cause()
             .map(|(cause, retry_after)| super::routing::Transient { cause, retry_after }),
@@ -1596,8 +1626,15 @@ pub(super) async fn invoke_bounded_with_preview(
                 })
         }
         _ => None,
-    };
-    let result = match result {
+    }
+}
+
+fn classify_call(
+    result: TimedResponse,
+    output_bound: crate::provider::OutputTokenBound,
+    output_cap: u32,
+) -> CallResult {
+    match result {
         Ok(Ok(response))
             if response
                 .usage
@@ -1615,9 +1652,10 @@ pub(super) async fn invoke_bounded_with_preview(
             CallResult::Failed(CallFailure::OutputLimit)
         }
         Ok(Ok(response))
-            if response.response_id.as_ref().is_some_and(|id| {
-                id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
-            }) =>
+            if response
+                .response_id
+                .as_deref()
+                .is_some_and(|id| !crate::provider::valid_wire_id(id)) =>
         {
             CallResult::Failed(CallFailure::InvalidResponse(Some(
                 ProviderFailureReason::ResponseContract,
@@ -1649,8 +1687,7 @@ pub(super) async fn invoke_bounded_with_preview(
             }
         },
         Err(_) => CallResult::Failed(CallFailure::Timeout),
-    };
-    (result, transient)
+    }
 }
 
 fn call_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
@@ -1684,35 +1721,7 @@ fn call_record(
     refusal: Option<ProposalRefusal>,
     rate_limits: Option<RateLimits>,
 ) -> ProviderCallRecord {
-    let disposition = match result {
-        CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Answer(_) | ProviderOutcome::Review(_),
-            ..
-        }) if valid_response => ProviderCallDisposition::Finished,
-        CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Delegate(_),
-            ..
-        }) if valid_response => ProviderCallDisposition::Delegated,
-        CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Tools(_),
-            ..
-        }) if valid_response => ProviderCallDisposition::ToolRequested,
-        CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Plan(_),
-            ..
-        }) if valid_response => ProviderCallDisposition::PlanRecorded,
-        CallResult::Response(_) if refusal.is_some() => ProviderCallDisposition::Rejected,
-        CallResult::Response(_) => ProviderCallDisposition::InvalidResponse,
-        CallResult::Failed(failure) => match failure {
-            CallFailure::Timeout => ProviderCallDisposition::TimedOut,
-            CallFailure::Unavailable { .. } => ProviderCallDisposition::Unavailable,
-            CallFailure::Rejected(_) => ProviderCallDisposition::Rejected,
-            CallFailure::InvalidResponse(_) => ProviderCallDisposition::InvalidResponse,
-            CallFailure::OutputLimit => ProviderCallDisposition::OutputLimit,
-            CallFailure::TaskPanic => ProviderCallDisposition::TaskPanic,
-        },
-        CallResult::Cancelled => ProviderCallDisposition::Cancelled,
-    };
+    let disposition = call_disposition(result, valid_response, refusal.is_some());
     let (response_id, usage, wire_provenance) = match result {
         CallResult::Response(response) => (
             response.response_id.clone(),
@@ -1726,36 +1735,9 @@ fn call_record(
         context_bytes: None,
         rate_limits,
         refusal,
-        delegation: if disposition == ProviderCallDisposition::Delegated {
-            match result {
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Delegate(d),
-                    ..
-                }) => Some(
-                    d.children
-                        .iter()
-                        .map(|child| {
-                            child.editor.as_ref().map_or_else(
-                                || crate::session::worker::ChildAssignment::Researcher {
-                                    objective: child.objective.clone(),
-                                    definition: d.agent.clone(),
-                                    profile: child
-                                        .profile
-                                        .clone()
-                                        .or_else(|| default_profile.clone()),
-                                },
-                                |assignment| crate::session::worker::ChildAssignment::Editor {
-                                    assignment: assignment.clone(),
-                                },
-                            )
-                        })
-                        .collect(),
-                ),
-                _ => None,
-            }
-        } else {
-            None
-        },
+        delegation: (disposition == ProviderCallDisposition::Delegated)
+            .then(|| delegation_plan(result, default_profile))
+            .flatten(),
         phase,
         disposition,
         requested_tools: match result {
@@ -1773,18 +1755,7 @@ fn call_record(
         cache_read_input_tokens: usage.cache_read_input_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         wire_provenance,
-        failure_reason: if refused {
-            Some(ProviderFailureReason::ProposalRefused)
-        } else {
-            match result {
-                CallResult::Failed(
-                    CallFailure::Unavailable { reason, .. }
-                    | CallFailure::Rejected(reason)
-                    | CallFailure::InvalidResponse(reason),
-                ) => *reason,
-                _ => None,
-            }
-        },
+        failure_reason: call_failure_reason(result, refused),
     };
     if record.rate_limits.is_some()
         && !serde_json::to_vec(&record)
@@ -1793,6 +1764,86 @@ fn call_record(
         record.rate_limits = None;
     }
     record
+}
+
+fn call_disposition(
+    result: &CallResult,
+    valid_response: bool,
+    refused: bool,
+) -> ProviderCallDisposition {
+    match result {
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Answer(_) | ProviderOutcome::Review(_),
+            ..
+        }) if valid_response => ProviderCallDisposition::Finished,
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Delegate(_),
+            ..
+        }) if valid_response => ProviderCallDisposition::Delegated,
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Tools(_),
+            ..
+        }) if valid_response => ProviderCallDisposition::ToolRequested,
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Plan(_),
+            ..
+        }) if valid_response => ProviderCallDisposition::PlanRecorded,
+        CallResult::Response(_) if refused => ProviderCallDisposition::Rejected,
+        CallResult::Response(_) => ProviderCallDisposition::InvalidResponse,
+        CallResult::Failed(failure) => match failure {
+            CallFailure::Timeout => ProviderCallDisposition::TimedOut,
+            CallFailure::Unavailable { .. } => ProviderCallDisposition::Unavailable,
+            CallFailure::Rejected(_) => ProviderCallDisposition::Rejected,
+            CallFailure::InvalidResponse(_) => ProviderCallDisposition::InvalidResponse,
+            CallFailure::OutputLimit => ProviderCallDisposition::OutputLimit,
+            CallFailure::TaskPanic => ProviderCallDisposition::TaskPanic,
+        },
+        CallResult::Cancelled => ProviderCallDisposition::Cancelled,
+    }
+}
+
+fn delegation_plan(
+    result: &CallResult,
+    default_profile: Option<String>,
+) -> Option<Vec<crate::session::worker::ChildAssignment>> {
+    match result {
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Delegate(d),
+            ..
+        }) => Some(
+            d.children
+                .iter()
+                .map(|child| {
+                    child.editor.as_ref().map_or_else(
+                        || crate::session::worker::ChildAssignment::Researcher {
+                            objective: child.objective.clone(),
+                            definition: d.agent.clone(),
+                            profile: child.profile.clone().or_else(|| default_profile.clone()),
+                        },
+                        |assignment| crate::session::worker::ChildAssignment::Editor {
+                            assignment: assignment.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn call_failure_reason(result: &CallResult, refused: bool) -> Option<ProviderFailureReason> {
+    if refused {
+        Some(ProviderFailureReason::ProposalRefused)
+    } else {
+        match result {
+            CallResult::Failed(
+                CallFailure::Unavailable { reason, .. }
+                | CallFailure::Rejected(reason)
+                | CallFailure::InvalidResponse(reason),
+            ) => *reason,
+            _ => None,
+        }
+    }
 }
 
 // The Stop feedback directly before the next call owns that call's facts and notes.
@@ -1884,55 +1935,7 @@ fn decide_primary_call(
 ) -> PrimaryDecision {
     let admitted = primary_admitted(site, &result, validity, facts);
     match site {
-        PrimarySite::Loop => {
-            if facts.cancel_requested || matches!(result, CallResult::Cancelled) {
-                return PrimaryDecision::Stop(StopCause::Cancelled);
-            }
-            if facts.active_time_exhausted {
-                return PrimaryDecision::Stop(StopCause::ActiveTime);
-            }
-            if matches!(
-                result,
-                CallResult::Failed(CallFailure::InvalidResponse(Some(
-                    ProviderFailureReason::OutcomeContract
-                )))
-            ) && facts.outcome_correction_pending
-            {
-                if let Some(cause) = facts.observed() {
-                    return PrimaryDecision::Stop(cause);
-                }
-                return if facts.tool_admitted() {
-                    PrimaryDecision::CorrectOutcome
-                } else {
-                    PrimaryDecision::Stop(StopCause::Budget)
-                };
-            }
-            let CallResult::Response(ProviderResponse { outcome, turn, .. }) = result else {
-                return PrimaryDecision::Fail(RunFailure::ProviderCall);
-            };
-            match (validity, outcome) {
-                // An empty Tool list names no operation to refuse.
-                (Err(_), ProviderOutcome::Tools(requests)) if requests.is_empty() => {
-                    PrimaryDecision::Fail(RunFailure::ProviderCall)
-                }
-                (Err(cause), ProviderOutcome::Tools(requests)) => {
-                    PrimaryDecision::RefusedTool(cause, requests, turn)
-                }
-                (Err(cause), _) => PrimaryDecision::Refused(cause),
-                (Ok(()), _) if !admitted => PrimaryDecision::Stop(StopCause::Budget),
-                (Ok(()), ProviderOutcome::Plan(plan)) => PrimaryDecision::Plan(plan, turn),
-                (Ok(()), ProviderOutcome::Answer(answer)) => PrimaryDecision::Finish(answer, turn),
-                (Ok(()), ProviderOutcome::Delegate(delegation)) => {
-                    PrimaryDecision::Delegate(delegation, turn)
-                }
-                (Ok(()), ProviderOutcome::Tools(requests)) => {
-                    PrimaryDecision::ToolStep(requests, turn)
-                }
-                (Ok(()), ProviderOutcome::Review(_)) => {
-                    PrimaryDecision::Fail(RunFailure::ProviderCall)
-                }
-            }
-        }
+        PrimarySite::Loop => decide_loop_call(result, validity, facts, admitted),
         PrimarySite::Wave { .. } if wave_deferred(&result, admitted, facts) => {
             PrimaryDecision::Defer
         }
@@ -1955,6 +1958,57 @@ fn decide_primary_call(
                 PrimaryDecision::Stop(StopCause::ToolStopped)
             }
         },
+    }
+}
+
+fn decide_loop_call(
+    result: CallResult,
+    validity: Result<(), ProposalRefusalCause>,
+    facts: &RunFacts,
+    admitted: bool,
+) -> PrimaryDecision {
+    if facts.cancel_requested || matches!(result, CallResult::Cancelled) {
+        return PrimaryDecision::Stop(StopCause::Cancelled);
+    }
+    if facts.active_time_exhausted {
+        return PrimaryDecision::Stop(StopCause::ActiveTime);
+    }
+    if matches!(
+        result,
+        CallResult::Failed(CallFailure::InvalidResponse(Some(
+            ProviderFailureReason::OutcomeContract
+        )))
+    ) && facts.outcome_correction_pending
+    {
+        if let Some(cause) = facts.observed() {
+            return PrimaryDecision::Stop(cause);
+        }
+        return if facts.tool_admitted() {
+            PrimaryDecision::CorrectOutcome
+        } else {
+            PrimaryDecision::Stop(StopCause::Budget)
+        };
+    }
+    let CallResult::Response(ProviderResponse { outcome, turn, .. }) = result else {
+        return PrimaryDecision::Fail(RunFailure::ProviderCall);
+    };
+    match (validity, outcome) {
+        // An empty Tool list names no operation to refuse.
+        (Err(_), ProviderOutcome::Tools(requests)) if requests.is_empty() => {
+            PrimaryDecision::Fail(RunFailure::ProviderCall)
+        }
+        (Err(cause), ProviderOutcome::Tools(requests)) => {
+            PrimaryDecision::RefusedTool(cause, requests, turn)
+        }
+        (Err(cause), _) => PrimaryDecision::Refused(cause),
+        (Ok(()), _) if !admitted => PrimaryDecision::Stop(StopCause::Budget),
+        (Ok(()), ProviderOutcome::Plan(plan)) => PrimaryDecision::Plan(plan, turn),
+        (Ok(()), ProviderOutcome::Answer(answer)) => PrimaryDecision::Finish(answer, turn),
+        (Ok(()), ProviderOutcome::Delegate(delegation)) => {
+            PrimaryDecision::Delegate(delegation, turn)
+        }
+        (Ok(()), ProviderOutcome::Tools(requests)) => PrimaryDecision::ToolStep(requests, turn),
+        (Ok(()), ProviderOutcome::Review(_)) => PrimaryDecision::Fail(RunFailure::ProviderCall),
     }
 }
 
@@ -2552,11 +2606,13 @@ mod call_bound_tests {
             let started = Instant::now();
             let (result, transient) = invoke_bounded_with_preview(
                 &provider,
-                request,
-                started + Duration::from_secs(1200),
-                RunCancellation::new(),
-                None,
-                limits.clone(),
+                crate::engine::routing::AttemptInput {
+                    request,
+                    deadline: started + Duration::from_secs(1200),
+                    cancellation: RunCancellation::new(),
+                    preview: None,
+                    limits: limits.clone(),
+                },
                 crate::fault::LatencyReceipt::default(),
             )
             .await;

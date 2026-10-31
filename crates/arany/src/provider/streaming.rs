@@ -338,9 +338,7 @@ impl<'a> ResponsesPreview<'a> {
         let item = &value["item"];
         let id = item["id"]
             .as_str()
-            .filter(|id| {
-                !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_graphic())
-            })
+            .filter(|id| crate::provider::valid_wire_id(id))
             .ok_or(ProviderError::InvalidStream)?;
         let index = value["output_index"]
             .as_u64()

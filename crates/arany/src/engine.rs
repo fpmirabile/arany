@@ -644,10 +644,9 @@ impl Engine {
     }
 
     pub fn open(state: StateRoot, config: EngineConfig) -> Result<Self, EngineError> {
-        if config
-            .worker_concurrency
-            .is_some_and(|n| !(1..=8).contains(&n))
-        {
+        if config.worker_concurrency.is_some_and(|n| {
+            !(1..=crate::session::CollaborationPolicy::MAX_ACTIVE_CHILDREN).contains(&n)
+        }) {
             return Err(EngineError::InvalidRequest);
         }
         let journal = Journal::new(Store::open(state.try_clone()?)?);
