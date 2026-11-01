@@ -19,8 +19,7 @@ mod active;
 mod agents;
 pub(crate) mod controls;
 mod files;
-// Linux release builds have no tests in this module: each one is debug-only or macOS-only.
-#[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
+#[cfg(test)]
 mod journeys;
 pub(crate) mod models;
 pub(in crate::cli) mod permissions;

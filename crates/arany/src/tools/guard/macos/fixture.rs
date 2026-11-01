@@ -20,7 +20,7 @@ pub(crate) enum Stage {
     SupervisorDetach,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 impl Stage {
     fn file(self) -> &'static str {
         match self {
@@ -46,24 +46,24 @@ impl Stage {
 }
 
 pub(crate) struct Span {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     capture: Option<Capture>,
 }
 
 impl Span {
     pub(crate) fn begin(stage: Stage) -> Self {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, test))]
         {
             Self::in_directory(stage, directory())
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(debug_assertions, test)))]
         {
             let _ = stage;
             Self {}
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     fn in_directory(stage: Stage, directory: Option<crate::private_fs::PrivateDirectory>) -> Self {
         let capture = directory.and_then(|directory| {
             let capture = Capture {
@@ -84,25 +84,25 @@ impl Span {
     }
 
     pub(crate) fn complete(mut self) {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, test))]
         if let Some(capture) = self.capture.take() {
             let _ = capture.finish("complete");
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(debug_assertions, test)))]
         let _ = &mut self;
     }
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, test))]
         if let Some(capture) = self.capture.take() {
             let _ = capture.finish("interrupted");
         }
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 pub(super) fn directory() -> Option<crate::private_fs::PrivateDirectory> {
     let account = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT")?;
     let path = std::env::var_os("ARANY_TEST_GUARD_TRACE")?;
@@ -113,14 +113,14 @@ pub(super) fn directory() -> Option<crate::private_fs::PrivateDirectory> {
     crate::private_fs::open_directory(std::path::Path::new(&path), false).ok()
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 struct Capture {
     directory: crate::private_fs::PrivateDirectory,
     stage: Stage,
     started: std::time::Instant,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 impl Capture {
     fn write(
         &self,
@@ -182,7 +182,7 @@ impl Capture {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::private_fs::open_directory;

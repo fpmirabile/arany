@@ -188,7 +188,7 @@ impl<'a> StreamDecoder<'a> {
         self.output_tokens_details = value
             .pointer("/response/usage/output_tokens_details")
             .cloned();
-        if cfg!(debug_assertions)
+        if cfg!(any(debug_assertions, test))
             && let Some(output) = value.pointer("/response/output").and_then(Value::as_array)
         {
             for item in output {
@@ -238,7 +238,7 @@ impl<'a> StreamDecoder<'a> {
     }
 
     fn item_done(&mut self, value: &Value, data: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
-        if cfg!(debug_assertions)
+        if cfg!(any(debug_assertions, test))
             && value.pointer("/item/type").and_then(Value::as_str) == Some("message")
         {
             self.response_shape.done_messages += 1;

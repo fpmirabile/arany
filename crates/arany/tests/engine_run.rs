@@ -81,15 +81,7 @@ use engine_support::{run_to_end, run_with};
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
-    if cfg!(not(debug_assertions)) && std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
-        assert!(matches!(
-            StateRoot::account_path(),
-            Err(arany::StoreError::InvalidStateDirectory)
-        ));
-        return;
-    }
     assert_eq!(StateRoot::account_path().unwrap(), root);
-    #[cfg(debug_assertions)]
     {
         use process::BoundedOutput;
 
@@ -1187,7 +1179,6 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    #[cfg(debug_assertions)]
     command.env(
         "ARANY_TEST_ACCOUNT_ROOT",
         arany::test_support::isolate_account_root(),

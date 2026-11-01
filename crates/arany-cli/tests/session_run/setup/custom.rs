@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(debug_assertions)]
 #[test]
 fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
     let (temp, workspace, state) = workspace_root();
@@ -42,7 +41,6 @@ fn fresh_setup_root_saves_and_edits_chat_route_without_provider_egress() {
     assert_setup_journal(&state, &workspace);
 }
 
-#[cfg(debug_assertions)]
 fn assert_setup_journal(state: &Path, workspace: &Path) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -103,7 +101,6 @@ fn assert_setup_journal(state: &Path, workspace: &Path) {
         });
 }
 
-#[cfg(debug_assertions)]
 fn edit_custom_chat_route_unchanged(pty: &mut Pty) {
     let edit_start = pty.transcript.len();
     let mut cursor = edit_start;
@@ -137,7 +134,6 @@ fn edit_custom_chat_route_unchanged(pty: &mut Pty) {
     );
 }
 
-#[cfg(debug_assertions)]
 fn assert_changed_protocol_requires_destination(pty: &mut Pty) {
     let mut cursor = pty.transcript.len();
     pty.send(b"1\r");
@@ -166,7 +162,6 @@ fn assert_changed_protocol_requires_destination(pty: &mut Pty) {
     wait_setup_choices(pty, cursor);
 }
 
-#[cfg(debug_assertions)]
 fn seed_long_custom_profiles(state: &Path) -> String {
     let long_name = "z".repeat(arany::MAX_CUSTOM_PROFILE_NAME_BYTES);
     let profile = |name: &str, model: &str, credential_env: &str| arany::CustomProfileDraft {
@@ -194,7 +189,6 @@ fn seed_long_custom_profiles(state: &Path) -> String {
     long_name
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn linear_setup_selects_nonfirst_maximum_length_custom_route() {
     let (temp, workspace, state) = workspace_root();

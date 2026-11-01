@@ -305,7 +305,7 @@ impl StateRoot {
     }
 
     pub fn account_path() -> Result<PathBuf, StoreError> {
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, feature = "test-support")))]
         if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
             return Err(StoreError::InvalidStateDirectory);
         }
@@ -320,7 +320,7 @@ impl StateRoot {
 
     #[cfg(not(any(test, feature = "test-support")))]
     fn fixture_account_root() -> Option<PathBuf> {
-        Self::debug_account_root()
+        Self::fixture_account_override()
     }
 
     // Test-support builds include the binary that `cargo test` spawns, so no test process reaches real state.
@@ -329,7 +329,7 @@ impl StateRoot {
         if let Some(path) = crate::test_support::account_root() {
             return Some(path.to_path_buf());
         }
-        if let Some(path) = Self::debug_account_root() {
+        if let Some(path) = Self::fixture_account_override() {
             return Some(path);
         }
         // Linux passwd-home fixtures mount a private passwd file whose home is the fixture's.
@@ -337,22 +337,15 @@ impl StateRoot {
         if passwd_is_mounted() {
             return None;
         }
-        // Optimized builds refuse the fixture variable, so a spawned binary isolates itself.
-        if !cfg!(debug_assertions) {
-            return Some(crate::test_support::isolate_account_root().to_path_buf());
-        }
-        panic!(
-            "debug test builds never resolve the real account or state root: call \
-             arany::test_support::isolate_account_root() or set ARANY_TEST_ACCOUNT_ROOT"
-        );
+        Some(crate::test_support::isolate_account_root().to_path_buf())
     }
 
-    fn debug_account_root() -> Option<PathBuf> {
-        #[cfg(debug_assertions)]
+    fn fixture_account_override() -> Option<PathBuf> {
+        #[cfg(any(test, feature = "test-support"))]
         {
             std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").map(PathBuf::from)
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             None
         }

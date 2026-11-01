@@ -14,7 +14,7 @@ mod keyring_helper;
 #[cfg(test)]
 pub(crate) use keyring_helper::TEST_HELPER;
 
-#[cfg(all(test, target_os = "macos", debug_assertions))]
+#[cfg(all(test, target_os = "macos", feature = "test-support"))]
 mod macos_tests;
 
 pub(crate) async fn probe_keyring() -> Result<(), CredentialError> {
@@ -1058,11 +1058,11 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[cfg(all(target_os = "macos", feature = "test-support"))]
     #[tokio::test]
     #[cfg_attr(
         not(arany_ci),
-        ignore = "isolated native macOS Keychain gate; requires ARANY_TEST_EXE pointing to debug arany"
+        ignore = "isolated native macOS Keychain gate; requires ARANY_TEST_EXE pointing to fixture-enabled arany"
     )]
     #[allow(clippy::await_holding_lock)]
     async fn native_store_round_trips_an_isolated_synthetic_account() {

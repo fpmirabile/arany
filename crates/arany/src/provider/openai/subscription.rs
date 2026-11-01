@@ -257,7 +257,7 @@ async fn invoke_at_observed(
         &wire::RunScope::new(request, &conversation, access_token),
     );
     let result = decoded.map_err(|error| {
-        if cfg!(debug_assertions) && error == wire::ResponseError::Outcome {
+        if cfg!(any(debug_assertions, test)) && error == wire::ResponseError::Outcome {
             let (stage, shape) = wire::outcome_failure_diagnostic(&completed, &request.model);
             return failure(
                 stage,

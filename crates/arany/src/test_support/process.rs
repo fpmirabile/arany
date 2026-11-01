@@ -9,11 +9,10 @@ use std::{
 /// Serializes heavy native gates that share one test binary.
 pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
-// Optimized builds refuse the variable and isolate a spawned product's account root themselves.
 pub fn account_fixture(
     root: impl AsRef<std::ffi::OsStr>,
 ) -> Option<(&'static str, std::ffi::OsString)> {
-    cfg!(debug_assertions).then(|| ("ARANY_TEST_ACCOUNT_ROOT", root.as_ref().to_owned()))
+    Some(("ARANY_TEST_ACCOUNT_ROOT", root.as_ref().to_owned()))
 }
 
 pub fn isolate_host_authentication(command: &mut Command, home: &std::path::Path) {
@@ -626,7 +625,6 @@ pub fn pty_text_matches<'a>(
     })
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub fn decline_workspace_consent(
     input: &mut impl std::io::Write,
     transcript: &[u8],
@@ -821,7 +819,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
     #[test]
     fn workspace_consent_waits_for_a_complete_pty_line() {
         for (prompt, choice) in [

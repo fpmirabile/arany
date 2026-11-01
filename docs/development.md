@@ -32,38 +32,38 @@ touched:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-cargo test --locked --offline <filter>
+cargo clippy --workspace --all-targets --release --features arany-cli/test-support --locked --offline -- -D warnings
+cargo test --release --features arany-cli/test-support --locked --offline <filter>
 ```
 
 Choose `<filter>` from the owning corpus or journey of the changed code, for
 example `-p arany --test engine_run goals::`, `-p arany-cli --test session_run tools::` or
-`-p arany --lib store::` for a module's own `tests.rs`; add `--release` when the change
-touches an optimized-profile gate. On both Linux and macOS, [CI](../.github/workflows/ci.yml)
-runs the complete workspace suite in release and the unit, binary and
-`session_run` tests in debug. Release owns the shared Engine and Guard integration
-suites and release-script tests. Debug retains development diagnostics, account
-fixtures, Keychain and terminal journeys that release excludes or exercises
-differently, plus unit assertions. The same [test action](../.github/actions/ci-tests/action.yml)
-owns standard and focused lanes. A new integration target with debug-only coverage must also be
-included in the debug selection.
+`-p arany --lib store::` for a module's own `tests.rs`.
+On both Linux and macOS, [CI](../.github/workflows/ci.yml) runs the complete
+workspace suite in release through the shared [test action](../.github/actions/ci-tests/action.yml).
+The CLI's nondefault `test-support` feature forwards the library fixture support
+and admits only private test roots and a synthetic macOS Keychain. Functional
+corpora are included independently of `debug_assertions`. Library unit tests
+exercise diagnostic privacy and bounds directly while the release product keeps
+logging disabled.
 
-Both native debug lanes run production-only Clippy in debug and release without
-`test-support`: selecting `--lib --bins` excludes the dev-dependencies that enable
-it. These passes retain CI's `RUSTFLAGS` to share dependency fingerprints and
-caches; `arany_ci` only affects tests. The debug pass also rejects `unwrap()` while
-allowing `expect()` for proven invariants, and covers the same configuration as a
-debug production `cargo check`:
+Dedicated Linux and macOS Clippy jobs check the fixture-enabled suite and
+production-only release targets without fixture features, rejecting `unwrap()`
+in production while allowing `expect()` for proven invariants:
 
 ```sh
-cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings
-cargo clippy --workspace --lib --bins --locked --offline -- -D warnings -D clippy::unwrap_used
+cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings -D clippy::unwrap_used
 ```
 
-Only the Linux debug lane also compiles all release targets with all features,
-replacing CI's `RUSTFLAGS` to cover test alternatives without `arany_ci` while
-denying warnings. This extra dependency rebuild is omitted on macOS to limit
-runner cost:
+Before building the fixture-enabled suite, CI builds an ordinary release product
+without fixture features and copies it to a pinned path. The explicit
+`production_release` gate uses that artifact to prove test-root refusal before
+state or native credential access, with a fixture-enabled positive control.
+The same step runs the offline Rust build gate on each OS and the APFS alias gate
+on macOS; every selected parent must complete exactly one test.
+
+The Linux Clippy job also compiles all release targets with all features,
+replacing CI's `RUSTFLAGS` to cover alternatives without `arany_ci` and deny warnings:
 
 ```sh
 RUSTFLAGS='-D warnings' cargo check --workspace --all-targets --all-features --release --locked --offline
@@ -73,8 +73,7 @@ Run the full suite locally only when CI is unavailable or the change is
 cross-cutting:
 
 ```sh
-cargo test --workspace --locked --offline
-cargo test --workspace --locked --offline --release
+cargo test --workspace --release --features arany-cli/test-support --locked --offline --no-fail-fast
 ```
 
 The Linux hygiene job also checks unused dependencies with `cargo-machete 0.9.1`,
@@ -101,19 +100,20 @@ Pull requests on any base compare the merge result with its first parent; pushes
 to `main` compare the complete pushed range with the event's `before` commit,
 including code changes followed by documentation commits.
 
-The workflow stays enabled, and the five required check names remain present:
-`Clippy`, `Linux Tests (debug)`, `Linux Tests (release)`, `macOS Tests (debug)` and
-`macOS Tests (release)`. They are separate jobs so skipping does not leave an
-unexpanded matrix name in place of a required check. A job-level skip satisfies
+The workflow stays enabled, with three required check names: `Clippy`,
+`Linux Tests` and `macOS Tests`. `Clippy` requires both native lint jobs to pass;
+test jobs run independently of lint. Test jobs are separate so skipping does not leave
+an unexpanded matrix name in place of a required check. A job-level skip satisfies
 GitHub's required-check policy; skipping the whole workflow with path filters can
-leave checks pending. Manual dispatch always runs the standard lanes; its inputs
-enable the additional native lanes and history measurement. The optional Linux
-ARM64 lane retains the complete suite in both profiles. When changing this policy,
+leave checks pending. Manual dispatch always runs the standard lanes and can
+enable the history measurement. The [native Linux workflow](../.github/workflows/ci-native.yml)
+offers manual ARM64 and advanced Guard/tmux checks without adding skipped checks
+to pull requests. Optional Linux ARM64 runs the same release suite. When changing this policy,
 audit Rust includes and file reads before widening the allowlist, then run:
 
 ```sh
 python3 scripts/test-ci-changes.py
-actionlint .github/workflows/ci.yml .github/workflows/ci-focused.yml
+actionlint .github/workflows/ci.yml .github/workflows/ci-focused.yml .github/workflows/ci-native.yml
 ```
 
 Linux terminal tests need Bubblewrap and util-linux `script`, with user and

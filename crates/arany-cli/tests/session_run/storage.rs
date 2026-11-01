@@ -3,7 +3,6 @@ use arany::{StateRoot, Store, create_session};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-#[cfg(debug_assertions)]
 use std::process::Command;
 
 fn private_file(path: &Path, bytes: &[u8]) {
@@ -26,14 +25,7 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
         .create(&workspace)
         .expect("Workspace");
     let run = || {
-        #[cfg(debug_assertions)]
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-        #[cfg(not(debug_assertions))]
-        let mut command = super::isolation::account_isolated_command(
-            temp.path(),
-            "/arany",
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-        );
         command
             .env_clear()
             .current_dir(&workspace)
@@ -47,7 +39,6 @@ fn storage_process_reports_missing_corrupt_and_unsafe_state_without_provider_or_
                 "--state-dir",
             ])
             .arg(&state);
-        #[cfg(debug_assertions)]
         command.env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("accounts"));
         command.bounded_output().expect("bounded storage process")
     };

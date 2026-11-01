@@ -28,9 +28,7 @@ enum Reply {
     ChunkedOversize,
     EncodedBody,
     EncodedBodyAfterIdentity,
-    #[cfg(debug_assertions)]
     Disconnect,
-    #[cfg(debug_assertions)]
     MalformedJson,
     InputAtLimit,
     InputAboveLimit,
@@ -163,9 +161,7 @@ async fn serve(listener: TcpListener, reply: Reply, messages: bool) -> Option<(u
             json!({"error":{"type":"insufficient_quota"}}).to_string(),
         ),
         Reply::Oversize => ("200 OK", String::new()),
-        #[cfg(debug_assertions)]
         Reply::MalformedJson => ("200 OK", "{".to_owned()),
-        #[cfg(debug_assertions)]
         Reply::Disconnect => return None,
         Reply::EncodedBody | Reply::EncodedBodyAfterIdentity => unreachable!(),
         Reply::AggregateJsonNodes
@@ -378,7 +374,6 @@ async fn run_case_observed(
 }
 
 #[tokio::test]
-#[cfg(debug_assertions)]
 #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn custom_messages_transport_rejections_are_logged_with_observed_shape() {
     if crate::test_process::isolate_test() {
@@ -387,7 +382,7 @@ async fn custom_messages_transport_rejections_are_logged_with_observed_shape() {
     let temp = tempfile::tempdir().expect("diagnostic state");
     let root =
         crate::store::StateRoot::admit(&temp.path().join("state")).expect("private state root");
-    crate::diagnostics::enable_development_diagnostics(&root);
+    crate::diagnostics::enable_test_diagnostics(&root);
     let path = root.path().join("development.log");
     let logged = |line: &str| std::fs::read_to_string(&path).unwrap().contains(line);
 

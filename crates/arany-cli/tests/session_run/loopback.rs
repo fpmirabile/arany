@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -18,17 +17,14 @@ pub(super) fn wait_product(child: Child) -> Output {
     super::process::capture(child.child(), PRODUCT_EXIT_WAIT, 64 * 1024)
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     read_request_for(stream, "/v1/responses", "authorization: bearer test-key")
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -> Vec<u8> {
     read_request_within(stream, path, auth, 64 * 1024)
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn read_request_within(
     stream: &mut TcpStream,
     path: &str,
@@ -95,13 +91,11 @@ pub(super) fn assert_compaction_request(request: &serde_json::Value) {
     assert!(crate::semantic::input(request)["items"].is_array());
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 thread_local! {
     static LAST_REQUEST_STREAMING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 // The reply format follows the "stream" field of the request this thread read last.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_json::Value) {
     let streaming = LAST_REQUEST_STREAMING
         .get()
@@ -109,7 +103,6 @@ pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_js
     send_response_for(stream, index, text, streaming);
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response_for(
     stream: &mut TcpStream,
     index: usize,
@@ -119,7 +112,6 @@ pub(super) fn send_response_for(
     send_response_for_model(stream, index, "model-1", text, streaming);
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response_for_model(
     stream: &mut TcpStream,
     index: usize,
@@ -202,7 +194,6 @@ pub(super) fn responses_stream(mut response: serde_json::Value) -> String {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn write_profile(state: &Path, port: u16) {
     arany::test_support::save_custom_profiles(
         state,
@@ -211,7 +202,6 @@ pub(super) fn write_profile(state: &Path, port: u16) {
 }
 
 // Streams the Run's call up to its text delta and holds the rest until released.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) struct HeldStream {
     pub(super) streaming: std::sync::mpsc::Receiver<()>,
     pub(super) release: std::sync::mpsc::SyncSender<()>,
@@ -220,20 +210,17 @@ pub(super) struct HeldStream {
     pub(super) peer: std::thread::JoinHandle<()>,
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldStream {
     held_provider(state, answer, HeldResponseKind::Streamed)
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[derive(Clone, Copy)]
 pub(super) enum HeldResponseKind {
-    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[cfg(target_os = "linux")]
     Buffered,
     Streamed,
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn held_provider(
     state: &Path,
     answer: &'static str,
@@ -278,12 +265,11 @@ pub(super) fn held_provider(
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn begin_held_response(stream: &mut TcpStream, answer: &str, kind: HeldResponseKind) -> Vec<u8> {
     let wire: serde_json::Value =
         serde_json::from_slice(&read_request(stream)).expect("Responses request");
     match kind {
-        #[cfg(all(target_os = "linux", debug_assertions))]
+        #[cfg(target_os = "linux")]
         HeldResponseKind::Buffered => assert!(wire.get("stream").is_none()),
         HeldResponseKind::Streamed => assert_eq!(wire["stream"], true),
     }
@@ -295,7 +281,7 @@ fn begin_held_response(stream: &mut TcpStream, answer: &str, kind: HeldResponseK
         "usage": {"input_tokens":20,"output_tokens":10}
     });
     let (body, content_type, split) = match kind {
-        #[cfg(all(target_os = "linux", debug_assertions))]
+        #[cfg(target_os = "linux")]
         HeldResponseKind::Buffered => (response.to_string(), "application/json", 0),
         HeldResponseKind::Streamed => {
             let body = responses_stream(response);

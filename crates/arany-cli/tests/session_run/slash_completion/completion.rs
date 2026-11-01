@@ -47,7 +47,7 @@ fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
         assert!(!wire.to_string().contains("NESTED_BODY_CANARY"));
         send_response(&mut stream, 0, serde_json::json!("Directory listed."));
     });
-    let shell = r#"printf 'SHELL_PID:%s\n' "$$"; "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --resume "$ARANY_TEST_SESSION" --provider custom:local --model model-1"#;
+    let shell = r#"printf 'SHELL_PID:%s\n' "$$"; "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --resume "$ARANY_TEST_SESSION" --provider custom:local --model model-1; exit "$?""#;
     let mut pty = Pty::new(
         crate::product::PtyLaunch::new(
             crate::product::Isolation::Passwd(crate::isolation::account_wrapper(temp.path())),
@@ -1209,7 +1209,6 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
     .session(&state, &workspace)
     .env("ARANY_TEST_SESSION", saved_id.to_string())
     .term("xterm");
-    #[cfg(debug_assertions)]
     let command = command
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account-root"))
         .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
@@ -1248,7 +1247,6 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             pty.send_and_wait(b"/provider\r", b"Notice: Provider: openai\r\nInput:\r\n");
         }
     }
-    #[cfg(debug_assertions)]
     {
         pty.send_and_wait(
             b"/model gpt-5.4 low\r",
@@ -1350,7 +1348,6 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             format!("Notice: {feedback}\r\nInput:\r\n").as_bytes(),
         );
     }
-    #[cfg(debug_assertions)]
     for (command, feedback) in [
         ("/model gpt-5.4", "Model: gpt-5.4 · low"),
         ("/model gpt-5.4 low", "Model: gpt-5.4 · low"),
@@ -1445,15 +1442,9 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             .expect("Session");
         assert_eq!(view.defaults.provider.as_deref(), Some("openai"));
         assert_eq!(view.defaults.account_id, None);
-        #[cfg(debug_assertions)]
         {
             assert_eq!(view.defaults.model.as_deref(), Some("gpt-5.4"));
             assert_eq!(view.defaults.effort, Some(arany::Effort::Low));
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            assert_eq!(view.defaults.model, None);
-            assert_eq!(view.defaults.effort, None);
         }
         assert_eq!(view.title, "Corrected title");
         assert_eq!(
@@ -1469,7 +1460,7 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             .expect("closed command Events");
         assert_eq!(
             events.len(),
-            if cfg!(debug_assertions) { 12 } else { 9 },
+            12,
             "only Session creation, accepted defaults and one rename are durable"
         );
         let renames = events

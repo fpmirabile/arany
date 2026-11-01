@@ -11,6 +11,9 @@ repository.workspace = true
 name = "arany"
 path = "src/main.rs"
 
+[features]
+test-support = ["arany/test-support"]
+
 [dependencies]
 arany = { path = "../arany" }
 aws-lc-rs.workspace = true

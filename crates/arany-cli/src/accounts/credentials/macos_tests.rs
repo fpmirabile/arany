@@ -199,13 +199,28 @@ pub(super) async fn roundtrip() {
         );
         return;
     }
-    let executable =
-        std::env::var_os("ARANY_TEST_EXE").expect("set ARANY_TEST_EXE to built debug arany");
+    let executable = std::env::var_os("ARANY_TEST_EXE")
+        .expect("set ARANY_TEST_EXE to built fixture-enabled arany");
     assert!(Path::new(&executable).is_absolute());
     let temp = tempfile::tempdir().unwrap();
     // A concurrent Cargo link must not replace the helper identity trusted by this Keychain.
     let pinned_executable = temp.path().join("arany");
     std::fs::copy(&executable, &pinned_executable).unwrap();
+    {
+        let mut command = Command::new(&pinned_executable);
+        command
+            .args([
+                "--internal-credential-helper",
+                "probe",
+                "credential-backend-probe",
+            ])
+            .env_clear()
+            .current_dir(temp.path());
+        let output = crate::test_process::file_output(&mut command, None);
+        assert_eq!(output.status.code(), Some(1), "missing fixture must refuse");
+        assert_eq!(output.stdout, b"");
+        assert_eq!(output.stderr, b"");
+    }
     let root = StateRoot::admit(&temp.path().join("keychain")).unwrap();
     let path = root.path().join(keyring_helper::macos::TEST_KEYCHAIN);
     let _interaction = SecKeychain::disable_user_interaction().unwrap();
@@ -256,7 +271,7 @@ pub(super) async fn roundtrip() {
         "isolated native Keychain child: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
-    if cfg!(debug_assertions) {
+    {
         let diagnostic = b"credential store refused access: ERR_SEC_";
         assert!(
             output

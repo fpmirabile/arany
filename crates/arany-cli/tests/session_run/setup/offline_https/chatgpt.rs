@@ -31,7 +31,6 @@ const SHELL: &str = "stty rows 8 cols 16; printf 'SHELL_PID:%s\nTTY_PATH:%s\n' \
 #[path = "chatgpt/checked_turn.rs"]
 mod checked_turn;
 
-#[cfg(debug_assertions)]
 #[path = "chatgpt/inspection.rs"]
 mod inspection;
 

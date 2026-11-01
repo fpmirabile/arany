@@ -1,7 +1,9 @@
 use keyring::{Error, Result};
+#[cfg(not(feature = "test-support"))]
+use security_framework::os::macos::keychain::SecPreferencesDomain;
 use security_framework::{
     item::{ItemClass, ItemSearchOptions},
-    os::macos::keychain::{SecKeychain, SecPreferencesDomain},
+    os::macos::keychain::SecKeychain,
 };
 
 const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
@@ -37,26 +39,26 @@ const ERR_SEC_STORAGE_ACCESS: [(i32, &str); 8] = [
 ];
 pub(in crate::accounts::credentials) const TEST_KEYCHAIN_ROOT_ENV: &str =
     "ARANY_TEST_KEYCHAIN_ROOT";
-#[cfg(debug_assertions)]
+#[cfg(feature = "test-support")]
 pub(in crate::accounts::credentials) const TEST_KEYCHAIN: &str = "arany-test.keychain-db";
 
 pub(super) struct Entry {
     keychain: SecKeychain,
     service: String,
     account: String,
-    #[cfg(debug_assertions)]
-    _interaction: Option<security_framework::os::macos::keychain::KeychainUserInteractionLock>,
+    #[cfg(feature = "test-support")]
+    _interaction: security_framework::os::macos::keychain::KeychainUserInteractionLock,
 }
 
 impl Entry {
     pub(super) fn new(service: &str, account: &str) -> Result<Self> {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "test-support")]
         let fixture = std::env::var_os(TEST_KEYCHAIN_ROOT_ENV);
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "test-support"))]
         if std::env::var_os(TEST_KEYCHAIN_ROOT_ENV).is_some() {
             return Err(Error::NoDefaultStore);
         }
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "test-support")]
         let (keychain, interaction) = if let Some(root) = fixture {
             use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
             use cap_std::fs::{Dir, MetadataExt, OpenOptions, OpenOptionsExt};
@@ -85,23 +87,19 @@ impl Entry {
             // The owner-only root prevents other users replacing the checked keychain before Security reopens by path.
             (
                 SecKeychain::open(root.path().join(TEST_KEYCHAIN)).map_err(decode_error)?,
-                Some(interaction),
+                interaction,
             )
         } else {
-            (
-                SecKeychain::default_for_domain(SecPreferencesDomain::User)
-                    .map_err(decode_error)?,
-                None,
-            )
+            return Err(Error::NoDefaultStore);
         };
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "test-support"))]
         let keychain =
             SecKeychain::default_for_domain(SecPreferencesDomain::User).map_err(decode_error)?;
         Ok(Self {
             keychain,
             service: service.into(),
             account: account.into(),
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "test-support")]
             _interaction: interaction,
         })
     }

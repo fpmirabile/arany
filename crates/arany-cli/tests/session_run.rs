@@ -1,8 +1,4 @@
 use arany::WorkspaceIdentity;
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
 use arany::test_support::private_file;
 use arany::test_support::scenario::tool_outcome;
 use arany::test_support::sha256_hex as hash;
@@ -225,7 +221,6 @@ fn reply_positioned_cursor_queries(
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(crate) fn tail(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .chars()
@@ -238,14 +233,12 @@ pub(crate) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(crate) struct PtyResponses {
     pub(crate) cursor_queries: usize,
     consent_from: usize,
     auto_consent: bool,
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 impl Default for PtyResponses {
     fn default() -> Self {
         Self {
@@ -256,7 +249,6 @@ impl Default for PtyResponses {
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 impl PtyResponses {
     pub(crate) fn manual_consent() -> Self {
         Self {
@@ -266,7 +258,6 @@ impl PtyResponses {
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(crate) fn drain_pty(output: &mut impl std::io::Read, transcript: &mut Vec<u8>) {
     loop {
         let mut chunk = [0; 4096];
@@ -293,14 +284,12 @@ pub(crate) fn drain_pty(output: &mut impl std::io::Read, transcript: &mut Vec<u8
     assert!(queries <= 128, "bounded cursor queries");
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
     terminal_grid(transcript, columns, rows).1
 }
 
 // Decodes cursor moves, clears, line feeds and scroll regions; rows leaving the top of
 // the screen enter the returned scrollback, as in an emulator.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn terminal_grid(transcript: &[u8], columns: usize, rows: usize) -> (Vec<String>, Vec<String>) {
     let blank = || vec![' '; columns];
     let mut grid = vec![blank(); rows];
@@ -389,7 +378,6 @@ fn terminal_grid(transcript: &[u8], columns: usize, rows: usize) -> (Vec<String>
 // The latest Classic composer caret after `from`, located on the decoded screen by the
 // composer border instead of a fixed row, since the content-sized viewport moves.
 // Returns the 1-based caret column and the decoded screen.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn composer_caret(
     bytes: &[u8],
     from: usize,
@@ -426,7 +414,6 @@ fn composer_caret(
 
 // Native history ends directly above the Classic composer: at most the two blank rows that
 // end every native message lie between them, never rows of an oversized viewport.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn assert_history_above(screen: &[String], composer_top: usize, context: &str) {
     let above = &screen[..composer_top];
     let gap = above
@@ -441,7 +428,6 @@ fn assert_history_above(screen: &[String], composer_top: usize, context: &str) {
 }
 
 // A selector takes keys only once armed: its finished frame shows the focused `› N.` row.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn armed_selector(bytes: &[u8], from: usize, columns: usize, rows: usize) -> Option<Vec<String>> {
     let end = from
         + bytes[from..]
@@ -461,7 +447,6 @@ fn armed_selector(bytes: &[u8], from: usize, columns: usize, rows: usize) -> Opt
         .then_some(screen)
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn assert_classic_owned_clear(bytes: &[u8], exit_from: usize) {
     let clear = exit_from
         + bytes[exit_from..]
@@ -500,20 +485,12 @@ fn assert_classic_owned_clear(bytes: &[u8], exit_from: usize) {
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
-    if cfg!(not(debug_assertions)) && std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
-        assert!(matches!(
-            StateRoot::account_path(),
-            Err(arany::StoreError::InvalidStateDirectory)
-        ));
-        return;
-    }
     assert_eq!(StateRoot::account_path().unwrap(), root);
     if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
         assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
     }
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = uuid::Uuid::now_v7();
@@ -535,7 +512,6 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     account_id
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn planned(request: &arany::ProviderRequest) -> bool {
     request.input.goal_plan_contract.is_some()
         || request
@@ -545,7 +521,6 @@ fn planned(request: &arany::ProviderRequest) -> bool {
             .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()))
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn safe_run_diagnostics(run: &arany::RunView) -> String {
     let agents = run
         .agents
@@ -602,7 +577,7 @@ mod isolation;
 #[path = "session_run/tools.rs"]
 mod tools;
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(target_os = "macos")]
 #[path = "session_run/tools_macos.rs"]
 mod tools;
 
@@ -620,7 +595,6 @@ mod git_journey;
 #[path = "session_run/supervisor.rs"]
 mod supervisor;
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
     ui_preferences(&[
         ("completion", completion, "tabs"),
@@ -642,7 +616,6 @@ fn ui_preferences(fields: &[(&str, &str, &str)]) -> Vec<u8> {
     .into_bytes()
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn seed_classic(state: &std::path::Path) {
     arany::StateRoot::admit(state)
         .unwrap()
@@ -651,7 +624,6 @@ fn seed_classic(state: &std::path::Path) {
         .unwrap();
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn seed_transcript_session(state: &std::path::Path, workspace: &std::path::Path) -> SessionId {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -698,7 +670,6 @@ fn seed_transcript_session(state: &std::path::Path, workspace: &std::path::Path)
     })
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn seed_answer_session(
     state: &std::path::Path,
     workspace: &std::path::Path,
@@ -730,14 +701,12 @@ fn seed_answer_session(
     })
 }
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/roster.rs"]
 mod roster;
 
 #[path = "session_run/custom.rs"]
 mod custom;
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/exec_interrupt.rs"]
 mod exec_interrupt;
 
@@ -767,8 +736,8 @@ mod account_lock;
 #[path = "session_run/setup.rs"]
 mod setup;
 
-// Only the Linux debug PTY fixtures use every launcher variant.
-#[cfg_attr(not(all(target_os = "linux", debug_assertions)), allow(dead_code))]
+// Only the Linux PTY fixtures use every launcher variant.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[path = "support/product.rs"]
 mod product;
 
@@ -784,7 +753,6 @@ mod loopback;
 #[path = "session_run/tls_fixture.rs"]
 mod tls_fixture;
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/startup_trust.rs"]
 mod startup_trust;
 
@@ -792,14 +760,13 @@ mod startup_trust;
 #[path = "session_run/active_terminal.rs"]
 mod active_terminal;
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(target_os = "macos")]
 #[path = "session_run/active_terminal_macos.rs"]
 mod active_terminal;
 
 #[cfg(target_os = "linux")]
 #[path = "session_run/chat_mouse.rs"]
 mod chat_mouse;
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[path = "session_run/pty.rs"]
 mod pty;
@@ -811,7 +778,6 @@ mod session_picker;
 #[path = "session_run/auto_compaction.rs"]
 mod auto_compaction;
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/telemetry.rs"]
 mod telemetry;
 
@@ -1253,22 +1219,6 @@ fn account_path_ignores_session_state_environment() {
     const TEST: &str = "account_path_ignores_session_state_environment";
     if let Some(case) = std::env::var_os(CASE) {
         match case.to_str() {
-            #[cfg(debug_assertions)]
-            Some("system") => {
-                for (name, resolve) in [
-                    ("account", StateRoot::account_path as fn() -> _),
-                    ("default state", StateRoot::default_path),
-                ] {
-                    let panic = std::panic::catch_unwind(resolve)
-                        .expect_err("test builds refuse the real root");
-                    let message = panic.downcast_ref::<&str>().expect("refusal message");
-                    assert!(
-                        message.contains("never resolve the real account or state root"),
-                        "{name}: {message}"
-                    );
-                }
-            }
-            #[cfg(not(debug_assertions))]
             Some("system") => {
                 let account = StateRoot::account_path().expect("self-isolated account root");
                 assert!(
@@ -1278,19 +1228,18 @@ fn account_path_ignores_session_state_environment() {
                         .is_some_and(|name| name
                             .to_string_lossy()
                             .starts_with("arany-test-accounts-")),
-                    "optimized test builds isolate instead of resolving the real root"
+                    "test builds isolate instead of resolving the real root"
                 );
                 assert!(matches!(
                     StateRoot::default_path(),
                     Err(StoreError::InvalidStateDirectory)
                 ));
             }
-            #[cfg(debug_assertions)]
             Some("fixture") => {
                 let fixture =
                     std::path::PathBuf::from(std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").unwrap());
                 assert_eq!(
-                    StateRoot::account_path().expect("absolute debug fixture"),
+                    StateRoot::account_path().expect("absolute test fixture"),
                     fixture
                 );
                 let parent = fixture.parent().expect("fixture-owned parent");
@@ -1304,7 +1253,6 @@ fn account_path_ignores_session_state_environment() {
                     "account and Session fixture roots remain separate"
                 );
             }
-            #[cfg(debug_assertions)]
             Some("reject-ambient-state") => {
                 assert!(
                     StateRoot::account_path().is_ok(),
@@ -1328,10 +1276,7 @@ fn account_path_ignores_session_state_environment() {
     }
 
     let temp = tempfile::tempdir().expect("temporary environment root");
-    #[cfg(debug_assertions)]
     let absolute_case = "fixture";
-    #[cfg(not(debug_assertions))]
-    let absolute_case = "reject";
     for (case, fixture) in [
         ("system", None),
         (absolute_case, Some(temp.path().join("account-root"))),
@@ -1339,7 +1284,6 @@ fn account_path_ignores_session_state_environment() {
             "reject",
             Some(std::path::PathBuf::from("relative-account-root")),
         ),
-        #[cfg(debug_assertions)]
         (
             "reject-ambient-state",
             Some(temp.path().join("account-root")),
@@ -1369,7 +1313,6 @@ fn account_path_ignores_session_state_environment() {
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn unisolated_binary_refuses_the_real_state_root() {
     let temp = tempfile::tempdir().expect("temporary home");
@@ -1385,13 +1328,9 @@ fn unisolated_binary_refuses_the_real_state_root() {
         .current_dir(temp.path())
         .bounded_output_for(std::time::Duration::from_secs(10), 64 * 1024)
         .expect("bounded unisolated product");
-    assert_eq!(output.status.code(), Some(101), "the refusal is a panic");
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("never resolve the real account or state root"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(output.stderr, b"error: invalid state directory\n");
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }
 
@@ -1601,7 +1540,6 @@ fn model_catalog_command_reads_only_selected_configuration() {
     assert_eq!(missing_key.stderr, b"error: Provider unavailable\n");
     assert!(!state_dir.exists());
 
-    #[cfg(debug_assertions)]
     {
         let account_root = temp.path().join("missing-chatgpt-account");
         let fixture_home = temp.path().join("fixture-home");
@@ -1750,7 +1688,7 @@ fn model_catalog_command_reads_only_selected_configuration() {
     );
     assert!(!state_dir.exists());
 
-    #[cfg(all(target_os = "linux", debug_assertions))]
+    #[cfg(target_os = "linux")]
     {
         let marker = temp.path().join("credential-command-marker");
         let address = format!("unixexec:path=/usr/bin/touch,argv1={}", marker.display());
@@ -3217,7 +3155,6 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let ready_path = temp.path().join("holder-ready");
         let mut holder_command = Command::new(std::env::current_exe().expect("test executable"));
         holder_command.env_clear();
-        #[cfg(debug_assertions)]
         holder_command.env(
             "ARANY_TEST_ACCOUNT_ROOT",
             arany::test_support::isolate_account_root(),
@@ -3248,7 +3185,6 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let contender = |resume_goal: Option<arany::GoalId>| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
             command.env_clear();
-            #[cfg(debug_assertions)]
             command.env(
                 "ARANY_TEST_ACCOUNT_ROOT",
                 arany::test_support::isolate_account_root(),
@@ -3576,10 +3512,6 @@ fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
         });
 }
 
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
 #[test]
 fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     let root = tempfile::tempdir().unwrap();
@@ -3776,6 +3708,5 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
         });
     }
 }
-#[cfg(any(debug_assertions, target_os = "linux"))]
 #[path = "session_run/storage.rs"]
 mod storage;

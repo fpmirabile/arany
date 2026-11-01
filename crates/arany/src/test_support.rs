@@ -185,7 +185,6 @@ pub(crate) fn inherit_account_root(path: &std::path::Path) {
 pub fn isolate_account_root() -> &'static std::path::Path {
     ACCOUNT_ROOT
         .get_or_init(|| {
-            #[cfg(debug_assertions)]
             if let Some(path) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
                 let path = std::path::PathBuf::from(path);
                 assert!(path.is_absolute(), "absolute inherited test account root");
@@ -323,7 +322,6 @@ mod account_roots {
         Ok(file)
     }
 
-    #[cfg(any(debug_assertions, test))]
     pub(super) fn inherit(path: &Path) -> io::Result<Option<File>> {
         if !path
             .file_name()

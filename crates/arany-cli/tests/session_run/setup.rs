@@ -1,22 +1,16 @@
 use super::active_terminal::assert_tty_restored;
-#[cfg(any(debug_assertions, target_os = "linux"))]
 use super::active_terminal::{ProductGuard, product_child_of_executable};
-#[cfg(debug_assertions)]
 use super::active_terminal::{product_child_of, transcript_field, tty_settings, wait_stopped};
 use super::loopback::{ChildGuard, wait_product};
 use super::process::BoundedOutput;
 use super::pty::{PTY_STAGE_WAIT, Pty};
 use super::session_picker::tail;
 use arany::{RecordKind, SessionView, StateRoot, Store};
-#[cfg(any(debug_assertions, target_os = "linux"))]
 use arany::{SessionDefaults, create_session, set_session_defaults};
-#[cfg(any(debug_assertions, target_os = "linux"))]
 use rustix::process::{Signal, kill_process};
-#[cfg(debug_assertions)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixListener;
-#[cfg(debug_assertions)]
 use std::process::Output;
 use std::{
     io::{Read, Write},
@@ -39,36 +33,29 @@ mod native;
 #[path = "setup/chatgpt.rs"]
 mod chatgpt;
 
-#[cfg(debug_assertions)]
 #[path = "setup/custom.rs"]
 mod custom;
 
 #[path = "setup/offline_https.rs"]
 mod offline_https;
 
-#[cfg(debug_assertions)]
 #[path = "setup/manager.rs"]
 mod manager;
 
-#[cfg(debug_assertions)]
 #[path = "setup/routing.rs"]
 mod routing;
 
-#[cfg(debug_assertions)]
 #[path = "setup/roster.rs"]
 mod roster;
 
-#[cfg(debug_assertions)]
 const SETUP_SHELL: &str = "trap ':' INT; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; printf 'SCRIPT_INPUT_GATE\n'; IFS= read -r gate; [ \"$gate\" = go ] || exit 2; \"$ARANY_TEST_EXE\" --screen-reader --setup --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
 
-#[cfg(debug_assertions)]
 const MIXED_START_SHELL: &str = "trap ':' INT; printf 'SHELL_PID:%s\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; printf 'SCRIPT_INPUT_GATE\n'; IFS= read -r gate; [ \"$gate\" = go ] || exit 2; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 const RELEASE_ACCOUNT_SHELL: &str = r#"before=$(stty -g); printf 'TTY_BEFORE:%s\n' "$before"; printf 'SCRIPT_INPUT_GATE\n'; IFS= read -r gate; [ "$gate" = go ] || exit 2; if [ "$ARANY_TEST_SETUP" = 1 ]; then set -- --setup; else set --; fi; /usr/bin/timeout --foreground -k 1s 20s /usr/bin/bwrap --unshare-user --unshare-net --unshare-pid --die-with-parent --tmpfs / --ro-bind /usr /usr --symlink usr/lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc/passwd /etc/passwd --bind "$ARANY_TEST_HOME" "$ARANY_PASSWD_HOME" --ro-bind "$ARANY_TEST_EXE" /arany --proc /proc --dev-bind /dev /dev --chdir "$ARANY_PASSWD_HOME/workspace" --clearenv --setenv HOME "$ARANY_TEST_HOME_ENV" --setenv XDG_STATE_HOME "$ARANY_TEST_XDG_STATE" --setenv TERM dumb --setenv PATH /usr/bin -- /arany --screen-reader "$@" --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_PASSWD_HOME/workspace"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' "$after"; exit "$exit_code""#;
 
 // A private test root holding an empty Workspace; the root, Workspace and State paths.
-#[cfg(debug_assertions)]
 fn workspace_root() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
@@ -77,12 +64,10 @@ fn workspace_root() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (temp, workspace, state)
 }
 
-#[cfg(debug_assertions)]
 fn prepare_test_file_account(root: &Path) -> Uuid {
     super::prepare_test_file_account_at(&crate::product::fixture_account(root))
 }
 
-#[cfg(debug_assertions)]
 fn prepare_selected_chatgpt_account(root: &Path) -> Uuid {
     prepare_selected_chatgpt_account_at(&crate::product::fixture_account(root))
 }
@@ -132,7 +117,6 @@ fn prepare_selected_chatgpt_account_at(account_root: &Path) -> Uuid {
     account_id
 }
 
-#[cfg(debug_assertions)]
 fn reviewed_setup_text(transcript: &str) -> String {
     transcript
         .lines()
@@ -143,15 +127,12 @@ fn reviewed_setup_text(transcript: &str) -> String {
         .collect()
 }
 
-#[cfg(debug_assertions)]
 const FIRST_ROUTE_KEY_CANARY: &str = "first-route-credential-canary";
 
-#[cfg(debug_assertions)]
 fn start_setup_pty(temp: &tempfile::TempDir, workspace: &Path, state: &Path) -> Pty {
     start_setup_pty_mode(temp, workspace, state, SetupPtyMode::Manager)
 }
 
-#[cfg(debug_assertions)]
 enum SetupPtyMode {
     Manager,
     Configured,
@@ -161,7 +142,6 @@ enum SetupPtyMode {
     ResumedInline(arany::SessionId),
 }
 
-#[cfg(debug_assertions)]
 fn start_setup_pty_mode(
     temp: &tempfile::TempDir,
     workspace: &Path,
@@ -171,7 +151,6 @@ fn start_setup_pty_mode(
     start_setup_pty_with_key(temp, workspace, state, mode, Some("test-key"))
 }
 
-#[cfg(debug_assertions)]
 fn start_setup_pty_with_key(
     temp: &tempfile::TempDir,
     workspace: &Path,
@@ -201,7 +180,6 @@ fn start_setup_pty_with_key(
     pty
 }
 
-#[cfg(debug_assertions)]
 fn setup_pty_command(
     temp: &tempfile::TempDir,
     workspace: &Path,
@@ -252,7 +230,6 @@ fn setup_pty_command(
     command
 }
 
-#[cfg(debug_assertions)]
 fn enter_conversation_setup(pty: &mut Pty) {
     pty.wait_for(b"Input:\r\n");
     let policy_at = pty.send_and_wait(b"/agents single\r", b"Next-Run collaboration: single");
@@ -261,12 +238,10 @@ fn enter_conversation_setup(pty: &mut Pty) {
     pty.send(b"/setup\r");
 }
 
-#[cfg(debug_assertions)]
 fn finish_setup_pty(pty: Pty) -> Output {
     finish_setup_pty_with_transcript(pty).0
 }
 
-#[cfg(debug_assertions)]
 fn finish_setup_pty_with_transcript(mut pty: Pty) -> (Output, Vec<u8>) {
     pty.wait_exit("setup product exit deadline");
     let result = wait_product(pty.child.take());
@@ -274,7 +249,6 @@ fn finish_setup_pty_with_transcript(mut pty: Pty) -> (Output, Vec<u8>) {
     (result, pty.transcript)
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
     // A damaged account record is archived at startup, so only intact pairs reach this choice.
@@ -386,7 +360,6 @@ fn bare_start_with_both_accounts_requires_an_explicit_billing_route() {
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -496,7 +469,7 @@ fn bare_start_without_account_keeps_chat_input_and_offers_named_setup_choices() 
     });
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 fn release_bare_session(
     private_home: &Path,
     passwd_home: &Path,
@@ -591,7 +564,7 @@ fn release_bare_session(
     Some(text)
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 fn release_passwd_home() -> PathBuf {
     let home = nix::unistd::User::from_uid(nix::unistd::geteuid())
         .expect("passwd lookup")
@@ -602,7 +575,7 @@ fn release_passwd_home() -> PathBuf {
 }
 
 // Each record file in the account root's startup archive, as (name, bytes).
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 fn archived_records(account_path: &Path) -> Vec<(String, Vec<u8>)> {
     let Ok(folders) = std::fs::read_dir(account_path.join("archive")) else {
         return Vec::new();
@@ -624,7 +597,7 @@ fn archived_records(account_path: &Path) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
-#[cfg(all(target_os = "linux", not(debug_assertions)))]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "native Linux Bubblewrap mixed-access release startup gate"]
 fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
@@ -749,7 +722,6 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
     }
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn configured_unsaved_conversation_survives_custom_save_and_back() {
     let (temp, workspace, state) = workspace_root();
@@ -777,7 +749,6 @@ fn configured_unsaved_conversation_survives_custom_save_and_back() {
     assert_retained_setup_conversation(&state, &workspace, Some(1));
 }
 
-#[cfg(debug_assertions)]
 fn submit_retained_setup_turn(pty: &mut Pty, provider: &super::loopback::HeldStream) {
     let submitted_at = pty.send(b"answer after setup\r");
     provider
@@ -796,7 +767,6 @@ fn submit_retained_setup_turn(pty: &mut Pty, provider: &super::loopback::HeldStr
     assert!(String::from_utf8_lossy(&pty.transcript).contains("retained setup answer"));
 }
 
-#[cfg(debug_assertions)]
 fn wait_setup_choices(pty: &mut Pty, mut cursor: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -829,7 +799,6 @@ fn wait_setup_choices(pty: &mut Pty, mut cursor: usize) {
     }
 }
 
-#[cfg(debug_assertions)]
 fn assert_retained_setup_conversation(state: &Path, workspace: &Path, runs: Option<usize>) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -884,7 +853,6 @@ fn assert_retained_setup_conversation(state: &Path, workspace: &Path, runs: Opti
         });
 }
 
-#[cfg(debug_assertions)]
 fn add_custom_route(pty: &mut Pty, choice: &[u8], protocol: &[u8]) -> usize {
     let mut prompt_at = pty.transcript.len();
     pty.send(choice);
@@ -925,7 +893,6 @@ fn add_custom_route(pty: &mut Pty, choice: &[u8], protocol: &[u8]) -> usize {
     pty.send(b"2\r")
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths() {
     let executable = std::env::var_os("ARANY_RELEASE_BINARY")

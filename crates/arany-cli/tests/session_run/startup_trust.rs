@@ -1369,7 +1369,7 @@ pub(crate) fn consent_user_programs(root: &std::path::Path, homebrew: bool) {
     assert_eq!(std::fs::read(&record_path).unwrap(), remembered);
 }
 
-#[cfg(all(target_os = "macos", debug_assertions))]
+#[cfg(target_os = "macos")]
 #[test]
 fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory() {
     use rustix::process::{Pid, Signal, kill_process};
